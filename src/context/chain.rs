@@ -1772,16 +1772,19 @@ fn to_raster(context: Option<&Gpu>, image: &Image) -> Option<Image> {
 
 #[cfg(test)]
 mod tests {
+    use std::env::consts::ARCH;
+
     use skia_safe::{
         AlphaType, Canvas as SkCanvas, Color, Color4f, ColorSpace, ColorType,
         Data, FilterMode, Image, ImageInfo, Matrix, MipmapMode, Paint,
         PathBuilder, PictureRecorder, Rect, SamplingOptions, Surface, Vector,
-        image::CachingHint,
+        image::CachingHint, named_primaries, named_transfer_fn,
     };
 
     use super::{
         Depth, REFUSE_PLACED, Step, apply, blurred_on_cpu, exact_blur,
-        filtered, rounded_once, shadow_composed, shadowed, tint, worked_on,
+        filtered, offset_tint, rounded_once, shadow_composed, shadowed, tint,
+        worked_on,
     };
     use crate::{prelude::*, started};
 
@@ -1885,6 +1888,124 @@ mod tests {
         right: 160.0,
         bottom: 100.0,
     };
+
+    /// How many alphas [`a_tint_into_floats_is_one_product_a_channel`]
+    /// tints at a time: a 256 by 256 image of them.
+    const SWEPT_SIDE: i32 = 256;
+
+    #[test]
+    fn a_tint_into_floats_is_one_product_a_channel() {
+        // What Skia's raster pipeline makes of `offset_tint` over a
+        // premultiplied F32 image holding nothing but an alpha, against one
+        // product a channel in Rust: the tint's alpha times the image's,
+        // then each colour times that. The other order is counted beside
+        // it, as the control a sweep that cannot tell them apart would
+        // fail. Run on every machine CI builds on: Skia picks its stages
+        // at run time on x86.
+        let n = (SWEPT_SIDE * SWEPT_SIDE) as usize;
+        // Every byte's alpha, a dense spread of the floats a blur leaves,
+        // and the ends: zero, the smallest normal and subnormal, one and
+        // the float under it.
+        let mut alphas: Vec<f32> =
+            (0..=255).map(|v| v as f32 / 255.0).collect();
+        let mut x = 0x9E37_79B9u32;
+        while alphas.len() < n - 6 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            alphas.push((x >> 8) as f32 / (1u32 << 24) as f32);
+        }
+        alphas.extend([
+            0.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            1.0,
+            1.0f32.next_down(),
+            0.5,
+        ]);
+        let pixels: Vec<f32> =
+            alphas.iter().flat_map(|&a| [0.0, 0.0, 0.0, a]).collect();
+        let bytes: Vec<u8> =
+            pixels.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let (mut compared, mut missed, mut missed_other) = (0usize, 0, 0);
+        for space in [
+            ColorSpace::new_srgb(),
+            ColorSpace::new_srgb_linear(),
+            ColorSpace::new_cicp(
+                named_primaries::CicpId::SMPTE_EG_432_1,
+                named_transfer_fn::CicpId::IEC61966_2_1,
+            )
+            .expect("Display P3"),
+        ] {
+            let info = ImageInfo::new(
+                (SWEPT_SIDE, SWEPT_SIDE),
+                ColorType::RGBAF32,
+                AlphaType::Premul,
+                Some(space),
+            );
+            let image = started::raster_from_data(
+                &info,
+                Data::new_copy(&bytes),
+                info.min_row_bytes(),
+            )
+            .expect("an image");
+            // Placed colours, a byte over 255, and some that are not.
+            let colours = (0..=255u8)
+                .step_by(17)
+                .map(|v| {
+                    let c = f32::from(v) / 255.0;
+                    [c, 1.0 - c, c / 3.0]
+                })
+                .chain([[0.1, 0.7, 0.999_999], [1e-30, 0.5, 2.0 / 3.0]]);
+            for rgb in colours {
+                for tint_alpha in
+                    [1.0, 0.5, 0.3, 1.0 / 255.0, 254.0 / 255.0, 0.7]
+                {
+                    let tinted = filtered(
+                        None,
+                        &image,
+                        &offset_tint(rgb, tint_alpha),
+                        1.0,
+                    )
+                    .expect("tinted");
+                    let mut got = vec![0f32; n * 4];
+                    assert!(tinted.read_pixels(
+                        &info,
+                        &mut got,
+                        info.min_row_bytes(),
+                        (0, 0),
+                        CachingHint::Disallow,
+                    ));
+                    for (px, &a) in got.as_chunks::<4>().0.iter().zip(&alphas) {
+                        let alpha = tint_alpha * a;
+                        let want = [
+                            rgb[0] * alpha,
+                            rgb[1] * alpha,
+                            rgb[2] * alpha,
+                            alpha,
+                        ];
+                        let other = [
+                            rgb[0] * tint_alpha * a,
+                            rgb[1] * tint_alpha * a,
+                            rgb[2] * tint_alpha * a,
+                            alpha,
+                        ];
+                        let bits = |p: &[f32; 4]| p.map(f32::to_bits);
+                        missed += usize::from(bits(px) != bits(&want));
+                        missed_other += usize::from(bits(px) != bits(&other));
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "tint sweep on {}: {compared} pixels, {missed} off one product a \
+             channel, {missed_other} off the other order",
+            ARCH
+        );
+        assert!(missed_other > 0, "the control: the orders differ somewhere");
+        assert_eq!(missed, 0, "{missed} of {compared} off");
+    }
 
     #[test]
     fn a_shadow_s_chain_works_on_its_blur_past_the_page() {
