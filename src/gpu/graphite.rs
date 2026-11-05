@@ -180,10 +180,6 @@ pub(crate) fn confirm(since: Option<Mark>) -> Result<(), String> {
 /// work submitted before, and says nothing of whether it ran -- see
 /// [`confirm`]. `Surface::read_pixels` does not read a Graphite surface at
 /// all.
-#[cfg_attr(
-    not(any(test, feature = "metal", feature = "vulkan")),
-    expect(dead_code, reason = "only a GPU backend's reads are confirmed")
-)]
 pub(crate) fn read_raw(
     surface: &mut Surface,
     info: &ImageInfo,
@@ -288,10 +284,6 @@ mod absent {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "metal", feature = "vulkan")),
-        expect(dead_code, reason = "only a GPU backend's reads are confirmed")
-    )]
     pub(super) fn read_raw(
         _surface: &mut Surface,
         _info: &ImageInfo,
