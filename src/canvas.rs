@@ -87,7 +87,11 @@ impl BackendInfo {
         };
         Self {
             renderer: match engine {
-                RenderingEngine::GPU => EngineKind::Gpu,
+                // Graphite is a hardware backend as Ganesh is; the status
+                // names which.
+                RenderingEngine::GPU | RenderingEngine::Graphite => {
+                    EngineKind::Gpu
+                }
                 RenderingEngine::CPU => EngineKind::Cpu,
             },
             api: text("api"),
@@ -629,7 +633,7 @@ impl Canvas {
     /// answers the same question.
     pub fn engine_kind(&self) -> EngineKind {
         match self.engine() {
-            RenderingEngine::GPU => EngineKind::Gpu,
+            RenderingEngine::GPU | RenderingEngine::Graphite => EngineKind::Gpu,
             RenderingEngine::CPU => EngineKind::Cpu,
         }
     }

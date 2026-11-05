@@ -1962,21 +1962,34 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
 
   // The stem of an `I`: the slope of its left edge, fitted over the middle
   // seventy percent of its rows, and its mean width.
+  //
+  // Each row's edge is where coverage crosses half, between the last pixel
+  // below it and the first at or above it, rather than that first pixel: a
+  // 0.5deg lean moves the edge about one pixel over the stem, so a
+  // whole-pixel edge measured it 0.006 to 0.009 off on macOS and Windows
+  // alike, past the tolerance the tests ask.
   const stem = (font) => {
     const ctx = new Canvas(300, 300).getContext("2d");
     ctx.font = font;
     ctx.fillText("I", 100, 250);
     const data = ctx.getImageData(0, 0, 300, 300).data,
+      alpha = (x, y) => data[(y * 300 + x) * 4 + 3],
       rows = [];
     for (let y = 0; y < 300; y++) {
       let left = null,
         right = null;
       for (let x = 0; x < 300; x++)
-        if (data[(y * 300 + x) * 4 + 3] >= 128) {
+        if (alpha(x, y) >= 128) {
           left ??= x;
           right = x;
         }
-      if (left !== null) rows.push([y, left, right]);
+      if (left === null) continue;
+      const below = left > 0 ? alpha(left - 1, y) : 0;
+      rows.push([
+        y,
+        left - 1 + (128 - below) / (alpha(left, y) - below),
+        right,
+      ]);
     }
     const inner = rows.slice(
         Math.floor(rows.length * 0.15),
@@ -2233,6 +2246,13 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
   FontLibrary.use("RecursiveOblique12", [
     `${R}/Recursive-oblique12-subset.ttf`,
   ]);
+  // The same two faces loaded the other way round: a face the platform reports
+  // in the same style as another of its family once replaced it, so which of
+  // the two the family kept, and so drew, went by the order they came in.
+  FontLibrary.use("RecursiveStaticReversed", [
+    `${R}/Recursive-oblique12-subset.ttf`,
+    `${R}/Recursive-upright-subset.ttf`,
+  ]);
 
   test("an oblique angle shears an upright face to the angle", () => {
     for (const family of ["Oswald", "RalewayWithItalic"]) {
@@ -2296,25 +2316,49 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     // and slnt -12 flagged oblique, with an italicAngle of -12. Every
     // positive angle takes the oblique face unsheared, the only oblique
     // value of that sign the family has; a negative one finds none, and the
-    // upright face is sheared.
+    // upright face is sheared. In either order the faces are loaded.
     const oblique = pixels("200px RecursiveOblique12");
-    for (const angle of [0.5, 10, 14, 30, 90]) {
+    for (const family of ["RecursiveStatic", "RecursiveStaticReversed"]) {
+      for (const angle of [0.5, 10, 14, 30, 90]) {
+        assert.ok(
+          pixels(`oblique ${angle}deg 200px ${family}`).equals(oblique),
+          `${family} ${angle}deg draws the oblique face`,
+        );
+      }
+      near(
+        stem(`oblique -14deg 200px ${family}`).slope,
+        -tan(-14),
+        0.005,
+        `${family} -14deg`,
+      );
       assert.ok(
-        pixels(`oblique ${angle}deg 200px RecursiveStatic`).equals(oblique),
-        `${angle}deg draws the oblique face`,
+        pixels(`oblique 0deg 200px ${family}`).equals(
+          pixels(`200px ${family}`),
+        ),
+        `${family} 0deg is upright and unsheared`,
       );
     }
-    near(
-      stem("oblique -14deg 200px RecursiveStatic").slope,
-      -tan(-14),
-      0.005,
-      "-14deg",
-    );
+  });
+
+  test("a face flagged oblique keeps its family's upright face", () => {
+    // `Recursive-oblique-flag-subset.ttf` is the oblique12 face with its
+    // italicAngle set to 0, so that it is told from the upright face only by
+    // `fsSelection` bit 9. CoreText reports it upright, the style the upright
+    // face has -- as DirectWrite reports the oblique12 face -- and adding it
+    // to the family replaced the upright face: plain text drew the oblique
+    // one.
+    FontLibrary.use("RecursiveUprightAlone", [
+      `${R}/Recursive-upright-subset.ttf`,
+    ]);
+    FontLibrary.use("RecursiveFlagged", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-oblique-flag-subset.ttf`,
+    ]);
     assert.ok(
-      pixels("oblique 0deg 200px RecursiveStatic").equals(
-        pixels("200px RecursiveStatic"),
+      pixels("200px RecursiveFlagged").equals(
+        pixels("200px RecursiveUprightAlone"),
       ),
-      "0deg is upright and unsheared",
+      "plain text draws the upright face",
     );
   });
 

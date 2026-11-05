@@ -4874,7 +4874,12 @@ impl Page {
     ) -> Result<SkImage, String> {
         match engine {
             RenderingEngine::GPU => owner::composite(self, options),
-            RenderingEngine::CPU => self.composite(options, engine),
+            // Not reached: `RenderingEngine::for_canvas` does not choose
+            // Graphite. Nor is this arm a route for a Graphite page:
+            // `Surface::read_pixels` does not read one.
+            RenderingEngine::CPU | RenderingEngine::Graphite => {
+                self.composite(options, engine)
+            }
         }
     }
 
@@ -5368,7 +5373,10 @@ impl Page {
                 RenderingEngine::GPU => {
                     owner::composite_into(self, &options, &dst_info)
                 }
-                RenderingEngine::CPU => {
+                // Not reached: `RenderingEngine::for_canvas` does not choose
+                // Graphite. Nor is this arm a route for a Graphite page:
+                // `Surface::read_pixels` does not read one.
+                RenderingEngine::CPU | RenderingEngine::Graphite => {
                     self.composite_into(&options, engine, &dst_info)
                 }
             };
@@ -5661,7 +5669,10 @@ impl Page {
             RenderingEngine::GPU => {
                 owner::composite_pixels(self, &surface_options, &dst_info)
             }
-            RenderingEngine::CPU => {
+            // Not reached: `RenderingEngine::for_canvas` does not choose
+            // Graphite. Nor is this arm a route for a Graphite page:
+            // `Surface::read_pixels` does not read one.
+            RenderingEngine::CPU | RenderingEngine::Graphite => {
                 self.composite_pixels(&surface_options, engine, &dst_info)
             }
         }
@@ -8551,11 +8562,15 @@ mod tests {
             ("clipped round", (&Matrix::default(), Some(&round))),
         ];
         let mut wrong = Vec::new();
+        // Graphite is not on the list: `RenderingEngine::default` never
+        // answers it, and no page is drawn on it here.
         let engines = match RenderingEngine::default() {
             RenderingEngine::GPU => {
                 vec![RenderingEngine::CPU, RenderingEngine::GPU]
             }
-            RenderingEngine::CPU => vec![RenderingEngine::CPU],
+            RenderingEngine::CPU | RenderingEngine::Graphite => {
+                vec![RenderingEngine::CPU]
+            }
         };
         for (drawn, contents) in confined_contents() {
             for ((layer, rec), engine) in recs

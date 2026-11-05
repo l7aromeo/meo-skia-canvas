@@ -5994,7 +5994,8 @@ pub fn to_engine(engine_name: &str) -> Option<RenderingEngine> {
 
 pub fn from_engine(engine: RenderingEngine) -> String {
     match engine {
-        RenderingEngine::GPU => "gpu",
+        // Graphite is a hardware backend as Ganesh is.
+        RenderingEngine::GPU | RenderingEngine::Graphite => "gpu",
         RenderingEngine::CPU => "cpu",
     }
     .to_string()

@@ -124,6 +124,7 @@ read the math functions and every length unit.
 ### Fixed
 
 - **A `blur()` of 5px or more in `set_filter_css` on a float canvas, followed by a colour function or `drop-shadow()`, cannot turn a pixel it leaves at zero alpha into NaN.** ([#550](https://github.com/l7aromeo/meo-skia-canvas/pull/550), [#549](https://github.com/l7aromeo/meo-skia-canvas/issues/549))
+- **`FontLibrary` keeps both faces of a family the platform reports in the same style, such as an upright face and one flagged oblique on Windows, and plain text draws the upright one; the face loaded second replaced the first.** ([#555](https://github.com/l7aromeo/meo-skia-canvas/issues/555))
 - **A `get_image_data` read of a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels, and a copy kept for repeat reads is kept only once the GPU ran it.** ([#533](https://github.com/l7aromeo/meo-skia-canvas/issues/533))
 - **An export from a GPU canvas on macOS whose pixel copy the GPU discarded is read again, or reported as an error, rather than handed back as zeros or stale pixels.** ([#519](https://github.com/l7aromeo/meo-skia-canvas/issues/519))
 - **A curve on a GPU canvas on macOS and Linux is drawn the same however the same path was drawn before it, at whatever size; it could move edge pixels by up to 128 levels after a larger or smaller draw of it.** ([#511](https://github.com/l7aromeo/meo-skia-canvas/issues/511))
@@ -141,7 +142,7 @@ read the math functions and every length unit.
 - **A CanvasKit filter's colour lands as a fill of it does on an eight-bit canvas in linear sRGB, Display P3 or Rec. 2020.** ([#460](https://github.com/l7aromeo/meo-skia-canvas/pull/460), [#459](https://github.com/l7aromeo/meo-skia-canvas/issues/459))
 - **A CanvasKit filter's colour lands as a fill of it does on every float canvas, in every blend mode.** ([#418](https://github.com/l7aromeo/meo-skia-canvas/pull/418), [#432](https://github.com/l7aromeo/meo-skia-canvas/issues/432))
 - **A PDF holds the pixels it embeds losslessly unless an explicit `EncodeOptions::quality` below 1 asks for JPEG.** ([#456](https://github.com/l7aromeo/meo-skia-canvas/pull/456), [#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444))
-- **`TextMetrics::font_bounding_box_ascent` and `font_bounding_box_descent` are the first available font's own.** ([#449](https://github.com/l7aromeo/meo-skia-canvas/pull/449))
+- **`TextMetrics::font_bounding_box_ascent` and `font_bounding_box_descent` are the first available font's own.** ([#449](https://github.com/l7aromeo/meo-skia-canvas/pull/449), [#448](https://github.com/l7aromeo/meo-skia-canvas/issues/448))
 - **On macOS, a font registered after another was let go reads its own metrics.** ([#427](https://github.com/l7aromeo/meo-skia-canvas/pull/427))
 - **`TextBaseline::Top`, `Middle` and `Bottom` sit on the em square.** ([#423](https://github.com/l7aromeo/meo-skia-canvas/pull/423))
 - **`font_bounding_box_ascent` and `font_bounding_box_descent` are measured from the `TextBaseline` set.** ([#420](https://github.com/l7aromeo/meo-skia-canvas/pull/420))
@@ -188,7 +189,7 @@ read the math functions and every length unit.
 - **A read inside a `saveLayer` no longer ends it.** ([#372](https://github.com/l7aromeo/meo-skia-canvas/pull/372))
 - **A paragraph's decoration and text shadow are painted in the colours its style names.** ([#373](https://github.com/l7aromeo/meo-skia-canvas/pull/373))
 - **A translucent layer composites at its alpha.** ([#372](https://github.com/l7aromeo/meo-skia-canvas/pull/372))
-- **A flat colour lands exactly on a float canvas in another space.** ([#391](https://github.com/l7aromeo/meo-skia-canvas/pull/391))
+- **A flat colour lands exactly on a float canvas in another space.** ([#391](https://github.com/l7aromeo/meo-skia-canvas/pull/391), [#392](https://github.com/l7aromeo/meo-skia-canvas/pull/392))
 - **A text decoration's colour is painted at the precision it names, as a fill's is.** ([#365](https://github.com/l7aromeo/meo-skia-canvas/pull/365))
 - **A draw too faint for eight bits draws on a float canvas.** ([#361](https://github.com/l7aromeo/meo-skia-canvas/pull/361))
 - **A canvas drawn into another takes the context's colour filter.** ([#360](https://github.com/l7aromeo/meo-skia-canvas/pull/360))
