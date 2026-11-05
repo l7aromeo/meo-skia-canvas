@@ -2563,16 +2563,13 @@ pub(crate) fn play_entries(
     };
     let mut at = 0;
     while at < entries.len() {
-        if let Some(played) = play_shared_chains(&entries[at..], canvas, target)
-        {
-            if paced {
-                for (entry, features) in entries[at..at + played]
-                    .iter()
-                    .zip(&features[at..at + played])
-                {
-                    pacing::played(canvas, offscreen_layers(entry, *features));
-                }
-            }
+        if let Some(played) = play_shared_chains(
+            &entries[at..],
+            &features[at..],
+            canvas,
+            target,
+            paced,
+        ) {
             at += played;
             continue;
         }
@@ -2618,10 +2615,28 @@ pub(crate) fn play_entries(
 /// whose reads and draws meet never share one, while chains further apart
 /// do: a row of blurred shapes each meeting the next takes two layers, not
 /// one each.
+///
+/// Where `paced`, it counts each entry's layers as it plays them, as any
+/// entry is counted -- see [`offscreen_layers`] -- and where the count is due
+/// to flush, it first plays the run so far, so that the flush falls inside
+/// the run, after the chains it is counted for -- see [`pacing`]. Counted
+/// only once the run had played, the flushes all came after it, leaving
+/// every chain's passes to the one before: 4,096 rects under a CSS drop
+/// shadow, each a group of its own, read in 2.7 s that way and in 0.66 s
+/// flushed inside, in a debug test build. A run cut short is played and
+/// composited before the next chain draws, in draw order, and each chain
+/// reads only its own layer, so the bytes are the ones the whole run lands.
+///
+/// Do not count each chain instead: a run of blurred rectangles joined in
+/// one entry -- 2,000 cards under `blur(4px)` on 800x600 -- then flushed
+/// every 256 chains, and its export took 9.7 ms against 6.0 played whole,
+/// waiting on the GPU, where its clustering had cost nothing to speak of.
 fn play_shared_chains(
     entries: &[Layer],
+    features: &[VectorFeatures],
     canvas: &SkCanvas,
     target: Target,
+    paced: bool,
 ) -> Option<usize> {
     let leading: Vec<Leading<'_>> = entries
         .iter()
@@ -2645,20 +2660,31 @@ fn play_shared_chains(
     }
     let to_device = canvas.local_to_device_as_3x3();
     let mut run = Run::default();
-    for member in leading.iter().flat_map(|entry| entry.members(&to_device)) {
-        let Some(plan) =
-            chain::plan(canvas, member.steps, member.content, member.depth)
-        else {
-            continue;
-        };
-        let layer = match run.layer_for(&plan) {
-            Some(layer) => layer,
-            None => {
+    for ((entry, layer_entry), features) in
+        leading.iter().zip(entries).zip(features)
+    {
+        for member in entry.members(&to_device) {
+            let Some(plan) =
+                chain::plan(canvas, member.steps, member.content, member.depth)
+            else {
+                continue;
+            };
+            let layer = match run.layer_for(&plan) {
+                Some(layer) => layer,
+                None => {
+                    std::mem::take(&mut run).play(canvas, target);
+                    0
+                }
+            };
+            run.push(Chained { member, plan }, layer);
+        }
+        if paced {
+            let layers = offscreen_layers(layer_entry, *features);
+            if pacing::due(layers) {
                 std::mem::take(&mut run).play(canvas, target);
-                0
             }
-        };
-        run.push(Chained { member, plan }, layer);
+            pacing::played(canvas, layers);
+        }
     }
     run.play(canvas, target);
     Some(leading.len())
@@ -2850,6 +2876,8 @@ impl Chained<'_> {
     /// Finishes this chain from `drawn`, the layer holding its draw, and
     /// composites the result onto `canvas`.
     fn finish(&self, drawn: &mut chain::Drawn, canvas: &SkCanvas) {
+        #[cfg(test)]
+        pacing::tests::chain_finished();
         let Chained { member, plan } = self;
         if let Some(outcome) = drawn.finish(plan, member.steps, member.paint) {
             outcome.composite(canvas, member.paint);

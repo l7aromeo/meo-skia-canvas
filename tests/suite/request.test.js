@@ -9,7 +9,8 @@
 // to a real server arrives with none of its headers, so a test of headers
 // beside nock reads nock's behaviour rather than this library's.
 
-const fs = require("fs"),
+const dns = require("dns"),
+  fs = require("fs"),
   http = require("http"),
   { execFile } = require("child_process"),
   { assert, describe, test } = require("../runner"),
@@ -28,6 +29,13 @@ const PATH = "tests/assets/images/pentagon.png",
 // Loads from `127.0.0.1`, which redirects to `localhost`, which serves
 // `body`. Returns what each host received and what the load threw, if
 // anything; a host that was never reached is left undefined.
+//
+// The `localhost` server listens on the address a connection to `localhost`
+// is made to, which is not always the one `listen` would pick for the name:
+// a client resolves it with `ADDRCONFIG`, which drops `::1` where no other
+// IPv6 address is configured, and `listen` does not. In such a container --
+// GitHub's, for the Linux release build -- the server bound `::1` and the
+// redirect was refused at `127.0.0.1`.
 const throughRedirect = async (load, body = BUFFER) => {
   /** @type {{ first?: http.IncomingHttpHeaders, second?: http.IncomingHttpHeaders, error?: any }} */
   let seen = {},
@@ -43,7 +51,10 @@ const throughRedirect = async (load, body = BUFFER) => {
       res.writeHead(302, { Location: `http://localhost:${port}/${PATH}` });
       res.end();
     });
-  await new Promise((ok) => second.listen(0, "localhost", () => ok(0)));
+  let { address: localhost } = await dns.promises.lookup("localhost", {
+    hints: dns.ADDRCONFIG,
+  });
+  await new Promise((ok) => second.listen(0, localhost, () => ok(0)));
   await new Promise((ok) => first.listen(0, "127.0.0.1", () => ok(0)));
   let { port } = /** @type {import("net").AddressInfo} */ (first.address());
   try {
