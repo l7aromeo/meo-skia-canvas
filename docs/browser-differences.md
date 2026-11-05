@@ -363,6 +363,10 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   and `italic`, in either load order, though CoreText and an unpatched
   DirectWrite report it upright -- `FontLibrary::slanted` in
   `src/node/font_library.rs`. Chrome was not measured on that face.
+  An SVG document's text follows the same rule, `oblique <angle>` included:
+  Chrome 153 draws an inline SVG's `italic` and an oblique of 14deg or more
+  in a family with no slanted face with a quarter's skew, and a smaller or
+  negative angle upright, as its canvas text does.
 
   Chrome draws neither the shear nor the angle. For a font loaded as a
   `FontFace` -- Oswald, Raleway with its italic face, and Arial, Georgia,

@@ -47,6 +47,12 @@ const TRIANGULATION = {
   marker: "info->fTolerance == tol",
 };
 
+/// containers/skia-svg-synthetic-slant.patch, on every platform.
+const SVG_SYNTHETIC_SLANT = {
+  file: "modules/svg/src/SkSVGText.cpp",
+  marker: "!Leans(font.getTypeface())",
+};
+
 /// Each file a patch for the platform changes, under Skia's source root, with
 /// what only the patched file contains. Linux's brotli patch is not here: it
 /// changes a build list rather than a compiled file, and a `freetype` build
@@ -60,8 +66,9 @@ export const PATCHED = {
     },
     ATLAS_SIZE,
     TRIANGULATION,
+    SVG_SYNTHETIC_SLANT,
   ],
-  linux: [ATLAS_SIZE, TRIANGULATION],
+  linux: [ATLAS_SIZE, TRIANGULATION, SVG_SYNTHETIC_SLANT],
   win32: [
     ATLAS_SIZE,
     TRIANGULATION,
@@ -70,6 +77,7 @@ export const PATCHED = {
       file: "src/ports/SkTypeface_win_dw.cpp",
       marker: "fsSelection.field.Oblique",
     },
+    SVG_SYNTHETIC_SLANT,
   ],
 };
 

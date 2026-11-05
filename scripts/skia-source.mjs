@@ -121,6 +121,27 @@ const ASYNC_TRANSFER_REUSE = join(
   "skia-async-transfer-reuse.patch",
 );
 
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: node scripts/test.mjs tests/suite/image.test.js against a binary built from a tree prepared without this patch; "a document's slanted text in a family with no slanted face is slanted as canvas text is" fails
+//
+// Skia's SVG text draws with `SkFont(typeface, size)` and never sets the
+// font's skew (`ResolveFont` in modules/svg/src/SkSVGText.cpp), so an
+// `italic` or `oblique` in a family with no slanted face draws upright, where
+// CSS Fonts 4 section 5.2 synthesises the slant. And its attribute parser
+// reads `font-style` as four keywords, so `oblique 10deg` fails to parse and
+// takes the inherited style. The patch parses the angle and keeps it in an
+// inherited presentation attribute of its own, `fFontObliqueAngle`, which
+// `font-style` sets with the slant. It does not widen `SkSVGFontStyle`:
+// skia-safe builds that struct field by field, and a field it does not name
+// fails its build. `ResolveFont` skews a face that does not lean -- by its
+// reported slant or by `OS/2` `fsSelection` bit 9 -- a quarter for `italic`
+// and to the tangent of the angle for `oblique`, as canvas text does. An
+// oblique of zero or a negative angle is matched as upright and sheared.
+const SVG_SYNTHETIC_SLANT = join(
+  "containers",
+  "skia-svg-synthetic-slant.patch",
+);
+
 export const PATCHES = {
   darwin: [
     // The Metal compile timeout -- see the UPSTREAM note in the justfile.
@@ -129,6 +150,7 @@ export const PATCHES = {
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
+    SVG_SYNTHETIC_SLANT,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -159,6 +181,7 @@ export const PATCHES = {
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
+    SVG_SYNTHETIC_SLANT,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
@@ -182,6 +205,7 @@ export const PATCHES = {
     // still earns is the slant reported: what `FontLibrary.family().styles`
     // lists, and what an SVG document's `font-style` is matched against.
     join("containers", "skia-dwrite-oblique.patch"),
+    SVG_SYNTHETIC_SLANT,
   ],
 };
 
