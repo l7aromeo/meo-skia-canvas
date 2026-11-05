@@ -3451,7 +3451,18 @@ impl Context2D {
                             Pass::Draw => global_alpha,
                             Pass::AlphaInShadow => 1.0,
                         };
-                        let reach = run.paint(canvas, at, paint, lines, faint);
+                        // What the run can ink is read only to bound a
+                        // filter chain's layer -- see `files_through_chain`
+                        // -- so a draw outside one does not work it out. The
+                        // tests read it on every draw, to hold it to the ink.
+                        let reach = run.paint(
+                            canvas,
+                            at,
+                            paint,
+                            lines,
+                            faint,
+                            chained || cfg!(test),
+                        );
                         let reach = reach.map(|reach| {
                             canvas.local_to_device_as_3x3().map_rect(reach).0
                         });
