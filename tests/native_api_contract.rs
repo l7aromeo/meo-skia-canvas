@@ -2369,6 +2369,69 @@ fn an_animated_avif_reports_and_returns_every_frame() -> Result<()> {
 }
 
 #[test]
+fn an_animated_webp_decodes_a_frame_with_alpha_after_an_opaque_one()
+-> Result<()> {
+    // Skia takes an animated WebP's image info from its first frame alone,
+    // and decoding a later frame that holds alpha into an opaque one is a
+    // conversion it refuses: frame 1 here failed with `InvalidConversion`.
+    // The encoder writes a page after the first as the rectangle that
+    // changed, transparent where nothing did, so a frame after an opaque
+    // first one holds alpha whatever the page does. Page 1 also clears a
+    // hole to transparent and paints columns at alphas from 0.1 to 0.9 in
+    // it, so its alpha is the page's own as well. At quality 1.0, which is
+    // lossless, every frame is held to its page exactly -- which a frame
+    // decoded premultiplied, rather than unpremultiplied as a file whose
+    // first frame holds alpha decodes, misses on the translucent columns.
+    const SIDE: f32 = 24.0;
+    let mut canvas = Canvas::new(SIDE, SIDE);
+    canvas.set_gpu(false);
+    for (page, colour) in ["rgb(200 40 40)", "rgb(40 40 200)", "rgb(40 160 40)"]
+        .into_iter()
+        .enumerate()
+    {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style_css(colour)?;
+        ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+        if page == 1 {
+            ctx.clear_rect(6.0, 5.0, 9.0, 11.0);
+            for (step, alpha) in
+                [0.1, 0.3, 0.5, 0.7, 0.9].into_iter().enumerate()
+            {
+                ctx.set_fill_style_css(&format!("rgb(250 130 20 / {alpha})"))?;
+                ctx.fill_rect(6.0 + step as f32, 5.0, 1.0, 11.0);
+            }
+        }
+    }
+    let webp = canvas.to_buffer(
+        ImageFormat::Webp,
+        &EncodeOptions {
+            quality: Some(1.0),
+            ..EncodeOptions::default()
+        },
+    )?;
+    let image = Image::from_encoded(&webp).context("it decodes")?;
+    assert_eq!(image.frame_count(), 3, "one frame per page");
+    for frame in 0..3 {
+        let wanted = canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                page: Some(frame),
+                ..EncodeOptions::default()
+            },
+        )?;
+        assert_eq!(
+            avif_frame_pixels(&image, frame)?,
+            wanted,
+            "frame {frame} exactly"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn apng_timings_come_from_the_chunks_not_the_pixels() -> Result<()> {
     // `frame_delays` runs on every image this crate constructs, and for an
     // APNG it used to inflate the whole animation to reach the timings --
