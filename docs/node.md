@@ -184,7 +184,7 @@ Start by installing:
 This project uses [just](https://github.com/casey/just) as its command runner. **`just --list` is the list** — every recipe carries its own description, and a table here would be a copy that goes stale while the recipes move. Four are worth knowing before you read it:
 
 - `just ci` is the full gate, and it is longer than it looks. Run it before opening a pull request.
-- `just precommit` is the subset fast enough to sit in front of every commit, about six seconds. `just install-hooks` puts it there; it is opt-in and run once per clone.
+- `just precommit` is the subset fast enough to sit in front of every commit: about 10 s when no Rust source has changed, and about a minute when one has, since each of its two clippy passes then checks the crate again. `just install-hooks` puts it there; it is opt-in and run once per clone.
 - `just test` and `npm test` both run the suite **against your local build**, and `npm test` prints which binary it used. A bare `node --test` does not — an installed platform package outranks `lib/skia.node`, so Node loads the published binary instead.
 - `just build` is a debug build and `just build-release` is what CI ships. Benchmark on the release one or not at all.
 
