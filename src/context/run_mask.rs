@@ -360,12 +360,7 @@ pub(crate) fn drawn(
         region: [region.left, region.top, region.right, region.bottom],
     };
     if let Some(mask) = get(&filed) {
-        let alike = mask.coverage.len() == sharp.values().len()
-            && mask
-                .coverage
-                .iter()
-                .zip(sharp.values())
-                .all(|(&kept, &value)| f32::from(kept) == value);
+        let alike = *mask.coverage == *sharp.bytes();
         let moved = alike
             .then(|| mask.outcome.at((x - mask.origin.0, y - mask.origin.1)))
             .flatten();
@@ -380,8 +375,7 @@ pub(crate) fn drawn(
     }
     #[cfg(test)]
     count(|masks| masks.misses += 1);
-    // A byte's value a pixel, so kept as the byte.
-    let coverage: Arc<[u8]> = sharp.values().iter().map(|&v| v as u8).collect();
+    let coverage: Arc<[u8]> = sharp.bytes().into();
     let outcome = colour(sharp)?;
     put(
         filed,

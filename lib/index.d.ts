@@ -1352,7 +1352,8 @@ export interface RenderOptions {
 export interface ExportOptions extends RenderOptions {
   /**
    * Quality for lossy encodings like JPEG & WEBP (0.0–1.0), defaulting to
-   * `0.92`.
+   * `0.92`. A WebP at `1.0` is lossless unless {@link lossless} is `false`.
+   * Below `1.0` beside a {@link lossless} of `true` it is a `RangeError`.
    *
    * A PDF writes the pixels it holds losslessly unless this is given below
    * `1`: then as JPEG at this quality, at full chroma unless
@@ -1447,16 +1448,29 @@ export interface ExportOptions extends RenderOptions {
   chromaSampling?: "4:4:4" | "4:2:2" | "4:2:0";
 
   /**
-   * Whether `"avif"` is coded with no loss at all, defaulting to `false`.
+   * Whether `"webp"` or `"avif"` is coded with no loss at all.
    *
-   * Off by default and deliberately: AVIF is reached for because it is
-   * small, and a lossless one is several times the size of a lossy one and
-   * often larger than the PNG it would replace. Every encoder in the
-   * ecosystem defaults to lossy for the same reason.
+   * Left out, each format keeps its own rule: a WebP is lossless at a
+   * {@link quality} of `1.0` and lossy below it, and an AVIF is lossy at
+   * every quality. `true` asks for lossless and `false` for lossy, so
+   * `false` at a quality of `1.0` writes a WebP at its finest lossy setting:
+   * VP8 at libwebp's quality 100, from a picture converted to YUV 4:2:0 as
+   * every lossy WebP is, so a colour edge softens even at the top of the
+   * dial.
+   * A {@link quality} below `1.0` beside `true` is a `RangeError` for both:
+   * the two ask for different files.
    *
-   * This is lossless in *red, green and blue*, not merely in what the
-   * encoder was handed. That needs two things beyond the flag, both of which
-   * this sets: full chroma, and the identity matrix, where the three coded
+   * A lossless WebP is VP8L, the encoder a quality of `1.0` reaches, and
+   * decodes to the pixels it was given.
+   *
+   * An AVIF is lossy unless asked, and deliberately: AVIF is reached for
+   * because it is small, and a lossless one is several times the size of a
+   * lossy one and often larger than the PNG it would replace. Every encoder
+   * in the ecosystem defaults to lossy for the same reason.
+   *
+   * A lossless AVIF is lossless in *red, green and blue*, not merely in
+   * what the encoder was handed. That needs two things beyond the flag, both
+   * of which this sets: full chroma, and the identity matrix, where the three coded
    * planes are green, blue and red rather than a luma and two colour
    * differences. Without the second, the picture is rounded by the
    * conversion before quantisation runs and the file faithfully preserves
@@ -1466,12 +1480,13 @@ export interface ExportOptions extends RenderOptions {
    * a `TypeError` rather than being silently overridden -- subsampled
    * identity planes would discard literal red and blue samples.
    *
-   * {@link quality} is ignored when this is set, and is *not* promoted to
-   * lossless at `1.0`: that means the finest quantizer, which is
-   * near-lossless but still filtered, and changing what it meant would change
-   * every file this library has already written.
+   * An AVIF's {@link quality} is *not* promoted to lossless at `1.0`: that
+   * means the finest quantizer, which is near-lossless but still filtered,
+   * and changing what it meant would change every file this library has
+   * already written.
    *
-   * Naming it for any other format is a `TypeError`.
+   * `true` for any other format is a `TypeError` saying why the format has
+   * no such choice; `false` is taken as leaving it out is.
    */
   lossless?: boolean;
 

@@ -706,19 +706,19 @@ fn encodes() -> Vec<(&'static str, ImageFormat, EncodeOptions, bool)> {
         (
             "avif-422",
             ImageFormat::Avif,
-            avif(Some(0.92), Some(ChromaSampling::Half), false),
+            avif(Some(0.92), Some(ChromaSampling::Half), None),
             false,
         ),
         (
             "avif-420",
             ImageFormat::Avif,
-            avif(Some(0.92), Some(ChromaSampling::Quarter), false),
+            avif(Some(0.92), Some(ChromaSampling::Quarter), None),
             false,
         ),
         (
             "avif-lossless",
             ImageFormat::Avif,
-            avif(None, None, true),
+            avif(None, None, Some(true)),
             false,
         ),
     ]

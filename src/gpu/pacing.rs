@@ -35,6 +35,10 @@
 //! filtered draws as one entry, which a playback plays whole, so the recorder
 //! files such a run in entries of at most [`LAYERS_PER_FLUSH`] draws -- see
 //! `PageRecorder::append_isolated` -- and a playback can flush between them.
+//! Consecutive entries whose chains share layers on the GPU play together,
+//! as one run of chains, which counts each entry as it plays it and plays
+//! what it holds before a flush the count calls for, so that the flushes
+//! fall inside the run -- see `layer::play_shared_chains`.
 
 use std::cell::Cell;
 
@@ -75,6 +79,13 @@ thread_local! {
     /// failure -- see [`tests::fail_flushes`].
     #[cfg(test)]
     static FAILING: Cell<bool> = const { Cell::new(false) };
+    /// The chains of shared layers the playback running on this thread has
+    /// finished since it last flushed, and the most it finished between two
+    /// flushes -- see [`tests::chain_finished`].
+    #[cfg(test)]
+    static CHAINS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static MOST_CHAINS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Starts the count for a playback of page `page` on this thread.
@@ -83,6 +94,8 @@ pub(crate) fn begin(page: usize) {
     #[cfg(test)]
     {
         FLUSHES.set(0);
+        CHAINS.set(0);
+        MOST_CHAINS.set(0);
         PACED.set(!tests::UNPACED.lock().contains(&page));
         FAILING.set(tests::FAILING.lock().contains(&page));
     }
@@ -94,9 +107,26 @@ pub(crate) fn begin(page: usize) {
 /// flushes it made for a test to read -- see [`tests::flushes`].
 pub(crate) fn end(page: usize) {
     #[cfg(test)]
-    tests::PLAYED.lock().push((page, FLUSHES.get()));
+    {
+        tests::PLAYED.lock().push((page, FLUSHES.get()));
+        let most = MOST_CHAINS.get().max(CHAINS.get());
+        tests::CHAINS_PLAYED.lock().push((page, most));
+    }
     #[cfg(not(test))]
     let _ = page;
+}
+
+/// Whether counting `layers` more layers now would flush: so that a run of
+/// chains sharing layers plays what it holds before it counts them, and the
+/// flush falls inside the run -- see `layer::play_shared_chains`. Never for
+/// the page a test plays unpaced as a reference, which plays such a run
+/// whole.
+pub(crate) fn due(layers: usize) -> bool {
+    #[cfg(test)]
+    if !PACED.get() {
+        return false;
+    }
+    layers > 0 && SINCE_FLUSH.get() + layers >= LAYERS_PER_FLUSH
 }
 
 /// Counts `layers` layers just rendered offscreen onto `canvas` -- see
@@ -131,7 +161,10 @@ pub(crate) fn played(canvas: &SkCanvas, layers: usize) {
             FAILED.set(true);
         }
         #[cfg(test)]
-        FLUSHES.set(FLUSHES.get() + 1);
+        {
+            FLUSHES.set(FLUSHES.get() + 1);
+            MOST_CHAINS.set(MOST_CHAINS.get().max(CHAINS.replace(0)));
+        }
     }
 }
 
@@ -210,5 +243,28 @@ pub(crate) mod tests {
     /// as a GPU fault would.
     pub(crate) fn fail_flushes(page: usize) {
         FAILING.lock().insert(page);
+    }
+
+    /// The pages played so far, each with the most chains of shared layers
+    /// its playback finished between two flushes, or before the first.
+    pub(super) static CHAINS_PLAYED: Mutex<Vec<(usize, usize)>> =
+        Mutex::new(Vec::new());
+
+    /// Counts a chain of a shared layer just finished on this thread -- see
+    /// `layer::play_shared_chains`: what a flush's count says nothing about
+    /// is where the flushes fall among the chains.
+    pub(crate) fn chain_finished() {
+        super::CHAINS.set(super::CHAINS.get() + 1);
+    }
+
+    /// The most chains of shared layers each playback of `page` finished
+    /// between two flushes, in order.
+    pub(crate) fn most_chains(page: usize) -> Vec<usize> {
+        CHAINS_PLAYED
+            .lock()
+            .iter()
+            .filter(|(played, _)| *played == page)
+            .map(|(_, most)| *most)
+            .collect()
     }
 }

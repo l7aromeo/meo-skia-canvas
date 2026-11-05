@@ -712,6 +712,128 @@ describe("Image", () => {
     });
   });
 
+  describe("can write a lossless WebP", () => {
+    // The image chunk of every frame, in order: "VP8L" for a lossless one,
+    // "VP8 " for a lossy one. Walks the RIFF chunks, and the chunks inside
+    // each ANMF past its 16-byte frame header, rather than searching the
+    // bytes for a tag compressed data could also hold.
+    const imageTags = (bytes) => {
+      const RIFF_HEADER = 12,
+        CHUNK_HEADER = 8,
+        ANMF_HEADER = 16;
+      assert.equal(bytes.toString("latin1", 8, 12), "WEBP", "a WebP");
+      const tags = [];
+      const walk = (start, end) => {
+        for (let at = start; at + CHUNK_HEADER <= end;) {
+          const tag = bytes.toString("latin1", at, at + 4);
+          const size = bytes.readUInt32LE(at + 4);
+          if (tag == "VP8 " || tag == "VP8L") tags.push(tag);
+          if (tag == "ANMF")
+            walk(at + CHUNK_HEADER + ANMF_HEADER, at + CHUNK_HEADER + size);
+          at += CHUNK_HEADER + size + (size % 2);
+        }
+      };
+      walk(RIFF_HEADER, bytes.length);
+      return tags;
+    };
+
+    // Opaque primaries over a gradient, moved along a pixel a page: the
+    // primaries are where a conversion rounds hardest, the gradient is where
+    // a filter would show, and opaque pixels keep premultiplication out of
+    // the comparison.
+    const SIDE = 48;
+    const pages = (count) => {
+      let canvas = new Canvas(SIDE, SIDE);
+      canvas.gpu = false;
+      for (let page = 0; page < count; page++) {
+        let ctx = page ? canvas.newPage() : canvas.getContext("2d");
+        ["#ff0000", "#00ff00", "#0000ff"].forEach((col, i) => {
+          ctx.fillStyle = col;
+          ctx.fillRect(i * 16 + page, 0, 16, SIDE / 2);
+        });
+        for (let x = 0; x < SIDE; x++) {
+          let v = Math.round((x / (SIDE - 1)) * 255);
+          ctx.fillStyle = `rgb(${v} ${Math.round(v / 2)} 255)`;
+          ctx.fillRect(x, SIDE / 2, 1, SIDE / 2);
+        }
+      }
+      return canvas;
+    };
+    const drawn = async (bytes) => {
+      let out = new Canvas(SIDE, SIDE);
+      out.gpu = false;
+      out.getContext("2d").drawImage(await loadImage(bytes), 0, 0);
+      return [...out.toBufferSync("raw")];
+    };
+
+    test("as VP8L when asked, and exactly", async () => {
+      let canvas = pages(1);
+      const wanted = [...canvas.toBufferSync("raw")];
+      for (let quality of [undefined, 1]) {
+        let webp = canvas.toBufferSync("webp", { lossless: true, quality });
+        assert.deepEqual(imageTags(webp), ["VP8L"], `quality ${quality}`);
+        assert.deepEqual(await drawn(webp), wanted, `quality ${quality}`);
+      }
+    });
+
+    test("with every frame of an animation VP8L", () => {
+      let webp = pages(2).toBufferSync("webp", { lossless: true });
+      assert.deepEqual(imageTags(webp), ["VP8L", "VP8L"]);
+    });
+
+    test("at quality 1 unless lossless is false", () => {
+      for (let [count, frames] of [
+        [1, 1],
+        [2, 2],
+      ]) {
+        let canvas = pages(count);
+        const tags = (options) =>
+          imageTags(canvas.toBufferSync("webp", options));
+        const every = (tag) => Array(frames).fill(tag);
+        assert.deepEqual(tags({ quality: 1 }), every("VP8L"), `${count}`);
+        assert.deepEqual(tags({ quality: 0.9 }), every("VP8 "), `${count}`);
+        assert.deepEqual(
+          tags({ quality: 1, lossless: false }),
+          every("VP8 "),
+          `${count}`,
+        );
+      }
+    });
+
+    test("refusing a quality below 1 beside it, for AVIF too", () => {
+      let canvas = pages(1);
+      for (let format of ["webp", "avif"]) {
+        assert.throws(
+          () => canvas.toBufferSync(format, { lossless: true, quality: 0.5 }),
+          (e) => e instanceof RangeError && /quality.*lossless/.test(e.message),
+          format,
+        );
+        canvas.toBufferSync(format, { lossless: true, quality: 1 });
+      }
+    });
+
+    test("and refusing it elsewhere, with a reason true of each", () => {
+      let canvas = pages(1);
+      for (let [format, says] of [
+        ["png", /png is always lossless/],
+        ["jpg", /jpeg is always lossy/],
+        ["gif", /palette of 256/],
+        ["tiff", /deflated/],
+        ["bmp", /uncompressed/],
+        ["ico", /PNG images/],
+        ["pdf", /unless a `quality` below 1.0/],
+        ["svg", /embeds its pixels as PNG/],
+      ]) {
+        assert.throws(
+          () => canvas.toBufferSync(format, { lossless: true }),
+          (e) => e instanceof TypeError && says.test(e.message),
+          format,
+        );
+        canvas.toBufferSync(format, { lossless: false });
+      }
+    });
+  });
+
   describe("can reach the frames of an animation", () => {
     // Two pixels wide, three frames, of which the last two cover one pixel
     // each. A frame handed back whole is evidence it was composited against

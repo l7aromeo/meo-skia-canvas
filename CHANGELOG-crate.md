@@ -19,18 +19,20 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
 
-**A breaking release. Twenty-nine changes can break working code, each under
+**A breaking release. Thirty-one changes can break working code, each under
 Breaking with what to change.**
 
 Signatures and types change: `FontSlant::Oblique` and `TextSlant::Oblique` carry
 an `ObliqueAngle`; a family list is `Vec<FontFamily>`, so a quoted generic
 keyword is a family name, and the details `family_details` returns are
 `FontFamilyDetails`; `TextStyle::font_variations` is a `FontVariationSettings`;
-`UiEvent::Input` carries a `TextInputType`; and `Error` is `#[non_exhaustive]`.
+`UiEvent::Input` carries a `TextInputType`; `EncodeOptions::lossless` is an
+`Option<bool>`; and `Error` is `#[non_exhaustive]`.
 Values that were taken are refused: a text contrast or gamma outside Skia's
 range, from `Canvas::with_options`; a `ColorFilter::lighting` coefficient that
 is not finite; a blank string in `set_filter_css`, which cleared the filter; a
-number ending in a point; and colour, font, filter and spacing strings Chrome
+number ending in a point; a `lossless` beside a quality below 1.0, which AVIF
+ignored; and colour, font, filter and spacing strings Chrome
 153 refuses, a space before `(`, legacy commas CSS Color 4 does not allow and
 `hwba()`, `hsv()` and hex without `#` among them. Values read back differently:
 `Context2D::font()` as CSSOM serializes a font, `filter()` as the chain was
@@ -56,12 +58,16 @@ puts them and beneath the glyphs, a family with no italic or bold face slanted
 or emboldened, `FontSlant::Oblique` as CSS Fonts 4 matches it, and a variable
 font at the weight asked and at the optical size of its font size.
 `Image::from_url` and `ImageData::from_url` load over `http` and `https` behind
-an opt-in `fetch` feature, `set_font_kerning`, `set_text_rendering`,
+an opt-in `fetch` feature, lossless WebP, `set_font_kerning`, `set_text_rendering`,
 `color-mix()` and CSS Color 4's system colours are added, and the CSS strings
 read the math functions and every length unit.
 
 ### Breaking
 
+- **`EncodeOptions::lossless` is an `Option<bool>`, `None` meaning each format's own rule.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+  Write `lossless: Some(true)` where you wrote `lossless: true`, and leave it out where you wrote `false`.
+- **`lossless: Some(true)` beside a quality below 1.0 is refused, for AVIF as for WebP.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+  Pass one or the other: AVIF ignored the quality.
 - **`EncodeOptions::quality` is an `Option<f32>`, `None` meaning each format's own default.** ([#456](https://github.com/l7aromeo/meo-skia-canvas/pull/456), [#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444))
   Write `quality: Some(0.8)` where you wrote `quality: 0.8`.
 - **A paragraph style's text shadows paint the first listed on top.** ([#399](https://github.com/l7aromeo/meo-skia-canvas/pull/399))
@@ -250,6 +256,7 @@ read the math functions and every length unit.
 
 ### Added
 
+- **`EncodeOptions::lossless` writes a lossless WebP, still or animated, as a quality of 1.0 does.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
 - **`just bench` runs the npm and crate benchmarks over the same cases and writes a dated report of each.** ([#470](https://github.com/l7aromeo/meo-skia-canvas/pull/470), [#468](https://github.com/l7aromeo/meo-skia-canvas/issues/468))
 - **CSS Color 4's system colours.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))
 - **`color-mix()` in the CSS colours the crate reads.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))
@@ -281,7 +288,7 @@ read the math functions and every length unit.
 
 ### Changed
 
-- **Text costs less to lay out, draw and measure, a colour less to look up, blurred shapes less to record and export, a page of many filtered draws or `saveLayer` groups less to draw, and a read of a GPU canvas less to wait for, the first after a draw as well as a repeated one.** ([#324](https://github.com/l7aromeo/meo-skia-canvas/pull/324), [#326](https://github.com/l7aromeo/meo-skia-canvas/pull/326), [#327](https://github.com/l7aromeo/meo-skia-canvas/pull/327), [#329](https://github.com/l7aromeo/meo-skia-canvas/pull/329), [#333](https://github.com/l7aromeo/meo-skia-canvas/pull/333), [#335](https://github.com/l7aromeo/meo-skia-canvas/pull/335), [#339](https://github.com/l7aromeo/meo-skia-canvas/pull/339), [#340](https://github.com/l7aromeo/meo-skia-canvas/pull/340), [#348](https://github.com/l7aromeo/meo-skia-canvas/pull/348), [#350](https://github.com/l7aromeo/meo-skia-canvas/pull/350), [#354](https://github.com/l7aromeo/meo-skia-canvas/pull/354), [#355](https://github.com/l7aromeo/meo-skia-canvas/pull/355), [#356](https://github.com/l7aromeo/meo-skia-canvas/pull/356), [#357](https://github.com/l7aromeo/meo-skia-canvas/pull/357), [#358](https://github.com/l7aromeo/meo-skia-canvas/pull/358), [#364](https://github.com/l7aromeo/meo-skia-canvas/pull/364), [#368](https://github.com/l7aromeo/meo-skia-canvas/pull/368), [#384](https://github.com/l7aromeo/meo-skia-canvas/pull/384), [#395](https://github.com/l7aromeo/meo-skia-canvas/pull/395), [#422](https://github.com/l7aromeo/meo-skia-canvas/pull/422), [#462](https://github.com/l7aromeo/meo-skia-canvas/pull/462), [#465](https://github.com/l7aromeo/meo-skia-canvas/pull/465), [#469](https://github.com/l7aromeo/meo-skia-canvas/pull/469), [#484](https://github.com/l7aromeo/meo-skia-canvas/issues/484), [#497](https://github.com/l7aromeo/meo-skia-canvas/issues/497), [#530](https://github.com/l7aromeo/meo-skia-canvas/issues/530))
+- **Text costs less to lay out, draw and measure, a colour less to look up, blurred shapes less to record and export, a page of many filtered draws or `saveLayer` groups less to draw, and a read of a GPU canvas less to wait for, the first after a draw as well as a repeated one.** ([#324](https://github.com/l7aromeo/meo-skia-canvas/pull/324), [#326](https://github.com/l7aromeo/meo-skia-canvas/pull/326), [#327](https://github.com/l7aromeo/meo-skia-canvas/pull/327), [#329](https://github.com/l7aromeo/meo-skia-canvas/pull/329), [#333](https://github.com/l7aromeo/meo-skia-canvas/pull/333), [#335](https://github.com/l7aromeo/meo-skia-canvas/pull/335), [#339](https://github.com/l7aromeo/meo-skia-canvas/pull/339), [#340](https://github.com/l7aromeo/meo-skia-canvas/pull/340), [#348](https://github.com/l7aromeo/meo-skia-canvas/pull/348), [#350](https://github.com/l7aromeo/meo-skia-canvas/pull/350), [#354](https://github.com/l7aromeo/meo-skia-canvas/pull/354), [#355](https://github.com/l7aromeo/meo-skia-canvas/pull/355), [#356](https://github.com/l7aromeo/meo-skia-canvas/pull/356), [#357](https://github.com/l7aromeo/meo-skia-canvas/pull/357), [#358](https://github.com/l7aromeo/meo-skia-canvas/pull/358), [#364](https://github.com/l7aromeo/meo-skia-canvas/pull/364), [#368](https://github.com/l7aromeo/meo-skia-canvas/pull/368), [#384](https://github.com/l7aromeo/meo-skia-canvas/pull/384), [#395](https://github.com/l7aromeo/meo-skia-canvas/pull/395), [#422](https://github.com/l7aromeo/meo-skia-canvas/pull/422), [#462](https://github.com/l7aromeo/meo-skia-canvas/pull/462), [#465](https://github.com/l7aromeo/meo-skia-canvas/pull/465), [#469](https://github.com/l7aromeo/meo-skia-canvas/pull/469), [#484](https://github.com/l7aromeo/meo-skia-canvas/issues/484), [#497](https://github.com/l7aromeo/meo-skia-canvas/issues/497), [#530](https://github.com/l7aromeo/meo-skia-canvas/issues/530), [#584](https://github.com/l7aromeo/meo-skia-canvas/pull/584), [#587](https://github.com/l7aromeo/meo-skia-canvas/pull/587))
 - **`node scripts/skia-source.mjs prepare` makes a tree from one it already has.** ([#415](https://github.com/l7aromeo/meo-skia-canvas/pull/415))
 - **On the GPU, an exact blur draws into a second target the page's size.** ([#389](https://github.com/l7aromeo/meo-skia-canvas/pull/389))
 - **`FontSlant::Oblique` and `TextSlant::Oblique` draw as CSS Fonts 4 matches them, superseding 0.16.0's "`TextSlant::Oblique` now renders the italic face".** ([#288](https://github.com/l7aromeo/meo-skia-canvas/pull/288))
