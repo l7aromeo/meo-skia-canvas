@@ -2709,12 +2709,14 @@ fn unpremultiply_into(from: &[u8], to: &mut [u8]) {
 /// otherwise. Anything else goes through Skia's CPU conversion from a copy.
 /// On Apple silicon a whole read of a translucent 1200x900 page after a draw
 /// takes 916 to 950 microseconds in release; written as a copy and then a
-/// second pass over the destination it took 1117 to 1147. The table adds about
-/// 0.35 nanoseconds a pixel on one thread -- 170 microseconds for 800x600 --
-/// shared across threads from [`PARALLEL_UNPREMULTIPLY_PIXELS`]. The same
-/// arithmetic worked lane by lane in `f32` gives the table's bytes for all
-/// 65,536 pairs and took 3.5 times as long: its divisions cost more than the
-/// table's lookups.
+/// second pass over the destination it took 1117 to 1147. The table costs
+/// about 0.7 nanoseconds a pixel on one thread over pixels of varied alpha --
+/// 334 to 367 microseconds for 800x600 -- shared across threads from
+/// [`PARALLEL_UNPREMULTIPLY_PIXELS`], a task of rows at a time, as
+/// `gpu::completion::PARALLEL_TASK_BYTES` describes. The same arithmetic in
+/// `f32`, four lanes at a time with one divide a pixel, gives the table's
+/// bytes for all 65,536 pairs and took twice as long: widening and narrowing
+/// the pixels costs more than the table's three loads.
 fn read_converted_on_cpu(
     surface: &mut Surface,
     info: &ImageInfo,

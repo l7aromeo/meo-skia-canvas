@@ -1,0 +1,396 @@
+diff --git a/skia-bindings/build.rs b/skia-bindings/build.rs
+index 1c09211..5e3778e 100644
+--- a/skia-bindings/build.rs
++++ b/skia-bindings/build.rs
+@@ -49,6 +49,13 @@ fn main() -> Result<(), io::Error> {
+         features
+     };
+ 
++    // meo-skia-canvas: tells a dependent's build script that this skia-bindings
++    // carries the Graphite bindings its patch adds (`DEP_SKIA_MEO_GRAPHITE_BINDINGS`,
++    // through `links = "skia"`). Only the patched crate prints it.
++    if features.graphite() {
++        println!("cargo:meo_graphite_bindings=1");
++    }
++
+     let binaries_config =
+         binaries_config::BinariesConfiguration::from_features(&features, skia_debug);
+ 
+diff --git a/skia-bindings/src/graphite.cpp b/skia-bindings/src/graphite.cpp
+index d0192da..48e018c 100644
+--- a/skia-bindings/src/graphite.cpp
++++ b/skia-bindings/src/graphite.cpp
+@@ -3,6 +3,9 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <memory>
++#include <list>
++#include <mutex>
++#include <unordered_map>
+ 
+ #include "include/core/SkCanvas.h"
+ #include "include/core/SkColorSpace.h"
+@@ -17,6 +20,7 @@
+ #include "include/gpu/graphite/ContextOptions.h"
+ #include "include/gpu/graphite/GraphiteTypes.h"
+ #include "include/gpu/graphite/Image.h"
++#include "include/gpu/graphite/ImageProvider.h"
+ #include "include/gpu/graphite/Recorder.h"
+ #include "include/gpu/graphite/Surface.h"
+ #include "include/gpu/graphite/TextureInfo.h"
+@@ -431,3 +435,149 @@ extern "C" SkContext* C_SkContexts_MakeGraphiteVulkan(
+         *static_cast<const skgpu::VulkanBackendContext*>(backendContext), *options).release();
+ }
+ #endif
++
++//
++// gpu/graphite/ImageProvider.h
++//
++
++// A provider that uploads a raster image with `SkImages::TextureFromImage` and
++// keeps the result, by the image's unique ID and whether it was asked for
++// mipmapped, least recently used first out once the kept bytes pass `budget`.
++// Graphite caches nothing for a client's provider (ImageProvider.h), and without
++// a provider at all it drops every raster image a Recorder draws. One provider
++// belongs to one Recorder: the textures it keeps are that Recorder's.
++namespace {
++class CachingImageProvider final : public skgpu::graphite::ImageProvider {
++public:
++    explicit CachingImageProvider(size_t budget) : fBudget(budget) {}
++
++    sk_sp<SkImage> findOrCreate(skgpu::graphite::Recorder* recorder,
++                                const SkImage* image,
++                                SkImage::RequiredProperties props) override {
++        const Key key{image->uniqueID(), props.fMipmapped};
++        std::lock_guard<std::mutex> lock(fMutex);
++        if (auto found = fIndex.find(key); found != fIndex.end()) {
++            fOrder.splice(fOrder.begin(), fOrder, found->second);
++            return found->second->fImage;
++        }
++        sk_sp<SkImage> made = SkImages::TextureFromImage(recorder, image, props);
++        if (!made) {
++            return nullptr;
++        }
++        const size_t bytes = made->imageInfo().computeMinByteSize();
++        // An image larger than the whole budget is drawn and not kept, rather
++        // than emptying the cache to hold it.
++        if (bytes > fBudget) {
++            return made;
++        }
++        fOrder.push_front(Entry{key, made, bytes});
++        fIndex.emplace(key, fOrder.begin());
++        fBytes += bytes;
++        while (fBytes > fBudget) {
++            const Entry& last = fOrder.back();
++            fBytes -= last.fBytes;
++            fIndex.erase(last.fKey);
++            fOrder.pop_back();
++        }
++        return made;
++    }
++
++    void purge() {
++        std::lock_guard<std::mutex> lock(fMutex);
++        fIndex.clear();
++        fOrder.clear();
++        fBytes = 0;
++    }
++
++    size_t keptBytes() const {
++        std::lock_guard<std::mutex> lock(fMutex);
++        return fBytes;
++    }
++
++private:
++    struct Key {
++        uint32_t fId;
++        bool fMipmapped;
++        bool operator==(const Key& other) const {
++            return fId == other.fId && fMipmapped == other.fMipmapped;
++        }
++    };
++    struct KeyHash {
++        size_t operator()(const Key& key) const {
++            return (static_cast<size_t>(key.fId) << 1) | static_cast<size_t>(key.fMipmapped);
++        }
++    };
++    struct Entry {
++        Key fKey;
++        sk_sp<SkImage> fImage;
++        size_t fBytes;
++    };
++
++    const size_t fBudget;
++    mutable std::mutex fMutex;
++    std::list<Entry> fOrder;
++    std::unordered_map<Key, std::list<Entry>::iterator, KeyHash> fIndex;
++    size_t fBytes = 0;
++};
++}  // namespace
++
++// Returned with a reference count of one, which the caller owns.
++extern "C" skgpu::graphite::ImageProvider* C_ImageProvider_MakeCaching(size_t budget) {
++    return new CachingImageProvider(budget);
++}
++
++// `self` is always a `CachingImageProvider`: `C_ImageProvider_MakeCaching` is the
++// only way the Rust side makes one.
++extern "C" void C_ImageProvider_purge(skgpu::graphite::ImageProvider* self) {
++    static_cast<CachingImageProvider*>(self)->purge();
++}
++
++extern "C" size_t C_ImageProvider_keptBytes(const skgpu::graphite::ImageProvider* self) {
++    return static_cast<const CachingImageProvider*>(self)->keptBytes();
++}
++
++// Takes a reference: the options hold `provider` alive, and so does the
++// Recorder made from them.
++extern "C" void C_RecorderOptions_setImageProvider(
++        skgpu::graphite::RecorderOptions* self,
++        skgpu::graphite::ImageProvider* provider) {
++    self->fImageProvider = sk_ref_sp(provider);
++}
++
++//
++// Context::asyncRescaleAndReadPixels, for an image
++//
++
++// `C_Context_readPixels` for a Graphite-backed image rather than a surface: the
++// image overload of `asyncRescaleAndReadPixels`, driven to completion the same
++// way. `false` where the read failed or never answered.
++extern "C" bool C_Context_readImagePixels(
++    skgpu::graphite::Context* self,
++    const SkImage* image,
++    const SkImageInfo* dstInfo,
++    void* dstPixels,
++    size_t dstRowBytes,
++    int srcX,
++    int srcY) {
++    SyncReadContext ctx;
++    ctx.fDst = dstPixels;
++    ctx.fDstRowBytes = dstRowBytes;
++    ctx.fMinRowBytes = dstInfo->minRowBytes();
++    ctx.fHeight = dstInfo->height();
++
++    SkIRect srcRect = SkIRect::MakeXYWH(srcX, srcY, dstInfo->width(), dstInfo->height());
++    self->asyncRescaleAndReadPixels(
++        image,
++        *dstInfo,
++        srcRect,
++        SkImage::RescaleGamma::kSrc,
++        SkImage::RescaleMode::kNearest,
++        &sync_read_callback,
++        &ctx);
++    self->submit(skgpu::graphite::SubmitInfo(skgpu::graphite::SyncToCpu::kYes));
++    int guard = 0;
++    while (!ctx.fCalled && guard++ < 10000) {
++        self->checkAsyncWorkCompletion();
++    }
++    return ctx.fCalled && ctx.fSuccess;
++}
+diff --git a/skia-safe/src/gpu/graphite.rs b/skia-safe/src/gpu/graphite.rs
+index 1858a5e..71694ac 100644
+--- a/skia-safe/src/gpu/graphite.rs
++++ b/skia-safe/src/gpu/graphite.rs
+@@ -36,6 +36,7 @@ mod context;
+ mod context_options;
+ mod graphite_types;
+ mod image;
++mod image_provider;
+ mod recorder;
+ mod recording;
+ mod surface;
+@@ -44,6 +45,7 @@ mod texture_info;
+ mod implementation {
+     // Core types
+     pub use super::context::Context;
++    pub use super::image_provider::ImageProvider;
+     pub use super::recorder::{BorrowedRecorder, Recorder, RecorderOptions};
+     pub use super::recording::Recording;
+ 
+diff --git a/skia-safe/src/gpu/graphite/context.rs b/skia-safe/src/gpu/graphite/context.rs
+index 705f88d..6b2bf90 100644
+--- a/skia-safe/src/gpu/graphite/context.rs
++++ b/skia-safe/src/gpu/graphite/context.rs
+@@ -6,7 +6,7 @@ use super::{
+     BackendTexture, InsertRecordingInfo, InsertStatus, Recorder, RecorderOptions, SubmitInfo,
+ };
+ use crate::prelude::*;
+-use crate::{IPoint, ImageInfo, Surface};
++use crate::{IPoint, Image, ImageInfo, Surface};
+ 
+ // `skgpu::graphite::Context` is `final` with no base class and is handed out as
+ // `std::unique_ptr<Context>` (Context::MakeMetal etc.). It is NOT ref-counted,
+@@ -195,4 +195,37 @@ impl Context {
+             )
+         }
+     }
++
++    /// As [`Self::read_pixels`], for a Graphite-backed image rather than a
++    /// surface: what a caller holding only the image, and not the surface it
++    /// came from, reads back. `false` where the read failed or never answered.
++    pub fn read_image_pixels(
++        &mut self,
++        image: &Image,
++        dst_info: &ImageInfo,
++        dst_pixels: &mut [u8],
++        dst_row_bytes: usize,
++        src: impl Into<IPoint>,
++    ) -> bool {
++        let src = src.into();
++        if dst_row_bytes < dst_info.min_row_bytes() {
++            return false;
++        }
++        match dst_row_bytes.checked_mul(dst_info.height() as usize) {
++            Some(required) if dst_pixels.len() >= required => {}
++            _ => return false,
++        }
++
++        unsafe {
++            sb::C_Context_readImagePixels(
++                self.native_mut(),
++                image.native(),
++                dst_info.native(),
++                dst_pixels.as_mut_ptr() as *mut std::ffi::c_void,
++                dst_row_bytes,
++                src.x,
++                src.y,
++            )
++        }
++    }
+ }
+diff --git a/skia-safe/src/gpu/graphite/context_options.rs b/skia-safe/src/gpu/graphite/context_options.rs
+index 0118d24..755b855 100644
+--- a/skia-safe/src/gpu/graphite/context_options.rs
++++ b/skia-safe/src/gpu/graphite/context_options.rs
+@@ -2,6 +2,7 @@ use std::fmt;
+ 
+ use skia_bindings as sb;
+ 
++use super::SampleCount;
+ use crate::prelude::*;
+ 
+ pub type ContextOptions = Handle<sb::skgpu_graphite_ContextOptions>;
+@@ -44,6 +45,20 @@ impl ContextOptions {
+         self.native_mut().fUseDrawListLayer = use_draw_list_layer;
+         self
+     }
++
++    /// The samples a pixel takes where Graphite renders paths and other shapes
++    /// with multisampling internally. Four by default. With one, Graphite
++    /// rasterizes them on the CPU into its atlas instead, with the same
++    /// analytic coverage a raster surface draws with.
++    pub fn internal_multisample_count(&self) -> SampleCount {
++        self.native().fInternalMultisampleCount
++    }
++
++    /// Sets [`Self::internal_multisample_count`].
++    pub fn set_internal_multisample_count(&mut self, count: SampleCount) -> &mut Self {
++        self.native_mut().fInternalMultisampleCount = count;
++        self
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/skia-safe/src/gpu/graphite/graphite_types.rs b/skia-safe/src/gpu/graphite/graphite_types.rs
+index 9ed9734..31f8c6e 100644
+--- a/skia-safe/src/gpu/graphite/graphite_types.rs
++++ b/skia-safe/src/gpu/graphite/graphite_types.rs
+@@ -96,6 +96,9 @@ impl SubmitInfo {
+ pub use sb::skgpu_graphite_SyncToCpu as SyncToCpu;
+ variant_name!(SyncToCpu::Yes);
+ 
++/// How many samples a pixel takes where Graphite draws with multisampling.
++pub use sb::skgpu_graphite_SampleCount as SampleCount;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/skia-safe/src/gpu/graphite/image_provider.rs b/skia-safe/src/gpu/graphite/image_provider.rs
+new file mode 100644
+index 0000000..0994790
+--- /dev/null
++++ b/skia-safe/src/gpu/graphite/image_provider.rs
+@@ -0,0 +1,52 @@
++use std::fmt;
++
++use skia_bindings::{self as sb, SkRefCntBase, skgpu_graphite_ImageProvider};
++
++use crate::prelude::*;
++
++/// Supplies a Graphite-backed image wherever a [`super::Recorder`] draws a
++/// raster one. Without a provider a Recorder drops every raster image it is
++/// asked to draw.
++///
++/// The provider made by [`ImageProvider::new_caching`] uploads each image with
++/// `SkImages::TextureFromImage` and keeps the result, by the image's unique ID
++/// and whether it was asked for mipmapped, until the kept bytes pass its budget,
++/// least recently used first out. Graphite caches nothing for a client's
++/// provider, so the budget is the only bound. One provider belongs to one
++/// Recorder: the textures it keeps are that Recorder's.
++pub type ImageProvider = RCHandle<skgpu_graphite_ImageProvider>;
++unsafe_send_sync!(ImageProvider);
++
++impl NativeRefCountedBase for skgpu_graphite_ImageProvider {
++    type Base = SkRefCntBase;
++}
++
++impl fmt::Debug for ImageProvider {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        f.debug_struct("ImageProvider")
++            .field("kept_bytes", &self.kept_bytes())
++            .finish()
++    }
++}
++
++impl ImageProvider {
++    /// A provider that keeps up to `budget` bytes of uploaded images. An
++    /// image larger than the whole budget is uploaded for its draw and not
++    /// kept.
++    pub fn new_caching(budget: usize) -> Self {
++        // SAFETY: `C_ImageProvider_MakeCaching` never returns null: it is a
++        // plain `new`, which aborts rather than returning null.
++        ImageProvider::from_ptr(unsafe { sb::C_ImageProvider_MakeCaching(budget) }).unwrap()
++    }
++
++    /// Drops every kept image. The provider keeps working, and uploads again
++    /// what it is next asked for.
++    pub fn purge(&self) {
++        unsafe { sb::C_ImageProvider_purge(self.native_mut_force()) }
++    }
++
++    /// How many bytes of uploaded images the provider keeps now.
++    pub fn kept_bytes(&self) -> usize {
++        unsafe { sb::C_ImageProvider_keptBytes(self.native()) }
++    }
++}
+diff --git a/skia-safe/src/gpu/graphite/recorder.rs b/skia-safe/src/gpu/graphite/recorder.rs
+index 6ee4d97..0d37249 100644
+--- a/skia-safe/src/gpu/graphite/recorder.rs
++++ b/skia-safe/src/gpu/graphite/recorder.rs
+@@ -5,7 +5,7 @@ use std::ops::Deref;
+ 
+ use skia_bindings as sb;
+ 
+-use super::{Recording, TextureInfo};
++use super::{ImageProvider, Recording, TextureInfo};
+ use crate::gpu::BackendApi;
+ use crate::prelude::*;
+ use crate::{Canvas, ImageInfo};
+@@ -39,6 +39,16 @@ impl RecorderOptions {
+     pub fn new() -> Self {
+         Self::construct(|options| unsafe { sb::C_RecorderOptions_Construct(options) })
+     }
++
++    /// Supplies Graphite-backed images for the raster images a Recorder made
++    /// from these options draws. The options take a reference, and so does the
++    /// Recorder: `provider` lives as long as either.
++    pub fn set_image_provider(&mut self, provider: &ImageProvider) -> &mut Self {
++        unsafe {
++            sb::C_RecorderOptions_setImageProvider(self.native_mut(), provider.native_mut_force())
++        }
++        self
++    }
+ }
+ 
+ // `skgpu::graphite::Recorder` is handed out as `std::unique_ptr<Recorder>`
