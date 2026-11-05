@@ -97,6 +97,28 @@ const GRAPHITE_BINDINGS = join(
   "containers",
   "rust-skia-graphite-bindings.patch",
 );
+// UPSTREAM: skia-safe 0.156.0 -- https://issues.skia.org/issues/40042671 -- worked around
+// Re-check: cargo test a_read_leaves_its_transfer_buffer_for_the_next with `metal` on macOS, on a tree prepared without this patch; the read keeps no buffer while `SurfaceContext::transferPixels` asks for `kStream_GrAccessPattern`
+//
+// Every `getImageData` on a GPU page goes through Skia's asynchronous read,
+// whose transfer buffer `SurfaceContext::transferPixels` asks for as
+// `kStream`. `GrResourceProvider::createBuffer` makes such a buffer fresh
+// and never caches it, so each read allocates a Metal buffer and frees it:
+// about 12 microseconds of a 64x48 read on an M4 Pro. The patch asks for
+// `kDynamic`, which `createBuffer` bins by size and finds again, as Metal's
+// and Vulkan's synchronous `onReadPixels` already do with theirs. Skia keeps
+// `kStream` for the bug above: the switch crashed Chromium's GPU process in
+// one web test on a Windows bot, with no cause found. On Metal and Vulkan the
+// two patterns get the same memory -- `GrMtlBuffer` gives every non-static
+// buffer the same storage mode, and `GrVkBuffer` the same mappable memory to
+// every GPU-to-CPU transfer -- so the patch changes only whether the buffer
+// is kept. Only GL, which this tree does not build, also changes its usage
+// hint. A cached buffer stays out of reach while its read is held, because
+// `GrClientMappedBufferManager` keeps a reference until it unmaps it.
+const ASYNC_TRANSFER_REUSE = join(
+  "containers",
+  "skia-async-transfer-reuse.patch",
+);
 
 export const PATCHES = {
   darwin: [
@@ -105,6 +127,7 @@ export const PATCHES = {
     ATLAS_SIZE,
     TRIANGULATION,
     GRAPHITE_BINDINGS,
+    ASYNC_TRANSFER_REUSE,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -134,6 +157,7 @@ export const PATCHES = {
     ATLAS_SIZE,
     TRIANGULATION,
     GRAPHITE_BINDINGS,
+    ASYNC_TRANSFER_REUSE,
   ],
 };
 
