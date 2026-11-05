@@ -30,7 +30,8 @@
 
 ## Checks
 
-- [ ] `just ci` passes -- the recipe is the authority on what that covers
+- [ ] `just prepush` passes -- `just ci` but the suites and the build, which PR CI runs; the
+      recipe is the authority on what that covers
 - [ ] New behaviour is tested, and a fix's test fails without the fix
 - [ ] Every new `unwrap`/`expect` under `src/` carries a `// SAFETY:` comment
 - [ ] The docs and comments the change affects are updated in it, including those outside the diff

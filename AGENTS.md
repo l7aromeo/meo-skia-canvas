@@ -164,7 +164,8 @@ which CI configurations cannot be reproduced on a developer machine.
 
 ```bash
 just               # list the recipes
-just ci            # the full gate; everything must pass before a commit
+just prepush       # everything ci checks but the suites and the build: run before a push
+just ci            # the full gate: prepush, the Linux-feature type-check, both suites, the build
 just test          # both suites, Rust and JavaScript, against the local build
 just test-rust     # the Rust half alone
 just test-js       # the JavaScript half alone
@@ -721,14 +722,23 @@ goes on reading as true.
 
 ## Before every commit
 
-1. **`just ci` must pass, all of it.** The recipe in the `justfile` is the
-   authority on what it runs; do not trust a list of it written anywhere else,
-   including here. Note that it runs rustdoc twice and both are gates: once on
-   stable, which is what docs.rs will render, and once on the pinned nightly,
-   which carries lints stable does not have.
+1. **`just prepush` must pass before a push, all of it.** It is every check in
+   `just ci` but the two test suites and the build, which are what make `ci`
+   slow; `ci` is `prepush` plus those three, so the two cannot drift. On macOS
+   `prepush` type-checks this host's feature set rather than the Linux one,
+   whose `vulkan` is a Skia build of its own here, and `ci` checks the Linux
+   set. **CI runs all of `just ci`** -- ci.yml's `repo` job the checks that
+   build no Skia, rust-ci.yml the rest, both suites and the build -- so run `ci`
+   whole here only when a change needs the suites before CI has them. The
+   recipes in the `justfile` are the authority on what each runs; do not trust
+   a list of them written anywhere else, including here. `prepush` runs rustdoc
+   twice and both are gates: once on stable, which is what docs.rs will
+   render, and once on the pinned nightly, which carries lints stable does not
+   have.
 
-2. **Nothing after `just ci` in the same command line.** A pipe, an `&&` or a
-   trailing `echo` replaces the gate's exit status with its own.
+2. **Nothing after `just prepush` or `just ci` in the same command line.** A
+   pipe, an `&&` or a trailing `echo` replaces the gate's exit status with its
+   own.
 
 3. **Every `unwrap()` and `expect()` you added under `src/` carries a
    `// SAFETY:` comment**, or does not exist.

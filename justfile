@@ -48,6 +48,10 @@ host_features := if os() == "macos" { "metal,window,node-addon,fetch" } else { "
 # docs/rust.md documents and `host_features` never builds. It enables the same
 # skia-safe features as `host_features`, so it reuses that build's Skia.
 host_backend := if os() == "macos" { "metal" } else { "vulkan" }
+# What `prepush` type-checks Rust with: `linux_features`, as `typecheck` does,
+# except on macOS, where that set's `vulkan` is a Skia build no other recipe
+# makes and the suite's set is one `check-bench-parity` builds anyway.
+prepush_typecheck_features := if os() == "macos" { test_features } else { linux_features }
 # Must match the fmt job in .github/workflows/rust-ci.yml.
 fmt_toolchain := "nightly-2026-09-04"
 # How a changelog heading spells a released version: `[v0.15.0] (crate)`,
@@ -70,7 +74,30 @@ crate_pin_files := "README.md docs/readme/crate.md docs/rust.md"
 default:
     @just --list
 
-# Aggregate: what CI runs. Uses non-fixing variants.
+# The full local gate: `prepush`, then the Rust type-check with the Linux
+# feature set wherever it runs, the suites and the build. Defined through
+# `prepush` so that the two cannot drift: a check added to one is in the other.
+# Uses non-fixing variants.
+[doc("The full gate: prepush, the Linux-feature type-check, both suites and the build.")]
+ci: prepush typecheck test build
+
+# What has to pass before a push: every check in `ci` but the suites and the
+# build, which are the slow part and which PR CI runs on every platform. It
+# exists because `ci` was skipped whole for that cost and `precommit` runs no
+# rustdoc, so a public doc linking a private item reached CI when
+# `docs-rust` catches it here in about a minute.
+#
+# It runs on the builds this host already makes, with two differences from
+# `ci`, and `ci` keeps both full versions:
+#
+# - On macOS the Rust type-check uses `test_features` -- this host's GPU
+#   backend, `window`, `freetype` and `fetch` -- rather than `linux_features`,
+#   whose `vulkan` is a Skia build of its own here, 15 to 30 minutes per
+#   worktree. `check-bench-parity` builds `test_features` anyway, so this
+#   costs no Skia build. Linux type-checks `linux_features` as `ci` does.
+# - `check-release-tests`, release-profile clippy with the prebuild features,
+#   is in neither: it is a release Skia build of its own, and CI's
+#   `release-tests` job runs it on a prebuilt one.
 #
 # `licenses` is in here because it was not, and the count in
 # THIRD-PARTY-NOTICES.md went stale with nobody to notice -- it claimed 135
@@ -99,8 +126,16 @@ default:
 # `docs`, `licenses`, `test` and `build`. Measured on a tree where rustdoc
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
-[doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
+[doc("Everything ci checks but the suites and the build: run before a push.")]
+prepush: fmt-check (check-docs "origin/main") check-repo (typecheck prepush_typecheck_features) lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses
+
+# `prepush`'s checks that build no Skia: they read the tree, the tags and the
+# dependency graph, and need Node, Bun, cargo and actionlint. ci.yml's `repo`
+# job runs exactly this on every pull request, because several of them ran in
+# no workflow at all. The rest of `prepush` runs in rust-ci.yml, where the Skia
+# they compile against is built.
+[doc("The checks in prepush that build no Skia, which ci.yml's repo job runs.")]
+check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches lint-js
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -133,9 +168,12 @@ ensure-binary: ensure-deps
 #
 # `just --list` shows the last comment line before a recipe, so anything with more to say
 # than one line carries an explicit [doc] -- otherwise the listing quotes a stray tail.
+#
+# `features` is the Rust half's feature set: `linux_features` unless a caller
+# names another, as `prepush` does on macOS.
 [doc("Type-check Rust and the shipped TypeScript declarations.")]
-typecheck: ensure-deps
-    cargo check --all-targets --features "{{ linux_features }}"
+typecheck features=linux_features: ensure-deps
+    cargo check --all-targets --features "{{ features }}"
     bun run typecheck
 
 # What the pre-commit hook runs: the checks that are fast enough to sit in
@@ -624,10 +662,15 @@ lint: ensure-deps
 # and `Renderer` to one of them rather than bind each name twice. Those are
 # what the `clippy` matrix in rust-ci.yml is for.
 [doc("Run clippy and ESLint without fixing. Three clippy passes: no features, this host's, its GPU backend alone.")]
-lint-check: ensure-deps
+lint-check: ensure-deps lint-js
     cargo clippy --all-targets --no-default-features -- -D warnings
     cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
     cargo clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
+
+# ESLint alone, apart from clippy so that `check-repo` can run it where no Skia
+# is built.
+[doc("Run ESLint without fixing.")]
+lint-js: ensure-deps
     bun run lint
 
 # Rust and JavaScript both: `just ci` checks both, so fixing only one half still fails.

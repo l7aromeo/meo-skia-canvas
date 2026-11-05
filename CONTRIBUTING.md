@@ -67,7 +67,10 @@ independently of the npm package.
 ## Making a change
 
 `just ci` runs what CI runs. Read the recipe for the list rather than a copy of it -- the copy is
-what goes stale.
+what goes stale. `just prepush` is all of it but the two test suites and the build, and is what
+to run before a push: those three are what make `just ci` slow, and CI runs them on every
+platform. On a Mac it type-checks the crate with this machine's feature set rather than the
+Linux one, which would need a Skia build of its own here; `just ci` checks the Linux set.
 
 A change that reaches a package adds its changelog entry as a file of its own under
 `changelog.d/`, not as an edit to `CHANGELOG-npm.md` or `CHANGELOG-crate.md`;
