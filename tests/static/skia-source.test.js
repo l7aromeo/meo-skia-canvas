@@ -341,7 +341,8 @@ function patchFiles(patches, label) {
 // `prepare` removes the trees a new one supersedes, and the cache is shared by
 // every worktree: one moving to a new Skia removed the tree every other
 // worktree still built from. A tree is superseded only when no worktree of the
-// repository locks it.
+// repository names it, no out-dir in a worktree's target was built from it,
+// and no running `just` holds it.
 describe("skia-source keeps the trees a worktree builds from", () => {
   let treesInUse;
   let removeSuperseded;
@@ -481,7 +482,171 @@ describe("skia-source keeps the trees a worktree builds from", () => {
 
     assert.ok(existsSync(join(cache, "skia-old")));
   });
+
+  // A worktree names one tree, by its patch list as it stands, but its target
+  // can hold out-dirs built from others: a build that ran before the list
+  // changed, or a running one. Those trees were removed from under it.
+  test("a tree only a worktree's target was built from is kept", (t) => {
+    const dir = scratch(t);
+    const cache = withCache(t, join(dir, "cache"));
+    const first = patchFiles(PATCHES, "first");
+    const root = repository(join(dir, "root"), {
+      "Cargo.lock": lock("0.1.0"),
+      ...first.files,
+    });
+    builtFrom(root, join("aarch64-apple-darwin", "release"), [
+      `cargo:rerun-if-changed=${join(cache, "skia-0.1.0-earlier", "rust-skia", "skia-bindings", "skia", "include")}`,
+      // A path outside the cache whose directory happens to read as a tree.
+      `cargo:rerun-if-changed=${join(dir, "worktrees", "skia-m156", "src")}`,
+    ]);
+
+    assert.deepEqual(
+      treesInUse(root),
+      new Set([treeName("0.1.0", first.contents), "skia-0.1.0-earlier"]),
+    );
+  });
+
+  // An uncommitted edit to the patch list renames a worktree's tree at once,
+  // while the build it was running, or its next one, still uses the old one.
+  test("a worktree's edited patch list keeps the tree its target was built from", (t) => {
+    const dir = scratch(t);
+    const cache = withCache(t, join(dir, "cache"));
+    const first = patchFiles(PATCHES, "first");
+    const second = patchFiles(PATCHES, "second");
+    const root = repository(join(dir, "root"), {
+      "Cargo.lock": lock("0.1.0"),
+      ...first.files,
+    });
+    const built = treeName("0.1.0", first.contents);
+    builtFrom(root, "debug", [
+      `cargo:rerun-if-changed=${join(cache, built, "rust-skia", "skia-bindings", "skia", "include")}`,
+    ]);
+    for (const [path, content] of Object.entries(second.files))
+      writeFileSync(join(root, path), content);
+
+    const inUse = treesInUse(root);
+    assert.ok(inUse.has(treeName("0.1.0", second.contents)));
+    assert.ok(inUse.has(built), `${built} was dropped for the edited list`);
+  });
+
+  // `env` is the justfile's `dotenv-command`, so it runs as a child of the
+  // `just` that then runs the recipe, and holds the tree for as long as that
+  // `just` lives.
+  test("a tree a running build holds is kept, and released when it ends", async (t) => {
+    const dir = scratch(t);
+    const cache = withCache(t, join(dir, "cache"));
+    const name = treeNameOf(cache, PATCHES);
+    if (name === null) return; // No patches here, so `env` names no tree.
+    const root = repository(join(dir, "root"), {
+      "Cargo.lock": lock("0.1.0"),
+    });
+    const { treesToKeep } = await import(pathToFileURL(SCRIPT).href);
+
+    const holder = await holdingParent(cache);
+    try {
+      assert.ok(treesToKeep(root, cache).has(name), `${name} was not held`);
+    } finally {
+      await new Promise((done) => {
+        holder.once("exit", done);
+        holder.kill();
+      });
+    }
+    assert.ok(!treesToKeep(root, cache).has(name), `${name} is still held`);
+  });
+
+  // A holder's PID can be given to another process once it ends; that process
+  // holds nothing.
+  test("a hold whose PID now runs another process holds nothing", async (t) => {
+    if (process.platform === "win32") return; // No start time to compare.
+    const cache = withCache(t, join(scratch(t), "cache"));
+    const { hold, treesHeld } = await import(pathToFileURL(SCRIPT).href);
+
+    hold("skia-0.1.0-held", process.pid, cache);
+    assert.deepEqual(treesHeld(cache), new Set(["skia-0.1.0-held"]));
+    writeFileSync(
+      join(cache, "holds", "skia-0.1.0-held", String(process.pid)),
+      "Thu Jan  1 00:00:00 1970\n",
+    );
+    assert.deepEqual(treesHeld(cache), new Set());
+    assert.ok(!existsSync(join(cache, "holds", "skia-0.1.0-held")));
+  });
 });
+
+/** Points `XDG_CACHE_HOME` at `dir` for the test; returns the cache inside. */
+function withCache(t, dir) {
+  const before = process.env.XDG_CACHE_HOME;
+  t.after(() => {
+    if (before === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = before;
+  });
+  process.env.XDG_CACHE_HOME = dir;
+  const cache = join(dir, "meo-skia-canvas");
+  mkdirSync(cache, { recursive: true });
+  return cache;
+}
+
+/**
+ * Writes a skia-bindings out-dir's `output` holding `lines` into the
+ * `profile` directory of `worktree`'s target -- `debug`, or a target triple
+ * and a profile.
+ */
+function builtFrom(worktree, profile, lines) {
+  const dir = join(
+    worktree,
+    "target",
+    profile,
+    "build",
+    "skia-bindings-0123456789abcdef",
+  );
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "output"),
+    `cargo:rustc-link-lib=static=skia\n${lines.join("\n")}\n`,
+  );
+}
+
+/**
+ * The tree this checkout's `env` names under `cache`, or null on a platform
+ * with no patches, where it names none. Asked of `dir`, which holds nothing.
+ */
+function treeNameOf(cache, patches) {
+  if ((patches[process.platform] ?? []).length === 0) return null;
+  const dir = execFileSync(process.execPath, [SCRIPT, "dir"], {
+    encoding: "utf8",
+    env: { ...process.env, XDG_CACHE_HOME: join(cache, "..") },
+  }).trim();
+  return dir.slice(cache.length + 1).split(/[\\/]/)[0];
+}
+
+/**
+ * A process that runs this checkout's `env`, as `just` runs its
+ * `dotenv-command`, and then stays alive until it is killed.
+ */
+function holdingParent(cache) {
+  const { spawn } = require("child_process");
+  const holder = spawn(
+    process.execPath,
+    [
+      "-e",
+      `require("child_process").execFileSync(process.execPath, [${JSON.stringify(SCRIPT)}, "env"], { stdio: ["ignore", "ignore", "inherit"] });
+       console.log("held");
+       setInterval(() => {}, 1000);`,
+    ],
+    {
+      env: { ...process.env, XDG_CACHE_HOME: join(cache, "..") },
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  );
+  return new Promise((resolve, reject) => {
+    holder.once("exit", (code) =>
+      reject(new Error(`the holder exited with ${code}`)),
+    );
+    holder.stdout.once("data", () => {
+      holder.removeAllListeners("exit");
+      resolve(holder);
+    });
+  });
+}
 
 // `just use-local-skia` points skia-bindings at a rust-skia checkout, which
 // skia-bindings then builds itself, DEPS and all. A tree named or prepared
