@@ -640,6 +640,8 @@ impl RunPaint {
     /// this way than by `Paragraph::paint`, which a kept run cannot use: it
     /// was laid out with no paint.
     fn built_blobs(&self) -> Vec<Option<TextBlob>> {
+        #[cfg(test)]
+        BLOB_BUILDS.set(BLOB_BUILDS.get() + 1);
         zip(&self.runs, &self.shears)
             .map(|(run, &shear)| {
                 sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
@@ -1234,6 +1236,9 @@ thread_local! {
     /// [`ReachBound`].
     pub(crate) static REACH_BOUND: Cell<ReachBound> =
         const { Cell::new(ReachBound::Stroked) };
+    /// How many times [`RunPaint::built_blobs`] has built a run's blobs on
+    /// this thread.
+    pub(crate) static BLOB_BUILDS: Cell<usize> = const { Cell::new(0) };
     /// How far, in the units a run is laid out in, [`RunPaint::reach`]
     /// draws its answer in on this thread: a mutant, a reach that cuts ink,
     /// for the checks on it to refuse.

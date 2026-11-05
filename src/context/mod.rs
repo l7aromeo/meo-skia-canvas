@@ -15,7 +15,6 @@ use skia_safe::{
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
     path_utils::fill_path_with_paint,
-    shaders,
     textlayout::{StrutStyle, TextStyle},
 };
 use std::{
@@ -1020,10 +1019,7 @@ impl Context2D {
             None => exact.dye(opaque)?,
         };
         let mut paint = paint.clone();
-        paint.set_shader(shaders::color_in_space(
-            opaque,
-            ColorSpace::new_srgb(),
-        ));
+        paint.set_shader(layer::plain_colour_shader(opaque));
         paint.set_color_filter(dye).set_alpha_f(alpha);
         if let Some(plain) = &plain_filter
             && let Some(folded) =
@@ -6577,6 +6573,47 @@ mod tests {
         );
         for (at, (kept, afresh)) in kept.iter().zip(&afresh).enumerate() {
             assert!(kept == afresh, "page {at}: the same pixels");
+        }
+    }
+
+    /// A kept run drawn again in the same colour draws the blobs it kept, on
+    /// a float page as on an eight-bit one: the paint a float page dyes its
+    /// text with, over a colour shader, compares equal from draw to draw.
+    #[test]
+    fn a_kept_run_draws_its_kept_blobs_on_a_float_page() {
+        use crate::node::typography::BLOB_BUILDS;
+        for (space, depth) in [
+            (PixelColorSpace::DisplayP3, PixelDepth::F32),
+            (PixelColorSpace::Srgb, PixelDepth::Uint8),
+        ] {
+            let mut canvas = Canvas::with_options(
+                80.0,
+                24.0,
+                CanvasOptions {
+                    gpu: false,
+                    color_space: space,
+                    color_type: depth,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_font_css("16px sans-serif");
+            ctx.set_fill_style_css("color(display-p3 0.3 0.6 0.9)")
+                .expect("a colour");
+            // Seen once, kept from the second draw, drawn from the third.
+            for _ in 0..3 {
+                ctx.fill_text("Wg", 4.0, 18.0, None);
+            }
+            let built = BLOB_BUILDS.get();
+            for _ in 0..4 {
+                ctx.fill_text("Wg", 4.0, 18.0, None);
+            }
+            assert_eq!(
+                BLOB_BUILDS.get(),
+                built,
+                "{space:?} {depth:?}: the kept blobs are drawn"
+            );
         }
     }
 
