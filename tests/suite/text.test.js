@@ -2473,9 +2473,26 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
       /oblique faces of|private family/.test(name),
     );
     assert.deepEqual(leaked, []);
-    assert.deepEqual(FontLibrary.family("HiddenAliasFamily").styles, [
-      "normal",
+    // The family lists the styles its faces list alone, whatever the
+    // platform reports the flagged face as -- upright on CoreText, oblique on
+    // FreeType and the Windows binaries' DirectWrite -- and nothing the alias
+    // adds.
+    FontLibrary.use("HiddenAliasFlagged", [
+      `${R}/Recursive-oblique-flag-subset.ttf`,
     ]);
+    FontLibrary.use("HiddenAliasUpright", [
+      `${R}/Recursive-upright-subset.ttf`,
+    ]);
+    const alone = [
+      ...new Set([
+        ...FontLibrary.family("HiddenAliasFlagged").styles,
+        ...FontLibrary.family("HiddenAliasUpright").styles,
+      ]),
+    ].sort();
+    assert.deepEqual(
+      [...FontLibrary.family("HiddenAliasFamily").styles].sort(),
+      alone,
+    );
     const alias =
       "meo-skia-canvas private family: oblique faces of HiddenAliasFamily";
     assert.ok(!FontLibrary.has(alias), "the alias is not a registered family");
