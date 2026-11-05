@@ -1130,3 +1130,142 @@ describe("skia-source cargo-patch writes only its own cargo config", () => {
     assert.strictEqual(readFileSync(own, "utf8"), "[build]\njobs = 4\n");
   });
 });
+
+// The Linux release build patches its own rust-skia checkout with `apply`, so
+// it and `prepare` share one loop, one order and one refusal.
+describe("skia-source applies a patch list in its order, refusing fuzz", () => {
+  let applyPatches;
+  beforeEach(async () => {
+    ({ applyPatches } = await import(pathToFileURL(SCRIPT).href));
+  });
+
+  /** A root holding `containers/<name>.patch` for each of `patches`. */
+  function root(t, patches) {
+    const dir = scratch(t);
+    mkdirSync(join(dir, "containers"));
+    for (const [name, text] of Object.entries(patches))
+      writeFileSync(join(dir, "containers", `${name}.patch`), text);
+    return dir;
+  }
+  const edit = (from, to, context = ["x", "y"]) =>
+    [
+      "--- a/f.txt",
+      "+++ b/f.txt",
+      "@@ -1,3 +1,3 @@",
+      ` ${context[0]}`,
+      `-${from}`,
+      `+${to}`,
+      ` ${context[1]}`,
+      "",
+    ].join("\n");
+  const checkout = (t, text) => {
+    const dir = scratch(t);
+    writeFileSync(join(dir, "f.txt"), text);
+    return dir;
+  };
+
+  test("each patch applies after the one before it", (t) => {
+    const r = root(t, { one: edit("a", "b"), two: edit("b", "c") });
+    const c = checkout(t, "x\na\ny\n");
+    applyPatches(c, ["containers/one.patch", "containers/two.patch"], r);
+    assert.equal(readFileSync(join(c, "f.txt"), "utf8"), "x\nc\ny\n");
+  });
+
+  test("out of order, the patch that fails is named", (t) => {
+    const r = root(t, { one: edit("a", "b"), two: edit("b", "c") });
+    const c = checkout(t, "x\na\ny\n");
+    assert.throws(
+      () =>
+        applyPatches(c, ["containers/two.patch", "containers/one.patch"], r),
+      /containers[/\\]two\.patch does not apply/,
+    );
+  });
+
+  test("a hunk whose context has moved is refused, not placed by fuzz", (t) => {
+    const r = root(t, { one: edit("a", "b", ["moved", "y"]) });
+    const c = checkout(t, "x\na\ny\n");
+    assert.throws(
+      () => applyPatches(c, ["containers/one.patch"], r),
+      /containers[/\\]one\.patch does not apply/,
+    );
+    assert.equal(readFileSync(join(c, "f.txt"), "utf8"), "x\na\ny\n");
+  });
+
+  test("a patch already applied is refused, not undone", (t) => {
+    const r = root(t, { one: edit("a", "b") });
+    const c = checkout(t, "x\na\ny\n");
+    applyPatches(c, ["containers/one.patch"], r);
+    assert.throws(
+      () => applyPatches(c, ["containers/one.patch"], r),
+      /containers[/\\]one\.patch does not apply/,
+    );
+    assert.equal(readFileSync(join(c, "f.txt"), "utf8"), "x\nb\ny\n");
+  });
+
+  test("the command names its usage without a checkout", () => {
+    const run = spawnSync(process.execPath, [SCRIPT, "apply"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 2);
+    assert.match(run.stderr, /usage: .* apply <rust-skia checkout>/);
+  });
+
+  test("the command fails on a checkout this platform's first patch misses", async (t) => {
+    const { PATCHES } = await import(pathToFileURL(SCRIPT).href);
+    const list = PATCHES[process.platform];
+    if (!list) return t.skip(`no patches for ${process.platform}`);
+    const run = spawnSync(process.execPath, [SCRIPT, "apply", scratch(t)], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 1, run.stderr);
+    assert.equal(run.stdout, "");
+    assert.ok(run.stderr.includes(`${list[0]} does not apply`), run.stderr);
+  });
+});
+
+// CI caches a tree under `cache-key`, so a key follows `PATCHES` and the lock
+// by construction rather than by a list of patch files kept beside them.
+describe("skia-source names a tree's cache key", () => {
+  test("alone on stdout, as the tree's own name for this platform", () => {
+    const key = spawnSync(process.execPath, [SCRIPT, "cache-key"], {
+      encoding: "utf8",
+    });
+    assert.equal(key.status, 0, key.stderr);
+    const dir = spawnSync(process.execPath, [SCRIPT, "dir"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const tree = dir.split(/[/\\]/).at(-4);
+    assert.equal(key.stdout, `skia-source-${process.platform}-${tree}\n`);
+  });
+
+  test("editing a patch, or the locked version, moves the key", async (t) => {
+    const { cacheKey, PATCHES } = await import(pathToFileURL(SCRIPT).href);
+    const list = PATCHES[process.platform];
+    if (!list) return t.skip(`no patches for ${process.platform}`);
+    const repo = join(__dirname, "..", "..");
+    const r = scratch(t);
+    mkdirSync(join(r, "containers"));
+    writeFileSync(
+      join(r, "Cargo.lock"),
+      readFileSync(join(repo, "Cargo.lock")),
+    );
+    for (const patch of list)
+      writeFileSync(join(r, patch), readFileSync(join(repo, patch)));
+    const before = cacheKey(r);
+    assert.equal(before, cacheKey(repo));
+
+    writeFileSync(
+      join(r, list.at(-1)),
+      `${readFileSync(join(r, list.at(-1)))}\n`,
+    );
+    const edited = cacheKey(r);
+    assert.notEqual(edited, before);
+
+    const lock = readFileSync(join(r, "Cargo.lock"), "utf8");
+    writeFileSync(
+      join(r, "Cargo.lock"),
+      lock.replace(/(name = "skia-bindings"\nversion = ")[^"]+/, "$19.9.9"),
+    );
+    assert.notEqual(cacheKey(r), edited);
+  });
+});
