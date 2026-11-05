@@ -684,7 +684,12 @@ pub(crate) struct ObliqueFamily {
     pub(crate) oblique: bool,
 }
 
-/// What [`FontLibrary::slanted`] needs to know of one family.
+/// What [`FontLibrary::slanted`] reads of one registered family, whatever
+/// the slant asked for. Worked out from the family's faces once while the
+/// fonts stand -- see [`family_slants`](FontLibrary::family_slants) -- since
+/// reading a face's tables copies them out of the platform on every call.
+/// A name the library does not hold reads as the default: no face at all.
+#[derive(Clone, Copy, Default)]
 struct FamilySlants {
     /// Whether the library holds the family at all.
     registered: bool,
@@ -692,12 +697,80 @@ struct FamilySlants {
     /// [`designed_oblique_angle`].
     leans: bool,
     /// Whether a face that [hides its lean](hides_its_lean) ties with an
-    /// upright face of the family, and no face of the family reports the
-    /// slant asked for.
-    needs_alias: bool,
+    /// upright face of the family: one its tables do not flag oblique,
+    /// reporting the same style.
+    ties: bool,
+    /// The slants its faces report, by [`slant_index`].
+    reports: [bool; 3],
     /// Whether the family has an italic face: one reporting italic that its
     /// tables do not flag oblique.
     has_italic: bool,
+}
+
+impl FamilySlants {
+    /// Whether a style asking for `slant` goes to the family's
+    /// [`oblique_alias`]: where a face that hides its lean ties with an
+    /// upright one, and no face reports `slant`, so Skia's matcher cannot
+    /// tell the faces apart.
+    fn needs_alias(&self, slant: Slant) -> bool {
+        self.ties && !self.reports[slant_index(slant)]
+    }
+}
+
+/// What [`FontLibrary::slanted`] reads of each family `fonts` holds, by the
+/// name it is registered under. Each face's tables are read once here.
+fn family_slants_of(
+    fonts: &[(Typeface, Option<String>)],
+) -> CacheMap<String, FamilySlants> {
+    let mut faces: CacheMap<String, Vec<(FontStyle, bool)>> =
+        CacheMap::default();
+    for (font, alias) in fonts {
+        let name = alias.clone().unwrap_or_else(|| font.family_name());
+        faces
+            .entry(name)
+            .or_default()
+            .push((font.font_style(), designed_oblique_angle(font).is_some()));
+    }
+    faces
+        .into_iter()
+        .map(|(name, faces)| {
+            // A face hides its lean where its tables flag it oblique and its
+            // platform reports it upright -- see `hides_its_lean`.
+            let ties = faces
+                .iter()
+                .filter(|(style, designed)| {
+                    *designed && style.slant() == Slant::Upright
+                })
+                .any(|(hidden, _)| {
+                    faces
+                        .iter()
+                        .any(|(style, designed)| !designed && style == hidden)
+                });
+            let slants = FamilySlants {
+                registered: true,
+                leans: faces.iter().any(|(_, designed)| *designed),
+                ties,
+                reports: [Slant::Upright, Slant::Italic, Slant::Oblique].map(
+                    |slant| {
+                        faces.iter().any(|(style, _)| style.slant() == slant)
+                    },
+                ),
+                has_italic: faces.iter().any(|(style, designed)| {
+                    style.slant() == Slant::Italic && !designed
+                }),
+            };
+            (name, slants)
+        })
+        .collect()
+}
+
+/// `slant`'s place in [`FamilySlants::reports`].
+fn slant_index(slant: Slant) -> usize {
+    match slant {
+        Slant::Upright => 0,
+        Slant::Italic => 1,
+        Slant::Oblique => 2,
+    }
 }
 
 pub struct FontLibrary {
@@ -739,6 +812,10 @@ pub struct FontLibrary {
     /// [`has_family`](Self::has_family) and dropped with everything else on
     /// [`invalidate`](Self::invalidate).
     system_families: Option<CacheSet<String>>,
+    /// What [`slanted`](Self::slanted) reads of each registered family, by
+    /// the name it is registered under, worked out on the first call after
+    /// [`invalidate`](Self::invalidate) -- see [`FamilySlants`].
+    family_slants: Option<CacheMap<String, FamilySlants>>,
 }
 
 /// The prefix every private alias carries.
@@ -893,6 +970,7 @@ impl FontLibrary {
             matches: CacheMap::default(),
             engine_names: CacheMap::default(),
             system_families: None,
+            family_slants: None,
         }
     }
 
@@ -1839,8 +1917,12 @@ impl FontLibrary {
     /// which is what Skia's matcher gives the family as it is.
     /// `oblique_degrees` is the angle an oblique asks for, `None` for the
     /// default 14deg.
+    ///
+    /// What it reads of each family is worked out from the faces once while
+    /// the fonts stand -- see [`FamilySlants`] -- so a call costs a lookup
+    /// per family named, whatever the library holds.
     pub(crate) fn slanted(
-        &self,
+        &mut self,
         names: &[String],
         slant: Slant,
         oblique_degrees: Option<f32>,
@@ -1850,42 +1932,11 @@ impl FontLibrary {
         if slant == Slant::Upright || leans_back {
             return None;
         }
-        let facts = |name: &String| {
-            let faces: Vec<&Typeface> = self
-                .fonts
-                .iter()
-                .filter(|(font, alias)| {
-                    alias
-                        .as_ref()
-                        .map_or_else(|| font.family_name(), String::clone)
-                        == *name
-                })
-                .map(|(font, _)| font)
-                .collect();
-            let ties = faces.iter().filter(|face| hides_its_lean(face)).any(
-                |hidden| {
-                    faces.iter().any(|face| {
-                        designed_oblique_angle(face).is_none()
-                            && face.font_style() == hidden.font_style()
-                    })
-                },
-            );
-            let reports = |wanted| {
-                faces.iter().any(|face| face.font_style().slant() == wanted)
-            };
-            FamilySlants {
-                registered: !faces.is_empty(),
-                leans: faces
-                    .iter()
-                    .any(|face| designed_oblique_angle(face).is_some()),
-                needs_alias: ties && !reports(slant),
-                has_italic: faces.iter().any(|face| {
-                    face.font_style().slant() == Slant::Italic
-                        && designed_oblique_angle(face).is_none()
-                }),
-            }
-        };
-        let families: Vec<FamilySlants> = names.iter().map(facts).collect();
+        let known = self.family_slants();
+        let families: Vec<FamilySlants> = names
+            .iter()
+            .map(|name| known.get(name).copied().unwrap_or_default())
+            .collect();
         if !families.iter().any(|family| family.leans) {
             return None;
         }
@@ -1894,14 +1945,16 @@ impl FontLibrary {
                 .iter()
                 .find(|family| family.registered)
                 .is_some_and(|family| family.leans && !family.has_italic);
-        let names =
-            families.iter().any(|family| family.needs_alias).then(|| {
+        let names = families
+            .iter()
+            .any(|family| family.needs_alias(slant))
+            .then(|| {
                 names
                     .iter()
                     .zip(&families)
                     .flat_map(|(name, family)| {
                         family
-                            .needs_alias
+                            .needs_alias(slant)
                             .then(|| oblique_alias(name))
                             .into_iter()
                             .chain(iter::once(name.clone()))
@@ -1915,27 +1968,40 @@ impl FontLibrary {
     /// sends to its [`oblique_alias`], with the slants it does it for: the
     /// table an SVG document's `font-style` is rewritten against, where a
     /// family and a slant reach Skia's matcher with no style to rewrite.
-    pub(crate) fn oblique_families(&self) -> Vec<ObliqueFamily> {
-        let mut families: Vec<ObliqueFamily> = Vec::new();
+    pub(crate) fn oblique_families(&mut self) -> Vec<ObliqueFamily> {
+        let mut names: Vec<String> = Vec::new();
         for (font, alias) in &self.fonts {
             let name = alias.clone().unwrap_or_else(|| font.family_name());
-            if families.iter().any(|family| family.name == name) {
-                continue;
+            if !names.contains(&name) {
+                names.push(name);
             }
-            let sent = |slant| {
-                self.slanted(std::slice::from_ref(&name), slant, None)
-                    .is_some_and(|slanted| slanted.names.is_some())
-            };
-            let (italic, oblique) = (sent(Slant::Italic), sent(Slant::Oblique));
-            if italic || oblique {
-                families.push(ObliqueFamily {
+        }
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let mut sent = |slant| {
+                    self.slanted(std::slice::from_ref(&name), slant, None)
+                        .is_some_and(|slanted| slanted.names.is_some())
+                };
+                let (italic, oblique) =
+                    (sent(Slant::Italic), sent(Slant::Oblique));
+                (italic || oblique).then_some(ObliqueFamily {
                     name,
                     italic,
                     oblique,
-                });
-            }
-        }
-        families
+                })
+            })
+            .collect()
+    }
+
+    /// What [`slanted`](Self::slanted) reads of each registered family --
+    /// see [`FamilySlants`] -- worked out from the faces on the first call
+    /// after the fonts change, and dropped by
+    /// [`invalidate`](Self::invalidate).
+    fn family_slants(&mut self) -> &CacheMap<String, FamilySlants> {
+        let fonts = &self.fonts;
+        self.family_slants
+            .get_or_insert_with(|| family_slants_of(fonts))
     }
 
     /// The name a registered family is filed under, where `name` is that
@@ -2013,6 +2079,7 @@ impl FontLibrary {
     fn invalidate(&mut self) {
         FONT_GENERATION.set(FONT_GENERATION.get().wrapping_add(1));
         self.system_families = None;
+        self.family_slants = None;
         self.epoch = Rc::new(FontEpoch {
             fonts: self.fonts.clone(),
         });
@@ -2928,6 +2995,42 @@ mod tests {
             );
             assert!(after.0 == fresh.0, "{font}: pixels as a fresh search's");
         }
+    }
+
+    /// What `slanted` remembers of a family is worked out again when the
+    /// fonts change: a family given a face its tables flag oblique after an
+    /// italic was asked of it lays the next italic out as that oblique,
+    /// whatever the platform reports the face as.
+    #[test]
+    fn a_face_registered_after_a_slant_was_asked_is_read() {
+        let path = |file: &str| {
+            format!(
+                "{}/tests/assets/fonts/Recursive/{file}",
+                env!("CARGO_MANIFEST_DIR")
+            )
+        };
+        let family = "SlantFactsLate".to_string();
+        let fonts = crate::font::FontLibrary::new();
+        let as_oblique = || {
+            FontLibrary::with_shared(|lib| {
+                lib.slanted(std::slice::from_ref(&family), Slant::Italic, None)
+                    .is_some_and(|slanted| slanted.as_oblique)
+            })
+        };
+        fonts
+            .register_font_from_path(
+                &family,
+                path("Recursive-upright-subset.ttf"),
+            )
+            .expect("the upright face registers");
+        assert!(!as_oblique(), "the upright face alone leans nowhere");
+        fonts
+            .register_font_from_path(
+                &family,
+                path("Recursive-oblique-flag-subset.ttf"),
+            )
+            .expect("the flagged face registers");
+        assert!(as_oblique(), "the flagged face registered since is read");
     }
 
     /// What is remembered per family list goes when the fonts change and
