@@ -128,7 +128,7 @@ The two HDR rows build a canvas with that transfer function and tag exports with
 
 ## Options structs
 
-`CanvasOptions`, `EncodeOptions`, `PixelExportOptions`, `TextureOptions`, `TextStyle`, `TextBoxOptions` and `StrutStyle` are plain structs with public fields and a `Default`. **Build them from the default and override what you need:**
+`CanvasOptions`, `EncodeOptions`, `PixelExportOptions`, `TextureOptions`, `TextStyle` and `StrutStyle` are plain structs with public fields and a `Default`. **Build them from the default and override what you need:**
 
 ```rust
 let options = EncodeOptions {
@@ -225,7 +225,7 @@ App::run().expect("the event loop runs");
 - `App::run()` blocks and takes over the calling thread. On macOS that thread must be the main one. It returns `Ok(())` when the last window closes or `App::quit()` is called, and `Err(Error::EventLoop)` when the loop never ran at all -- no display, or the platform refused it. A caller that discards it waits for windows that cannot appear.
 - `App::set_fps` sets the target frame rate; `App::close_window` takes the id from `Window::id()`.
 
-The handlers are independent closures, so state shared between them has to be shared explicitly -- an `Rc<Cell<_>>` or `Rc<RefCell<_>>`. A plain local captured by `move` in both gives each its own copy. `examples/window.rs` is a runnable version of the above.
+The handlers are independent closures, so state shared between them has to be shared explicitly -- an `Rc<Cell<_>>` or `Rc<RefCell<_>>`. A plain local captured by `move` in both gives each its own copy. `examples/rust/window.rs` is a runnable version of the above.
 
 Run it with:
 
@@ -364,6 +364,7 @@ let image = Image::from_url("https://example.com/pentagon.png", &options)?;
 - `FontLibrary::installed_families()` lists every family a draw can match -- the platform's own plus anything registered here -- and `family_details(name)` reports the weights, widths and styles one offers, or `None` when nothing resolves under that name, matching `name` by Unicode case folding as a font's family list does and reporting the family under the name it was registered by. The counterparts of the JavaScript `FontLibrary.families` and `FontLibrary.family()`. `families()` stays the narrower question: what this registry was given.
 - `Font::from_css` reads a CSS `font` shorthand as Chrome reads `ctx.font`, and `None` where Chrome ignores one; `Context2D::set_font_css` assigns one, setting the caps and stretch as the shorthand does and returning `false` without changing anything when it will not read. `Context2D::font()` reports the font as CSSOM serializes it, with no line height: the weight as a number, the stretch keyword, an `oblique` with its angle unless that is the default 14deg, the size to at most six decimals, and family names quoted. Chrome's `ctx.font` differs, and docs/browser-differences.md lists how. System font keywords such as `caption` are refused, since what they name is the platform's choice. A family list is `FontFamily`s, each `Named` or a `Generic` keyword: a string converts as CSS reads an unquoted name (`"serif".into()` is the generic), the shorthand keeps quoting (`"serif"` in quotes is a family called serif), and `FontFamily::Named` names one directly. An oblique carries its `ObliqueAngle`, from -90deg to 90deg: `FontSlant::Oblique(angle)`, or `FontSlant::OBLIQUE` for the 14deg `oblique` means alone, and the same in a paragraph as `TextSlant::Oblique(angle)`.
 - `Context2D::set_font_stretch` selects a narrower face where the family ships one, and pins the `wdth` axis where it is a variable font -- which is how most variable fonts carry their widths.
+- `Context2D::set_font_kerning` and `set_text_rendering` are `ctx.fontKerning` and `ctx.textRendering`, taking `FontKerning` and `TextRendering`. `FontKerning::None` turns the font's `kern` feature off. `TextRendering::OptimizeSpeed` turns the common ligatures off, and `GeometricPrecision` draws outlines unhinted whatever `set_font_hinting` says. `save` and `restore` keep both; `set_font` leaves them alone.
 - `TextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.
 - `Paragraph::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width, not the wrapping budget -- `max_width()` gives back the budget the layout was asked for.
 - The rest of the metric surface: `alphabetic_baseline()` and `ideographic_baseline()` are the two first-line baselines measured from the top of the block; `min_intrinsic_width()` / `max_intrinsic_width()` are the widths at which the line breaks stop changing -- the widest unbreakable word, and the width that fits every line without wrapping; `did_exceed_max_lines()` says whether the paragraph style's line cap dropped content, which is how truncated text is told from text that fit; and `unresolved_codepoints()` lists the characters no font in the collection could draw.
@@ -441,21 +442,19 @@ just lint-check
 just test-rust
 ```
 
-`just test-rust` is the last one spelled out: it runs `cargo test` with `metal,window,freetype` on
-macOS and `vulkan,window,freetype` elsewhere. Running `cargo test` bare instead builds with default
-features, where `gui` does not exist, and eighteen tests are skipped rather than run.
+`just test-rust` is the last one spelled out: it runs `cargo test` with the justfile's
+`test_features`, the host's backend with `window`, `freetype` and `fetch`. Running `cargo test` bare
+instead builds with default features, where `gui` does not exist, and the tests that need it are
+compiled out rather than run.
 
-The test run covers all five binaries: `native_context2d` (the Canvas facade,
-the largest of them), `native_api_contract`, `native_studio_renderer_contract`,
-`native_studio_renderer_adapter` and `native_text_perf_smoke`, plus the
+The test run covers the library's unit tests, every integration test under `tests/`, and the
 doctests.
 
 Audits:
 
 ```bash
-rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" src/*.rs
-rg -n "\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!" src/*.rs
-rg -n "use skia_safe" tests/native_studio_renderer_adapter.rs
+just check-rust-api
+rg -n "\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!" src
 ```
 
-The first should be empty. The second is **not** expected to be empty: `AGENTS.md` permits `.unwrap()`/`.expect()` where a `// SAFETY:` comment justifies it, so read the hits rather than counting them -- an uncommented one is the defect. It covers library code only; the tests are deliberately full of `.expect("...")`, which is how a test reports a failure. The third returns only doc-comment hits referring to the audit itself.
+The first fails where a public signature exposes a type from a crate the API hides. The second is **not** expected to be empty: `AGENTS.md` permits `.unwrap()`/`.expect()` where a `// SAFETY:` comment justifies it, so read the hits rather than counting them -- an uncommented one is the defect. Its hits inside `#[cfg(test)]` modules are tests, which are deliberately full of `.expect("...")`, since that is how a test reports a failure.
