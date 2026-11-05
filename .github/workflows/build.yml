@@ -131,6 +131,10 @@ jobs:
           # cannot be stopped for one process; the step above is the proof
           # that holds there.
           MEO_SKIA_CANVAS_REQUIRE_METAL: "1"
+          # The binary this job built. scripts/test.mjs falls back to an installed
+          # platform package -- the published one -- when `lib/skia.node` is missing;
+          # named here, lib/binary.js refuses a path that does not exist instead.
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: bun run test:suite
 
       - name: Add to release
@@ -256,6 +260,8 @@ jobs:
       - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The binary this job built, for the reason the macOS job gives.
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: bun run test:suite
 
       - name: Add to release
@@ -539,23 +545,48 @@ jobs:
           # a binary reporting GLIBCXX_3.4.21 still died on:
           #
           #   undefined symbol: std::__cxx11::basic_string<...>::_M_replace_cold(...)
-          if ! node -e "
+          #
+          # It has to load the binary this job built. `lib/binary.js` prefers an installed
+          # platform package over `lib/skia.node`, and the dependency install puts the published
+          # one in node_modules, so a bare `require` tests that instead. MEO_SKIA_CANVAS_BINARY
+          # points the load at the build, and the check refuses to go on unless the one addon
+          # in `require.cache` is that file -- checked before rendering, because 7.0's
+          # JavaScript drawing through 6.0.2's binary throws first and would be reported as a
+          # load failure. Requiring the module loads the addon. `require.cache` keys are
+          # realpaths, hence `realpathSync`.
+          built="$PWD/skia-canvas/lib/skia.node"
+          # `|| status=$?` because the step's shell runs with -e.
+          status=0
+          MEO_SKIA_CANVAS_BINARY="$built" node -e "
+                const built = require('fs').realpathSync(process.argv[1]);
                 const {Canvas} = require('./skia-canvas/lib/index.js');
+                const loaded = Object.keys(require.cache).filter((path) => path.endsWith('.node'));
+                if (loaded.length !== 1 || loaded[0] !== built) {
+                  console.error('loaded ' + JSON.stringify(loaded) + ', not ' + built);
+                  process.exit(2);
+                }
                 const c = new Canvas(32, 32), x = c.getContext('2d');
                 x.fillStyle = '#745557'; x.fillRect(0, 0, 32, 32);
                 if (c.toBufferSync('png').length < 100) throw new Error('rendered nothing');
-                console.log('loads and renders on the oldest supported platform');
-              "; then
-            echo "::error::The binary does not load on AlmaLinux 8, the oldest platform this release claims. The version ceilings above passed, so this is an unversioned symbol they cannot see — read the dlopen error just above. Usually libstdc++: rustc links through cc by default, which ignores -static-libstdc++, so RUSTFLAGS in containers/Dockerfile.glibc must also set the linker to clang++. See #7."
-            fail=1
-          fi
+                console.log('loads and renders on the oldest supported platform: ' + built);
+              " "$built" || status=$?
+          case $status in
+            0) ;;
+            2) echo "::error::The load check loaded a binary other than the one this job built (named just above), so it says nothing about this build. lib/binary.js chooses which binary loads; MEO_SKIA_CANVAS_BINARY is what points it here. See #573."
+               fail=1 ;;
+            *) echo "::error::The binary does not load on AlmaLinux 8, the oldest platform this release claims. The version ceilings above passed, so this is an unversioned symbol they cannot see — read the dlopen error just above. Usually libstdc++: rustc links through cc by default, which ignores -static-libstdc++, so RUSTFLAGS in containers/Dockerfile.glibc must also set the linker to clang++. See #7."
+               fail=1 ;;
+          esac
 
           exit $fail
 
       - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: cd skia-canvas && bun run test:suite
+        # The binary this job built, for the reason the macOS job gives. Set in the
+        # script rather than through `env:`: in a container job `github.workspace`
+        # names the runner's path, not the container's.
+        run: cd skia-canvas && MEO_SKIA_CANVAS_BINARY="$PWD/lib/skia.node" bun run test:suite
 
       - name: Add to release
         if: ${{ inputs.upload }}
@@ -587,9 +618,12 @@ jobs:
           PKG_VERSION=npm-v$(cd "$SRC_DIR" && npm pkg get version | tr -d '"')
           export PKG_VERSION
 
+          # `--omit=optional` keeps the platform packages out: one installed beside the
+          # package outranks the `lib/skia.node` copied in below, so a layer holding one
+          # would ship the published binary rather than this build.
           mkdir -p "$LAYER_DIR/nodejs"
           cd "$LAYER_DIR/nodejs" && \
-             npm install --ignore-scripts "$SRC_DIST" && \
+             npm install --ignore-scripts --omit=optional "$SRC_DIST" && \
              cp "$SRC_DIR/lib/skia.node" ./node_modules/meo-skia-canvas/lib
           cd "$LAYER_DIR" && \
              zip -r9 "$LAYER_ZIP" nodejs/node_modules
@@ -644,6 +678,12 @@ jobs:
               echo "runtime glibc: $(ldd --version | head -1)"
               NODE_PATH=/opt/nodejs/node_modules node -e "
                 const {Canvas} = require(\"meo-skia-canvas\");
+                // The binary the linux job copied into the layer, and no other: a
+                // platform package in the layer would outrank it.
+                const built = require(\"fs\").realpathSync(\"/opt/nodejs/node_modules/meo-skia-canvas/lib/skia.node\");
+                const loaded = Object.keys(require.cache).filter((path) => path.endsWith(\".node\"));
+                if (loaded.length !== 1 || loaded[0] !== built)
+                  throw new Error(\"loaded \" + JSON.stringify(loaded) + \", not \" + built);
                 const c = new Canvas(64, 32), x = c.getContext(\"2d\");
                 x.fillStyle = \"#745557\"; x.fillRect(0, 0, 64, 32);
                 const png = c.toBufferSync(\"png\");
