@@ -1139,12 +1139,12 @@ impl FontLibrary {
     /// [`TextEngine`](crate::text::TextEngine): one built before this call
     /// still sees the font, and still instances it at the axes a
     /// [`font_variations`](crate::text::TextStyle::font_variations) asks
-    /// for. An engine holds this library's registry rather than a copy of
-    /// what it held, and builds its collection again at its next layout
-    /// after a registration -- see [`FontRegistry`]. Measured on Oswald
-    /// registered after the engine was built: 359.04 at `wght` 200 and
-    /// 446.46 at 700, the same pair an engine built after the registration
-    /// reports, where a family resolving to nothing measures 483.78.
+    /// for. An engine holds this library's registered faces themselves
+    /// rather than a copy of them, and builds its font collection again at
+    /// its next layout after a registration. Measured on Oswald registered
+    /// after the engine was built: 359.04 at `wght` 200 and 446.46 at 700,
+    /// the same pair an engine built after the registration reports, where a
+    /// family resolving to nothing measures 483.78.
     ///
     /// The typeface is also added to the registry
     /// [`Context2D::set_font`](crate::context2d::Context2D::set_font)
