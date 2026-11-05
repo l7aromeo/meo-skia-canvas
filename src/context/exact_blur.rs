@@ -932,7 +932,8 @@ fn plan<L: FftNum>(
 /// those transforms before any of it is written back, so it is worked in
 /// place, and in a lane that holds them -- see [`Lane::HELD_TO_REACH`] --
 /// each value written back is held to the range its line's channel allows,
-/// see [`within_reach`].
+/// see [`within_reach`]. Every value written back is a zero of positive
+/// sign where it is zero at all -- see [`positive_zero`].
 fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let r = k.len() - 1;
     let len = fast_len(n + r);
@@ -995,7 +996,8 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
                         array::from_fn(|c| within_reach(sums[c], lo[c], hi[c]))
                     }
                     None => sums,
-                };
+                }
+                .map(positive_zero);
             }
         },
     );
@@ -1020,6 +1022,21 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
 /// zero and move only by comparison, which a NaN never wins.
 fn within_reach(v: f32, lo: f32, hi: f32) -> f32 {
     v.clamp(lo, hi)
+}
+
+/// `v`, or +0.0 where `v` is -0.0; every other value, a NaN among them,
+/// keeps its bits.
+///
+/// The FFT's round-off leaves a -0.0 now and then where the exact blur is
+/// zero: an F32 layer of one opaque rect, blurred at a sigma of 6, kept two
+/// alphas of -0.0. The sign is the round-off's, not the blur's, and it is
+/// not harmless: through Skia's colour matrix, as a chain's colour step and
+/// a float layer's drop shadow tint, a pixel of alpha -0.0 came out NaN in
+/// every channel, and the shadow's blur then spread that across 338 pixels.
+/// A sum tap by tap makes no -0.0 from values that hold none -- each is a
+/// weight times a value, added -- so only the FFT's values need it.
+fn positive_zero(v: f32) -> f32 {
+    if v == 0.0 { 0.0 } else { v }
 }
 
 /// The kernel's spectrum at length `len`, real since the kernel is
@@ -1122,6 +1139,61 @@ pub(crate) fn reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_positive_zero_changes_nothing_but_a_negative_zero() {
+        // Each sign and exponent, with mantissas at both ends and between,
+        // and the NaNs, quiet and signalling, of either sign: every value
+        // keeps its bits but -0.0, which becomes +0.0.
+        let mantissas =
+            [0u32, 1, 2, 0x40_0000, 0x55_5555, 0x7F_FFFE, 0x7F_FFFF];
+        let mut seen = 0;
+        for sign in [0u32, 1 << 31] {
+            for exponent in 0..=255u32 {
+                for m in mantissas {
+                    let bits = sign | exponent << 23 | m;
+                    let want = match bits == 1 << 31 {
+                        true => 0,
+                        false => bits,
+                    };
+                    let got = positive_zero(f32::from_bits(bits)).to_bits();
+                    assert_eq!(got, want, "{bits:#010x}");
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 2 * 256 * mantissas.len());
+    }
+
+    #[test]
+    fn the_fft_writes_no_negative_zero() {
+        // An F32 layer of one opaque grey rect, blurred through the FFT at
+        // a sigma of 6, where the round-off left two alphas of -0.0 before
+        // `positive_zero` was applied to what the FFT writes.
+        let (w, h) = (144, 108);
+        let pixels: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                match (72..120).contains(&x) && (10..46).contains(&y) {
+                    true => [0.4, 0.4, 0.4, 1.0],
+                    false => [0.0; 4],
+                }
+            })
+            .collect();
+        assert_eq!(method(6.0), Method::Fourier);
+        let blurred = blur(pixels, w, h, 6.0, 6.0);
+        let negative: Vec<usize> = blurred
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| **v == 0.0 && v.is_sign_negative())
+            .map(|(i, _)| i)
+            .collect();
+        assert!(negative.is_empty(), "-0.0 at values {negative:?}");
+        // The two alphas the round-off signed are zeros still.
+        for at in [7370, 14282] {
+            assert_eq!(blurred[at * 4 + 3].to_bits(), 0, "alpha {at}");
+        }
+    }
 
     fn lcg(seed: &mut u32) -> u32 {
         *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
