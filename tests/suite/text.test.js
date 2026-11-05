@@ -2851,12 +2851,42 @@ describe("a quoted generic keyword is a family name", () => {
   };
 
   test("with no family of that name, the list moves on", () => {
-    // fontconfig answers `serif`, `sans-serif` and `monospace` with faces
-    // of its own choosing, which a quoted name must not take. Reset first:
-    // the tests above register families under `sans-serif` and
-    // `monospace`, and a family of that name exists once they have.
+    // Reset first: the tests above register families under `sans-serif`
+    // and `monospace`, and a family of that name exists once they have.
     FontLibrary.reset();
+    // What a missing family draws is the library's `sans-serif`, the canvas
+    // default family: pinned to that family rather than to another
+    // fallback, since the comparisons below move with whatever it is.
+    assert.equal(
+      painted("36px sans-serif"),
+      painted("36px NoSuchFamilyQuoted"),
+      "a missing family draws the library's sans-serif",
+    );
+    // Taken as the generic, `"serif"` would draw a face of the system's
+    // and stop there -- its fallback where it has no serif face -- and the
+    // family after it would never draw. So this holds on any system.
+    FontLibrary.use("QuotedNextFamily", [FACE]);
+    assert.equal(
+      painted('36px "serif", QuotedNextFamily'),
+      painted("36px QuotedNextFamily"),
+      "the next family in the list draws",
+    );
+  });
+
+  test("a quoted generic draws none of the system's own faces", (t) => {
+    // fontconfig answers `serif`, `sans-serif` and `monospace` with faces
+    // of its own choosing, which a quoted name must not take: it draws
+    // what a missing family draws.
     const missing = painted("36px NoSuchFamilyQuoted");
+    // The control: the generic draws something else, or the comparisons
+    // below could not tell a quoted name from it. A system whose only
+    // faces are one sans -- the AlmaLinux image of the Linux release build
+    // holds DejaVu Sans alone -- answers `serif` with that, and has no
+    // face here to tell apart.
+    if (painted("36px serif") === missing) {
+      t.skip("no serif face here but the one a missing family draws");
+      return;
+    }
     for (const font of [
       '36px "serif"',
       "36px 'SERIF'",
@@ -2865,23 +2895,6 @@ describe("a quoted generic keyword is a family name", () => {
     ]) {
       assert.equal(painted(font), missing, font);
     }
-    // The control: the generics themselves draw something else, or the
-    // comparison above could not tell the two apart.
-    assert.notEqual(painted("36px serif"), missing, "bare serif");
-    // What a missing family draws is the library's `sans-serif`, the canvas
-    // default family: pinned to that family rather than to another
-    // fallback, since the comparisons above move with whatever it is.
-    assert.equal(
-      painted("36px sans-serif"),
-      missing,
-      "a missing family draws the library's sans-serif",
-    );
-    FontLibrary.use("QuotedNextFamily", [FACE]);
-    assert.equal(
-      painted('36px "serif", QuotedNextFamily'),
-      painted("36px QuotedNextFamily"),
-      "the next family in the list draws",
-    );
   });
 
   test("a family registered under the name draws, from the next draw on", () => {

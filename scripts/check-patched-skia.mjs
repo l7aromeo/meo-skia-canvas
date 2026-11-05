@@ -13,7 +13,8 @@
 // every `getImageData`; a binary built against it passes every test that does
 // not stall the compiler, land a path where the pixel moves, draw a curve at
 // two scales or look at which buffer a read kept. Three things have to hold,
-// and each is read from skia-bindings' `output`:
+// and each is read from what skia-bindings' build script printed -- its
+// `output` and its `stderr`, see `buildLog`:
 //
 // 1. It built from a source tree and did not try a download: offline from
 //    `SKIA_SOURCE_DIR` -- "STARTING OFFLINE BUILD" -- or, from a rust-skia
@@ -113,9 +114,22 @@ function compiledLine(file) {
     .join("[\\\\/]");
   return new RegExp(`compile (\\S+[\\\\/]${escaped})`);
 }
-// A CRLF line end needs nothing here: `$` in multiline mode matches before
-// `\r` as before `\n`, both being line terminators to JavaScript.
-const NINJA_DIR = /^ninja: Entering directory `(.*)'$/m;
+/// The line each ninja prints for `-C`, capturing the directory. ninja writes
+/// ``ninja: Entering directory `<dir>'``. samurai, which Alpine installs as
+/// `/usr/bin/ninja` and so the musl container builds with, writes
+/// `<the name it ran as>: entering directory '<dir>'` -- `ninja` there, `samu`
+/// when run as itself -- and writes it to stderr, which is why `buildLog`
+/// reads both streams. A CRLF line end needs nothing here: `$` in multiline
+/// mode matches before `\r` as before `\n`, both being line terminators to
+/// JavaScript.
+const NINJA_DIRS = [
+  /^ninja: Entering directory `(.*)'$/m,
+  /^(?:ninja|samu): entering directory '(.*)'$/m,
+];
+
+/** The directory ninja ran in, from the first ninja's line that names one. */
+const ninjaDir = (output) =>
+  NINJA_DIRS.map((line) => output.match(line)?.[1]).find(Boolean);
 
 const FROM_SOURCE = ["STARTING OFFLINE BUILD", "STARTING A FULL BUILD"];
 
@@ -128,7 +142,7 @@ export function refusal(output, patched) {
     return "skia-bindings did not build from a source tree";
   if (output.includes("DOWNLOAD AND INSTALL"))
     return "skia-bindings tried to download prebuilt Skia";
-  const ninja = output.match(NINJA_DIR)?.[1];
+  const ninja = ninjaDir(output);
   for (const { file, marker } of patched) {
     const compiled = output.match(compiledLine(file))?.[1];
     if (!compiled) return `ninja did not compile ${file}`;
@@ -170,6 +184,20 @@ export function markerRefusal(patchText, file, marker) {
   return null;
 }
 
+/**
+ * What skia-bindings' build script printed in `dir`, both streams: cargo
+ * keeps its stdout as `output` and its stderr as `stderr`. Both ninjas print
+ * what they compiled on stdout, but samurai prints the directory it ran in on
+ * stderr.
+ */
+export function buildLog(dir) {
+  const stderr = join(dir, "stderr");
+  return [
+    readFileSync(join(dir, "output"), "utf8"),
+    existsSync(stderr) ? readFileSync(stderr, "utf8") : "",
+  ].join("\n");
+}
+
 function check(buildDir) {
   const patched = PATCHED[process.platform];
   if (!patched) {
@@ -187,7 +215,7 @@ function check(buildDir) {
     process.exit(1);
   }
   const problems = outputs
-    .map((path) => [path, refusal(readFileSync(path, "utf8"), patched)])
+    .map((path) => [path, refusal(buildLog(dirname(path)), patched)])
     .filter(([, why]) => why);
   for (const [path, why] of problems) console.error(`${path}: ${why}`);
   if (problems.length) process.exit(1);
@@ -211,6 +239,12 @@ function cases(root, patched) {
     ),
   ].join("\n");
   const crlf = good.replaceAll("\n", "\r\n");
+  // The same build's output with samurai's directory line, as `name`.
+  const samurai = (name) =>
+    good.replace(
+      /^ninja: Entering directory `(.*)'$/m,
+      (_, dir) => `${name}: entering directory '${dir}'`,
+    );
   const backslashed = good.replace(
     /compile (\S+)/g,
     (_, path) => `compile ${path.replaceAll("/", "\\")}`,
@@ -275,6 +309,29 @@ function cases(root, patched) {
       good.replace(/^ninja: Entering.*$/m, ""),
       false,
       "no ninja directory",
+    ],
+    [files, samurai("ninja"), true, "samurai run as ninja"],
+    [files, samurai("samu"), true, "samurai run as samu"],
+    [
+      files,
+      samurai("ninja").replaceAll("\n", "\r\n"),
+      true,
+      "samurai with CRLF line ends",
+    ],
+    ...patched.map(({ file }) => [
+      { ...files, [file]: "unpatched" },
+      samurai("ninja"),
+      false,
+      `samurai's build of an unpatched ${file}`,
+    ]),
+    [
+      files,
+      good.replace(
+        /^ninja: Entering directory `(.*)'$/m,
+        (_, dir) => `make: Entering directory '${dir}'`,
+      ),
+      false,
+      "only make's directory line",
     ],
   ];
 }
@@ -363,6 +420,38 @@ function selfTest() {
         if ((refusal(text, patched) === null) !== accepted) {
           console.error(
             `check-patched-skia self-test: ${platform}, ${what} was ${accepted ? "refused" : "accepted"}`,
+          );
+          process.exit(1);
+        }
+        count += 1;
+      }
+      // samurai's build as cargo files it: what it compiled in `output`, the
+      // directory it ran in in `stderr`. Read through `buildLog`, as `check`
+      // reads it, with and without the `stderr`.
+      const [files, text] = cases(root, patched).find(
+        ([, , , what]) => what === "samurai run as ninja",
+      );
+      for (const [file, contents] of Object.entries(files))
+        writeFileSync(join(root, "skia", file), contents);
+      const lines = text.split("\n");
+      const ninjaLine = lines.find((line) =>
+        line.includes(": entering directory"),
+      );
+      const build = join(root, "build");
+      mkdirSync(build, { recursive: true });
+      writeFileSync(
+        join(build, "output"),
+        lines.filter((line) => line !== ninjaLine).join("\n"),
+      );
+      for (const [stderr, accepted] of [
+        [ninjaLine, true],
+        [null, false],
+      ]) {
+        rmSync(join(build, "stderr"), { force: true });
+        if (stderr !== null) writeFileSync(join(build, "stderr"), stderr);
+        if ((refusal(buildLog(build), patched) === null) !== accepted) {
+          console.error(
+            `check-patched-skia self-test: ${platform}, samurai's directory line ${stderr === null ? "missing from" : "in"} stderr was ${accepted ? "refused" : "accepted"}`,
           );
           process.exit(1);
         }

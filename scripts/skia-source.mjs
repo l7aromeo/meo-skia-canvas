@@ -27,11 +27,12 @@
 // whose Skia submodule is pinned by that tag, with Skia's own DEPS synced and gn
 // fetched at the revision `bin/fetch-gn` names. It lives once per version and
 // patch list under `$XDG_CACHE_HOME/meo-skia-canvas`, so a new version or a changed
-// patch gets a new directory and a stale one cannot be reused. Once a new one
-// is ready, the others are removed unless something still uses one -- the
-// cache is shared by every worktree on the machine: a worktree whose patch
-// list names it, a skia-bindings out-dir in a worktree's target that was built
-// from it, or a `just` holding it -- see `treesToKeep`.
+// patch gets a new directory and a stale one cannot be reused. `prepare` makes
+// one under its lock -- see `lockTree` -- so two worktrees' `just` make it once.
+// Once a new one is ready, the others are removed unless something still uses
+// one -- the cache is shared by every worktree on the machine: a worktree whose
+// patch list names it, a skia-bindings out-dir in a worktree's target that was
+// built from it, or a `just` holding it -- see `treesToKeep`.
 //
 // Every tree for a version holds the same checkout, dependencies and gn, and
 // differs from the others only in the patches applied to tracked files. So a
@@ -44,6 +45,7 @@ import {
   constants,
   cpSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -275,9 +277,9 @@ function cacheRoot() {
  * locked version and a digest of this platform's patches, in order. A list of
  * one hashes as that patch alone did.
  */
-function treeName(root = ROOT) {
+export function treeName(root = ROOT, list = patches()) {
   const hash = createHash("sha256");
-  for (const patch of patches()) hash.update(readFileSync(join(root, patch)));
+  for (const patch of list) hash.update(readFileSync(join(root, patch)));
   const digest = hash.digest("hex").slice(0, PATCH_DIGEST_LENGTH);
   return `skia-${lockedVersion(root)}-${digest}`;
 }
@@ -888,27 +890,72 @@ export function retry(
   }
 }
 
-function prepare() {
-  if (usesLocalSkia()) return null;
-  const tree = treeDir();
+/**
+ * Makes the tree the checkout at `root` names under `cache`, once, and
+ * returns its Skia source directory, or null against a local rust-skia
+ * checkout. A tree marked `.ready` is returned as it is. Otherwise, under the
+ * tree's lock, the tree is derived from another of its version -- or fetched,
+ * by `fetch`, where none will do -- into `<name>.partial`, patched with `list`,
+ * marked ready and renamed into place.
+ *
+ * A second prepare of the same tree waits for the lock and then finds the
+ * tree ready. A tree directory without `.ready` holds nothing anyone can
+ * build from -- every prepare that ends early leaves one, and a rename onto
+ * it fails -- so it is removed and made again. `wait` bounds the wait for the
+ * lock, in seconds. `at` names each step to a test that has to stop a prepare
+ * between two of them; a prepare passes nothing.
+ */
+export function prepare({
+  root = ROOT,
+  cache = cacheRoot(),
+  list = patches(),
+  fetch = fetchTree,
+  wait = LOCK_WAIT_SECONDS,
+  at = () => {},
+} = {}) {
+  if (usesLocalSkia(root)) return null;
+  const version = lockedVersion(root);
+  const name = treeName(root, list);
+  const tree = join(cache, name);
   if (existsSync(join(tree, READY))) return sourceDir(tree);
 
-  const partial = `${tree}.partial`;
-  rmSync(partial, { recursive: true, force: true });
-  const checkout = join(partial, "rust-skia");
-  const created = patches().flatMap((patch) =>
-    patchCreates(readFileSync(join(ROOT, patch), "utf8")),
-  );
-  const base = derive(cacheRoot(), partial, lockedVersion(), created);
-  if (base) console.error(`skia-source: derived ${treeName()} from ${base}`);
-  else fetchTree(partial, checkout);
+  const unlock = lockTree(cache, name, { wait });
+  try {
+    // Another prepare may have made it while this one waited.
+    if (existsSync(join(tree, READY))) return sourceDir(tree);
+    if (existsSync(tree)) {
+      console.error(
+        `skia-source: removing ${name}, which an earlier prepare left unfinished`,
+      );
+      rmSync(tree, { recursive: true, force: true });
+    }
+    const partial = `${tree}.partial`;
+    rmSync(partial, { recursive: true, force: true });
+    at("removed");
+    const checkout = join(partial, "rust-skia");
+    const created = list.flatMap((patch) =>
+      patchCreates(readFileSync(join(root, patch), "utf8")),
+    );
+    const base = derive(cache, partial, version, created);
+    if (base) console.error(`skia-source: derived ${name} from ${base}`);
+    else fetch(partial, checkout, version, name);
+    at("derived");
 
-  applyPatches(checkout);
-  writeFileSync(join(partial, READY), `${lockedVersion()}\n`);
-  renameSync(partial, tree);
+    applyPatches(checkout, list, root);
+    at("patched");
+    writeFileSync(join(partial, READY), `${version}\n`);
+    renameSync(partial, tree);
+  } finally {
+    unlock();
+  }
 
-  // This checkout is one of the worktrees, so the new tree is kept with them.
-  removeSuperseded(cacheRoot(), treesToKeep());
+  // The worktrees name the trees of their own platform's patches, this
+  // checkout among them, so a tree made from another `list` is none of
+  // theirs: it is kept by name, or it would be removed as soon as it was
+  // made, and the path returned would name nothing.
+  const keep = treesToKeep(root, cache);
+  keep?.add(name);
+  removeSuperseded(cache, keep);
   return sourceDir(tree);
 }
 
@@ -955,13 +1002,138 @@ export function cacheKey(root = ROOT, platform = process.platform) {
 }
 
 /**
+ * How long `prepare` waits for another prepare of the same tree before it
+ * gives up: a fetch is about 1 GB, so a holder can be at work for minutes.
+ */
+const LOCK_WAIT_SECONDS = 30 * 60;
+/** How often a waiting `prepare` looks again. */
+const LOCK_POLL_SECONDS = 1;
+/**
+ * How long a lock file with no owner in it can stand before it counts as its
+ * holder's, who ended between creating and writing it: the write follows the
+ * create at once, so a few seconds is far past any live holder's.
+ */
+const LOCK_UNWRITTEN_SECONDS = 10;
+
+function locksDir(cache) {
+  return join(cache, "locks");
+}
+
+/** What a lock holds: its holder's PID and start time, as `running` takes them. */
+function lockOwner(pid = process.pid) {
+  return `${pid}\n${startTime(pid)}\n`;
+}
+
+/** When the file at `path` was last written, in ms, or now where it is gone. */
+function mtime(path) {
+  try {
+    return statSync(path).mtimeMs;
+  } catch (error) {
+    if (error.code === "ENOENT") return Date.now();
+    throw error;
+  }
+}
+
+/** The lock file at `path`, read, or null where there is none to read. */
+function readLock(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/**
+ * Takes the lock on the tree `name` under `cache` -- `<cache>/locks/<name>`,
+ * created only where absent, holding this process's PID and start time -- and
+ * returns the function that releases it.
+ *
+ * Two prepares of one tree work in one `<name>.partial`, so without it they
+ * remove, copy, patch and rename one another's work (#566). A holder that has
+ * ended, or whose PID now runs a process started at another time, holds
+ * nothing: its lock is moved aside and taken. Moving it aside rather than
+ * removing it means two waiters taking over at once cannot remove each
+ * other's new lock: the one that finds a live lock where it moved the stale
+ * one puts it back. A live holder is waited for, for `wait` seconds at most.
+ */
+export function lockTree(
+  cache,
+  name,
+  { wait = LOCK_WAIT_SECONDS, poll = LOCK_POLL_SECONDS } = {},
+) {
+  mkdirSync(locksDir(cache), { recursive: true });
+  const path = join(locksDir(cache), name);
+  const mine = lockOwner();
+  const end = Date.now() + wait * 1000;
+  let said = false;
+  for (;;) {
+    try {
+      writeFileSync(path, mine, { flag: "wx" });
+      return () => {
+        if (readLock(path) === mine) rmSync(path, { force: true });
+      };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    const held = readLock(path);
+    if (held === null) continue;
+    const [pid, started = ""] = held.split("\n");
+    const ended = /^\d+$/.test(pid)
+      ? !running(Number(pid), started)
+      : Date.now() - mtime(path) > LOCK_UNWRITTEN_SECONDS * 1000;
+    if (ended) {
+      const aside = `${path}.${process.pid}`;
+      try {
+        renameSync(path, aside);
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw error;
+      }
+      if (readLock(aside) === held) {
+        console.error(
+          `skia-source: took over the lock on ${name} from ${pid}, which has ended`,
+        );
+        rmSync(aside, { force: true });
+      } else {
+        // A live holder's lock, which took the stale one's place between the
+        // read and the move: put back where nothing has taken its place since.
+        try {
+          linkSync(aside, path);
+        } catch (error) {
+          if (error.code !== "EEXIST") throw error;
+        }
+        rmSync(aside, { force: true });
+      }
+      continue;
+    }
+    if (Date.now() >= end)
+      throw new Error(
+        `skia-source: ${name} is still being prepared by ${pid} (started ${started || "at an unknown time"}) after ${wait} s; if that process is not preparing it, remove ${path}`,
+      );
+    if (!said) {
+      console.error(
+        `skia-source: waiting for ${pid} (started ${started || "at an unknown time"}), which is preparing ${name}`,
+      );
+      said = true;
+    }
+    sleep(poll);
+  }
+}
+
+/**
  * Fetches rust-skia at the locked tag into `checkout`, with Skia's DEPS and
  * gn: about 1 GB, said so on stderr before it starts, because nothing else
  * would show a build that is waiting on it.
  */
-function fetchTree(partial, checkout) {
+function fetchTree(
+  partial,
+  checkout,
+  version = lockedVersion(),
+  name = treeName(),
+) {
   console.error(
-    `skia-source: no tree for ${lockedVersion()} to derive ${treeName()} ` +
+    `skia-source: no tree for ${version} to derive ${name} ` +
       "from; fetching rust-skia, Skia's dependencies and gn, about 1 GB",
   );
   // A clone that failed part way leaves a directory git will not clone into,
@@ -974,7 +1146,7 @@ function fetchTree(partial, checkout) {
       "--depth",
       "1",
       "--branch",
-      lockedVersion(),
+      version,
       "--recurse-submodules",
       "--shallow-submodules",
       "-j8",
