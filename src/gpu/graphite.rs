@@ -316,9 +316,10 @@ mod absent {
 
 #[cfg(test)]
 mod tests {
-    use skia_safe::{AlphaType, ColorSpace, ColorType, surfaces};
+    use skia_safe::{AlphaType, ColorSpace, ColorType};
 
     use super::*;
+    use crate::started;
 
     fn f32_info() -> ImageInfo {
         ImageInfo::new(
@@ -340,7 +341,7 @@ mod tests {
             make_surface(&info, &ExportOptions::default()).err(),
             Some(GraphiteRead::NotBuilt.to_string())
         );
-        let mut raster = surfaces::raster(&info, None, None).expect("raster");
+        let mut raster = started::raster(&info, None, None).expect("raster");
         let mut dst = vec![0u8; info.compute_min_byte_size()];
         assert!(!owns(&mut raster));
         assert_eq!(commit(true), Err(GraphiteRead::NotBuilt));
@@ -368,7 +369,7 @@ mod tests {
         std::thread::spawn(|| {
             let info = f32_info();
             let mut raster =
-                surfaces::raster(&info, None, None).expect("raster");
+                started::raster(&info, None, None).expect("raster");
             let mut dst = vec![0u8; info.compute_min_byte_size()];
             assert!(!owns(&mut raster));
             assert_eq!(commit(false), Err(GraphiteRead::NoContext));
