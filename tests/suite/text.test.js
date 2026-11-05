@@ -2362,32 +2362,117 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     );
   });
 
-  test("a family's face for plain text does not depend on the order its faces came in", () => {
+  test("a family's face for a style does not depend on the order its faces came in", () => {
     // Two pairs of faces, each loaded both ways round. The flagged one is told
     // apart from the upright face only by `fsSelection` bit 9, so CoreText
     // reports the two alike -- as DirectWrite does any face flagged oblique --
     // and Skia's matcher keeps whichever was registered first. RecursiveStatic
     // is the control: its oblique face states an `italicAngle`, every platform
-    // reports it slanted, and nothing ties.
-    const UP = `${R}/Recursive-upright-subset.ttf`;
-    FontLibrary.use("PlainOrderUpright", [UP]);
-    const upright = pixels("200px PlainOrderUpright");
-    const wrong = [];
-    for (const [name, leaning] of [
+    // reports it slanted, and nothing ties. Plain text takes the upright face;
+    // `oblique` and `italic` take the face that leans, as it is drawn on its
+    // own, since CSS Fonts 4 section 5.2 falls back from italic to an oblique
+    // face before it synthesises one.
+    const pairs = [
       ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
       ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
-    ]) {
+    ];
+    FontLibrary.use("OrderUpright", [`${R}/Recursive-upright-subset.ttf`]);
+    const wrong = [];
+    for (const [name, leaning] of pairs) {
+      FontLibrary.use(`Order${name}Alone`, [leaning]);
+      const upright = pixels("200px OrderUpright");
+      const leans = pixels(`200px Order${name}Alone`);
+      if (!pixels(`italic 200px Order${name}Alone`).equals(leans))
+        wrong.push(`${name} alone: "italic 200px" draws the face as it is`);
       for (const [order, files] of [
-        ["upright first", [UP, leaning]],
-        ["leaning first", [leaning, UP]],
+        ["upright first", [`${R}/Recursive-upright-subset.ttf`, leaning]],
+        ["leaning first", [leaning, `${R}/Recursive-upright-subset.ttf`]],
       ]) {
-        const family = `PlainOrder${name}${order === "upright first" ? "U" : "L"}`;
+        const family = `Order${name}${order === "upright first" ? "U" : "L"}`;
         FontLibrary.use(family, files);
-        if (!pixels(`200px ${family}`).equals(upright))
-          wrong.push(`${name}, ${order}: "200px" draws the upright face`);
+        for (const [style, want, face] of [
+          ["", upright, "upright"],
+          ["oblique ", leans, "leaning"],
+          ["italic ", leans, "leaning"],
+        ]) {
+          if (!pixels(`${style}200px ${family}`).equals(want))
+            wrong.push(
+              `${name}, ${order}: "${style}200px" draws the ${face} face as it is`,
+            );
+        }
       }
     }
+    // A family with an italic face beside the tie keeps it for `italic`, and
+    // still takes the oblique face for `oblique`: CSS Fonts 4 section 5.2
+    // looks for italic faces first for one and oblique faces first for the
+    // other.
+    const RALEWAY_ITALIC =
+      "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf";
+    FontLibrary.use("OrderItalicAlone", [RALEWAY_ITALIC]);
+    FontLibrary.use("OrderMixed", [
+      `${R}/Recursive-oblique-flag-subset.ttf`,
+      `${R}/Recursive-upright-subset.ttf`,
+      RALEWAY_ITALIC,
+    ]);
+    if (
+      !pixels("italic 200px OrderMixed").equals(
+        pixels("italic 200px OrderItalicAlone"),
+      )
+    )
+      wrong.push('with an italic face: "italic 200px" draws the italic face');
+    if (
+      !pixels("oblique 200px OrderMixed").equals(
+        pixels("200px OrderFlaggedAlone"),
+      )
+    )
+      wrong.push('with an italic face: "oblique 200px" draws the oblique face');
     assert.deepEqual(wrong, []);
+  });
+
+  test("a face flagged oblique is reported slanted", () => {
+    // RecursiveStatic's oblique face is flagged by `fsSelection` bit 9 and
+    // states an `italicAngle` of -12. CoreText reports it italic, FreeType and
+    // the Windows binaries' patched DirectWrite port oblique; an unpatched
+    // DirectWrite port reports it upright.
+    const styles = FontLibrary.family("RecursiveStatic").styles;
+    assert.ok(
+      styles.some((style) => style !== "normal"),
+      `RecursiveStatic lists a slanted face: ${JSON.stringify(styles)}`,
+    );
+  });
+
+  test("an upright face alone is still skewed for italic", () => {
+    // The skew is skipped only for a face whose own tables say it leans.
+    FontLibrary.use("SkewUpright", [`${R}/Recursive-upright-subset.ttf`]);
+    near(stem("italic 200px SkewUpright").slope, -0.25, 0.005, "italic");
+    near(stem("200px SkewUpright").slope, 0, 0.005, "upright");
+  });
+
+  test("the name a family's oblique faces are asked for by is not a family", () => {
+    // `FontLibrary::slanted` sends a slanted style to a second name holding a
+    // family's oblique faces. Nothing that lists or resolves families sees it.
+    FontLibrary.use("HiddenAliasFamily", [
+      `${R}/Recursive-oblique-flag-subset.ttf`,
+      `${R}/Recursive-upright-subset.ttf`,
+    ]);
+    const leaked = FontLibrary.families.filter((name) =>
+      /oblique faces of|private family/.test(name),
+    );
+    assert.deepEqual(leaked, []);
+    assert.deepEqual(FontLibrary.family("HiddenAliasFamily").styles, [
+      "normal",
+    ]);
+    const alias =
+      "meo-skia-canvas private family: oblique faces of HiddenAliasFamily";
+    assert.ok(!FontLibrary.has(alias), "the alias is not a registered family");
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = `200px "${alias}"`;
+    assert.ok(
+      !pixels(`200px "${alias}"`).equals(
+        pixels("oblique 200px HiddenAliasFamily"),
+      ),
+      "a canvas cannot name the alias and reach the oblique face",
+    );
   });
 
   // A sheared glyph is drawn in a sheared font, not under a sheared canvas:

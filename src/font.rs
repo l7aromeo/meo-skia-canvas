@@ -8,7 +8,7 @@ use std::{
 
 use parking_lot::Mutex;
 use skia_safe::{
-    FontMgr, FourByteTag, Typeface,
+    FontMgr, FontStyle, FourByteTag, Typeface,
     font_arguments::variation_position::Coordinate,
     font_parameters::variation::Axis, font_style::Slant,
     textlayout::TypefaceFontProvider,
@@ -24,7 +24,7 @@ use crate::{
     cache_map::{CacheMap, CacheSet},
     context2d::{FontSlant, FontStretch},
     error::Error,
-    node::font_library::FontLibrary as SharedFontRegistry,
+    node::font_library::{FontLibrary as SharedFontRegistry, oblique_alias},
 };
 
 pub(crate) mod caseless;
@@ -667,6 +667,20 @@ pub(crate) fn hides_its_lean(face: &Typeface) -> bool {
         && designed_oblique_angle(face).is_some()
 }
 
+/// `face`'s style with the slant its own tables give: `Oblique` for a face
+/// that [hides its lean](hides_its_lean), and the reported style otherwise.
+///
+/// What decides whether a run is synthesised: SkParagraph skews a run
+/// italic wherever the style asks for italic and the face is not, and a
+/// face that already leans is not to be leaned a second time.
+pub(crate) fn designed_style(face: &Typeface) -> FontStyle {
+    let style = face.font_style();
+    match hides_its_lean(face) {
+        true => FontStyle::new(style.weight(), style.width(), Slant::Oblique),
+        false => style,
+    }
+}
+
 /// The oblique angle `face` is instanced at on a `slnt` axis, in CSS
 /// degrees, or `None` where it has no such axis or sits upright on it.
 ///
@@ -1010,7 +1024,10 @@ struct FontManagerInner {
 impl FontManagerInner {
     /// Adds `face` under `family` and builds `provider` again from every
     /// face, in the order the shared library registers them -- see
-    /// `FontLibrary::in_registration_order` in `node::font_library`.
+    /// `FontLibrary::in_registration_order` in `node::font_library` -- and
+    /// with each face its tables flag oblique under its family's
+    /// [`oblique_alias`] too, which `FontLibrary::slanted` sends a
+    /// slanted style to.
     ///
     /// Built again rather than added to: a `TypefaceFontProvider` keeps
     /// faces in the order they arrived, and Skia's matcher keeps the first
@@ -1026,6 +1043,14 @@ impl FontManagerInner {
             .partition(|(face, _)| !hides_its_lean(face));
         for (face, family) in upright.into_iter().chain(leaning) {
             provider.register_typeface(face.clone(), Some(family.as_str()));
+        }
+        for (face, family) in &self.faces {
+            if designed_oblique_angle(face).is_some() {
+                provider.register_typeface(
+                    face.clone(),
+                    Some(oblique_alias(family).as_str()),
+                );
+            }
         }
         self.provider = provider;
     }

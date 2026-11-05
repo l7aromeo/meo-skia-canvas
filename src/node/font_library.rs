@@ -29,7 +29,7 @@ use crate::{
     context2d::{Font, FontFields, FontKey},
     font::{
         FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
-        designed_oblique_angle, hides_its_lean, optical_size,
+        designed_oblique_angle, designed_style, hides_its_lean, optical_size,
         quarantine::font_data,
     },
     image::x_height_ratio,
@@ -314,8 +314,9 @@ struct MatchFacts {
     variable: bool,
     /// Whether any face matched has an `opsz` axis.
     sized: bool,
-    /// The style of the first face matched: what a style that matches no
-    /// variable face is laid out in.
+    /// The style of the first face matched, with the slant its own tables
+    /// give -- see [`designed_style`]: what a style that matches no variable
+    /// face is laid out in.
     first: Option<FontStyle>,
 }
 
@@ -656,6 +657,34 @@ pub struct FontEpoch {
     fonts: Vec<(Typeface, Option<String>)>,
 }
 
+/// How a slanted style is laid out where its families hold a face that
+/// hides its lean -- see [`FontLibrary::slanted`].
+pub(crate) struct Slanted {
+    /// The families to ask for, each that needs it after its
+    /// [`oblique_alias`], or `None` where the style's own stand.
+    pub(crate) names: Option<Vec<String>>,
+    /// Whether an italic is laid out as an oblique: where the first of the
+    /// style's families this library holds has no italic face and a face
+    /// that hides its lean, which CSS Fonts 4 section 5.2 falls back to and
+    /// draws as it is. SkParagraph skews a run italic wherever the style asks
+    /// for italic and the face is not, so a face that already leans would be
+    /// leaned twice.
+    pub(crate) as_oblique: bool,
+}
+
+/// What [`FontLibrary::slanted`] needs to know of one family.
+struct FamilySlants {
+    /// Whether the library holds the family at all.
+    registered: bool,
+    /// Whether one of its faces hides its lean.
+    hides: bool,
+    /// Whether such a face ties with an upright face of the family, and no
+    /// face of the family reports the slant asked for.
+    needs_alias: bool,
+    /// Whether a face of the family reports itself italic.
+    reports_italic: bool,
+}
+
 pub struct FontLibrary {
     mgr: FontMgr,
     /// The registered fonts as they stand, shared with what is laid out
@@ -724,6 +753,30 @@ fn private_alias(claimed: &str) -> String {
     format!("{PRIVATE_ALIAS_PREFIX}{claimed}")
 }
 
+/// The second name each face of `family` that its tables flag oblique is
+/// registered under, and the name an italic or oblique request for `family`
+/// is sent to first where one of those faces hides its lean -- see
+/// [`FontLibrary::slanted`].
+///
+/// A family of its own because Skia's matcher scores on the style a
+/// platform reports and nothing else, and keeps the face registered first of
+/// any it scores alike: within `family`, a face reported upright that leans
+/// by its tables answers every request the same as the upright face it ties
+/// with. Asked for by this name it is the only kind of face there, so an
+/// oblique request finds it whichever was loaded first. Never in
+/// `self.fonts`, for the reasons on [`FontLibrary::claimed_families`], so
+/// nothing that lists or resolves families reports it.
+///
+/// No font names its own family with [`PRIVATE_ALIAS_PREFIX`], and a family a
+/// caller asks for by a name starting with it is asked for by
+/// [`unmatched_name`] unless one was registered under that name -- see
+/// [`FontLibrary::collection_names`] -- so neither a face's family nor a
+/// typed name reaches this one. A caller registering under such a name
+/// itself is [`private_alias`]'s deliberate non-guard.
+pub(crate) fn oblique_alias(family: &str) -> String {
+    private_alias(&format!("oblique faces of {family}"))
+}
+
 /// The name a generic family's faces are registered under in a collection,
 /// and asked for by: its keyword after [`PRIVATE_ALIAS_PREFIX`].
 ///
@@ -761,6 +814,11 @@ fn register_under(
 /// The name a family that spells a generic keyword is asked for by where no
 /// family of that name exists: one nothing is registered under, so the list
 /// moves on to its next family, as CSS has a missing family do.
+///
+/// Also the name a caller's family is asked for by where it spells one of
+/// this library's own names -- it starts with [`PRIVATE_ALIAS_PREFIX`] and
+/// no family was registered under it -- so that a family list cannot reach
+/// the faces filed under a generic's or an [`oblique_alias`].
 pub(crate) fn unmatched_name(family: &str) -> String {
     private_alias(&format!("unmatched {family}"))
 }
@@ -985,6 +1043,10 @@ impl FontLibrary {
         // back a typeable name with an unexplained rendering.
         for (font, alias) in self.in_registration_order() {
             register_under(&mut assets, font.clone(), alias.as_deref());
+        }
+        for (font, family) in self.oblique_faces() {
+            assets
+                .register_typeface(font, Some(oblique_alias(&family).as_str()));
         }
 
         let mut style_set =
@@ -1613,7 +1675,10 @@ impl FontLibrary {
     /// family name by CSS Fonts 4 -- is passed on only where a family of that
     /// name exists, and otherwise by [`unmatched_name`]: fontconfig answers
     /// `serif`, `sans-serif` and `monospace` with faces of its choosing,
-    /// which would draw a quoted "serif" as the generic it is not. Any other
+    /// which would draw a quoted "serif" as the generic it is not. A name
+    /// that starts with [`PRIVATE_ALIAS_PREFIX`] and names no registered
+    /// family goes by [`unmatched_name`] too, so that the names this library
+    /// files faces under cannot be typed. Any other
     /// name is passed as it is and left to the platform, whose own aliases
     /// stand -- Chrome on Linux takes fontconfig's metric aliases too, such
     /// as Helvetica drawn in Nimbus Sans.
@@ -1631,6 +1696,9 @@ impl FontLibrary {
                     None if GenericFamily::from_css(name).is_some()
                         && !self.has_family(name) =>
                     {
+                        unmatched_name(name)
+                    }
+                    None if name.starts_with(PRIVATE_ALIAS_PREFIX) => {
                         unmatched_name(name)
                     }
                     None => name.clone(),
@@ -1663,6 +1731,9 @@ impl FontLibrary {
                     None if GenericFamily::from_css(name).is_some()
                         && !self.has_family(name) =>
                     {
+                        unmatched_name(name)
+                    }
+                    None if name.starts_with(PRIVATE_ALIAS_PREFIX) => {
                         unmatched_name(name)
                     }
                     None => name.clone(),
@@ -1698,6 +1769,100 @@ impl FontLibrary {
         upright.into_iter().chain(leaning)
     }
 
+    /// Each registered face that its tables flag oblique, with the family it
+    /// was registered under: the faces [`oblique_alias`] names.
+    fn oblique_faces(&self) -> impl Iterator<Item = (Typeface, String)> + '_ {
+        self.fonts
+            .iter()
+            .filter(|(font, _)| designed_oblique_angle(font).is_some())
+            .map(|(font, alias)| {
+                let family =
+                    alias.clone().unwrap_or_else(|| font.family_name());
+                (font.clone(), family)
+            })
+    }
+
+    /// How a style asking for `slant` in `names`, its families as
+    /// [`collection_names`](Self::collection_names) gave them, is laid out
+    /// where one of those families has a face that [hides its
+    /// lean](hides_its_lean) -- see [`Slanted`]; `None` where none does, or
+    /// `slant` is upright.
+    ///
+    /// Skia cannot pick such a face for a slanted request when it ties with
+    /// an upright face of the family, since it scores the two alike and
+    /// [`in_registration_order`](Self::in_registration_order) puts the
+    /// upright one first. So a family with a tie and no face reporting
+    /// `slant` is asked for after its [`oblique_alias`]: CSS Fonts 4 section
+    /// 5.2 matches an oblique request against oblique faces first, and falls
+    /// back from italic to oblique before it synthesises. The family stays in
+    /// the list behind its alias, for any glyph its oblique faces lack. A
+    /// family whose faces report their slants -- RecursiveStatic's, or any
+    /// on FreeType -- is left as it was.
+    pub(crate) fn slanted(
+        &self,
+        names: &[String],
+        slant: Slant,
+    ) -> Option<Slanted> {
+        if slant == Slant::Upright {
+            return None;
+        }
+        let facts = |name: &String| {
+            let faces: Vec<&Typeface> = self
+                .fonts
+                .iter()
+                .filter(|(font, alias)| {
+                    alias
+                        .as_ref()
+                        .map_or_else(|| font.family_name(), String::clone)
+                        == *name
+                })
+                .map(|(font, _)| font)
+                .collect();
+            let hiding: Vec<&&Typeface> =
+                faces.iter().filter(|face| hides_its_lean(face)).collect();
+            let ties = hiding.iter().any(|hidden| {
+                faces.iter().any(|face| {
+                    !hides_its_lean(face)
+                        && designed_oblique_angle(face).is_none()
+                        && face.font_style() == hidden.font_style()
+                })
+            });
+            let reports = |wanted| {
+                faces.iter().any(|face| face.font_style().slant() == wanted)
+            };
+            FamilySlants {
+                registered: !faces.is_empty(),
+                hides: !hiding.is_empty(),
+                needs_alias: ties && !reports(slant),
+                reports_italic: reports(Slant::Italic),
+            }
+        };
+        let families: Vec<FamilySlants> = names.iter().map(facts).collect();
+        if !families.iter().any(|family| family.hides) {
+            return None;
+        }
+        let as_oblique = slant == Slant::Italic
+            && families
+                .iter()
+                .find(|family| family.registered)
+                .is_some_and(|family| family.hides && !family.reports_italic);
+        let names =
+            families.iter().any(|family| family.needs_alias).then(|| {
+                names
+                    .iter()
+                    .zip(&families)
+                    .flat_map(|(name, family)| {
+                        family
+                            .needs_alias
+                            .then(|| oblique_alias(name))
+                            .into_iter()
+                            .chain(iter::once(name.clone()))
+                    })
+                    .collect()
+            });
+        Some(Slanted { names, as_oblique })
+    }
+
     /// The name a registered family is filed under, where `name` is that
     /// family in another case.
     ///
@@ -1725,6 +1890,12 @@ impl FontLibrary {
     /// promise about fonts rather than a record of one.
     pub fn resolve(&mut self, mut spec: FontSpec) -> Option<ResolvedFont> {
         spec.collection_names = self.collection_names(&spec.families);
+        if let Some(names) = self
+            .slanted(&spec.collection_names, spec.style().slant())
+            .and_then(|slanted| slanted.names)
+        {
+            spec.collection_names = names;
+        }
         let typeface = self
             .face_collection()
             .find_typefaces(&spec.collection_names, spec.style())
@@ -1917,8 +2088,9 @@ impl FontLibrary {
         self
     }
 
-    /// The collection a style should be laid out with, and the face the
-    /// style matched first.
+    /// The collection a style should be laid out with, and the style of the
+    /// face it matched first, with the slant that face's own tables give --
+    /// see [`designed_style`].
     ///
     /// Two answers from one search. Skia's paragraph builder synthesises a
     /// bold or an italic where the face it finds is not the weight or slant
@@ -2001,7 +2173,7 @@ impl FontLibrary {
                 .clone()
                 .find_typefaces(&families, style.font_style())
                 .first()
-                .map(Typeface::font_style);
+                .map(designed_style);
             self.collection_cache
                 .insert(key, collection.clone(), matched);
             (collection, matched)
@@ -2050,7 +2222,7 @@ impl FontLibrary {
         let facts = MatchFacts {
             variable,
             sized,
-            first: matches.first().map(Typeface::font_style),
+            first: matches.first().map(designed_style),
         };
         if remember {
             if self.matches.len() >= MATCHES_KEPT {

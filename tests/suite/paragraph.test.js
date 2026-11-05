@@ -1819,30 +1819,59 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     }
   });
 
-  test("an upright range's face does not depend on the order the faces came in", () => {
-    // The canvas test of the same name, for Paragraph ranges.
+  test("a range's face for its slant does not depend on the order the faces came in", () => {
+    // The canvas test of the same name, for Paragraph ranges: the flagged face
+    // ties with the upright one where its platform reports it upright, and
+    // RecursiveStatic is the control that never ties.
+    const pairs = [
+      ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
+      ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
+    ];
     const UP = `${R}/Recursive-upright-subset.ttf`;
-    FontLibrary.use("ParagraphPlainUpright", [UP]);
-    const upright = paragraph("ParagraphPlainUpright", [
+    FontLibrary.use("ParagraphOrderUpright", [UP]);
+    const upright = paragraph("ParagraphOrderUpright", [
       ["IH", slanted(UPRIGHT)],
     ]);
     const wrong = [];
-    for (const [name, leaning] of [
-      ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
-      ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
-    ]) {
+    for (const [name, leaning] of pairs) {
+      FontLibrary.use(`ParagraphOrder${name}Alone`, [leaning]);
+      const leans = paragraph(`ParagraphOrder${name}Alone`, [
+        ["IH", slanted(UPRIGHT)],
+      ]);
+      if (
+        !same(
+          paragraph(`ParagraphOrder${name}Alone`, [["IH", slanted(ITALIC)]]),
+          leans,
+        )
+      )
+        wrong.push(`${name} alone: an italic range draws the face as it is`);
       for (const [order, files] of [
         ["upright first", [UP, leaning]],
         ["leaning first", [leaning, UP]],
       ]) {
-        const family = `ParagraphPlain${name}${order === "upright first" ? "U" : "L"}`;
+        const family = `ParagraphOrder${name}${order === "upright first" ? "U" : "L"}`;
         FontLibrary.use(family, files);
-        if (!same(paragraph(family, [["IH", slanted(UPRIGHT)]]), upright))
-          wrong.push(
-            `${name}, ${order}: an upright range draws the upright face`,
-          );
+        for (const [label, slant, want] of [
+          ["an upright", UPRIGHT, upright],
+          ["an oblique", OBLIQUE, leans],
+          ["an italic", ITALIC, leans],
+        ]) {
+          if (!same(paragraph(family, [["IH", slanted(slant)]]), want))
+            wrong.push(
+              `${name}, ${order}: ${label} range draws the face that is`,
+            );
+        }
       }
     }
+    // An upright face alone is still skewed for an italic range: the skew is
+    // skipped only for a face whose own tables say it leans.
+    if (
+      same(
+        paragraph("ParagraphOrderUpright", [["IH", slanted(ITALIC)]]),
+        upright,
+      )
+    )
+      wrong.push("an upright face alone: an italic range is skewed");
     assert.deepEqual(wrong, []);
   });
 

@@ -168,7 +168,7 @@ export const PATCHES = {
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-    // Re-check: node scripts/test.mjs tests/suite/text.test.js on Windows, against a binary built from a tree prepared without this patch; "an oblique face of the angle's sign is drawn as it is" draws the upright face sheared for a positive angle
+    // Re-check: node scripts/test.mjs tests/suite/text.test.js on Windows, against a binary built from a tree prepared without this patch; "a face flagged oblique is reported slanted" fails
     //
     // Skia's DirectWrite port takes a face's slant from DirectWrite alone
     // (`DWriteFontTypeface::GetStyle`), and DirectWrite reports a face
@@ -177,6 +177,10 @@ export const PATCHES = {
     // Windows such a face matched as its family's upright one: an oblique
     // request got the upright face sheared rather than the oblique face CSS
     // Fonts 4 matches. The patch reads the bit as the FreeType port does.
+    // Text chooses between such faces from their own tables now --
+    // `FontLibrary::slanted` in src/node/font_library.rs -- so what the patch
+    // still earns is the slant reported: what `FontLibrary.family().styles`
+    // lists, and what an SVG document's `font-style` is matched against.
     join("containers", "skia-dwrite-oblique.patch"),
   ],
 };

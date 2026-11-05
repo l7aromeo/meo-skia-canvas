@@ -1007,6 +1007,31 @@ fn parse_text_style<'a>(
         style.set_half_leading(half);
     }
 
+    // A slanted style asks for its families' oblique faces first, where a
+    // family has one its platform reports upright -- see
+    // `FontLibrary::slanted`. Here rather than beside `fontFamilies`,
+    // because the slant is read after the families. An italic sent there is
+    // laid out as the oblique it falls back to: SkParagraph skews a run
+    // italic wherever the style asks for italic and the face is not, and
+    // these faces lean already.
+    let families: Vec<String> =
+        style.font_families().iter().map(str::to_string).collect();
+    let font_style = style.font_style();
+    if let Some(slanted) = FontLibrary::with_shared(|lib| {
+        lib.slanted(&families, font_style.slant())
+    }) {
+        if let Some(names) = &slanted.names {
+            style.set_font_families(names);
+        }
+        if slanted.as_oblique {
+            style.set_font_style(FontStyle::new(
+                font_style.weight(),
+                font_style.width(),
+                Slant::Oblique,
+            ));
+        }
+    }
+
     Ok((style, oblique, fraction, colours))
 }
 

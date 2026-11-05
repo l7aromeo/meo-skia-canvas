@@ -90,8 +90,9 @@ cap, the triangulation tolerance, the Graphite bindings and
 `containers/skia-dwrite-oblique.patch`. The last makes Skia's DirectWrite port
 read `OS/2` `fsSelection` bit 9 as its FreeType port does: DirectWrite reports
 a face flagged oblique only by that bit as upright, so the family's upright
-face and its oblique one matched alike, and an oblique request drew the
-upright face sheared.
+face and its oblique one are reported alike. Text chooses between such faces
+from their tables either way; the patch makes the reported slant right, which
+`FontLibrary.family().styles` and an SVG document's `font-style` go by.
 
 **Build through `just`.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe, and

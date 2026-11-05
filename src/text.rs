@@ -2529,13 +2529,24 @@ fn fill_text_style(
     }
 
     sk_style.set_font_size(style.font_size);
+    let mut as_oblique = false;
     if !style.font_families.is_empty() {
         // The names instancing found the faces by, where it ran.
         let names = match &instance.names {
             Some(names) => names.clone(),
             None => collection_names(&style.font_families),
         };
-        sk_style.set_font_families(&names);
+        // A slanted style asks for its families' oblique faces first, where
+        // a family has one its platform reports upright -- see
+        // `FontLibrary::slanted`.
+        let leaning = SharedFontRegistry::with_shared(|library| {
+            library.slanted(&names, font_style_for(style).slant())
+        });
+        as_oblique = leaning.as_ref().is_some_and(|slanted| slanted.as_oblique);
+        match leaning.and_then(|slanted| slanted.names) {
+            Some(names) => sk_style.set_font_families(&names),
+            None => sk_style.set_font_families(&names),
+        };
     }
     // Pinned to the weight the instance has. Skia fakes a bold wherever the
     // weight asked for is 200 or more above the face's, and an instance is
@@ -2549,6 +2560,16 @@ fn fill_text_style(
             Weight::from(weight),
             font_style.width(),
             font_style.slant(),
+        );
+    }
+    // An italic is laid out as the oblique it falls back to where
+    // `Slanted::as_oblique` says so: SkParagraph skews a run italic
+    // wherever the style asks for italic and the face is not.
+    if as_oblique {
+        font_style = FontStyle::new(
+            font_style.weight(),
+            font_style.width(),
+            Slant::Oblique,
         );
     }
     sk_style.set_font_style(font_style);
@@ -2831,32 +2852,45 @@ mod tests {
     }
 
     /// A family whose oblique face is told from its upright face only by
-    /// `fsSelection` bit 9 draws its upright face for upright text whichever
-    /// of the two was registered first. CoreText reports that face upright,
-    /// and so does DirectWrite through crates.io's Skia, which the crate
-    /// builds against on Windows; Skia's matcher scores the two alike and
-    /// keeps the one registered first.
+    /// `fsSelection` bit 9 draws the same face for each slant whichever of
+    /// the two was registered first: upright for upright, and the oblique
+    /// face as it is for an oblique or an italic. CoreText reports that face
+    /// upright, and so does DirectWrite through crates.io's Skia, which the
+    /// crate builds against on Windows; Skia's matcher scores the two alike
+    /// and keeps the one registered first.
     #[test]
-    fn a_family_draws_its_upright_face_in_either_load_order() {
+    fn a_family_draws_the_same_face_for_a_slant_in_either_load_order() {
         const UPRIGHT: &str =
             "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf";
         const FLAGGED: &str =
             "tests/assets/fonts/Recursive/Recursive-oblique-flag-subset.ttf";
         let upright =
-            drawn_at("CratePlainUpright", &[UPRIGHT], TextSlant::Upright);
-        let flagged =
-            drawn_at("CratePlainFlagged", &[FLAGGED], TextSlant::Upright);
-        assert_ne!(upright, flagged, "the two faces draw differently");
+            drawn_at("CrateOrderUpright", &[UPRIGHT], TextSlant::Upright);
+        let leans =
+            drawn_at("CrateOrderFlagged", &[FLAGGED], TextSlant::Upright);
+        assert_ne!(upright, leans, "the two faces draw differently");
+        let mut wrong = Vec::new();
         for (order, files) in [
             ("upright first", [UPRIGHT, FLAGGED]),
             ("flagged first", [FLAGGED, UPRIGHT]),
         ] {
-            let family = format!("CratePlain {order}");
-            assert!(
-                drawn_at(&family, &files, TextSlant::Upright) == upright,
-                "{order}: upright text draws the upright face"
-            );
+            let family = format!("CrateOrder {order}");
+            for (slant, want) in [
+                (TextSlant::Upright, &upright),
+                (TextSlant::OBLIQUE, &leans),
+                (TextSlant::Italic, &leans),
+            ] {
+                if &drawn_at(&family, &files, slant) != want {
+                    wrong.push(format!("{order}: {slant:?}"));
+                }
+            }
         }
+        assert!(
+            drawn_at("CrateOrderFlaggedItalic", &[FLAGGED], TextSlant::Italic)
+                == leans,
+            "an italic of the flagged face alone draws it as it is"
+        );
+        assert!(wrong.is_empty(), "drew the wrong face: {wrong:?}");
     }
 
     /// Whether skia-safe still turns an empty family list into a slice
