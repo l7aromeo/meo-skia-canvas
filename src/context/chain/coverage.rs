@@ -15,16 +15,18 @@
 //! It costs a quarter of the chain's sums and none of its conversions.
 
 use skia_safe::{
-    AlphaType, Canvas as SkCanvas, ColorType, IRect, ImageInfo, Matrix, Rect,
-    Surface,
+    AlphaType, Canvas as SkCanvas, ClipOp, ColorType, IRect, ISize, ImageInfo,
+    Matrix, Rect, Surface, image::RequiredProperties,
+    surface::ContentChangeMode,
 };
 
 use super::{
     Depth, Outcome, Step, clear_unless_zeroed, layer_info, layer_surface,
-    placed, region, split,
+    placed, pool, region, split, trims_composite,
 };
 use crate::{
     context::{blur_mask::baked_image, exact_blur},
+    gpu::{RenderingEngine, engine_of},
     started,
 };
 
@@ -51,16 +53,16 @@ thread_local! {
 }
 
 /// Writes the alpha of `surface`'s pixels in `read` into `rows`, one row of
-/// `read` each, as each byte's value. A raster surface's pixels are read
-/// where they lie where each holds its alpha as a byte -- an A8 plane, or a
-/// premultiplied or unpremultiplied RGBA or BGRA one -- which takes the byte
-/// `read_pixels` to A8 would copy, without its conversion or a copy of the
-/// plane. Any other surface goes through `read_pixels`. `false` where the
-/// pixels cannot be read.
+/// `read` each. A raster surface's pixels are read where they lie where each
+/// holds its alpha as a byte -- an A8 plane, or a premultiplied or
+/// unpremultiplied RGBA or BGRA one -- which takes the byte `read_pixels` to
+/// A8 would copy, without its conversion or a copy of the plane. Any other
+/// surface goes through `read_pixels`. `false` where the pixels cannot be
+/// read.
 fn alpha_into<'a>(
     surface: &mut Surface,
     read: IRect,
-    rows: impl Iterator<Item = &'a mut [f32]>,
+    rows: impl Iterator<Item = &'a mut [u8]>,
 ) -> bool {
     let line = read.width() as usize;
     if let Some(pixmap) = surface.peek_pixels()
@@ -107,11 +109,10 @@ fn alpha_into<'a>(
 }
 
 /// Writes byte `AT` of each `STEP`-byte pixel of `bytes`, whose rows start
-/// `stride` bytes apart, into `rows` as its value. Each a constant, so that
-/// a row is read as fixed-size pixels and the compiler can take several at
-/// once.
+/// `stride` bytes apart, into `rows`. Each a constant, so that a row is read
+/// as fixed-size pixels and the compiler can take several at once.
 fn alpha_rows<'a, const STEP: usize, const AT: usize>(
-    rows: impl Iterator<Item = &'a mut [f32]>,
+    rows: impl Iterator<Item = &'a mut [u8]>,
     bytes: &[u8],
     stride: usize,
 ) {
@@ -119,7 +120,7 @@ fn alpha_rows<'a, const STEP: usize, const AT: usize>(
         let (pixels, _) = pixels.as_chunks::<STEP>();
         row.iter_mut()
             .zip(pixels)
-            .for_each(|(v, pixel)| *v = f32::from(pixel[AT]));
+            .for_each(|(v, pixel)| *v = pixel[AT]);
     });
 }
 
@@ -186,6 +187,74 @@ pub(crate) fn sharp(
     Coverage::of(canvas, sigma, content, plane, draw)
 }
 
+/// What a plane of kind `plane` for a draw on `canvas` holds over `drawn`:
+/// coverage alone, or a layer of the page's own type and space.
+fn plane_info(canvas: &SkCanvas, plane: Plane, drawn: IRect) -> ImageInfo {
+    match plane {
+        Plane::Drawn => ImageInfo::new(
+            drawn.size(),
+            ColorType::Alpha8,
+            AlphaType::Premul,
+            None,
+        ),
+        Plane::Alpha => layer_info(canvas, Depth::Bytes, drawn),
+    }
+}
+
+/// A plane of kind `plane` for a draw on `canvas` over `drawn`, kept for the
+/// rest of the playback -- see [`pool`] -- and whether a draw used it before:
+/// one kept from an earlier draw where one fits, and otherwise one made as
+/// the plane made for this draw alone would be, but as large as the page, so
+/// that the playback's later draws fit in it. Made by the canvas's own
+/// device, as that plane is, so in main memory and made with the canvas's
+/// props. `None` off the CPU, where planes are not kept, or where the canvas
+/// makes no plane.
+fn kept_plane(
+    canvas: &SkCanvas,
+    plane: Plane,
+    drawn: IRect,
+) -> Option<(Surface, bool)> {
+    match engine_of(canvas) {
+        RenderingEngine::CPU if pool::keeps_planes() => {}
+        RenderingEngine::CPU
+        | RenderingEngine::GPU
+        | RenderingEngine::Graphite => return None,
+    }
+    let info = plane_info(canvas, plane, drawn);
+    if let Some(kept) =
+        pool::take_plane(plane, &info, &canvas.base_props(), drawn.size())
+    {
+        return Some((kept, true));
+    }
+    let page = canvas.base_layer_size();
+    let size = ISize::new(
+        drawn.width().max(page.width),
+        drawn.height().max(page.height),
+    );
+    let mut surface = canvas.new_surface(&info.with_dimensions(size), None)?;
+    surface.peek_pixels()?;
+    Some((surface, false))
+}
+
+/// Sets every byte of `surface`'s pixels within `within` to zero:
+/// transparent black, as a plane made afresh holds, filled row by row where
+/// the rows lie. `None` where the pixels are not in main memory.
+fn zero_within(surface: &mut Surface, within: IRect) -> Option<()> {
+    surface.notify_content_will_change(ContentChangeMode::Retain);
+    let mut pixmap = surface.peek_pixels()?;
+    let step = pixmap.info().bytes_per_pixel();
+    let stride = pixmap.row_bytes();
+    let (left, right) =
+        (within.left as usize * step, within.right as usize * step);
+    pixmap
+        .bytes_mut()?
+        .chunks_mut(stride)
+        .skip(within.top as usize)
+        .take(within.height() as usize)
+        .for_each(|row| row[left..right].fill(0));
+    Some(())
+}
+
 impl Blurred {
     /// This blur, composited `by` whole device pixels from where it was
     /// made. A draw moved by whole pixels does not always cover the same --
@@ -200,10 +269,17 @@ impl Blurred {
     }
 }
 
-/// A draw's coverage before it is blurred: one float a pixel of `region`,
-/// a byte's value, and the device sigmas the blur takes along x and y.
+/// A draw's coverage before it is blurred: one byte a pixel of `region`, and
+/// the device sigmas the blur takes along x and y.
+///
+/// Bytes rather than the floats the blur takes, because a kept result is
+/// found by comparing a draw's coverage with the coverage it was made from
+/// -- see `run_mask::drawn` and `kept::CoverageInput` -- and a draw that finds
+/// one is never blurred: comparing and keeping bytes costs a quarter of the
+/// memory and none of the conversion, and [`Self::blurred`] widens them to
+/// the same floats.
 pub(crate) struct Coverage {
-    values: Vec<f32>,
+    bytes: Vec<u8>,
     region: IRect,
     rest: Matrix,
     sigma: (f32, f32),
@@ -236,12 +312,7 @@ impl Coverage {
         let surface = |drawn: IRect| {
             let surface = match plane {
                 Plane::Drawn => {
-                    let info = ImageInfo::new(
-                        drawn.size(),
-                        ColorType::Alpha8,
-                        AlphaType::Premul,
-                        None,
-                    );
+                    let info = plane_info(canvas, plane, drawn);
                     canvas
                         .new_surface(&info, None)
                         .or_else(|| started::raster(&info, None, None))
@@ -252,49 +323,73 @@ impl Coverage {
             };
             surface.map(|surface| (surface, drawn))
         };
-        // The region alone where a plane from the device's origin cannot be
-        // made, as `run` falls back for its layer.
-        let (mut surface, drawn) =
-            surface(drawn).or_else(|| surface(region))?;
-        clear_unless_zeroed(&mut surface);
+        // A plane kept from an earlier draw of the playback where there is
+        // one, and otherwise one made for this draw: the region alone where
+        // a plane from the device's origin cannot be made, as `run` falls
+        // back for its layer.
+        let (mut surface, drawn, kept) = match kept_plane(canvas, plane, drawn)
+        {
+            Some((surface, used)) => (surface, drawn, Some(used)),
+            None => {
+                let (surface, drawn) =
+                    surface(drawn).or_else(|| surface(region))?;
+                (surface, drawn, None)
+            }
+        };
+        let read = region.with_offset((-drawn.left, -drawn.top));
+        match kept {
+            // What an earlier draw left where this one is read.
+            Some(true) => zero_within(&mut surface, read)?,
+            Some(false) | None => clear_unless_zeroed(&mut surface),
+        }
         let offscreen = surface.canvas();
+        offscreen.save();
+        // A kept plane is larger than the one made for this draw would be,
+        // and Skia covers a path cut by a plane's edge otherwise than one it
+        // draws whole -- see `region` -- so the draw is cut where that plane
+        // would end.
+        offscreen.clip_irect(IRect::from_size(drawn.size()), ClipOp::Intersect);
         let origin = Matrix::translate((-drawn.left as f32, -drawn.top as f32));
         offscreen.set_matrix(&Matrix::concat(&origin, &layer).into());
         draw(offscreen);
-        // The region's coverage, as floats, on a plane of what the blur works
-        // on: +0.0 around it, where nothing is painted.
+        offscreen.restore_to_count(1);
+        offscreen.reset_matrix();
+        // The region's coverage on a plane of what the blur works on: zero
+        // around it, where nothing is painted.
         let (w, h) = (worked.width() as usize, worked.height() as usize);
-        let read = region.with_offset((-drawn.left, -drawn.top));
-        let mut values = vec![0.0f32; w * h];
+        let mut bytes = vec![0u8; w * h];
         let (dx, dy) = (
             (region.left - worked.left) as usize,
             (region.top - worked.top) as usize,
         );
         let line = read.width() as usize;
-        let rows = values[dy * w..]
+        let rows = bytes[dy * w..]
             .chunks_mut(w)
             .take(read.height() as usize)
             .map(|row| &mut row[dx..][..line]);
         if !alpha_into(&mut surface, read, rows) {
             return None;
         }
+        if kept.is_some() {
+            pool::keep_plane(plane, surface);
+        }
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
         Some(Coverage {
-            values,
+            bytes,
             region: worked,
             rest,
             sigma: (sigma * scale.0, sigma * scale.1),
         })
     }
 
-    /// Each pixel's coverage, a byte's value, row by row across
-    /// [`Self::region`]: the read rectangle's and +0.0 around it, out to
-    /// what the blur works on. Everything the blur reads but the sigmas.
-    pub(crate) fn values(&self) -> &[f32] {
-        &self.values
+    /// Each pixel's coverage, row by row across [`Self::region`]: the read
+    /// rectangle's and zero around it, out to what the blur works on.
+    /// Everything the blur reads but the sigmas.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
-    /// The device pixels [`Self::values`] cover: the read rectangle widened
+    /// The device pixels [`Self::bytes`] cover: the read rectangle widened
     /// by what the blur works on.
     pub(crate) fn region(&self) -> IRect {
         self.region
@@ -315,7 +410,7 @@ impl Coverage {
         let (w, h) =
             (self.region.width() as usize, self.region.height() as usize);
         let values = exact_blur::blur_alpha(
-            self.values,
+            self.bytes.iter().copied().map(f32::from).collect(),
             w,
             h,
             self.sigma.0,
@@ -345,11 +440,23 @@ pub(crate) fn coloured(
     let info = layer_info(canvas, Depth::Bytes, blurred.region);
     let bgra = info.color_type() == ColorType::BGRA8888;
     let w = blurred.region.width() as usize;
+    // The pixels that are not transparent black, as each is written: the
+    // blur's tails round to zero well inside the region it works on.
+    let mut inked = IRect::new_empty();
     let image = baked_image(&info, |out, stride| {
-        for (row, values) in
-            out.chunks_mut(stride).zip(blurred.values.chunks(w))
+        for (y, (row, values)) in out
+            .chunks_mut(stride)
+            .zip(blurred.values.chunks(w))
+            .enumerate()
         {
-            for (px, &b) in row.as_chunks_mut::<4>().0.iter_mut().zip(values) {
+            let (mut first, mut last) = (usize::MAX, 0);
+            for (x, (px, &b)) in row
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(values)
+                .enumerate()
+            {
                 let alpha = (b * gain + 0.5) as u8;
                 let scaled = f64::from(b) * f64::from(gain);
                 let [r, g, bl] =
@@ -358,14 +465,41 @@ pub(crate) fn coloured(
                     true => [bl, g, r, alpha],
                     false => [r, g, bl, alpha],
                 };
+                if *px != [0; 4] {
+                    first = first.min(x);
+                    last = x;
+                }
+            }
+            if first <= last {
+                let row = IRect::new(
+                    first as i32,
+                    y as i32,
+                    last as i32 + 1,
+                    y as i32 + 1,
+                );
+                inked = IRect::join(&inked, &row);
             }
         }
     })?;
-    Some(Outcome {
+    // The inked part alone is kept, copied out of the region: it is what a
+    // composite draws -- see `Outcome::composite`.
+    if !trims_composite() {
+        return Some(Outcome::whole(image, blurred.region, blurred.rest));
+    }
+    let image = match inked.is_empty() {
+        true => image,
+        false => image.make_subset(
+            None,
+            inked,
+            RequiredProperties { mipmapped: false },
+        )?,
+    };
+    Some(Outcome::with_inked(
         image,
-        region: blurred.region,
-        rest: blurred.rest,
-    })
+        blurred.region,
+        blurred.rest,
+        inked,
+    ))
 }
 
 #[cfg(test)]
@@ -533,16 +667,10 @@ mod tests {
                 line,
                 (read.left, read.top)
             ));
-            let mut got = vec![0.5f32; want.len()];
+            // Not zero, so that a row the read misses shows.
+            let mut got = vec![0x5au8; want.len()];
             let before = READ_IN_PLACE.with(|n| n.get());
             assert!(alpha_into(&mut surface, read, got.chunks_mut(line)));
-            let got: Vec<u8> = got
-                .iter()
-                .map(|&v| {
-                    assert_eq!(v.fract(), 0.0, "{colour:?}: a byte's value");
-                    v as u8
-                })
-                .collect();
             assert_eq!(got, want, "{colour:?} {alpha:?}");
             assert_eq!(
                 READ_IN_PLACE.with(|n| n.get()) - before,
@@ -613,9 +741,9 @@ mod tests {
                             coverage.region.height() as usize,
                         );
                         let plane: Vec<u8> = coverage
-                            .values
+                            .bytes
                             .iter()
-                            .flat_map(|&v| [0, 0, 0, v as u8])
+                            .flat_map(|&v| [0, 0, 0, v])
                             .collect();
                         let exact = exact_blur::reference(
                             &plane,
@@ -750,6 +878,270 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_composite_drawn_only_where_inked_lands_every_byte() {
+        // Blurred shapes and text over a page already painted, through the
+        // coverage route, composited only where inked and as the whole
+        // region: the same bytes under every blend, at either density and
+        // under a turn. Counted, so that the trim is shown to have been
+        // taken where a transparent pixel changes nothing and only there.
+        use crate::{
+            context::{
+                chain::{TRIMMED, TRIMS_COMPOSITE},
+                kept::release_kept_results,
+                run_mask::release_cached_runs,
+            },
+            paint::BlendMode,
+        };
+        let page = |blend: BlendMode, density: u32, turn: f32, trims: bool| {
+            // Nothing kept from the other run: each page makes its results.
+            release_cached_runs();
+            release_kept_results();
+            TRIMS_COMPOSITE.set(trims);
+            let mut canvas = Canvas::with_options(
+                160.0,
+                120.0,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            for (i, colour) in
+                ["rgb(30 140 200)", "rgb(240 200 20 / 0.6)", "rgb(90 20 60)"]
+                    .iter()
+                    .enumerate()
+            {
+                ctx.set_fill_style_css(colour).expect("a colour");
+                ctx.fill_rect(i as f32 * 41.3, 10.0, 70.0, 100.0);
+            }
+            ctx.set_global_composite_operation(blend);
+            ctx.rotate(turn);
+            for (k, (sigma, colour, alpha)) in [
+                (1.0, "rgb(200 120 40)", 1.0),
+                (2.5, "black", 0.6),
+                (4.0, "rgb(20 200 90 / 0.7)", 1.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let k = k as f32;
+                ctx.set_filter_css(&format!("blur({sigma}px)"))
+                    .expect("a filter");
+                ctx.set_fill_style_css(colour).expect("a colour");
+                ctx.set_global_alpha(alpha);
+                ctx.begin_path();
+                ctx.ellipse(
+                    30.3 + 45.0 * k,
+                    35.6,
+                    9.5,
+                    6.0,
+                    0.3,
+                    0.0,
+                    std::f32::consts::TAU,
+                    false,
+                )
+                .expect("an ellipse");
+                ctx.fill(FillRule::NonZero);
+                assert!(ctx.set_font_css("28px sans-serif"));
+                ctx.fill_text("Ag", 12.4 + 48.0 * k, 92.7, None);
+            }
+            let before = TRIMMED.get();
+            let pixels = canvas
+                .to_image_data(
+                    None,
+                    &ImageDataExport {
+                        density,
+                        ..ImageDataExport::default()
+                    },
+                )
+                .expect("pixels")
+                .pixels()
+                .to_vec();
+            TRIMS_COMPOSITE.set(true);
+            (pixels, TRIMMED.get() - before)
+        };
+        let leaves = [BlendMode::SourceOver];
+        let clears = [
+            BlendMode::Copy,
+            BlendMode::DestinationIn,
+            BlendMode::SourceIn,
+            BlendMode::Lighter,
+            BlendMode::Multiply,
+        ];
+        for (blend, density, turn) in leaves
+            .into_iter()
+            .chain(clears)
+            .flat_map(|b| [(b, 1, 0.0), (b, 2, 0.0), (b, 1, 0.05)])
+        {
+            let what = format!("{blend:?} at density {density}, turned {turn}");
+            let (whole, untrimmed) = page(blend, density, turn, false);
+            let (trimmed, trims) = page(blend, density, turn, true);
+            assert_eq!(untrimmed, 0, "{what}: the control trims nothing");
+            assert!(whole == trimmed, "{what}: a byte moved");
+            // A turn is drawn in the plane, so `rest` is the identity.
+            let expected = leaves.contains(&blend);
+            assert_eq!(trims > 0, expected, "{what}: trimmed {trims}");
+        }
+    }
+
+    #[test]
+    fn a_kept_plane_covers_as_a_plane_made_afresh() {
+        // One playback of blurred shapes and text that overlap, so that a
+        // draw reads where an earlier one drew on a kept plane; some cut by a
+        // clip, so that a draw is cut short of the page, one of them a path
+        // the plane's edge cuts; turned, scaled, at densities 1 and 2: the same
+        // bytes with planes kept and made afresh for every draw.
+        // Counted, so that planes are shown to be kept.
+        use crate::context::{
+            chain::pool::{KEEP_PLANES, PLANES_TAKEN},
+            kept::release_kept_results,
+            run_mask::release_cached_runs,
+        };
+        let page = |density: u32, keep: bool| {
+            release_cached_runs();
+            release_kept_results();
+            KEEP_PLANES.set(keep);
+            let mut canvas = Canvas::with_options(
+                220.0,
+                160.0,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(240 230 200)")
+                .expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 220.0, 160.0);
+            // A shape and a glyph covering most of the page first, so that
+            // each kind of plane is inked nearly everywhere the later draws
+            // read: an edge of what they read left as it was shows.
+            ctx.set_filter_css("blur(1px)").expect("a filter");
+            ctx.set_fill_style_css("rgb(60 60 160 / 0.5)")
+                .expect("a colour");
+            ctx.begin_path();
+            ctx.ellipse(
+                110.0,
+                80.0,
+                112.0,
+                82.0,
+                0.0,
+                0.0,
+                std::f32::consts::TAU,
+                false,
+            )
+            .expect("an ellipse");
+            ctx.fill(FillRule::NonZero);
+            assert!(ctx.set_font_css("190px sans-serif"));
+            ctx.fill_text("W", -6.0, 150.0, None);
+            for k in 0..14 {
+                let f = k as f32;
+                let (x, y) =
+                    (17.3 + 13.1 * f, 21.6 + 7.7 * (f * 1.3).sin().abs() * 9.0);
+                ctx.save();
+                if k % 3 == 1 {
+                    ctx.begin_path();
+                    ctx.rect(x - 6.0, y - 9.0, 21.0, 17.0);
+                    ctx.clip(FillRule::NonZero);
+                }
+                if k % 4 == 2 {
+                    ctx.translate(x, y);
+                    ctx.rotate(0.3 * f);
+                    ctx.scale(1.25, 0.8);
+                    ctx.translate(-x, -y);
+                }
+                let sigma = [1.0, 2.5, 4.0][k % 3];
+                ctx.set_filter_css(&format!("blur({sigma}px)"))
+                    .expect("a filter");
+                let colour =
+                    ["rgb(200 120 40)", "black", "rgb(20 90 200 / 0.7)"][k % 3];
+                ctx.set_fill_style_css(colour).expect("a colour");
+                ctx.set_stroke_style_css(colour).expect("a colour");
+                match k % 3 {
+                    0 => {
+                        ctx.begin_path();
+                        ctx.ellipse(
+                            x,
+                            y,
+                            9.5 + f * 0.4,
+                            6.0,
+                            0.2 * f,
+                            0.0,
+                            std::f32::consts::TAU,
+                            false,
+                        )
+                        .expect("an ellipse");
+                        ctx.fill(FillRule::NonZero);
+                    }
+                    1 => {
+                        ctx.begin_path();
+                        ctx.move_to(x - 8.4, y + 9.1);
+                        ctx.bezier_curve_to(
+                            x,
+                            y - 20.0,
+                            x + 9.0,
+                            y + 18.0,
+                            x + 16.3,
+                            y - 3.7,
+                        );
+                        ctx.set_line_width(2.5);
+                        ctx.stroke();
+                    }
+                    _ => {
+                        assert!(ctx.set_font_css(&format!(
+                            "{}px sans-serif",
+                            14 + 5 * (k % 5)
+                        )));
+                        ctx.fill_text("Ag&", x - 9.6, y + 6.2, None);
+                    }
+                }
+                ctx.restore();
+            }
+            // A path the plane made for its draw cuts: a clip at x 82 ends
+            // that plane short of the triangle's right corner, which a kept
+            // plane as large as the page would draw whole, and Skia covers
+            // the triangle's left edge otherwise when its corner is cut --
+            // see `chain::skia_rasterises_a_path_its_clip_cuts_another_way`.
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(0.0, 0.0, 82.0, 160.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.set_filter_css("blur(1px)").expect("a filter");
+            ctx.set_fill_style_css("black").expect("a colour");
+            ctx.begin_path();
+            ctx.move_to(20.0, 80.0);
+            ctx.line_to(80.0, 15.25);
+            ctx.line_to(140.5, 85.0);
+            ctx.close_path();
+            ctx.fill(FillRule::NonZero);
+            ctx.restore();
+            let before = PLANES_TAKEN.get();
+            let pixels = canvas
+                .to_image_data(
+                    None,
+                    &ImageDataExport {
+                        density,
+                        ..ImageDataExport::default()
+                    },
+                )
+                .expect("pixels")
+                .pixels()
+                .to_vec();
+            KEEP_PLANES.set(true);
+            (pixels, PLANES_TAKEN.get() - before)
+        };
+        for density in [1, 2] {
+            let (afresh, none) = page(density, false);
+            let (kept, taken) = page(density, true);
+            assert_eq!(none, 0, "density {density}: the control keeps none");
+            assert!(afresh == kept, "density {density}: a byte moved");
+            assert!(taken > 0, "density {density}: no plane was kept");
         }
     }
 
