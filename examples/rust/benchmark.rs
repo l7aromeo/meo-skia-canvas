@@ -57,13 +57,17 @@ const DEPTHS: [(&str, PixelDepth); 3] = [
     ("RGBAF32", PixelDepth::F32),
 ];
 
-/// The pages every drawing case runs on: the default, and the two where
-/// 7.0's accepted costs live -- an eight-bit wide-gamut page, whose colours
-/// are held exactly in their own space, and a half-float one.
-const SPACES: [(&str, PixelColorSpace, PixelDepth); 3] = [
+/// The pages every drawing case runs on: the default; the two where 7.0's
+/// accepted costs live -- an eight-bit wide-gamut page, whose colours are
+/// held exactly in their own space, and a half-float one; and sRGB in each
+/// float format, which against the default is what a float `color_type`
+/// costs. A float page draws on the CPU whichever engine is asked for.
+const SPACES: [(&str, PixelColorSpace, PixelDepth); 5] = [
     ("srgb", PixelColorSpace::Srgb, PixelDepth::Uint8),
     ("p3", PixelColorSpace::DisplayP3, PixelDepth::Uint8),
     ("p3-f16", PixelColorSpace::DisplayP3, PixelDepth::F16),
+    ("srgb-f16", PixelColorSpace::Srgb, PixelDepth::F16),
+    ("srgb-f32", PixelColorSpace::Srgb, PixelDepth::F32),
 ];
 
 const ENGINES: [(&str, bool); 2] = [("cpu", false), ("gpu", true)];
