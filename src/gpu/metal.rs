@@ -17,7 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{context::page::ExportOptions, gpu::ThreadBound};
+use crate::{
+    context::{chain, page::ExportOptions},
+    gpu::ThreadBound,
+};
 
 mod recording;
 
@@ -140,7 +143,13 @@ impl MetalEngine {
         MTL_CONTEXT.with_borrow_mut(|cell| {
             cell.take_if(|engine| {
                 engine.cleanup(); // it's unclear how effective this is...
-                engine.last_use.elapsed() > MTL_CONTEXT_LIFESPAN
+                let idle = engine.last_use.elapsed() > MTL_CONTEXT_LIFESPAN;
+                // The chain layers this thread keeps are the context's, and
+                // go before it does.
+                if idle {
+                    chain::pool::release();
+                }
+                idle
             });
         });
     }

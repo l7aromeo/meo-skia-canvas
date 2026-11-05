@@ -28,7 +28,9 @@
 //! in a debug build on macOS. They belong to the thread that filled them, so
 //! the watcher's own thread cannot empty them: in the Node addon it posts the
 //! release to each JavaScript thread, where it runs between two tasks -- see
-//! `node::idle`.
+//! `node::idle`. The same post lets go of the GPU chain layers the thread
+//! keeps for its next run -- see `context::chain::pool` -- which are its
+//! context's and have to be let go there too.
 //!
 //! The watcher below waits for rendering to stop and then does all three,
 //! bitmaps and fonts before the trim. The order is the point: trimming while
@@ -82,10 +84,11 @@ use std::{
 
 use crate::context::{
     blur_mask::release_cached_masks, chain_cache::release_cached_chains,
-    page::release_cached_pages, run_mask::release_cached_runs,
+    kept::release_kept_results, page::release_cached_pages,
+    run_mask::release_cached_runs,
 };
 #[cfg(feature = "node-addon")]
-use crate::node::idle::release_font_caches;
+use crate::node::idle::release_thread_caches;
 
 /// Bumped once per rasterization and once per use of a thread's fonts. Only
 /// ever compared against itself.
@@ -209,12 +212,13 @@ fn reclaim() {
     // Posted, so it runs on each JavaScript thread after this returns, and
     // trims there once its caches have gone.
     #[cfg(feature = "node-addon")]
-    release_font_caches();
+    release_thread_caches();
     // Bitmaps first: they are live allocations until they are dropped, and a
     // trim cannot hand back a page something is still using.
     release_cached_pages();
     release_cached_masks();
     release_cached_chains();
+    release_kept_results();
     release_cached_runs();
     trim();
 }

@@ -43,6 +43,7 @@ use crate::{
         chain::{self, Depth, Step},
         chain_cache, coverage_of, exact_blur,
         faint::{Faint, composited},
+        kept::CoverageInput,
         page::{ExportOptions, Page},
         run_mask::{self, Kept},
     },
@@ -2668,7 +2669,7 @@ fn play_shared_chains(
 /// blurred shapes along a line do, and each layer open is a snapshot the size
 /// of the page held until every chain in the run is composited, so more would
 /// hold more of them without a scene here that needs it.
-const MAX_RUN_LAYERS: usize = 2;
+pub(crate) const MAX_RUN_LAYERS: usize = 2;
 
 /// Chains of consecutive entries, each placed in the first open layer whose
 /// chains it can share with -- see [`chain::Plan::joins`] -- or in a new one,
@@ -3482,24 +3483,47 @@ impl BlurOp {
                 if let Some(rgb) =
                     self.coverage_colour(canvas, self.paint.sigma * replay)
                 {
+                    let gain = chain.gain.alpha_f();
+                    let info = canvas.image_info();
                     for path in self.paths() {
-                        let blurred = chain::coverage::blurred(
+                        let sharp = chain::coverage::sharp(
                             canvas,
                             self.paint.sigma,
                             Some(self.content(&path)),
                             chain::coverage::Plane::Drawn,
                             |plane| self.draw_into(plane, &path, &chain.draw),
                         );
-                        if let Some(blurred) = blurred {
-                            #[cfg(test)]
-                            COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
-                            chain::coverage::composite(
-                                canvas,
-                                &blurred,
-                                rgb,
-                                chain.gain.alpha_f(),
-                                &chain.gain,
-                            );
+                        let Some(sharp) = sharp else {
+                            continue;
+                        };
+                        #[cfg(test)]
+                        COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
+                        // A coverage blurred and coloured before is not
+                        // again, once it is that one to the byte -- see
+                        // `kept`.
+                        let input = CoverageInput::of(&sharp, rgb, gain, &info);
+                        let outcome = match input
+                            .as_ref()
+                            .and_then(CoverageInput::kept)
+                        {
+                            Some(kept) => Some(kept),
+                            None => {
+                                let made = chain::coverage::coloured(
+                                    canvas,
+                                    &sharp.blurred(),
+                                    rgb,
+                                    gain,
+                                );
+                                if let (Some(input), Some(made)) =
+                                    (input, made.as_ref())
+                                {
+                                    input.keep(made.clone());
+                                }
+                                made
+                            }
+                        };
+                        if let Some(outcome) = outcome {
+                            outcome.composite(canvas, &chain.gain);
                         }
                     }
                     canvas.restore();

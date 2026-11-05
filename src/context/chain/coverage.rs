@@ -15,8 +15,8 @@
 //! It costs a quarter of the chain's sums and none of its conversions.
 
 use skia_safe::{
-    AlphaType, Canvas as SkCanvas, ColorType, IRect, ImageInfo, Matrix, Paint,
-    Rect, Surface,
+    AlphaType, Canvas as SkCanvas, ColorType, IRect, ImageInfo, Matrix, Rect,
+    Surface,
 };
 
 use super::{
@@ -246,7 +246,9 @@ impl Coverage {
                         .new_surface(&info, None)
                         .or_else(|| started::raster(&info, None, None))
                 }
-                Plane::Alpha => layer_surface(canvas, Depth::Bytes, drawn),
+                // On the CPU, where no layer is kept: see `pool::key`.
+                Plane::Alpha => layer_surface(canvas, Depth::Bytes, drawn)
+                    .map(|(surface, _)| surface),
             };
             surface.map(|surface| (surface, drawn))
         };
@@ -296,6 +298,16 @@ impl Coverage {
     /// by what the blur works on.
     pub(crate) fn region(&self) -> IRect {
         self.region
+    }
+
+    /// The device sigmas the blur takes along x and y.
+    pub(crate) fn sigma(&self) -> (f32, f32) {
+        self.sigma
+    }
+
+    /// The part of the canvas's transform the plane was not drawn in.
+    pub(crate) fn rest(&self) -> Matrix {
+        self.rest
     }
 
     /// This coverage blurred exactly, unrounded.
@@ -356,20 +368,6 @@ pub(crate) fn coloured(
     })
 }
 
-/// `blurred` coloured -- see [`coloured`] -- and composited onto `canvas`
-/// through `paint`, as the chain's result is. `None` where no image could be
-/// made.
-pub(crate) fn composite(
-    canvas: &SkCanvas,
-    blurred: &Blurred,
-    rgb: [f32; 3],
-    gain: f32,
-    paint: &Paint,
-) -> Option<()> {
-    coloured(canvas, blurred, rgb, gain)?.composite(canvas, paint);
-    Some(())
-}
-
 #[cfg(test)]
 mod tests {
     use skia_safe::{
@@ -377,7 +375,7 @@ mod tests {
         Path, PathBuilder, Rect,
     };
 
-    use super::{Coverage, READ_IN_PLACE, alpha_into, composite};
+    use super::{Coverage, READ_IN_PLACE, alpha_into, coloured};
     use crate::{
         canvas::{Canvas, CanvasOptions},
         context::{
@@ -628,14 +626,9 @@ mod tests {
                         );
                         let region = coverage.region;
                         let blurred = coverage.blurred();
-                        composite(
-                            canvas,
-                            &blurred,
-                            rgb,
-                            gain,
-                            &Paint::default(),
-                        )
-                        .expect("composited");
+                        coloured(canvas, &blurred, rgb, gain)
+                            .expect("coloured")
+                            .composite(canvas, &Paint::default());
                         let mut px = vec![0u8; 90 * 80 * 4];
                         assert!(surface.read_pixels(
                             &info,
