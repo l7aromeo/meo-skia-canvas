@@ -1002,7 +1002,9 @@ pub struct FontFace {
 /// so the same manager can be shared across threads without exposing `RefCell`
 /// to consumers.
 pub struct FontLibrary {
-    inner: Mutex<FontManagerInner>,
+    /// Shared with every [`TextEngine`](crate::text::TextEngine) built from
+    /// this library -- see [`FontRegistry`].
+    inner: Rc<Mutex<FontManagerInner>>,
 }
 
 struct FontManagerInner {
@@ -1019,6 +1021,9 @@ struct FontManagerInner {
     /// registration order: what `provider` is rebuilt from -- see
     /// [`FontManagerInner::register`].
     faces: Vec<(Typeface, String)>,
+    /// How many times `provider` has been replaced, so that an engine
+    /// holding an earlier one can tell -- see [`FontRegistry`].
+    generation: u64,
 }
 
 impl FontManagerInner {
@@ -1053,6 +1058,33 @@ impl FontManagerInner {
             }
         }
         self.provider = provider;
+        self.generation += 1;
+    }
+}
+
+/// A [`FontLibrary`]'s registered faces as a
+/// [`TextEngine`](crate::text::TextEngine) holds them: the library's own
+/// state, so that a face registered after the engine was built, or a
+/// [`reset`](FontLibrary::reset), reaches it.
+///
+/// The engine cannot hold the provider itself. The library builds a new
+/// one on each registration, to keep the order Skia's matcher breaks ties
+/// by -- see [`FontManagerInner::register`] -- so a provider taken once
+/// would miss every face registered after it.
+#[derive(Clone)]
+pub(crate) struct FontRegistry(Rc<Mutex<FontManagerInner>>);
+
+impl FontRegistry {
+    /// How many times the registry's provider has been replaced: an engine
+    /// whose collection was built at another generation builds it again.
+    pub(crate) fn generation(&self) -> u64 {
+        self.0.lock().generation
+    }
+
+    /// The registry's provider, with the generation it stands at.
+    pub(crate) fn provider(&self) -> (u64, TypefaceFontProvider) {
+        let inner = self.0.lock();
+        (inner.generation, inner.provider.clone())
     }
 }
 
@@ -1066,14 +1098,15 @@ impl FontLibrary {
     /// Creates an empty registry holding no typefaces.
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(FontManagerInner {
+            inner: Rc::new(Mutex::new(FontManagerInner {
                 provider: TypefaceFontProvider::new(),
                 font_mgr: SharedFontRegistry::with_shared(|library| {
                     library.system_font_mgr()
                 }),
                 families: Vec::new(),
                 faces: Vec::new(),
-            }),
+                generation: 0,
+            })),
         }
     }
 
@@ -1086,12 +1119,14 @@ impl FontLibrary {
     /// and [`register_font_from_path`](Self::register_font_from_path) added.
     ///
     /// A layout already built keeps the typefaces it resolved; this affects
-    /// what the next one can find.
+    /// what the next one can find, through an engine built before it as
+    /// much as one built after.
     pub fn reset(&self) {
         let mut inner = self.inner.lock();
         inner.provider = TypefaceFontProvider::new();
         inner.families.clear();
         inner.faces.clear();
+        inner.generation += 1;
     }
 
     /// Registers a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2, depending
@@ -1104,15 +1139,12 @@ impl FontLibrary {
     /// [`TextEngine`](crate::text::TextEngine): one built before this call
     /// still sees the font, and still instances it at the axes a
     /// [`font_variations`](crate::text::TextStyle::font_variations) asks
-    /// for. An engine holds a *handle* to the provider these registrations
-    /// write into rather than a copy of it.
-    ///
-    /// This used to say the opposite -- that the engine snapshots the
-    /// registry at construction, so a later typeface was invisible to it.
-    /// Measured on Oswald registered after the engine was built: 359.04 at
-    /// `wght` 200 and 446.46 at 700, the same pair an engine built after
-    /// the registration reports, where a family resolving to nothing
-    /// measures 483.78.
+    /// for. An engine holds this library's registry rather than a copy of
+    /// what it held, and builds its collection again at its next layout
+    /// after a registration -- see [`FontRegistry`]. Measured on Oswald
+    /// registered after the engine was built: 359.04 at `wght` 200 and
+    /// 446.46 at 700, the same pair an engine built after the registration
+    /// reports, where a family resolving to nothing measures 483.78.
     ///
     /// The typeface is also added to the registry
     /// [`Context2D::set_font`](crate::context2d::Context2D::set_font)
@@ -1441,14 +1473,10 @@ impl FontLibrary {
         }
     }
 
-    /// Internal accessor used by `TextEngine` to wire the registry into a
-    /// paragraph `FontCollection`.
-    ///
-    /// Returns a clone of the `TypefaceFontProvider` (Skia-side ref-counted, so
-    /// the clone shares typeface storage with the manager).
-    pub(crate) fn snapshot_provider(&self) -> TypefaceFontProvider {
-        let inner = self.inner.lock();
-        inner.provider.clone()
+    /// The registry a `TextEngine` built from this library resolves its
+    /// families against -- see [`FontRegistry`].
+    pub(crate) fn registry(&self) -> FontRegistry {
+        FontRegistry(self.inner.clone())
     }
 }
 

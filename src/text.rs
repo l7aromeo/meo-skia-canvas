@@ -25,7 +25,7 @@ use skia_safe::{
         TextDecorationStyle as SkTextDecorationStyle,
         TextDirection as SkTextDirection,
         TextHeightBehavior as SkTextHeightBehavior, TextShadow as SkTextShadow,
-        TextStyle as SkTextStyle,
+        TextStyle as SkTextStyle, TypefaceFontProvider,
     },
 };
 
@@ -39,7 +39,7 @@ use crate::{
     context2d::{FontStretch, TextDirection},
     css::NamedColour,
     font::{
-        FontAxisTag, FontFamily, FontLibrary, FontVariation,
+        FontAxisTag, FontFamily, FontLibrary, FontRegistry, FontVariation,
         InstancedPositions, KnownAxes, ObliqueAngle, optical_size,
     },
     geometry::Rect,
@@ -1207,15 +1207,20 @@ pub struct LineMetrics {
 /// `with_system_fonts()` for the platform's default fonts only.
 pub struct TextEngine {
     /// The one collection every paragraph this engine builds resolves its
-    /// fonts against.
+    /// fonts against, with the [`FontRegistry::generation`] it was built
+    /// at -- see [`TextEngine::collection`].
     ///
-    /// One for the engine's life rather than one per call, because Skia
-    /// keeps its caches on it: the faces each family and style resolved to,
-    /// each variable-font instance by typeface and axes, and each shaped
-    /// paragraph. A variable font is instanced through the `FontArguments`
-    /// on a paragraph's text style, so instancing needs no collection of
-    /// its own.
-    pub(crate) collection: FontCollection,
+    /// One while the registered fonts stand rather than one per call,
+    /// because Skia keeps its caches on it: the faces each family and style
+    /// resolved to, each variable-font instance by typeface and axes, and
+    /// each shaped paragraph. A variable font is instanced through the
+    /// `FontArguments` on a paragraph's text style, so instancing needs no
+    /// collection of its own. Held in a `Mutex` for the unwind safety it
+    /// keeps, as `positions` is.
+    collection: Mutex<(FontCollection, u64)>,
+    /// The library's registered faces, which `collection` is built over
+    /// again when they change; `None` for an engine of system fonts only.
+    registry: Option<FontRegistry>,
     /// The positions instanced through `collection` since its caches were
     /// last dropped, shared with every builder this engine opens.
     ///
@@ -1230,35 +1235,52 @@ pub struct TextEngine {
     faces: Rc<Mutex<FaceRecord>>,
 }
 
+/// The collection an engine resolves its fonts against: `assets`, a
+/// library's registered faces, where it has them, over the platform's
+/// system fonts, which also answer a glyph the matched family lacks.
+fn engine_collection(assets: Option<TypefaceFontProvider>) -> FontCollection {
+    let mut collection = FontCollection::new();
+    // The default manager needs a default *family*, not just a manager.
+    // Without one, Skia's defaultFallback() has no name to resolve and an
+    // unmatched family lands on the asset provider instead -- so once any
+    // font was registered, every lookup returned it, including one that
+    // named no family at all. Text runs with no asset provider survive
+    // that, falling back glyph by glyph, but anything that asks the
+    // collection for a face outright does not -- a strut naming no family
+    // measured `-inf` on a machine carrying only DejaVu, where the same
+    // strut naming `DejaVu Sans` measured 64. The Node FontLibrary has
+    // always passed a name here; this mirrors it.
+    let system_fonts =
+        SharedFontRegistry::with_shared(|library| library.system_font_mgr());
+    let default_family = system_fonts
+        .legacy_make_typeface(None, FontStyle::default())
+        .map(|face| face.family_name());
+    collection.set_default_font_manager(
+        system_fonts.clone(),
+        default_family.as_deref(),
+    );
+    if let Some(assets) = assets {
+        collection.set_asset_font_manager(Some(assets.into()));
+    }
+    // Resolve glyphs missing from the matched family against the system
+    // fonts instead of rendering tofu -- matches CanvasKit's
+    // `FontCollection.enableFontFallback`.
+    collection.enable_font_fallback();
+    collection
+}
+
 impl TextEngine {
     /// Builds using `font_manager`'s registered typefaces plus system
     /// fallbacks for unmatched family names.
     pub fn new(font_manager: &FontLibrary) -> Self {
-        let asset_provider = font_manager.snapshot_provider();
-        let mut collection = FontCollection::new();
-        // The default manager needs a default *family*, not just a manager.
-        // Without one, Skia's defaultFallback() has no name to resolve
-        // and an unmatched family lands on the asset provider instead --
-        // so once any font was registered, every lookup returned
-        // it, including one that named no family at all. The Node FontLibrary
-        // has always passed a name here; this mirrors it.
-        let system_fonts = SharedFontRegistry::with_shared(|library| {
-            library.system_font_mgr()
-        });
-        let default_family = system_fonts
-            .legacy_make_typeface(None, FontStyle::default())
-            .map(|face| face.family_name());
-        collection.set_default_font_manager(
-            system_fonts.clone(),
-            default_family.as_deref(),
-        );
-        collection.set_asset_font_manager(Some(asset_provider.into()));
-        // Resolve glyphs missing from the matched family against the
-        // system fonts instead of rendering tofu -- matches CanvasKit's
-        // `FontCollection.enableFontFallback`.
-        collection.enable_font_fallback();
+        let registry = font_manager.registry();
+        let (generation, provider) = registry.provider();
         Self {
-            collection,
+            collection: Mutex::new((
+                engine_collection(Some(provider)),
+                generation,
+            )),
+            registry: Some(registry),
             positions: Rc::default(),
             faces: Rc::default(),
         }
@@ -1267,30 +1289,42 @@ impl TextEngine {
     /// Builds using the platform's system fonts only. Useful when no
     /// `FontLibrary` is needed.
     pub fn with_system_fonts() -> Self {
-        let mut collection = FontCollection::new();
-        // Named for the same reason `TextEngine::new` names one: a default
-        // manager without a default *family* leaves `defaultFallback()` with
-        // nothing to resolve. Text runs survive that, falling back glyph by
-        // glyph, but anything that asks the collection for a face outright
-        // does not -- a strut naming no family measured `-inf` on a machine
-        // carrying only DejaVu, where the same strut naming `DejaVu Sans`
-        // measured 64.
-        let system_fonts = SharedFontRegistry::with_shared(|library| {
-            library.system_font_mgr()
-        });
-        let default_family = system_fonts
-            .legacy_make_typeface(None, FontStyle::default())
-            .map(|face| face.family_name());
-        collection.set_default_font_manager(
-            system_fonts.clone(),
-            default_family.as_deref(),
-        );
-        collection.enable_font_fallback();
         Self {
-            collection,
+            collection: Mutex::new((engine_collection(None), 0)),
+            registry: None,
             positions: Rc::default(),
             faces: Rc::default(),
         }
+    }
+
+    /// The collection a paragraph this engine builds resolves its fonts
+    /// against: the one built before, or, where the library's fonts have
+    /// changed since, one built again over them -- a face registered after
+    /// the engine was built is found, and one [`FontLibrary::reset`] let go
+    /// is not. The positions instanced through the collection it replaces
+    /// go with it, as its caches do, and so do the matches and instances
+    /// the engine remembered of it -- see [`FaceRecord`].
+    pub(crate) fn collection(&self) -> FontCollection {
+        let mut held = self
+            .collection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(registry) = &self.registry
+            && registry.generation() != held.1
+        {
+            let (generation, provider) = registry.provider();
+            *held = (engine_collection(Some(provider)), generation);
+            *self
+                .positions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) =
+                InstancedPositions::default();
+            self.faces
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .generation = None;
+        }
+        held.0.clone()
     }
 
     /// Lays out `text` against `style`, wrapping at `max_width`.
@@ -1379,7 +1413,7 @@ impl TextEngine {
         &self,
         base_style: &TextStyle,
     ) -> ParagraphBuilder {
-        let mut collection = self.collection.clone();
+        let mut collection = self.collection();
         let strut = strut_families(base_style, &mut collection.clone());
         // A base style has nothing to inherit, so `Inherit` is `Normal` here.
         let base_variations = base_style.font_variations.resolve(&[]);
@@ -2165,16 +2199,18 @@ pub(crate) struct FaceRecord {
     axes: KnownAxes,
     /// The instance each [`FaceQuery`] was answered with, so that a style
     /// met before -- a span pushed in the paragraph's own font, or any
-    /// style a caller lays out again -- is not worked out again. Never
-    /// stale for the reason a match is not: the collection is the engine's
-    /// for its life and a face's axes are fixed. Dropped whole at
-    /// [`MATCHES_KEPT`] and when the fonts change.
+    /// style a caller lays out again -- is not worked out again. Not stale
+    /// for the reason a match is not: the engine builds its collection again
+    /// only when its library's fonts change, and drops these with it, and a
+    /// face's axes are fixed. Dropped whole at [`MATCHES_KEPT`] and when the
+    /// fonts change.
     instances: InstanceMemo,
     /// The [`font_generation`] the shared library's fonts were at when
     /// `matches` and `instances` were filled. When the fonts change the
     /// library spells every family list again, as a new list and perhaps
-    /// differently, so both are dropped then. A face's axes stay, being
-    /// fixed.
+    /// differently, so both are dropped then. `None` also where the engine
+    /// has built its collection again since -- see
+    /// [`TextEngine::collection`]. A face's axes stay, being fixed.
     generation: Option<u64>,
 }
 
@@ -2970,7 +3006,7 @@ mod tests {
             };
             engine.layout_text("Hamburgefonstiv", &style, f32::MAX);
         };
-        let cached = || engine.collection.clone().paragraph_cache_mut().count();
+        let cached = || engine.collection().paragraph_cache_mut().count();
 
         (0..INSTANCED_POSITIONS).for_each(lay_out);
         assert!(
@@ -3045,7 +3081,7 @@ mod tests {
             ..TextStyle::default()
         };
         instance_for(
-            &mut engine.collection.clone(),
+            &mut engine.collection(),
             &engine.positions,
             &engine.faces,
             &FaceQuery::of(&style, &[]),
@@ -3321,7 +3357,7 @@ mod tests {
     ) -> usize {
         let instance = |engine: &TextEngine, (style, variations)| {
             instance_for(
-                &mut engine.collection.clone(),
+                &mut engine.collection(),
                 &engine.positions,
                 &engine.faces,
                 &FaceQuery::of(style, variations),
@@ -3350,7 +3386,7 @@ mod tests {
         let query = FaceQuery::of(&style, &[]);
         let instance = || {
             instance_for(
-                &mut engine.collection.clone(),
+                &mut engine.collection(),
                 &engine.positions,
                 &engine.faces,
                 &query,
@@ -3397,7 +3433,7 @@ mod tests {
                 ..amstelvar()
             };
             instance_for(
-                &mut engine.collection.clone(),
+                &mut engine.collection(),
                 &engine.positions,
                 &engine.faces,
                 &FaceQuery::of(&style, &[]),
@@ -3427,7 +3463,7 @@ mod tests {
         let names = || {
             let before = super::INSTANCES.get();
             let names = instance_for(
-                &mut engine.collection.clone(),
+                &mut engine.collection(),
                 &engine.positions,
                 &engine.faces,
                 &FaceQuery::of(&style, &[]),
@@ -3481,7 +3517,7 @@ mod tests {
         let lists = super::COORDINATE_LISTS.get();
         for use_ in 0..2 {
             let instance = instance_for(
-                &mut engine.collection.clone(),
+                &mut engine.collection(),
                 &engine.positions,
                 &engine.faces,
                 &FaceQuery::of(&style, &[]),

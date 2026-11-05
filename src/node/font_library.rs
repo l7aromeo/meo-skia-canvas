@@ -2875,7 +2875,7 @@ mod tests {
             faces.iter().map(Typeface::unique_id).collect::<Vec<_>>()
         };
         let engine = TextEngine::new(&crate::font::FontLibrary::new());
-        let mut collection = engine.collection.clone();
+        let mut collection = engine.collection();
         let mut remembered = FaceMatches::default();
         for _ in 0..2 {
             for (families, style) in &styles {
@@ -2921,7 +2921,7 @@ mod tests {
         let families = named(&["HashOnceFamily", "MemoMonoton"]);
         let style = FontStyle::normal();
         let engine = TextEngine::new(&crate::font::FontLibrary::new());
-        let mut collection = engine.collection.clone();
+        let mut collection = engine.collection();
         let mut remembered = FaceMatches::default();
         let before =
             FontLibrary::with_shared(|lib| lib.engine_names(&families));
