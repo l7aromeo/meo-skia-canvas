@@ -87,13 +87,21 @@ jobs:
       # The patched Skia tree the macOS build compiles from -- rust-skia at the
       # Cargo.lock tag, Skia's DEPS and gn, and macOS's patches from `PATCHES`
       # in scripts/skia-source.mjs. `just build-release` prepares it when the
-      # cache misses; skia-source names it by version and patch digest, so the
-      # key below follows the lock and the same patches.
+      # cache misses. The key is the tree's own name, which carries the version
+      # and the patches' digest, so it follows both with no list here to keep
+      # in step. Assigned before it is written out, so that a failing
+      # `cache-key` fails the step.
+      - name: Name the Skia source's cache key
+        id: skia-key
+        run: |
+          key=$(node scripts/skia-source.mjs cache-key)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
       - name: Cache the Skia source
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: skia-source-${{ hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch') }}
+          key: ${{ steps.skia-key.outputs.key }}
 
       - name: Build module
         env:
@@ -102,14 +110,15 @@ jobs:
 
       # A binary built against rust-skia's prebuilt Skia, or from an unpatched
       # tree, carries the one-second Metal compile timeout, the atlas that
-      # can move a pixel of a path's coverage, and the triangulation cache that
-      # draws a curve by what the context drew before, and passes every test
-      # that does not stall the compiler or land a path there. skia-bindings'
-      # build output says whether it built offline and names each file ninja
-      # compiled, so this refuses a build that downloaded, or whose
-      # `GrMtlUtil.mm`, `AtlasPathRenderer.cpp` or
-      # `TriangulatingPathRenderer.cpp` is not the patched one --
-      # scripts/check-patched-skia.mjs says how.
+      # can move a pixel of a path's coverage, the triangulation cache that
+      # draws a curve by what the context drew before, and the read that
+      # allocates a transfer buffer each time, and passes every test that does
+      # not stall the compiler, land a path there or look at the buffer.
+      # skia-bindings' build output says whether it built offline and names
+      # each file ninja compiled, so this refuses a build that downloaded, or
+      # whose `GrMtlUtil.mm`, `AtlasPathRenderer.cpp`,
+      # `TriangulatingPathRenderer.cpp` or `SurfaceContext.cpp` is not the
+      # patched one -- scripts/check-patched-skia.mjs says how.
       - name: Check Skia was built from the patched source
         run: node scripts/check-patched-skia.mjs target/release/build
 
@@ -192,13 +201,23 @@ jobs:
       # the Cargo.lock tag, Skia's DEPS and gn, and Windows's patches from
       # `PATCHES` in scripts/skia-source.mjs. `just build-release` prepares it
       # when the cache misses; skia-source names it by version and patch
-      # digest, so the key follows the lock and the same patches. Only the
+      # digest. The key is that name, from `cache-key`, so it follows both
+      # with no list here to keep in step; bash, because the Windows runner's
+      # default shell reads `key=$(...)` otherwise, and assigned before it is
+      # written out so that a failing `cache-key` fails the step. Only the
       # source is cached: Skia itself is compiled on every run, as on macOS.
+      - name: Name the Skia source's cache key
+        id: skia-key
+        shell: bash
+        run: |
+          key=$(node scripts/skia-source.mjs cache-key)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
       - name: Cache the Skia source
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: skia-source-win32-${{ hashFiles('Cargo.lock', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch', 'containers/skia-dwrite-oblique.patch') }}
+          key: ${{ steps.skia-key.outputs.key }}
 
       # Built with the Skia tree reached through a drive letter of its own.
       # ninja resolves every header clang-cl reports, and where the tree and
@@ -377,21 +396,13 @@ jobs:
           TAG=$(cd skia-canvas && just skia-version)
           export TAG
           git clone --depth 1 --branch "$TAG" --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
-          # Linux's patches from `PATCHES` in scripts/skia-source.mjs, in its
-          # order: the brotli sources Skia's build list leaves out, without
-          # which this `freetype` build fails to link on kCmdLut and
-          # BrotliDecoderEnsureStaticInit, the atlas-size cap, without
-          # which a GPU path can have a pixel's coverage moved a step, and the
-          # triangulation tolerance, without which a GPU curve is drawn by what
-          # the context drew before, and the Graphite bindings, which a float
-          # page's Graphite engine builds on. `-F0` fails a
-          # hunk that no longer matches rather than placing it by guesswork.
-          # Under `use-local-skia` the justfile names no tree of its own, so
-          # this checkout is what skia-bindings builds.
-          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-brotli-sources.patch"
-          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-atlas-size.patch"
-          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/skia-triangulation-tolerance.patch"
-          patch -p1 -F0 -d rust-skia -i "$GITHUB_WORKSPACE/skia-canvas/containers/rust-skia-graphite-bindings.patch"
+          # Linux's patches from `PATCHES` in scripts/skia-source.mjs, applied by
+          # the same code that patches a tree for `just`, in `PATCHES`'s order
+          # and with `-F0`, so a hunk that no longer matches fails, naming its
+          # patch, rather than being placed by guesswork. Under
+          # `use-local-skia` the justfile names no tree of its own, so this
+          # checkout is what skia-bindings builds.
+          node skia-canvas/scripts/skia-source.mjs apply rust-skia
 
       - name: Vendor Skia dependencies
         run: |
@@ -422,8 +433,8 @@ jobs:
       # package hash, so skia-bindings does a full build from the tree inside
       # it and never tries a download -- scripts/check-patched-skia.mjs reads
       # that from its output, and refuses either kind of build whose
-      # `AtlasPathRenderer.cpp` or `TriangulatingPathRenderer.cpp` is not the
-      # patched one.
+      # `AtlasPathRenderer.cpp`, `TriangulatingPathRenderer.cpp` or
+      # `SurfaceContext.cpp` is not the patched one.
       - name: Check Skia was built from the patched source
         run: node skia-canvas/scripts/check-patched-skia.mjs skia-canvas/target/release/build
 

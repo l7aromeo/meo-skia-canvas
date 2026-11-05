@@ -28,7 +28,8 @@ Cargo.lock
 # `Cargo.lock` resolves, so an edit to either has to run it.
 THIRD-PARTY-NOTICES.md
 
-# The Skia patches name the tree every source build compiles from, and the
-# action restores it, so a change to either changes what is built.
-:(glob)containers/skia-*.patch
+# The patches name the tree every source build compiles from -- Skia's and
+# rust-skia's alike -- and the action restores it, so a change to either
+# changes what is built.
+:(glob)containers/*.patch
 :(glob).github/actions/**

@@ -59,14 +59,17 @@ density 2 after one at density 1 -- had its edges covered by up to 128 levels
 otherwise than on a fresh context.
 
 Both also carry `containers/rust-skia-graphite-bindings.patch`, which is not a
-Skia patch: it adds to rust-skia's own sources the three Graphite bindings a
-float page's Graphite engine needs -- a caching `ImageProvider`, without which a
-Recorder drops every raster image; `ContextOptions::fInternalMultisampleCount`;
-and reading a Graphite image back through the Context. Applying it to the tree
-changes nothing a build compiles. A build takes the patched crates only through
-the `.cargo/config.toml` that `node scripts/skia-source.mjs cargo-patch` writes,
-which points `[patch.crates-io]` at the tree's skia-bindings, skia-safe and
-skia-svg-macros, and `cargo-patch --remove` takes it away.
+Skia patch: it adds to rust-skia's own sources the three Graphite bindings that
+a Graphite engine for float pages needs -- a caching `ImageProvider`, without
+which a Recorder drops every raster image;
+`ContextOptions::fInternalMultisampleCount`; and reading a Graphite image back
+through the Context. That engine is built but selected for no canvas:
+`RenderingEngine::for_canvas` asks only for the default engine, Ganesh. Applying
+the patch to the tree changes nothing a build compiles. A build takes the
+patched crates only through the `.cargo/config.toml` that
+`node scripts/skia-source.mjs cargo-patch` writes, which points
+`[patch.crates-io]` at the tree's skia-bindings, skia-safe and skia-svg-macros,
+and `cargo-patch --remove` takes it away.
 
 - **The gate.** The patched skia-bindings alone prints `meo_graphite_bindings`,
   which `graphite_bindings` in `build.rs` reads through `links = "skia"` and
@@ -85,22 +88,34 @@ skia-svg-macros, and `cargo-patch --remove` takes it away.
   `tests/graphite_bindings.rs`, and greps for the notice `build.rs` prints when
   the cfg turns on, so a gate that never opens cannot pass as one that is shut.
 
+macOS and Linux also carry `containers/skia-async-transfer-reuse.patch`, which
+asks for the transfer buffer of Skia's asynchronous read -- every `getImageData`
+on a GPU page -- as `kDynamic` rather than `kStream`, so that Ganesh caches the
+buffer and the next read of that size takes it again rather than allocating
+one. Skia keeps `kStream` for a crash of Chromium's GPU process in a Windows
+test (skbug.com/40042671), whose cause is not known; the UPSTREAM note beside
+it in `PATCHES` says why Metal and Vulkan get the same memory either way.
+
 Windows binaries are built from a patched source too, carrying the atlas-size
 cap, the triangulation tolerance, the Graphite bindings and
 `containers/skia-dwrite-oblique.patch`. The last makes Skia's DirectWrite port
 read `OS/2` `fsSelection` bit 9 as its FreeType port does: DirectWrite reports
 a face flagged oblique only by that bit as upright, so the family's upright
 face and its oblique one matched alike, and an oblique request drew the
-upright face sheared.
+upright face sheared. `WITHHELD` in `scripts/skia-source.mjs` records each
+patch a platform goes without and why: Windows goes without the transfer-buffer
+patch on purpose, for the crash above, and without the Metal timeout and the
+brotli sources, which change nothing it builds.
 
 **Build through `just`.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe, and
 `ensure-deps` prepares the tree it names: rust-skia at the Cargo.lock tag,
 Skia's DEPS and gn, and the platform's patches from `PATCHES` applied with
-`-F0` -- the four above on macOS, on Linux
-`containers/skia-brotli-sources.patch`, the atlas-size cap, the triangulation
-tolerance and the Graphite bindings, and on Windows the last three with the
-DirectWrite oblique patch. `env`
+`-F0` -- on macOS the Metal timeout, the atlas-size cap, the triangulation
+tolerance, the Graphite bindings and the transfer buffer; on Linux
+`containers/skia-brotli-sources.patch` and the last four of those; and on
+Windows the atlas-size cap, the triangulation tolerance, the Graphite bindings
+and the DirectWrite oblique patch. `env`
 single-quotes a directory holding a backslash, a space, a quote or `$`, which
 just's dotenv reader would otherwise take as an escape or the value's end; a
 plain path stays bare, so `export $(... env)` still works where it did. The brotli
@@ -128,8 +143,9 @@ and does nothing where the build list already has them.
 **The release cannot ship that binary.** `build.yml`'s mac and windows jobs
 refuse a build whose skia-bindings output does not say it built offline from
 that tree, and its linux job one built from a rust-skia checkout without
-Linux's atlas and triangulation patches. The windows job caches only the
-source tree, as the mac job does, and compiles Skia on every run.
+Linux's atlas, triangulation and transfer-buffer patches. The windows job
+caches only the source tree, as the mac job does, and compiles Skia on every
+run.
 On the mac job, `tests/suite/metal-compile.test.js`, required there by
 `MEO_SKIA_CANVAS_REQUIRE_METAL`, stops the process's own compiler service for
 three seconds under a sandbox that hides the Metal shader cache, and reads a
@@ -138,3 +154,17 @@ holds on the hosted runner: a macOS virtual machine shares one compiler service
 between processes, so the test has none of its own to stop there, and it skips
 on the Apple Paravirtual device alone. An Apple Silicon Mac on macOS 27 starts
 a service per process and runs it, and any other machine without one fails it.
+
+**`PATCHES` is the only list of patches.** Two places in CI cannot build
+through `just`, and ask the script instead of keeping a list of their own: the
+linux job's patch step runs `node scripts/skia-source.mjs apply rust-skia`,
+the same loop `prepare` patches a tree with, and each Skia cache key -- in
+`build.yml`, `rust-ci.yml` and the skia-source action -- is the output of
+`node scripts/skia-source.mjs cache-key`, the platform and the tree's own name.
+A copy built green when it was short of a patch, which is how one merged with
+`PATCHES` alone. `just check-skia-patches`, run by `precommit`, `ci` and
+`ci.yml`, refuses a workflow or action that names a `containers/*.patch` file
+outside a comment, a Skia cache keyed any other way, a release patch step that
+does not run `apply`, a patch `scripts/check-patched-skia.mjs` has no marker
+for and does not name in `UNVERIFIED`, and a patch a platform neither takes
+nor withholds.

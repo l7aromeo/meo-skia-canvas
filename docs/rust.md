@@ -251,7 +251,7 @@ The same Skia's atlas path renderer can also move a pixel of an anti-aliased pat
 
 On Windows, the same Skia takes a face's slant from DirectWrite alone, and DirectWrite reports a face flagged oblique only by `OS/2` `fsSelection` bit 9 as upright. In a family with an upright face and such an oblique one, `oblique` therefore draws the upright face sheared rather than the oblique face. The npm package's Windows binaries read the bit as Skia's FreeType port does; a crate build does not.
 
-To build without them, compile Skia from source with this repository's patches: on macOS `containers/skia-metal-untimed-compile.patch` and `containers/skia-atlas-size.patch`, on Linux the second of those with `containers/skia-brotli-sources.patch`, and on Windows the second with `containers/skia-dwrite-oblique.patch`. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies them and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB the first time; a later patch list for the same version is made from that tree without downloading anything. The build compiles Skia, which takes a few minutes.
+To build without them, compile Skia from source with this repository's patches, the ones `PATCHES` in `scripts/skia-source.mjs` names for your platform. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies them and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB the first time; a later patch list for the same version is made from that tree without downloading anything. The build compiles Skia, which takes a few minutes.
 
 ## Paint
 
