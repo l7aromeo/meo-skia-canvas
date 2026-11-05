@@ -30,7 +30,7 @@ API in each language's spelling: `fillRect` is `fill_rect`, and `fillStyle` read
 
 ### Node.js
 
-Requires Node 22 or newer.
+Requires Node 21 or newer.
 
 ```bash
 npm install meo-skia-canvas
