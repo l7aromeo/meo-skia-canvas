@@ -6,9 +6,9 @@
 // and dropping them holds memory in a sawtooth: it climbs while the dropped
 // ones wait for a collection and falls back when one runs. One sample can
 // land anywhere on a tooth, so what is judged is the floor -- the least
-// held over a few passes -- at the end against early on, once the allocator
-// has settled. A canvas never collected raises every later sample, the
-// lowest included; one collected late raises only some.
+// held over a few passes -- over the last few passes against the few before
+// them, once the allocator has settled. A canvas never collected raises every
+// later sample, the lowest included; one collected late raises only some.
 //
 // Shared by the test of resident memory on the CPU and the test of what is
 // reported to V8 for the GPU, each a file of its own so that neither's
@@ -24,27 +24,26 @@ const SIDE = [1000, 800];
 /** Canvases made, read back whole and dropped per pass. */
 const PER_PASS = 10;
 
-/** Passes made in all. */
-const PASSES = 30;
-
 /**
- * Passes left out of the judgement while the allocator and the caches warm
- * up. Resident memory on macOS settled by the end of pass 4 or 5, and in one
- * run pass 3 stood 107 MB under where it settled.
+ * Passes made in all. Only the last `2 * FLOOR_PASSES` are judged; the rest
+ * warm the allocator and the caches. Resident memory settled by pass 4 or 5
+ * on macOS, and by pass 11 on CI's Linux arm64 release leg, where it climbed
+ * in 64 MB steps to 395.9 MB and stayed there (run 42122640796).
  */
-const WARM_PASSES = 5;
+const PASSES = 40;
 
 /**
- * The passes each floor is the least of: the first after warming up, and the
- * last. On CI's Linux runner the sawtooth fell back to its floor every second
- * to fourth pass, so five hold at least one trough.
+ * The passes each floor is the least of: the last, and the ones just before
+ * them. On CI's Linux runner the sawtooth fell back to its floor every
+ * second to fourth pass, so five hold at least one trough.
  */
 const FLOOR_PASSES = 5;
 
 /**
- * The most of what the passes between the two floors read that may stay
- * under the last. Collected canvases leave the floors within a few MB of
- * each other; uncollected ones raise the last by all of it.
+ * The most of what one window of passes reads that the last floor may stand
+ * over the floor before it. A canvas never collected raises memory with
+ * every pass, so each floor is its window's first pass and the two stand a
+ * window's reads apart; collected ones leave them within a few MB.
  */
 const KEPT_SHARE = 0.25;
 
@@ -53,30 +52,26 @@ const PIXEL_BYTES = 4;
 
 /**
  * Whether `after`, the bytes held after each pass, keeps no more than
- * `KEPT_SHARE` of what its passes read -- the floor of the last
- * `FLOOR_PASSES` less the floor of the `FLOOR_PASSES` after `WARM_PASSES`,
- * against what the passes between them read -- and a message saying what it
- * kept, naming what was measured as `what`.
+ * `KEPT_SHARE` of what a window of passes reads -- the floor of the last
+ * `FLOOR_PASSES` less the floor of the `FLOOR_PASSES` before them -- and a
+ * message saying what it kept, naming what was measured as `what`.
  *
  * @param {number[]} after
  * @param {string} what
  */
 function judged(after, what) {
-  const start = Math.min(
-    ...after.slice(WARM_PASSES, WARM_PASSES + FLOOR_PASSES),
-  );
-  const end = Math.min(...after.slice(-FLOOR_PASSES));
+  const floor = (/** @type {number[]} */ passes) => Math.min(...passes);
+  const start = floor(after.slice(-2 * FLOOR_PASSES, -FLOOR_PASSES));
+  const end = floor(after.slice(-FLOOR_PASSES));
   const kept = end - start;
-  // Everything read after the latest pass the first floor can fall on, up to
-  // the end of the earliest the last can, stays under the last floor.
-  const passes = after.length - FLOOR_PASSES + 1 - (WARM_PASSES + FLOOR_PASSES);
-  const read = passes * PER_PASS * SIDE[0] * SIDE[1] * PIXEL_BYTES;
+  const read = FLOOR_PASSES * PER_PASS * SIDE[0] * SIDE[1] * PIXEL_BYTES;
+  const first = after.length - 2 * FLOOR_PASSES + 1;
   const message =
-    `the floor of ${what} over the last ${FLOOR_PASSES} passes stood ` +
-    `${(kept / 1e6).toFixed(1)} MB over its floor in passes ` +
-    `${WARM_PASSES + 1} to ${WARM_PASSES + FLOOR_PASSES}, against the ` +
-    `${(read / 1e6).toFixed(1)} MB the ${passes} passes between read; ` +
-    `after each pass ${after.map((b) => (b / 1e6).toFixed(1)).join(", ")} MB`;
+    `the floor of ${what} over passes ${first + FLOOR_PASSES} to ` +
+    `${after.length} stood ${(kept / 1e6).toFixed(1)} MB over its floor in ` +
+    `passes ${first} to ${first + FLOOR_PASSES - 1}, against the ` +
+    `${(read / 1e6).toFixed(1)} MB ${FLOOR_PASSES} passes read; after each ` +
+    `pass ${after.map((b) => (b / 1e6).toFixed(1)).join(", ")} MB`;
   return { kept: kept <= KEPT_SHARE * read, message };
 }
 

@@ -42,6 +42,17 @@ const SAWTOOTH_ON_CI = [
   517.8, 566.3, 517.9, 524.3, 524.2, 572.6, 524.2, 530.7, 685.5,
 ];
 
+/**
+ * Resident memory after each of 20 passes of a run on CI's Linux arm64
+ * release leg, in MB: collected throughout, settling only by pass 11, where
+ * it stayed. Run 42122640796, where the last sample's rise of 249.7 MB over
+ * pass 3 was refused (#597).
+ */
+const PLATEAU_ON_CI = [
+  75.8, 136.6, 146.2, 146.2, 207.1, 207.1, 264.7, 267.9, 331.9, 331.9, 395.9,
+  395.9, 395.9, 395.9, 395.9, 395.9, 395.9, 395.9, 395.9, 395.9,
+];
+
 /** Resident bytes after each pass of CPU canvases handed to `hold`. */
 const resident = (/** @type {(canvas: any) => void} */ hold) =>
   afterEachPass({ gpu: false, hold, measure: () => process.memoryUsage().rss });
@@ -58,6 +69,14 @@ describe("Canvases that are dropped", () => {
   test("are not taken for kept by a collection peak on the last pass", () => {
     const { kept, message } = judged(
       SAWTOOTH_ON_CI.map((mb) => mb * 1e6),
+      "resident memory",
+    );
+    assert.ok(kept, message);
+  });
+
+  test("are not taken for kept by memory settling late", () => {
+    const { kept, message } = judged(
+      PLATEAU_ON_CI.map((mb) => mb * 1e6),
       "resident memory",
     );
     assert.ok(kept, message);
