@@ -263,6 +263,8 @@ pub(crate) fn draws_ran(
             // `pacing`.
             let flushed = context.flush(None).is_ok() && !pacing::take_failed();
             let ran = context.submit(SyncCpu::Yes);
+            #[cfg(test)]
+            SYNCED.set(SYNCED.get() + 1);
             flushed && ran && confirmed(&context, None)
         }
         Held::Graphite => {
@@ -677,8 +679,12 @@ thread_local! {
     /// took the two-wait path.
     pub(crate) static DECLINED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-    /// How many times [`read_checked`] has waited on the GPU through Skia on
-    /// this thread.
+    /// How many times this thread has waited on a Ganesh context through
+    /// `submit(SyncCpu::Yes)`: in [`read_checked`] and in [`draws_ran`], the
+    /// only two places that make that wait, so that a test can count a read's
+    /// waits whichever route makes them. It does not count a wait inside
+    /// Skia's own synchronous `readPixels`, which the `copy_pixels` routes
+    /// take, nor a Graphite commit, which [`WAITED_COMMITS`] counts.
     pub(crate) static SYNCED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     /// How many GPU reads [`read_checked`] has committed the draws for before
@@ -1591,7 +1597,8 @@ mod tests {
         }
 
         /// A read with draws before it commits two buffers, the draws' and
-        /// the copy's, and waits through Skia once.
+        /// the copy's, and waits through Skia once: once in all, counting
+        /// [`draws_ran`]'s wait as well as the read's own.
         #[test]
         fn a_read_commits_its_draws_first_and_waits_once() {
             let Some(mut canvas) = ready() else {
