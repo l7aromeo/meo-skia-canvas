@@ -137,7 +137,22 @@ export const PATCHES = {
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
   // fix for it as one outside this script does.
-  win32: [ATLAS_SIZE, TRIANGULATION, GRAPHITE_BINDINGS],
+  win32: [
+    ATLAS_SIZE,
+    TRIANGULATION,
+    GRAPHITE_BINDINGS,
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: node scripts/test.mjs tests/suite/text.test.js on Windows, against a binary built from a tree prepared without this patch; "an oblique face of the angle's sign is drawn as it is" draws the upright face sheared for a positive angle
+    //
+    // Skia's DirectWrite port takes a face's slant from DirectWrite alone
+    // (`DWriteFontTypeface::GetStyle`), and DirectWrite reports a face
+    // flagged oblique only by `OS/2` `fsSelection` bit 9 as NORMAL. Skia's
+    // FreeType port reads the bit itself and reports the face oblique, so on
+    // Windows such a face matched as its family's upright one: an oblique
+    // request got the upright face sheared rather than the oblique face CSS
+    // Fonts 4 matches. The patch reads the bit as the FreeType port does.
+    join("containers", "skia-dwrite-oblique.patch"),
+  ],
 };
 
 /** This platform's patches, or none. */

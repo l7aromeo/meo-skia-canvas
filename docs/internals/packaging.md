@@ -86,7 +86,12 @@ skia-svg-macros, and `cargo-patch --remove` takes it away.
   the cfg turns on, so a gate that never opens cannot pass as one that is shut.
 
 Windows binaries are built from a patched source too, carrying the atlas-size
-cap, the triangulation tolerance and the Graphite bindings.
+cap, the triangulation tolerance, the Graphite bindings and
+`containers/skia-dwrite-oblique.patch`. The last makes Skia's DirectWrite port
+read `OS/2` `fsSelection` bit 9 as its FreeType port does: DirectWrite reports
+a face flagged oblique only by that bit as upright, so the family's upright
+face and its oblique one matched alike, and an oblique request drew the
+upright face sheared.
 
 **Build through `just`.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe, and
@@ -94,7 +99,8 @@ cap, the triangulation tolerance and the Graphite bindings.
 Skia's DEPS and gn, and the platform's patches from `PATCHES` applied with
 `-F0` -- the four above on macOS, on Linux
 `containers/skia-brotli-sources.patch`, the atlas-size cap, the triangulation
-tolerance and the Graphite bindings, and on Windows the last three. `env`
+tolerance and the Graphite bindings, and on Windows the last three with the
+DirectWrite oblique patch. `env`
 single-quotes a directory holding a backslash, a space, a quote or `$`, which
 just's dotenv reader would otherwise take as an escape or the value's end; a
 plain path stays bare, so `export $(... env)` still works where it did. The brotli

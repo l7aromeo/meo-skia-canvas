@@ -62,7 +62,15 @@ export const PATCHED = {
     TRIANGULATION,
   ],
   linux: [ATLAS_SIZE, TRIANGULATION],
-  win32: [ATLAS_SIZE, TRIANGULATION],
+  win32: [
+    ATLAS_SIZE,
+    TRIANGULATION,
+    {
+      // containers/skia-dwrite-oblique.patch
+      file: "src/ports/SkTypeface_win_dw.cpp",
+      marker: "fsSelection.field.Oblique",
+    },
+  ],
 };
 
 /**

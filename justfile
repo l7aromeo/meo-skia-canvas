@@ -10,8 +10,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # wins. Which patches each platform's tree carries is `PATCHES` in
 # scripts/skia-source.mjs; macOS's are the one below and the atlas-size cap
 # and triangulation tolerance noted there, Linux's the brotli build-list fix
-# and the same two, Windows's those two alone, and all three the Graphite
-# bindings, which a build takes only through
+# and the same two, Windows's the same two and the DirectWrite oblique fix, and
+# all three the Graphite bindings, which a build takes only through
 # `node scripts/skia-source.mjs cargo-patch`.
 #
 # UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
