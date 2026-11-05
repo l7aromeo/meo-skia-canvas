@@ -12,6 +12,15 @@ on:
           - linux
           - mac
           - windows
+      # Off, a run builds and tests every leg it is asked for and posts nothing:
+      # no binary, no Lambda layer, and the release for the version is neither
+      # made nor touched. For timing or checking a build change on a branch,
+      # whose binaries must not replace the draft's.
+      upload:
+        description: "Upload the binaries to the release"
+        required: false
+        default: true
+        type: boolean
 
 # Queued, never cancelled. The jobs below upload to the release for the tag they
 # were dispatched at, with `--clobber`, and the published package pins the
@@ -113,7 +122,7 @@ jobs:
       - name: Check Skia was built from the patched source
         run: node scripts/check-patched-skia.mjs target/release/build
 
-      - name: Add to release
+      - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # tests/suite/metal-compile.test.js fails rather than skips here for
@@ -122,8 +131,13 @@ jobs:
           # cannot be stopped for one process; the step above is the proof
           # that holds there.
           MEO_SKIA_CANVAS_REQUIRE_METAL: "1"
-        run: |
-          bun run test:suite && bun run upload
+        run: bun run test:suite
+
+      - name: Add to release
+        if: ${{ inputs.upload }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun run upload
 
   windows:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'windows' }}
@@ -170,14 +184,85 @@ jobs:
       - name: Install Ninja and just
         run: choco install ninja just
 
-      - name: Build module
-        run: just build-release
+      # skia-bindings compiles Skia with clang-cl from LLVM_HOME or
+      # `C:\Program Files\LLVM`, and bindgen needs libclang from the same
+      # place; without one it falls back to MSVC's `cl`. Installed only where
+      # the image does not carry it.
+      - name: Use LLVM
+        shell: bash
+        run: |
+          if [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
+            "/c/Program Files/LLVM/bin/clang-cl.exe" --version | head -1
+          else
+            choco install llvm --no-progress
+          fi
 
-      - name: Add to release
+      # The patched Skia tree the Windows build compiles from -- rust-skia at
+      # the Cargo.lock tag, Skia's DEPS and gn, and Windows's patches from
+      # `PATCHES` in scripts/skia-source.mjs. `just build-release` prepares it
+      # when the cache misses; skia-source names it by version and patch
+      # digest. The key is that name, from `cache-key`, so it follows both
+      # with no list here to keep in step; bash, because the Windows runner's
+      # default shell reads `key=$(...)` otherwise, and assigned before it is
+      # written out so that a failing `cache-key` fails the step. Only the
+      # source is cached: Skia itself is compiled on every run, as on macOS.
+      - name: Name the Skia source's cache key
+        id: skia-key
+        shell: bash
+        run: |
+          key=$(node scripts/skia-source.mjs cache-key)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Skia source
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: ${{ steps.skia-key.outputs.key }}
+
+      # Built with the Skia tree reached through a drive letter of its own.
+      # ninja resolves every header clang-cl reports, and where the tree and
+      # the target share a drive -- windows-11-arm checks out on C:, the
+      # cache's drive -- gn writes the tree's paths relative to the out
+      # directory, nine `../` deep, and ninja's resolution of a header there
+      # passes 260 characters: "GetFullPathNameA(...): The filename or
+      # extension is too long". On another drive gn keeps them absolute, at
+      # most 173 characters here, as the x64 image's D: checkout does.
+      # Windows' long-path switch did not lift it. `subst` is per logon
+      # session, so it is made in the step that builds.
+      - name: Build module
+        shell: pwsh
+        run: |
+          if (Test-Path S:\) { throw "S: is taken; pick another letter for the Skia cache" }
+          New-Item -ItemType Directory -Force "$env:USERPROFILE\.cache" | Out-Null
+          subst S: "$env:USERPROFILE\.cache"
+          $env:XDG_CACHE_HOME = 'S:\'
+          just build-release
+
+      # The macOS job's check, for Windows's patches: rust-skia's prebuilt
+      # Skia, or a build from an unpatched tree, links and passes every test
+      # that does not land a path where the atlas moves a pixel, draw a curve
+      # at two scales or ask for a face flagged oblique.
+      # scripts/check-patched-skia.mjs refuses a build that downloaded, or
+      # whose `AtlasPathRenderer.cpp`, `TriangulatingPathRenderer.cpp` or
+      # `SkTypeface_win_dw.cpp` is not the patched one. It reads the compiled
+      # files at the `S:` paths ninja named them by, so the drive is mapped
+      # again where the build step's mapping did not outlive it.
+      - name: Check Skia was built from the patched source
+        shell: pwsh
+        run: |
+          if (-not (Test-Path S:\)) { subst S: "$env:USERPROFILE\.cache" }
+          node scripts/check-patched-skia.mjs target/release/build
+
+      - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          bun run test:suite && bun run upload
+        run: bun run test:suite
+
+      - name: Add to release
+        if: ${{ inputs.upload }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun run upload
 
   linux:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
@@ -467,14 +552,19 @@ jobs:
 
           exit $fail
 
-      - name: Add to release
+      - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd skia-canvas && bun run test:suite && bun run upload
+        run: cd skia-canvas && bun run test:suite
+
+      - name: Add to release
+        if: ${{ inputs.upload }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cd skia-canvas && bun run upload
 
       - name: Add AWS layer to release
-        if: ${{ matrix.libc == 'glibc' }}
+        if: ${{ inputs.upload && matrix.libc == 'glibc' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -523,7 +613,9 @@ jobs:
   verify-lambda-layer:
     name: Verify the AWS layer loads on Lambda
     needs: linux
-    if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
+    # The layer it loads is one the linux job uploaded, which a run without
+    # uploads never posts.
+    if: ${{ inputs.upload && (inputs.platforms == 'all' || inputs.platforms == 'linux') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Reads an asset off a release that is still a draft, and a draft is invisible

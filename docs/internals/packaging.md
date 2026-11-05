@@ -33,7 +33,7 @@ is load-bearing, not incidental. `build.yml` asserts both after every Linux
 build, and a separate job loads the published Lambda layer and renders through
 it.
 
-## Skia on macOS is built from a patched source
+## Skia is built from a patched source
 
 The darwin binary does not use rust-skia's prebuilt Skia. skia-bindings
 replaces Skia's `@available(macOS 10.15, *)` checks in `GrMtlUtil.mm` and
@@ -88,28 +88,37 @@ and `cargo-patch --remove` takes it away.
   `tests/graphite_bindings.rs`, and greps for the notice `build.rs` prints when
   the cfg turns on, so a gate that never opens cannot pass as one that is shut.
 
-Both also carry `containers/skia-async-transfer-reuse.patch`, which asks for
-the transfer buffer of Skia's asynchronous read -- every `getImageData` on a
-GPU page -- as `kDynamic` rather than `kStream`, so that Ganesh caches the
+macOS and Linux also carry `containers/skia-async-transfer-reuse.patch`, which
+asks for the transfer buffer of Skia's asynchronous read -- every `getImageData`
+on a GPU page -- as `kDynamic` rather than `kStream`, so that Ganesh caches the
 buffer and the next read of that size takes it again rather than allocating
 one. Skia keeps `kStream` for a crash of Chromium's GPU process in a Windows
 test (skbug.com/40042671), whose cause is not known; the UPSTREAM note beside
 it in `PATCHES` says why Metal and Vulkan get the same memory either way.
 
-Published Windows binaries are built against rust-skia's prebuilt Skia, which
-carries none of these patches, so on Windows the atlas can move a pixel and a
-curve is drawn by what the context drew before. `WITHHELD` in
-`scripts/skia-source.mjs` records each patch a platform goes without and why,
-and the transfer-buffer patch stays off Windows on purpose even once the
-others reach it.
+Windows binaries are built from a patched source too, carrying the atlas-size
+cap, the triangulation tolerance, the Graphite bindings and
+`containers/skia-dwrite-oblique.patch`. The last makes Skia's DirectWrite port
+read `OS/2` `fsSelection` bit 9 as its FreeType port does: DirectWrite reports
+a face flagged oblique only by that bit as upright, so the family's upright
+face and its oblique one matched alike, and an oblique request drew the
+upright face sheared. `WITHHELD` in `scripts/skia-source.mjs` records each
+patch a platform goes without and why: Windows goes without the transfer-buffer
+patch on purpose, for the crash above, and without the Metal timeout and the
+brotli sources, which change nothing it builds.
 
-**Build through `just` on macOS and Linux.** The justfile's `dotenv-command`,
-`scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe on macOS
-and Linux and on Windows not at all, and `ensure-deps` prepares the tree it
-names: rust-skia at the Cargo.lock tag, Skia's DEPS and gn, and the platform's
-patches from `PATCHES` applied with `-F0` -- the five above on macOS, and on
-Linux `containers/skia-brotli-sources.patch` and the four after the Metal
-timeout. The brotli
+**Build through `just`.** The justfile's `dotenv-command`,
+`scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe, and
+`ensure-deps` prepares the tree it names: rust-skia at the Cargo.lock tag,
+Skia's DEPS and gn, and the platform's patches from `PATCHES` applied with
+`-F0` -- on macOS the Metal timeout, the atlas-size cap, the triangulation
+tolerance, the Graphite bindings and the transfer buffer; on Linux
+`containers/skia-brotli-sources.patch` and the last four of those; and on
+Windows the atlas-size cap, the triangulation tolerance, the Graphite bindings
+and the DirectWrite oblique patch. `env`
+single-quotes a directory holding a backslash, a space, a quote or `$`, which
+just's dotenv reader would otherwise take as an escape or the value's end; a
+plain path stays bare, so `export $(... env)` still works where it did. The brotli
 patch adds the two sources Skia's build list leaves out since M156, without
 which a `freetype` build fails to link on `kCmdLut` and
 `BrotliDecoderEnsureStaticInit`. It is
@@ -131,10 +140,12 @@ prebuilt carries `freetype` and skia-bindings builds Skia from its own unpatched
 source, `build.rs` compiles the missing brotli files from that source instead,
 and does nothing where the build list already has them.
 
-**The release cannot ship that binary.** `build.yml`'s mac job refuses a build
-whose skia-bindings output does not say it built offline from that tree, and
-its linux job one built from a rust-skia checkout without Linux's atlas,
-triangulation and transfer-buffer patches.
+**The release cannot ship that binary.** `build.yml`'s mac and windows jobs
+refuse a build whose skia-bindings output does not say it built offline from
+that tree, and its linux job one built from a rust-skia checkout without
+Linux's atlas, triangulation and transfer-buffer patches. The windows job
+caches only the source tree, as the mac job does, and compiles Skia on every
+run.
 On the mac job, `tests/suite/metal-compile.test.js`, required there by
 `MEO_SKIA_CANVAS_REQUIRE_METAL`, stops the process's own compiler service for
 three seconds under a sandbox that hides the Metal shader cache, and reads a

@@ -31,10 +31,11 @@ points `skia-bindings` at the patched Skia source this tree builds. A bare
 `cargo test` has none, links a Skia without those patches, and tests that
 depend on them fail on main's own behaviour -- a red that reads as a
 regression in the change under test. Changing the variable's value reruns
-`skia-bindings`' build and recompiles Skia. Outside `just`:
+`skia-bindings`' build and recompiles Skia. Outside `just`, through `eval`,
+since `env` quotes a directory with a backslash or a space in it:
 
 ```bash
-export $(node scripts/skia-source.mjs env)
+eval "export $(node scripts/skia-source.mjs env)"
 cargo test --features metal,window,freetype,fetch    # the set `just test-rust` uses on macOS
 ```
 
