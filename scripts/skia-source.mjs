@@ -184,6 +184,24 @@ const SVG_SYNTHETIC_SLANT = join(
   "skia-svg-synthetic-slant.patch",
 );
 
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: node scripts/test.mjs tests/suite/text.test.js against a binary built from a tree prepared without this patch; "a family's italic face is drawn for italic whatever its weight" fails
+//
+// `SkFontStyleSet::matchStyleCSS3` (src/core/SkFontMgr.cpp) scores a
+// face's slant and then shifts it by 8 bits before adding a weight score
+// that reaches 1000, so a face far closer in weight outranks one whose
+// slant is the one asked for -- an italic request took a family's upright
+// 400 face over its italic 900 one, and on a platform that reports a face
+// flagged by `OS/2` `fsSelection` bit 9 oblique, its oblique 400 face over
+// a variable italic face whose default instance is 100. CSS Fonts 4
+// section 5.2 narrows by style before weight, and the comment above that
+// shift says the slant "takes priority over all valid weights". The patch
+// shifts by enough bits to hold the whole weight score.
+const FONT_MATCH_SLANT_FIRST = join(
+  "containers",
+  "skia-font-match-slant-first.patch",
+);
+
 export const PATCHES = {
   darwin: [
     METAL_UNTIMED_COMPILE,
@@ -192,6 +210,7 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -213,6 +232,7 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
@@ -223,6 +243,7 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     DWRITE_OBLIQUE,
     SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
   ],
 };
 

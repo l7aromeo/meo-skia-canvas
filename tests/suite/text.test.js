@@ -2443,6 +2443,36 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     assert.deepEqual(wrong, []);
   });
 
+  test("a family's italic face is drawn for italic whatever its weight", () => {
+    // CSS Fonts 4 section 5.2 narrows a family's faces by style before
+    // weight: an italic asked of a family with an upright 400 face and an
+    // italic 900 one takes the italic face, as Chrome draws it, rather than
+    // the upright face closer in weight, skewed. The italic face leans by
+    // 12deg of its own, so the two tell apart under the skew either way.
+    FontLibrary.use("WeightUprightAlone", [
+      `${R}/Recursive-upright-subset.ttf`,
+    ]);
+    FontLibrary.use("WeightItalicAlone", [
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    FontLibrary.use("WeightItalicMixed", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    assert.ok(
+      pixels("italic 200px WeightItalicMixed").equals(
+        pixels("italic 200px WeightItalicAlone"),
+      ),
+      "italic draws the italic face",
+    );
+    assert.ok(
+      pixels("200px WeightItalicMixed").equals(
+        pixels("200px WeightUprightAlone"),
+      ),
+      "plain text draws the upright face",
+    );
+  });
+
   test("a face flagged oblique is reported slanted", () => {
     // RecursiveStatic's oblique face is flagged by `fsSelection` bit 9 and
     // states an `italicAngle` of -12. CoreText reports it italic, FreeType and

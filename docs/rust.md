@@ -253,6 +253,8 @@ On Windows, the same Skia takes a face's slant from DirectWrite alone, and Direc
 
 An SVG document's `italic` and `oblique` text in a family with no slanted face draws upright in a crate build. CSS Fonts 4 section 5.2 synthesises the slant, and the npm package's binaries do -- a quarter for `italic`, `tan(angle)` for `oblique <angle>` -- through `containers/skia-svg-synthetic-slant.patch`; crates.io's Skia never sets a skew on SVG text, and reads `oblique <angle>` as an unparseable `font-style`.
 
+A crate build can draw a family's upright face, or its face of another slant, for `italic` or `oblique` where the family has a face of the slant asked for but far from the weight asked for. CSS Fonts 4 section 5.2 narrows a family's faces by style before weight, and the npm package's binaries do through `containers/skia-font-match-slant-first.patch`; crates.io's Skia scores a face's weight so that it can outrank its slant, so `italic` in a family of an upright 400 face and an italic 900 one draws the upright face, skewed.
+
 To build without them, compile Skia from source with this repository's patches, the ones `PATCHES` in `scripts/skia-source.mjs` names for your platform. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies them and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB the first time; a later patch list for the same version is made from that tree without downloading anything. The build compiles Skia, which takes a few minutes.
 
 ## Paint

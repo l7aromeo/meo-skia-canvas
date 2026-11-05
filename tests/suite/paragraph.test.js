@@ -1901,6 +1901,26 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     assert.deepEqual(wrong, []);
   });
 
+  test("a range's italic face is drawn for italic whatever its weight", () => {
+    // The canvas test of the same name, for a Paragraph range: CSS Fonts 4
+    // section 5.2 narrows by style before weight, so the italic 900 face is
+    // drawn rather than the upright 400 face skewed.
+    FontLibrary.use("ParagraphWeightItalicAlone", [
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    FontLibrary.use("ParagraphWeightItalicMixed", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    assert.ok(
+      same(
+        paragraph("ParagraphWeightItalicMixed", [["IH", slanted(ITALIC)]]),
+        paragraph("ParagraphWeightItalicAlone", [["IH", slanted(ITALIC)]]),
+      ),
+      "an italic range draws the italic face",
+    );
+  });
+
   test("sheared by tan(14deg)", () => {
     register();
     for (const family of FAMILIES) {

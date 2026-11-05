@@ -1,0 +1,20 @@
+--- a/skia-bindings/skia/src/core/SkFontMgr.cpp
++++ b/skia-bindings/skia/src/core/SkFontMgr.cpp
+@@ -292,7 +292,16 @@
+             /* [pattern] */
+         }};
+         currentScore += score[pattern.slant()][current.slant()];
+-        currentScore <<= 8;
++        // Room below the slant for the whole weight score, which reaches
++        // 1000, so that no weight outranks a slant: CSS Fonts 4 section 5.2
++        // narrows the faces by style before it looks at weight. Shifted by
++        // 8, a face 1000 points closer in weight outranked one a slant
++        // better, and an italic request took an upright 400 face over an
++        // italic 900 one.
++        static constexpr int kWeightScoreBits = 10;
++        static_assert((1 << kWeightScoreBits) > 1000,
++                      "a weight score must not reach the slant's bits");
++        currentScore <<= kWeightScoreBits;
+ 
+         // Synthetics (weight, style) [no stretch synthetic?]
+ 

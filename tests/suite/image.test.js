@@ -298,6 +298,37 @@ describe("an SVG containing text", () => {
     assert.deepEqual(wrong, []);
   });
 
+  test("a document's italic text takes a family's italic face whatever its weight", async () => {
+    // The canvas test of the same name, for an SVG document: an italic asked
+    // of a family with an upright 400 face and an italic 900 one draws the
+    // italic face, by CSS Fonts 4 section 5.2's style before weight.
+    const R = "tests/assets/fonts/Recursive";
+    const draw = async (family) => {
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">` +
+        `<text x="60" y="250" font-size="200" font-family="${family}" font-style="italic" fill="#000">IH</text></svg>`;
+      const image = await loadImage(
+        "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+      );
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    FontLibrary.use("SvgWeightItalicAlone", [
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    FontLibrary.use("SvgWeightItalicMixed", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    assert.ok(
+      (await draw("SvgWeightItalicMixed")).equals(
+        await draw("SvgWeightItalicAlone"),
+      ),
+      "italic draws the italic face",
+    );
+  });
+
   test("a document's slanted text in a family with no slanted face is slanted as canvas text is", async () => {
     // CSS Fonts 4 section 5.2 synthesises a slant a family has no face for:
     // canvas text skews `italic` by a quarter and shears `oblique <angle>` to
