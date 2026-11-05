@@ -46,7 +46,7 @@ const SAWTOOTH_ON_CI = [
  * Resident memory after each of 20 passes of a run on CI's Linux arm64
  * release leg, in MB: collected throughout, settling only by pass 11, where
  * it stayed. Run 42122640796, where the last sample's rise of 249.7 MB over
- * pass 3 was refused (#597).
+ * pass 3 was refused (#595).
  */
 const PLATEAU_ON_CI = [
   75.8, 136.6, 146.2, 146.2, 207.1, 207.1, 264.7, 267.9, 331.9, 331.9, 395.9,
