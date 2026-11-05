@@ -1702,11 +1702,21 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
       `${R}/Recursive-upright-subset.ttf`,
       `${R}/Recursive-oblique12-subset.ttf`,
     ]);
+    // The same two loaded the other way round, which once decided which of
+    // them a family whose platform reports them alike kept.
+    FontLibrary.use("ParagraphRecursiveStaticReversed", [
+      `${R}/Recursive-oblique12-subset.ttf`,
+      `${R}/Recursive-upright-subset.ttf`,
+    ]);
     for (const family of [...FAMILIES, ...LEANING])
       assert.ok(FontLibrary.has(family), `${family} is registered`);
   };
   const FAMILIES = ["ParagraphOswald", "ParagraphRaleway"],
-    LEANING = ["ParagraphRecursiveSlnt", "ParagraphRecursiveStatic"],
+    LEANING = [
+      "ParagraphRecursiveSlnt",
+      "ParagraphRecursiveStatic",
+      "ParagraphRecursiveStaticReversed",
+    ],
     W = 400,
     H = 300,
     UPRIGHT = 0,

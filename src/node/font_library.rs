@@ -29,7 +29,7 @@ use crate::{
     context2d::{Font, FontFields, FontKey},
     font::{
         FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
-        optical_size, quarantine::font_data,
+        designed_oblique_angle, optical_size, quarantine::font_data,
     },
     image::x_height_ratio,
     memory::note_font_use,
@@ -1515,16 +1515,32 @@ impl FontLibrary {
         self.add_typeface(font, alias);
     }
 
+    /// Adds `font`, replacing a face added before under the same family that
+    /// is the same face by its style: the same reported `font_style()` and
+    /// the same oblique angle by the face's own tables.
+    ///
+    /// The angle is part of the match because the reported style alone does
+    /// not tell an oblique face from an upright one everywhere. DirectWrite
+    /// reports a face flagged oblique only by `OS/2` `fsSelection` bit 9 as
+    /// upright, and CoreText reports one whose `italicAngle` is zero the same
+    /// way, so on those an upright face and the family's oblique one match in
+    /// style; matched by style alone, the one added second replaced the
+    /// first, and plain text drew whichever was loaded last.
     fn add_typeface(&mut self, font: Typeface, alias: Option<String>) {
-        // replace any previously added font with the same metadata/alias
-        if let Some(idx) = self.fonts.iter().position(|(old_font, old_alias)|
-      match alias.is_some(){
-        true => old_alias == &alias,
-        false => old_font.family_name() == font.family_name()
-      } && old_font.font_style() == font.font_style()
-    ){
-      self.fonts.remove(idx);
-    }
+        let oblique = designed_oblique_angle(&font);
+        if let Some(idx) =
+            self.fonts.iter().position(|(old_font, old_alias)| {
+                let same_family = match alias.is_some() {
+                    true => old_alias == &alias,
+                    false => old_font.family_name() == font.family_name(),
+                };
+                same_family
+                    && old_font.font_style() == font.font_style()
+                    && designed_oblique_angle(old_font) == oblique
+            })
+        {
+            self.fonts.remove(idx);
+        }
 
         // add the new typeface/alias and recreate the FontCollection to include
         // it
