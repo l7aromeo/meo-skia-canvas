@@ -1,11 +1,15 @@
-//! Releasing a JavaScript thread's font caches when the idle watcher asks.
+//! Releasing a JavaScript thread's font caches and kept chain layers when the
+//! idle watcher asks.
 //!
 //! Every font cache belongs to the thread that filled it -- the font library
 //! is thread-local, and so are the collections it hands out, since skia-safe's
-//! `FontCollection` is neither `Send` nor `Sync`. The watcher in
-//! `crate::memory` runs on a thread of its own and cannot reach them. So each
-//! thread that loads the addon, the main one and every worker, leaves a
-//! channel here when it does, and the watcher posts the release through each.
+//! `FontCollection` is neither `Send` nor `Sync`. The GPU layers
+//! `chain::pool` keeps belong to their thread's context the same way, and the
+//! GPU's own idle release reaches only `rayon` workers and export owners,
+//! never a JavaScript thread. The watcher in `crate::memory` runs on a thread
+//! of its own and cannot reach any of them. So each thread that loads the
+//! addon, the main one and every worker, leaves a channel here when it does,
+//! and the watcher posts the release through each.
 //!
 //! A posted release runs on its thread's event loop between two tasks, never
 //! inside one. A layout is synchronous from the call that asks for it to the
@@ -22,7 +26,9 @@ use neon::{
 };
 use parking_lot::Mutex;
 
-use crate::{memory::trim, node::font_library::FontLibrary};
+use crate::{
+    context::chain::pool, memory::trim, node::font_library::FontLibrary,
+};
 
 /// A channel to each JavaScript thread that has loaded the addon and not yet
 /// exited.
@@ -36,15 +42,17 @@ pub(crate) fn register(cx: &mut ModuleContext) {
     THREADS.lock().push(channel);
 }
 
-/// Asks every JavaScript thread to empty its font caches, and to trim once it
-/// has, since the watcher's own trim has run by then.
+/// Asks every JavaScript thread to empty its font caches and let go of the
+/// chain layers it keeps, and to trim once it has, since the watcher's own
+/// trim has run by then. A thread that keeps nothing lets go of nothing.
 ///
 /// A thread that has exited refuses the post, and its channel is dropped
 /// here.
-pub(crate) fn release_font_caches() {
+pub(crate) fn release_thread_caches() {
     THREADS.lock().retain(|channel| {
         channel
             .try_send(|_| {
+                pool::release();
                 FontLibrary::release_shared_caches();
                 trim();
                 Ok(())
