@@ -12,6 +12,15 @@ on:
           - linux
           - mac
           - windows
+      # Off, a run builds and tests every leg it is asked for and posts nothing:
+      # no binary, no Lambda layer, and the release for the version is neither
+      # made nor touched. For timing or checking a build change on a branch,
+      # whose binaries must not replace the draft's.
+      upload:
+        description: "Upload the binaries to the release"
+        required: false
+        default: true
+        type: boolean
 
 # Queued, never cancelled. The jobs below upload to the release for the tag they
 # were dispatched at, with `--clobber`, and the published package pins the
@@ -104,7 +113,7 @@ jobs:
       - name: Check Skia was built from the patched source
         run: node scripts/check-patched-skia.mjs target/release/build
 
-      - name: Add to release
+      - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # tests/suite/metal-compile.test.js fails rather than skips here for
@@ -113,8 +122,13 @@ jobs:
           # cannot be stopped for one process; the step above is the proof
           # that holds there.
           MEO_SKIA_CANVAS_REQUIRE_METAL: "1"
-        run: |
-          bun run test:suite && bun run upload
+        run: bun run test:suite
+
+      - name: Add to release
+        if: ${{ inputs.upload }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun run upload
 
   windows:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'windows' }}
@@ -164,11 +178,16 @@ jobs:
       - name: Build module
         run: just build-release
 
-      - name: Add to release
+      - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          bun run test:suite && bun run upload
+        run: bun run test:suite
+
+      - name: Add to release
+        if: ${{ inputs.upload }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun run upload
 
   linux:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
@@ -466,14 +485,19 @@ jobs:
 
           exit $fail
 
-      - name: Add to release
+      - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cd skia-canvas && bun run test:suite && bun run upload
+        run: cd skia-canvas && bun run test:suite
+
+      - name: Add to release
+        if: ${{ inputs.upload }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cd skia-canvas && bun run upload
 
       - name: Add AWS layer to release
-        if: ${{ matrix.libc == 'glibc' }}
+        if: ${{ inputs.upload && matrix.libc == 'glibc' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -522,7 +546,9 @@ jobs:
   verify-lambda-layer:
     name: Verify the AWS layer loads on Lambda
     needs: linux
-    if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
+    # The layer it loads is one the linux job uploaded, which a run without
+    # uploads never posts.
+    if: ${{ inputs.upload && (inputs.platforms == 'all' || inputs.platforms == 'linux') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Reads an asset off a release that is still a draft, and a draft is invisible
