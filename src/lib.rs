@@ -565,6 +565,16 @@ fn discard_gpu_draws(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
+/// Test-only: how many chain layers this thread keeps for its next run --
+/// see `context::chain::pool` -- which a test reads either side of the idle
+/// watcher's release.
+///
+/// Exported by debug builds only, as `__discardGpuDraws` is.
+#[cfg(all(feature = "node-addon", debug_assertions))]
+fn kept_layers(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(context::chain::pool::kept() as f64))
+}
+
 /// Test-only: the idle watcher's activity count -- see [`memory`] -- which a
 /// test reads either side of a posted font release.
 ///
@@ -1032,6 +1042,8 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("__cachedParagraphs", font_library::cachedParagraphs)?;
     #[cfg(debug_assertions)]
     cx.export_function("__reportedMemory", node::external::reported_memory)?;
+    #[cfg(debug_assertions)]
+    cx.export_function("__keptLayers", kept_layers)?;
     #[cfg(debug_assertions)]
     cx.export_function(
         "__paragraphStyleCopies",
