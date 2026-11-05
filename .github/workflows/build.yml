@@ -188,6 +188,23 @@ jobs:
             choco install llvm --no-progress
           fi
 
+      # ninja resolves every header clang-cl reports with GetFullPathNameA, the
+      # build directory joined to the path as the compiler gave it. Where the
+      # Skia tree and the target share a drive, as on windows-11-arm's C:, gn
+      # writes that path relative, nine `../` deep, and a header there joins
+      # to past 260 characters: "The filename or extension is too long", for
+      # zlib's first. The x64 image checks out on D:, so its paths stay
+      # absolute and short. ninja 1.13.2's manifest is longPathAware; this is
+      # the system switch that lets that take effect for the processes after
+      # it.
+      - name: Allow long paths
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null
+          (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem').LongPathsEnabled
+          ninja --version
+
       # The patched Skia tree the Windows build compiles from -- rust-skia at
       # the Cargo.lock tag, Skia's DEPS and gn, and Windows's patches from
       # `PATCHES` in scripts/skia-source.mjs. `just build-release` prepares it
