@@ -58,8 +58,8 @@ use crate::{
     },
     export::{
         ChromaSampling, Content, DEFAULT_QUALITY, EncoderKind, ImageFormat,
-        LOSSLESS_PDF_ENCODING_QUALITY, NOMINAL_DPI, QUALITY_SCALE,
-        VectorFeatures, dots_per_inch, encoder_quality, pdf::with_page_groups,
+        LOSSLESS_PDF_ENCODING_QUALITY, NOMINAL_DPI, VectorFeatures,
+        dots_per_inch, encoder_quality, lossless_for, pdf::with_page_groups,
         pixels_per_metre,
     },
     gpu::{
@@ -5583,7 +5583,7 @@ impl Page {
                 depth: options.frame_depth(),
                 bits: options.bit_depth,
                 chroma: options.chroma.unwrap_or_default(),
-                lossless: options.lossless,
+                lossless: options.codes_losslessly(),
             };
             let mut bytes = Cursor::new(Vec::new());
             {
@@ -5793,7 +5793,7 @@ impl Page {
 
                     ImageFormat::Webp => {
                         let mut webp_opts = webp_encoder::Options::default();
-                        if img_quality == QUALITY_SCALE as u32 {
+                        if options.codes_losslessly() {
                             webp_opts.compression =
                                 webp_encoder::Compression::Lossless;
                             // Effort, not quality -- see the constant.
@@ -6103,7 +6103,7 @@ impl PageSequence {
             depth: options.frame_depth(),
             bits: options.bit_depth,
             chroma: options.chroma.unwrap_or_default(),
-            lossless: options.lossless,
+            lossless: options.codes_losslessly(),
         };
 
         let mut sink = encode::start(options.format, &spec, out)?;
@@ -6887,9 +6887,11 @@ pub struct ExportOptions {
     /// How AVIF samples chroma, or `None` for full. See
     /// [`EncodeOptions::chroma`](crate::export::EncodeOptions::chroma).
     pub chroma: Option<ChromaSampling>,
-    /// Whether AVIF codes with no loss. See
-    /// [`EncodeOptions::lossless`](crate::export::EncodeOptions::lossless).
-    pub lossless: bool,
+    /// Whether a WebP or an AVIF codes with no loss, or `None` for each
+    /// format's own rule -- see
+    /// [`EncodeOptions::lossless`](crate::export::EncodeOptions::lossless)
+    /// and [`ExportOptions::codes_losslessly`].
+    pub lossless: Option<bool>,
     /// The space an export or readback is *converted into*.
     ///
     /// Distinct from [`ExportOptions::surface_color_space`], which is the one
@@ -6961,7 +6963,7 @@ impl Default for ExportOptions {
             color_type: ColorType::RGBA8888,
             bit_depth: None,
             chroma: None,
-            lossless: false,
+            lossless: None,
             color_space: ColorSpace::new_srgb(),
             alpha_type: AlphaType::Unpremul,
             surface_color_space: ColorSpace::new_srgb(),
@@ -7012,6 +7014,13 @@ impl ExportOptions {
     /// [`DEFAULT_QUALITY`].
     pub(crate) fn lossy_quality(&self) -> f32 {
         self.quality.unwrap_or(DEFAULT_QUALITY)
+    }
+
+    /// Whether this export codes its pixels with no loss: as
+    /// [`ExportOptions::lossless`] asks, or by the format's own rule where it
+    /// does not -- see [`lossless_for`].
+    pub(crate) fn codes_losslessly(&self) -> bool {
+        lossless_for(self.format, self.lossless, self.quality)
     }
 
     /// The JPEG a PDF writes its images as: at an explicit quality below 1,

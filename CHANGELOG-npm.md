@@ -17,22 +17,24 @@ sent that way may have reached that host and should be rotated.** `redirect` and
 `integrity`, which were ignored, are honoured, and `follow-redirects` moves past
 three advisories; the Security section has each.
 
-Thirty-three changes can break working code, each under Breaking with what to
+Thirty-five changes can break working code, each under Breaking with what to
 change. Values that were taken are refused or ignored: a text gamma of 4 or
 above and a contrast or gamma that is not finite; a `ParagraphBuilder` option of
 the wrong kind, a numeric code outside its set, and a `textDirection` or
 `textAlign` it does not name; colour, font, filter and transform strings Chrome
 153 refuses -- a space before `(`, legacy commas CSS Color 4 does not allow,
 `hwba()`, `hsv()` and hex without `#`, whitespace CSS does not define, and an
-enumerated name in another case; `@0x`; a `data:` URL `fetch` rejects; and a
-twenty-first redirect. Values read back differently: `ctx.font`, `ctx.filter`,
+enumerated name in another case; `@0x`; a `data:` URL `fetch` rejects; a
+twenty-first redirect; and `lossless` beside a `quality` below 1, which AVIF
+ignored. Values read back differently: `ctx.font`, `ctx.filter`,
 `fillStyle` and the other colours, a `DOMMatrix` read from a string, `Path2D.d`,
 `TextMetrics`, whose values move to its prototype, text widths, line metrics and
 rects, which are no longer rounded to hundredths, and `ctx.fontHinting`, which
 reads `true` until it is set. Some values mean something else: a `[r, g, b, a]`
 colour array is sRGB on every canvas, `color(rec2020 ...)` decodes by a 2.4
 gamma, a quoted generic keyword in `ctx.font` is a family name, `sans-serif` is
-the face Chrome draws it in, `wordSpacing` is added after every word separator,
+the face Chrome draws it in, `wordSpacing` is added after every word separator, `lossless: false` keeps a
+WebP lossy at a `quality` of 1,
 and a `Paragraph` style's text shadows paint the first listed on top. And two
 calls do what they say rather than what they happened to do: `FontLibrary.use()`
 registers every font it is given or none, and an `@2x` in a `toFile` name is
@@ -51,11 +53,15 @@ and gamma, `fontHinting` taking effect, decorations where the font puts them and
 beneath the glyphs, a family with no italic or bold face slanted or emboldened,
 `oblique` as CSS Fonts 4 matches it, a variable font at the weight asked and at
 the optical size of its font size, and a registered family in any case.
-`fontKerning`, `textRendering`, `color-mix()` and CSS Color 4's system colours
-are added, and the CSS strings read the math functions and every length unit.
+`fontKerning`, `textRendering`, lossless WebP, `color-mix()` and CSS Color 4's
+system colours are added, and the CSS strings read the math functions and every length unit.
 
 ### Breaking
 
+- **`lossless: true` beside a `quality` below 1 is a `RangeError`, for AVIF as for WebP.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+  Pass one or the other: AVIF ignored the quality.
+- **`lossless: false` keeps a WebP lossy at a `quality` of 1.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+  Leave `lossless` out to keep the lossless WebP a `quality` of 1 writes.
 - **A `Paragraph` style's text shadows paint the first listed on top.** ([#399](https://github.com/l7aromeo/meo-skia-canvas/pull/399))
   Reverse the list to keep a drawing as it was.
 - **`sans-serif` is the face Chrome draws it in, and an SVG naming no family it has is drawn in the standard serif.** ([#381](https://github.com/l7aromeo/meo-skia-canvas/pull/381))
@@ -271,6 +277,7 @@ are added, and the CSS strings read the math functions and every length unit.
 
 ### Added
 
+- **`lossless: true` writes a lossless WebP, still or animated, as a `quality` of 1 does.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
 - **`just bench` runs the npm and crate benchmarks over the same cases and writes a dated report of each.** ([#470](https://github.com/l7aromeo/meo-skia-canvas/pull/470), [#468](https://github.com/l7aromeo/meo-skia-canvas/issues/468))
 - **CSS Color 4's system colours.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))
 - **`color-mix()`, CSS Color 5's mix of colours.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))

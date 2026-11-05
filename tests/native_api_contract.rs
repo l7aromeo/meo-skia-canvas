@@ -2866,7 +2866,7 @@ fn a_lossless_avif_returns_exactly_what_was_drawn() -> Result<()> {
     let lossless = canvas.to_buffer(
         ImageFormat::Avif,
         &EncodeOptions {
-            lossless: true,
+            lossless: Some(true),
             ..EncodeOptions::default()
         },
     )?;
@@ -2909,7 +2909,7 @@ fn a_lossless_avif_returns_exactly_what_was_drawn() -> Result<()> {
     let refused = canvas.to_buffer(
         ImageFormat::Avif,
         &EncodeOptions {
-            lossless: true,
+            lossless: Some(true),
             chroma: Some(ChromaSampling::Quarter),
             ..EncodeOptions::default()
         },
@@ -2919,11 +2919,244 @@ fn a_lossless_avif_returns_exactly_what_was_drawn() -> Result<()> {
     let elsewhere = canvas.to_buffer(
         ImageFormat::Png,
         &EncodeOptions {
-            lossless: true,
+            lossless: Some(true),
             ..EncodeOptions::default()
         },
     );
     assert!(elsewhere.is_err(), "png has no lossless option to set");
+    Ok(())
+}
+
+/// The image chunk of every frame a WebP holds, in order: `VP8L` for a
+/// lossless frame, `VP8 ` for a lossy one. Walks the RIFF chunks, and the
+/// chunks inside each `ANMF` past its frame header, rather than searching the
+/// bytes for a tag that compressed data could also contain.
+fn webp_image_tags(bytes: &[u8]) -> Vec<[u8; 4]> {
+    /// "RIFF", the file's length, and "WEBP".
+    const RIFF_HEADER: usize = 12;
+    /// A chunk's tag and its little-endian length.
+    const CHUNK_HEADER: usize = 8;
+    /// An `ANMF` frame's position, size, duration and flags, ahead of its
+    /// image chunks (WebP container specification, "ANMF Chunk").
+    const ANMF_HEADER: usize = 16;
+
+    fn walk(mut rest: &[u8], tags: &mut Vec<[u8; 4]>) {
+        while rest.len() >= CHUNK_HEADER {
+            let tag: [u8; 4] = rest[..4].try_into().expect("four bytes");
+            let size = u32::from_le_bytes(
+                rest[4..CHUNK_HEADER].try_into().expect("four bytes"),
+            ) as usize;
+            let end = (CHUNK_HEADER + size).min(rest.len());
+            let body = &rest[CHUNK_HEADER..end];
+            match &tag {
+                b"VP8 " | b"VP8L" => tags.push(tag),
+                b"ANMF" if body.len() >= ANMF_HEADER => {
+                    walk(&body[ANMF_HEADER..], tags);
+                }
+                _ => {}
+            }
+            // A chunk's payload is padded to an even length.
+            let next = CHUNK_HEADER + size + size % 2;
+            if next > rest.len() {
+                break;
+            }
+            rest = &rest[next..];
+        }
+    }
+
+    assert!(
+        bytes.starts_with(b"RIFF")
+            && bytes.get(8..12) == Some(b"WEBP".as_slice()),
+        "a WebP"
+    );
+    let mut tags = Vec::new();
+    walk(&bytes[RIFF_HEADER..], &mut tags);
+    tags
+}
+
+/// A canvas of `pages` opaque pages, each saturated primaries over a
+/// gradient, moved along by a pixel a page: the primaries are where a
+/// conversion rounds hardest and the gradient is where a filter would show,
+/// and opaque pixels make the comparison independent of how alpha is
+/// premultiplied on the way.
+fn opaque_pages(pages: usize) -> Canvas {
+    const SIDE: f32 = 48.0;
+    let mut canvas = Canvas::new(SIDE, SIDE);
+    canvas.set_gpu(false);
+    for page in 0..pages {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        for (at, colour) in [
+            RgbaLinear::opaque(1.0, 0.0, 0.0),
+            RgbaLinear::opaque(0.0, 1.0, 0.0),
+            RgbaLinear::opaque(0.0, 0.0, 1.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ctx.set_fill_style(colour);
+            ctx.fill_rect(
+                at as f32 * 16.0 + page as f32,
+                0.0,
+                16.0,
+                SIDE / 2.0,
+            );
+        }
+        for step in 0..48 {
+            let value = step as f32 / 47.0;
+            ctx.set_fill_style(RgbaLinear::opaque(value, value * 0.5, 1.0));
+            ctx.fill_rect(step as f32, SIDE / 2.0, 1.0, SIDE / 2.0);
+        }
+    }
+    canvas
+}
+
+fn lossless(quality: Option<f32>) -> EncodeOptions {
+    EncodeOptions {
+        lossless: Some(true),
+        quality,
+        ..EncodeOptions::default()
+    }
+}
+
+#[test]
+fn a_lossless_webp_is_vp8l_and_returns_exactly_what_was_drawn() -> Result<()> {
+    let mut canvas = opaque_pages(1);
+    let wanted =
+        canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+
+    for quality in [None, Some(1.0)] {
+        let webp = canvas.to_buffer(ImageFormat::Webp, &lossless(quality))?;
+        assert_eq!(
+            webp_image_tags(&webp),
+            [*b"VP8L"],
+            "one lossless image at quality {quality:?}"
+        );
+        let image = Image::from_encoded(&webp).context("it decodes")?;
+        assert_eq!(
+            avif_frame_pixels(&image, 0)?,
+            wanted,
+            "exactly what was drawn at quality {quality:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_lossless_animated_webp_codes_every_frame_as_vp8l() -> Result<()> {
+    let mut canvas = opaque_pages(2);
+    let webp = canvas.to_buffer(ImageFormat::Webp, &lossless(None))?;
+    assert_eq!(webp_image_tags(&webp), [*b"VP8L", *b"VP8L"]);
+
+    // The pixels are held on the first frame only. `Image::frame(1)` of this
+    // file fails with `InvalidConversion` at every quality, lossy as well, on
+    // a second frame that adds alpha to an opaque first one, where libwebp
+    // and ffmpeg decode it: a defect of the decode, not of what is written,
+    // which the tags above check on both frames.
+    let image = Image::from_encoded(&webp).context("it decodes")?;
+    assert_eq!(image.frame_count(), 2);
+    let wanted = canvas.to_buffer(
+        ImageFormat::Raw,
+        &EncodeOptions {
+            page: Some(0),
+            ..EncodeOptions::default()
+        },
+    )?;
+    assert_eq!(
+        avif_frame_pixels(&image, 0)?,
+        wanted,
+        "the first frame exactly"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_webp_at_full_quality_is_lossless_unless_lossless_is_false() -> Result<()> {
+    // `None` keeps the rule a WebP has always had, lossless at 1.0 and lossy
+    // below it; `Some(false)` asks for lossy and gets it even at 1.0.
+    for (pages, frames) in [(1, 1), (2, 2)] {
+        let mut canvas = opaque_pages(pages);
+        let tags = |canvas: &mut Canvas, quality, lossless| {
+            canvas
+                .to_buffer(
+                    ImageFormat::Webp,
+                    &EncodeOptions {
+                        quality,
+                        lossless,
+                        ..EncodeOptions::default()
+                    },
+                )
+                .map(|bytes| webp_image_tags(&bytes))
+        };
+        assert_eq!(
+            tags(&mut canvas, Some(1.0), None)?,
+            vec![*b"VP8L"; frames],
+            "lossless at 1.0, {pages} page(s)"
+        );
+        assert_eq!(
+            tags(&mut canvas, Some(0.9), None)?,
+            vec![*b"VP8 "; frames],
+            "lossy below it, {pages} page(s)"
+        );
+        assert_eq!(
+            tags(&mut canvas, Some(1.0), Some(false))?,
+            vec![*b"VP8 "; frames],
+            "lossy at 1.0 when asked, {pages} page(s)"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn lossless_beside_a_quality_below_one_is_refused() -> Result<()> {
+    let mut canvas = opaque_pages(1);
+    for format in [ImageFormat::Webp, ImageFormat::Avif] {
+        match canvas.to_buffer(format, &lossless(Some(0.5))) {
+            Err(Error::InvalidExportOption { option, reason }) => {
+                assert_eq!(option, "quality", "{format:?}");
+                assert!(reason.contains("lossless"), "{format:?}: {reason}");
+            }
+            other => panic!("{format:?}: expected a refusal, got {other:?}"),
+        }
+        // The top of the dial is not a contradiction.
+        canvas.to_buffer(format, &lossless(Some(1.0)))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn lossless_is_refused_with_a_reason_true_of_each_format() -> Result<()> {
+    let mut canvas = opaque_pages(1);
+    for (format, says) in [
+        (ImageFormat::Png, "png is always lossless"),
+        (ImageFormat::Apng, "apng is always lossless"),
+        (ImageFormat::Tiff, "deflated"),
+        (ImageFormat::Bmp, "uncompressed"),
+        (ImageFormat::Ico, "PNG images"),
+        (ImageFormat::Raw, "pixels themselves"),
+        (ImageFormat::Jpeg, "always lossy"),
+        (ImageFormat::Gif, "palette of 256"),
+        (ImageFormat::Pdf, "unless a `quality` below 1.0"),
+        (ImageFormat::Svg, "embeds its pixels as PNG"),
+    ] {
+        match canvas.to_buffer(format, &lossless(None)) {
+            Err(Error::InvalidExportOption { option, reason }) => {
+                assert_eq!(option, "lossless", "{format:?}");
+                assert!(reason.contains(says), "{format:?}: {reason}");
+            }
+            other => panic!("{format:?}: expected a refusal, got {other:?}"),
+        }
+        // `false` asks for nothing these formats fail to give.
+        canvas.to_buffer(
+            format,
+            &EncodeOptions {
+                lossless: Some(false),
+                ..EncodeOptions::default()
+            },
+        )?;
+    }
     Ok(())
 }
 
