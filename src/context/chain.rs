@@ -1415,13 +1415,14 @@ fn shadowed_on_gpu(
 /// [`shadowed`]'s image over its shadow, in floats, before it is rounded.
 ///
 /// On an eight-bit layer the shadow is the source's alpha alone, blurred
-/// in f32 and then tinted: the tint is the colour scaled by the alpha, and
-/// a blur is linear, so the two orders agree but for float rounding, which
-/// the bytes the result is rounded to show only where a value lies on a
-/// tie. It is a quarter of the sums of blurring the tinted source's four
-/// channels, each in f32 rather than f64. A layer of floats keeps that
-/// blur, so that its values stay the floats nearest the exact sums -- see
-/// [`exact_blur::blur`].
+/// in f32 and then tinted -- by [`tinted_alpha`] where [`tint_colour`]
+/// names the tint, and through Skia's blend otherwise. The tint is the
+/// colour scaled by the alpha, and a blur is linear, so the two orders
+/// agree but for float rounding, which the bytes the result is rounded to
+/// show only where a value lies on a tie. It is a quarter of the sums of
+/// blurring the tinted source's four channels, each in f32 rather than f64.
+/// A layer of floats keeps that blur, so that its values stay the floats
+/// nearest the exact sums -- see [`exact_blur::blur`].
 fn shadow_composed(
     context: Option<&Gpu>,
     image: &Image,
@@ -1449,22 +1450,29 @@ fn shadow_composed(
             canvas.draw_image(&raster, (0, 0), None);
         })?,
     };
-    let tint = tint(colour, space, raster.image_info())?;
+    let named = tint_colour(colour, space, raster.image_info());
+    let tint = || tint(named, colour, space);
     let blurred = sigma.0 > 0.0 || sigma.1 > 0.0;
     let bytes = matches!(
         image.color_type(),
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
     let shadow = match (blurred, bytes) {
-        (true, true) => {
-            let alpha = blurred_alpha(&source, sigma)?;
-            filtered(None, &alpha, &tint, 1.0)?
-        }
+        (true, true) => match named {
+            Some((rgb, alpha)) => {
+                blurred_alpha(&source, sigma, |a| tinted_alpha(rgb, alpha, a))?
+            }
+            None => {
+                let alpha =
+                    blurred_alpha(&source, sigma, |a| [0.0, 0.0, 0.0, a])?;
+                filtered(None, &alpha, &tint()?, 1.0)?
+            }
+        },
         (true, false) => {
-            let tinted = filtered(None, &source, &tint, 1.0)?;
+            let tinted = filtered(None, &source, &tint()?, 1.0)?;
             blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?
         }
-        (false, _) => filtered(None, &source, &tint, 1.0)?,
+        (false, _) => filtered(None, &source, &tint()?, 1.0)?,
     };
     let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0 {
         true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
@@ -1491,9 +1499,14 @@ fn shadow_composed(
 
 /// `source`'s alpha, blurred by `sigma` along rows and columns -- see
 /// [`exact_blur::blur_alpha`] -- as a premultiplied F32 image of the
-/// source's size and space holding nothing but that alpha, for a tint to
-/// colour.
-fn blurred_alpha(source: &Image, sigma: (f32, f32)) -> Option<Image> {
+/// source's size and space, each pixel `pixel` of its blurred alpha: that
+/// alpha alone, for a tint to colour, or the tint itself, by
+/// [`tinted_alpha`].
+fn blurred_alpha(
+    source: &Image,
+    sigma: (f32, f32),
+    pixel: impl Fn(f32) -> [f32; 4],
+) -> Option<Image> {
     let (w, h) = (source.width() as usize, source.height() as usize);
     let info = source
         .image_info()
@@ -1518,17 +1531,48 @@ fn blurred_alpha(source: &Image, sigma: (f32, f32)) -> Option<Image> {
         out.chunks_mut(stride)
             .zip(alpha.chunks(w))
             .for_each(|(row, line)| {
-                row.fill(0);
                 row.as_chunks_mut::<16>().0.iter_mut().zip(line).for_each(
-                    |(px, a)| px[12..].copy_from_slice(&a.to_ne_bytes()),
+                    |(px, &a)| {
+                        px.as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(pixel(a))
+                            .for_each(|(out, v)| *out = v.to_ne_bytes());
+                    },
                 );
             });
     })
 }
 
+/// The pixel [`offset_tint`] of `rgb` at `tint_alpha` makes of a
+/// premultiplied F32 pixel holding nothing but `alpha`, drawn onto a
+/// cleared F32 surface by Skia's raster pipeline, as [`filtered`] draws
+/// it -- computed here, to the bit, rather than drawn:
+///
+/// - the tint's alpha times `alpha`, held to `[0, 1]`, as Skia's draw holds the
+///   alpha its colour matrix makes: [`exact_blur::blur_alpha`] leaves its
+///   values to the rounding to bytes to hold, so through the FFT some lie up to
+///   about 1e-7 below zero, and some blurs reach 1.0000002;
+/// - each colour times that product, one rounding a channel -- not the colour
+///   times the tint's alpha first, which rounds differently in two of five
+///   pixels that test sweeps;
+/// - and `+ 0.0`, the source-over onto zeros the draw ends with, which leaves
+///   every value as it is but a negative zero, which it makes positive: a
+///   colour below zero, outside the layer's gamut, over an alpha of zero.
+///
+/// Held to Skia's draw by `a_tint_into_floats_is_one_product_a_channel`,
+/// which CI runs on arm64 and x86-64 alike, since Skia picks its stages at
+/// run time on x86. An alpha of -0.0 is the one input the two part on:
+/// Skia's draw makes NaN of every channel of it, and this the zeros any
+/// other zero alpha tints to.
+fn tinted_alpha([r, g, b]: [f32; 3], tint_alpha: f32, alpha: f32) -> [f32; 4] {
+    let a = (tint_alpha * alpha).clamp(0.0, 1.0);
+    [r * a, g * a, b * a, a].map(|c| c + 0.0)
+}
+
 /// The colour filter a shadow in `colour`, unpremultiplied in `space`, is
-/// tinted through onto a layer like `layer`: the colour, in the alpha of
-/// what it is tinting.
+/// tinted through onto a layer `named` is the [`tint_colour`] of: the
+/// colour, in the alpha of what it is tinting.
 ///
 /// A layer the page places its colours on -- eight bits a channel in a
 /// space other than sRGB, see [`exact_fill`] -- takes the colour a fill of
@@ -1550,11 +1594,11 @@ fn blurred_alpha(source: &Image, sigma: (f32, f32)) -> Option<Image> {
 /// alpha, and a white shadow stored a colour byte one above its alpha
 /// byte, `[42, 42, 41, 41]`.
 fn tint(
+    named: Option<([f32; 3], f32)>,
     colour: Color4f,
     space: &ColorSpace,
-    layer: &ImageInfo,
 ) -> Option<ColorFilter> {
-    match tint_colour(colour, space, layer) {
+    match named {
         Some((rgb, alpha)) => Some(offset_tint(rgb, alpha)),
         None => color_filters::blend_with_color_space(
             colour,
@@ -1813,9 +1857,9 @@ mod tests {
     };
 
     use super::{
-        Depth, REFUSE_PLACED, Step, apply, blurred_on_cpu, exact_blur,
-        filtered, offset_tint, rounded_once, shadow_composed, shadowed, tint,
-        worked_on,
+        Depth, REFUSE_PLACED, Step, apply, blurred_alpha, blurred_on_cpu,
+        exact_blur, filtered, offset_tint, rounded_once, shadow_composed,
+        shadowed, tint, tint_colour, tinted_alpha, worked_on,
     };
     use crate::{prelude::*, started};
 
@@ -1927,20 +1971,27 @@ mod tests {
     #[test]
     fn a_tint_into_floats_is_one_product_a_channel() {
         // What Skia's raster pipeline makes of `offset_tint` over a
-        // premultiplied F32 image holding nothing but an alpha, against one
-        // product a channel in Rust: the tint's alpha times the image's,
-        // then each colour times that. The other order is counted beside
-        // it, as the control a sweep that cannot tell them apart would
-        // fail. Run on every machine CI builds on: Skia picks its stages
-        // at run time on x86.
+        // premultiplied F32 image holding nothing but an alpha, against
+        // `tinted_alpha`, which an eight-bit shadow is tinted by in its
+        // place: one product a channel, the tint's alpha times the image's
+        // and then each colour times that. The other order is counted
+        // beside it, as the control a sweep that cannot tell them apart
+        // would fail. Run on every machine CI builds on: Skia picks its
+        // stages at run time on x86.
         let n = (SWEPT_SIDE * SWEPT_SIDE) as usize;
         // Every byte's alpha, a dense spread of the floats a blur leaves,
-        // and the ends: zero, the smallest normal and subnormal, one and
-        // the float under it.
+        // and the ends: either zero, the smallest normal and subnormal, one
+        // and the float under it.
         let mut alphas: Vec<f32> =
             (0..=255).map(|v| v as f32 / 255.0).collect();
+        // What a blur's float rounding can leave either side of the alphas
+        // it was handed: a little under zero and a little over one.
+        alphas.extend((1..=32u8).flat_map(|k| {
+            let k = f32::from(k);
+            [-k * 1e-7, 1.0 + k * f32::EPSILON]
+        }));
         let mut x = 0x9E37_79B9u32;
-        while alphas.len() < n - 6 {
+        while alphas.len() < n - 7 {
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;
@@ -1948,6 +1999,7 @@ mod tests {
         }
         alphas.extend([
             0.0,
+            -0.0,
             f32::MIN_POSITIVE,
             f32::from_bits(1),
             1.0,
@@ -1987,7 +2039,10 @@ mod tests {
                     let c = f32::from(v) / 255.0;
                     [c, 1.0 - c, c / 3.0]
                 })
-                .chain([[0.1, 0.7, 0.999_999], [1e-30, 0.5, 2.0 / 3.0]]);
+                .chain([[0.1, 0.7, 0.999_999], [1e-30, 0.5, 2.0 / 3.0]])
+                // Out of the layer's gamut, as a colour converted from a
+                // wider space lands.
+                .chain([[-0.3, 1.2, 0.5], [1.5, -0.01, 2.0]]);
             for rgb in colours {
                 for tint_alpha in
                     [1.0, 0.5, 0.3, 1.0 / 255.0, 254.0 / 255.0, 0.7]
@@ -2008,20 +2063,22 @@ mod tests {
                         CachingHint::Disallow,
                     ));
                     for (px, &a) in got.as_chunks::<4>().0.iter().zip(&alphas) {
-                        let alpha = tint_alpha * a;
-                        let want = [
-                            rgb[0] * alpha,
-                            rgb[1] * alpha,
-                            rgb[2] * alpha,
-                            alpha,
-                        ];
+                        let bits = |p: &[f32; 4]| p.map(f32::to_bits);
+                        let want = tinted_alpha(rgb, tint_alpha, a);
+                        // Skia makes NaN of a negative zero's pixel, and
+                        // `tinted_alpha` the zeros a zero alpha tints to.
+                        if a == 0.0 && a.is_sign_negative() {
+                            assert_eq!(bits(&want), [0; 4], "-0.0 to zeros");
+                            continue;
+                        }
+                        let held = (tint_alpha * a).clamp(0.0, 1.0);
                         let other = [
                             rgb[0] * tint_alpha * a,
                             rgb[1] * tint_alpha * a,
                             rgb[2] * tint_alpha * a,
-                            alpha,
-                        ];
-                        let bits = |p: &[f32; 4]| p.map(f32::to_bits);
+                            held,
+                        ]
+                        .map(|c| c + 0.0);
                         missed += usize::from(bits(px) != bits(&want));
                         missed_other += usize::from(bits(px) != bits(&other));
                         compared += 1;
@@ -2844,7 +2901,8 @@ mod tests {
         let source = on_floats(&|canvas| {
             canvas.draw_image(image, (0, 0), None);
         })?;
-        let tint = tint(colour, space, image.image_info())?;
+        let named = tint_colour(colour, space, image.image_info());
+        let tint = tint(named, colour, space)?;
         let tinted = filtered(None, &source, &tint, 1.0)?;
         let shadow = match sigma.0 > 0.0 || sigma.1 > 0.0 {
             true => blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?,
@@ -3085,6 +3143,140 @@ mod tests {
             beyond.len(),
             beyond.first()
         );
+    }
+
+    #[test]
+    fn an_eight_bit_shadow_is_tinted_to_the_bit_skia_tints_it() {
+        // An eight-bit layer's blurred alpha tinted by `tinted_alpha`,
+        // against the same plane drawn by Skia through `offset_tint`: the
+        // layers a page places its colours on and those it does not, a
+        // colour outside the layer's gamut, and sigmas summed tap by tap and
+        // through the FFT, so that the alphas a blur leaves under zero and
+        // over one are among those tinted.
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let kinds = [
+            (ColorType::RGBA8888, &srgb, "8-bit sRGB"),
+            (ColorType::BGRA8888, &srgb, "8-bit BGRA sRGB"),
+            (ColorType::RGBA8888, &p3, "8-bit Display P3"),
+        ];
+        let colours = [
+            (Color4f::new(0.0, 0.0, 0.0, 1.0), &srgb),
+            (Color4f::new(0.78, 0.16, 0.35, 0.6), &srgb),
+            (Color4f::new(1.0, 1.0, 1.0, 0.3), &srgb),
+            // Outside sRGB's gamut: below zero in red and blue on an sRGB
+            // layer.
+            (Color4f::new(0.0, 1.0, 0.0, 0.8), &p3),
+        ];
+        let sigmas =
+            [(1.0, 1.0), (3.0, 0.0), (5.0, 5.0), (8.0, 2.0), (0.0, 6.0)];
+        // Layers of rects of grey, at random sizes and levels and some
+        // opaque, beside the shared ones: an opaque rect blurs to alphas over
+        // one, and the FFT's round-off leaves some under zero.
+        let mut x = 0x1234_5679u32;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as usize
+        };
+        let mut blocks = |kind, space: &ColorSpace, layout: usize| {
+            let (w, h) = (20 + next() % 140, 10 + next() % 120);
+            let mut levels = vec![0u8; w * h];
+            for _ in 0..=layout % 4 {
+                let (x0, y0) = (next() % w, next() % h);
+                let (x1, y1) = (
+                    (x0 + 1 + next() % w).min(w),
+                    (y0 + 1 + next() % h).min(h),
+                );
+                let level = match layout % 3 {
+                    0 => 255,
+                    _ => (next() % 256) as u8,
+                };
+                (y0..y1)
+                    .for_each(|y| levels[y * w + x0..y * w + x1].fill(level));
+            }
+            let bytes: Vec<u8> = levels.iter().flat_map(|&v| [v; 4]).collect();
+            let info = ImageInfo::new(
+                (w as i32, h as i32),
+                kind,
+                AlphaType::Premul,
+                space.clone(),
+            );
+            started::raster_from_data(
+                &info,
+                Data::new_copy(&bytes),
+                info.min_row_bytes(),
+            )
+            .expect("an image")
+        };
+        let (mut tinted, mut under, mut over, mut outside) = (0, 0, 0, 0);
+        for (kind, space, name) in kinds {
+            for scene in 0..8 {
+                let image = match scene {
+                    0 | 1 => layer(40, 36, kind, space, scene as u32),
+                    _ => blocks(kind, space, scene),
+                };
+                for sigma in sigmas {
+                    let alpha =
+                        blurred_alpha(&image, sigma, |a| [0.0, 0.0, 0.0, a])
+                            .expect("an alpha");
+                    let plane = floats_of_image(&alpha);
+                    under += plane.iter().skip(3).step_by(4).any(|&a| a < 0.0)
+                        as usize;
+                    over += plane.iter().skip(3).step_by(4).any(|&a| a > 1.0)
+                        as usize;
+                    for (colour, colour_space) in colours {
+                        let (rgb, tint_alpha) = tint_colour(
+                            colour,
+                            colour_space,
+                            image.image_info(),
+                        )
+                        .expect("a tint this crate names");
+                        outside += rgb.iter().any(|&c| c < 0.0) as usize;
+                        let ours = blurred_alpha(&image, sigma, |a| {
+                            tinted_alpha(rgb, tint_alpha, a)
+                        })
+                        .expect("a tint");
+                        let theirs = filtered(
+                            None,
+                            &alpha,
+                            &offset_tint(rgb, tint_alpha),
+                            1.0,
+                        )
+                        .expect("a tint");
+                        let bits = |image: &Image| -> Vec<u32> {
+                            floats_of_image(image)
+                                .iter()
+                                .map(|v| v.to_bits())
+                                .collect()
+                        };
+                        assert_eq!(
+                            bits(&ours),
+                            bits(&theirs),
+                            "{name} scene {scene} sigma {sigma:?} {colour:?}"
+                        );
+                        tinted += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(tinted, 3 * 8 * 5 * 4);
+        assert!(under > 0, "no blur left an alpha under zero");
+        assert!(over > 0, "no blur left an alpha over one");
+        assert!(outside > 0, "no tint outside the layer's gamut");
+    }
+
+    /// Every float of `image`, a premultiplied F32 image, as it holds them.
+    fn floats_of_image(image: &Image) -> Vec<f32> {
+        bytes_of(image, image.image_info())
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| f32::from_ne_bytes(b))
+            .collect()
     }
 
     /// A layer of 8-bit floats, recovered in floats as the CPU composes it.
