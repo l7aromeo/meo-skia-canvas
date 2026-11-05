@@ -1853,7 +1853,7 @@ mod tests {
         AlphaType, Canvas as SkCanvas, Color, Color4f, ColorSpace, ColorType,
         Data, FilterMode, Image, ImageInfo, Matrix, MipmapMode, Paint,
         PathBuilder, PictureRecorder, Rect, SamplingOptions, Surface, Vector,
-        image::CachingHint, named_primaries, named_transfer_fn,
+        color_filters, image::CachingHint, named_primaries, named_transfer_fn,
     };
 
     use super::{
@@ -1967,6 +1967,84 @@ mod tests {
     /// How many alphas [`a_tint_into_floats_is_one_product_a_channel`]
     /// tints at a time: a 256 by 256 image of them.
     const SWEPT_SIDE: i32 = 256;
+
+    #[test]
+    fn a_float_layer_blurred_through_the_fft_colours_without_nan() {
+        // A float layer blurred through the FFT, then coloured and then
+        // given a drop shadow by Skia, as a chain of `blur()` and a colour
+        // step or `drop-shadow()` runs them. This layer's blur leaves a few
+        // alphas at zero where the FFT's round-off lands, and through Skia's
+        // colour matrix a pixel of alpha -0.0 came out NaN in every channel,
+        // which a page then draws in place of what it held. Where the
+        // round-off signs a zero depends on the machine: on arm64 this
+        // layer's alphas at two pixels, and on an x86-64 with AVX2 and FMA
+        // no alpha of the 828 layers `the_fft_writes_no_negative_zero`'s two
+        // were found among, so this fails without the fix on arm64 alone.
+        // A -0.0 in a colour value, which is all x86-64 showed, came out of
+        // the matrix as +0.0, NaN nowhere.
+        let (w, h) = (144, 108);
+        let info = ImageInfo::new(
+            (w, h),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                let inside = (72..120).contains(&x) && (10..46).contains(&y);
+                let p = match inside {
+                    true => [0.4f32, 0.4, 0.4, 1.0],
+                    false => [0.0; 4],
+                };
+                p.into_iter().flat_map(f32::to_ne_bytes)
+            })
+            .collect();
+        let layer = started::raster_from_data(
+            &info,
+            Data::new_copy(&pixels),
+            info.min_row_bytes(),
+        )
+        .expect("a layer");
+        let blurred = blurred_on_cpu(&layer, 6.0, 6.0, 1.0).expect("a blur");
+        #[rustfmt::skip]
+        let brighter = color_filters::matrix_row_major(
+            &[
+                1.2, 0.0, 0.0, 0.0, 0.0,
+                0.0, 1.2, 0.0, 0.0, 0.0,
+                0.0, 0.0, 1.2, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0,
+            ],
+            color_filters::Clamp::Yes,
+        );
+        let coloured =
+            filtered(None, &blurred, &brighter, 1.0).expect("coloured");
+        let shadowed = shadow_composed(
+            None,
+            &blurred,
+            Vector::new(2.0, 2.0),
+            (1.0, 1.0),
+            (Color4f::new(1.0, 0.0, 0.0, 1.0), &ColorSpace::new_srgb()),
+        )
+        .expect("a shadow");
+        for (what, image) in [("coloured", &coloured), ("shadowed", &shadowed)]
+        {
+            let nan: Vec<usize> = bytes_of(image, image.image_info())
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    p.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|&c| f32::from_ne_bytes(c).is_nan())
+                })
+                .map(|(i, _)| i)
+                .collect();
+            assert!(nan.is_empty(), "{what}: NaN at pixels {nan:?}");
+        }
+    }
 
     #[test]
     fn a_tint_into_floats_is_one_product_a_channel() {

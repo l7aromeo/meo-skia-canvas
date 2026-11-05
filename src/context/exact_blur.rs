@@ -932,7 +932,8 @@ fn plan<L: FftNum>(
 /// those transforms before any of it is written back, so it is worked in
 /// place, and in a lane that holds them -- see [`Lane::HELD_TO_REACH`] --
 /// each value written back is held to the range its line's channel allows,
-/// see [`within_reach`].
+/// see [`within_reach`]. Every value written back is a zero of positive
+/// sign where it is zero at all -- see [`positive_zero`].
 fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
     let r = k.len() - 1;
     let len = fast_len(n + r);
@@ -995,7 +996,8 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
                         array::from_fn(|c| within_reach(sums[c], lo[c], hi[c]))
                     }
                     None => sums,
-                };
+                }
+                .map(positive_zero);
             }
         },
     );
@@ -1020,6 +1022,21 @@ fn fourier<L: Lane>(pixels: &mut [f32], n: usize, k: &[f64]) {
 /// zero and move only by comparison, which a NaN never wins.
 fn within_reach(v: f32, lo: f32, hi: f32) -> f32 {
     v.clamp(lo, hi)
+}
+
+/// `v`, or +0.0 where `v` is -0.0; every other value, a NaN among them,
+/// keeps its bits.
+///
+/// The FFT's round-off leaves a -0.0 now and then where the exact blur is
+/// zero: an F32 layer of one opaque rect, blurred at a sigma of 6, kept two
+/// alphas of -0.0. The sign is the round-off's, not the blur's, and it is
+/// not harmless: through Skia's colour matrix, as a chain's colour step and
+/// a float layer's drop shadow tint, a pixel of alpha -0.0 came out NaN in
+/// every channel, and the shadow's blur then spread that across 338 pixels.
+/// A sum tap by tap makes no -0.0 from values that hold none -- each is a
+/// weight times a value, added -- so only the FFT's values need it.
+fn positive_zero(v: f32) -> f32 {
+    if v == 0.0 { 0.0 } else { v }
 }
 
 /// The kernel's spectrum at length `len`, real since the kernel is
@@ -1122,6 +1139,68 @@ pub(crate) fn reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_positive_zero_changes_nothing_but_a_negative_zero() {
+        // Each sign and exponent, with mantissas at both ends and between,
+        // and the NaNs, quiet and signalling, of either sign: every value
+        // keeps its bits but -0.0, which becomes +0.0.
+        let mantissas =
+            [0u32, 1, 2, 0x40_0000, 0x55_5555, 0x7F_FFFE, 0x7F_FFFF];
+        let mut seen = 0;
+        for sign in [0u32, 1 << 31] {
+            for exponent in 0..=255u32 {
+                for m in mantissas {
+                    let bits = sign | exponent << 23 | m;
+                    let want = match bits == 1 << 31 {
+                        true => 0,
+                        false => bits,
+                    };
+                    let got = positive_zero(f32::from_bits(bits)).to_bits();
+                    assert_eq!(got, want, "{bits:#010x}");
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 2 * 256 * mantissas.len());
+    }
+
+    #[test]
+    fn the_fft_writes_no_negative_zero() {
+        // F32 layers of one opaque grey rect, blurred through the FFT, where
+        // the round-off left -0.0 before `positive_zero` was applied to what
+        // the FFT writes. Where it lands depends on the machine, since
+        // rustfft picks its arithmetic for the processor: the first layer
+        // left two alphas of -0.0 on arm64 and none on an x86-64 with AVX2
+        // and FMA, and the second left one colour value of -0.0 there and
+        // none on arm64. Each was found by a search of 828 such layers on
+        // both machines.
+        for (w, h, (x0, y0, x1, y1), sigma) in [
+            (144, 108, (72, 10, 120, 46), 6.0),
+            (192, 144, (48, 36, 112, 84), 8.0),
+        ] {
+            let pixels: Vec<f32> = (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    match (x0..x1).contains(&x) && (y0..y1).contains(&y) {
+                        true => [0.4, 0.4, 0.4, 1.0],
+                        false => [0.0; 4],
+                    }
+                })
+                .collect();
+            assert_eq!(method(sigma), Method::Fourier);
+            let negative: Vec<usize> = blur(pixels, w, h, sigma, sigma)
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v == 0.0 && v.is_sign_negative())
+                .map(|(i, _)| i)
+                .collect();
+            assert!(
+                negative.is_empty(),
+                "{w} by {h} at a sigma of {sigma}: -0.0 at values {negative:?}"
+            );
+        }
+    }
 
     fn lcg(seed: &mut u32) -> u32 {
         *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
