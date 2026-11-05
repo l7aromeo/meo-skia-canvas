@@ -69,6 +69,10 @@ independently of the npm package.
 `just ci` runs what CI runs. Read the recipe for the list rather than a copy of it -- the copy is
 what goes stale.
 
+A change that reaches a package adds its changelog entry as a file of its own under
+`changelog.d/`, not as an edit to `CHANGELOG-npm.md` or `CHANGELOG-crate.md`;
+[changelog.d/README.md](changelog.d/README.md) has the form.
+
 `just install-hooks` puts a pre-commit hook in front of `just precommit`, which is the subset fast
 enough to sit there: formatting for both languages, ESLint, and clippy twice -- without features,
 and with this platform's GPU backend alone, which is the only pass that compiles backend-only code.

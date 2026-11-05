@@ -61,6 +61,7 @@ const MUST_COVER = {
       "CHANGELOG-crate.md",
       "CHANGELOG-npm.md",
       "docs/readme/crate.md",
+      ":(glob)changelog.d/**",
     ],
   },
   "doctests.txt": {

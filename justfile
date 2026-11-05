@@ -469,7 +469,7 @@ check-release-guards:
     # patched source; the self-test keeps that check able to refuse.
     node scripts/check-patched-skia.mjs --self-test
 
-[doc("Fail when a changelog's prose disagrees with the entries it counts, or an entry from 7.0.0 / 0.17.0 is not one linked line.")]
+[doc("Fail when a changelog's prose disagrees with the entries it counts, an entry from 7.0.0 / 0.17.0 is not one linked line, or a fragment in changelog.d is malformed.")]
 check-changelog:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -477,6 +477,22 @@ check-changelog:
     node scripts/check-changelog-counts.mjs
     node scripts/check-changelog-entries.mjs --self-test
     node scripts/check-changelog-entries.mjs
+    node scripts/changelog-fragments.mjs --self-test
+    node scripts/changelog-fragments.mjs check
+
+# Write a channel's fragments from changelog.d into its changelog and remove
+# them, as a release is prepared: `npm-v7.0.0` for CHANGELOG-npm.md,
+# `rust-v0.17.0` for CHANGELOG-crate.md. The tag names the channel because the
+# two number their releases apart. What it cannot write is the release's
+# opening paragraphs and the counts they state, so `check-changelog` runs
+# after it: a count the new entries made stale fails there, naming the
+# sentence. The result lands as a pull request of its own before
+# `release-npm` or `release-crate`, which refuse to run while the channel
+# holds a fragment.
+[doc("Write a channel's changelog.d fragments into its changelog: npm-vX.Y.Z or rust-vX.Y.Z.")]
+changelog-assemble tag:
+    node scripts/changelog-fragments.mjs assemble "{{ tag }}"
+    just check-changelog
 
 # Fail when a capability exists on one surface and is neither on the other nor
 # registered in `parity.toml`.
@@ -1062,6 +1078,14 @@ release-npm *bump="patch":
         echo "       add one above the previous release, then re-run"
         exit 1
     fi
+    # Pull requests write their entries to changelog.d, so one left there is
+    # an entry this release's notes would leave out.
+    if [[ "$VERSION" != *-* ]] && compgen -G "changelog.d/npm/*.md" > /dev/null; then
+        echo "Error: changelog.d/npm holds entries not yet in CHANGELOG-npm.md:"
+        ls changelog.d/npm
+        echo "       run 'just changelog-assemble ${TAG}', write the release's opening, and land that first"
+        exit 1
+    fi
 
     # Drop the platform pins for the duration of the release. They point at the *previous*
     # version from here until `just publish-npm` runs sync-targets, and while they do:
@@ -1627,6 +1651,13 @@ release-crate bump="patch" wait="false":
         echo "       A change reaching both surfaces needs an entry in both"
         echo "       files, written for each audience. CHANGELOG-npm.md is"
         echo "       the addon's and is checked by release-npm."
+        exit 1
+    fi
+    # As in `release-npm`: an entry left in changelog.d is one the notes would miss.
+    if [[ "$VERSION" != *-* ]] && compgen -G "changelog.d/crate/*.md" > /dev/null; then
+        echo "Error: changelog.d/crate holds entries not yet in CHANGELOG-crate.md:"
+        ls changelog.d/crate
+        echo "       run 'just changelog-assemble ${TAG}', write the release's opening, and land that first"
         exit 1
     fi
 

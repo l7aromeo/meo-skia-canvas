@@ -34,6 +34,9 @@ CHANGELOG.md
 CHANGELOG-crate.md
 CHANGELOG-npm.md
 docs/readme/crate.md
+# The fragments pull requests write instead of editing the changelogs, which
+# the `changelog` job checks.
+:(glob)changelog.d/**
 
 # The patches name the tree every source build compiles from -- Skia's and
 # rust-skia's alike -- and the action restores it, so a change to either

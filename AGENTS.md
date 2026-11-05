@@ -575,6 +575,15 @@ shader painted nothing over what that claim had thrown away.
 
 ## Changelog entries
 
+**A pull request writes its entries as a fragment, not into the changelogs**:
+`changelog.d/npm/<n>.md` and `changelog.d/crate/<n>.md`, `<n>` its number, one
+for each channel it reaches. Edited directly, the two changelogs were shared by
+nearly every pull request, so each merge left the rest needing `main` merged in
+and CI run again. [changelog.d/README.md](changelog.d/README.md) has the form,
+and `just changelog-assemble <tag>` writes a channel's fragments into its
+changelog when a release is prepared. Pull requests opened before this keep
+their direct edits.
+
 **From npm 7.0.0 and crate 0.17.0 on, an entry is one line**: a bold title
 saying what changed, in the terms of someone who hits it, and the pull request
 and issue it came from.
@@ -596,11 +605,13 @@ and the commit message, which stay attached to the change; a paragraph here
 goes stale against the code under it. A change that reaches both surfaces gets
 an entry in each file, written for that file's reader. A speed change with no
 change in output joins the release's one entry saying what costs less, rather
-than taking an entry of its own.
+than taking an entry of its own: its fragment names that entry by the start of
+its title and gives its links, which the assembly merges in.
 
 `scripts/check-changelog-entries.mjs`, run by `just ci`, refuses an entry that
-runs longer, links nothing, or sits in a loose list. It checks the shape, not
-whether the title is true or the link the right one.
+runs longer, links nothing, or sits in a loose list, in the changelogs and, through
+`scripts/changelog-fragments.mjs check`, in every fragment. It checks the shape,
+not whether the title is true or the link the right one.
 
 ---
 
@@ -663,10 +674,14 @@ starting:
 
 - **Nothing is released without an explicit instruction**, and the version and
   the changelog are decided by the maintainer.
-- **The changelog entry is written before the tag**, by hand, above the previous
-  entry. `just release-npm` refuses to proceed without one, because the release
-  notes are generated from the tag and reconstructing intent afterwards means
-  reading commits instead of remembering why. Prereleases are exempt.
+- **The changelog is assembled before the tag.** `just changelog-assemble <tag>`
+  writes the channel's fragments in and removes them; the release's opening
+  paragraphs, and any count they state, are written by hand after it, and the
+  result lands as its own pull request. `just release-npm` and
+  `just release-crate` refuse to proceed without the entry or with a fragment
+  left, because the release notes are generated from the tag and reconstructing
+  intent afterwards means reading commits instead of remembering why.
+  Prereleases are exempt.
 - **npm and the crate are separate channels with separate numbering** and are
   not comparable. Most releases move only npm.
 - **The build workflow is the gate**, not the publish step. Until it is green
