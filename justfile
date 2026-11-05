@@ -141,23 +141,33 @@ typecheck: ensure-deps
 # What the pre-commit hook runs: the checks that are fast enough to sit in
 # front of every commit.
 #
-# Not the whole gate, deliberately. `lint-check` runs clippy three times and
-# the passes with a GPU backend are most of its time; `test` and `build` are
-# minutes. A hook that costs that much stops
-# being run -- `--no-verify` is one flag away -- and a hook nobody runs
-# enforces nothing. These four cost about six seconds together and catch what
-# is actually forgotten: formatting, and a lint that fails the build.
+# Not the whole gate, deliberately. `lint-check` runs clippy three times, and
+# its pass with this host's full feature set is most of its time; `test` and
+# `build` are minutes. A hook that costs that much stops being run --
+# `--no-verify` is one flag away -- and a hook nobody runs enforces nothing.
+# What is here catches what is actually forgotten: formatting, and a lint that
+# fails the build.
+#
+# Clippy runs twice: with no features, and with this host's GPU backend alone,
+# `lint-check`'s third pass. The featureless pass compiles away everything
+# under `cfg(any(feature = "metal", feature = "vulkan"))`, tests included, so
+# a lint there passed the hook and was first refused by CI's clippy legs.
+# The backend pass reaches that code with nothing else on top. With a warm
+# target, after a change to one source file, each pass checks the crate again
+# in about 27 s on Apple M4 Pro, so the recipe takes about 65 s where it took
+# about 36 s; with no Rust change both are cached and it takes about 10 s.
 #
 # CI remains the authority. This only moves the failure earlier.
 #
 # `install-hooks` is what puts this in front of a commit; it is opt-in and
 # run once per clone.
-[doc("The pre-commit subset: formatting both languages, ESLint, featureless clippy.")]
+[doc("The pre-commit subset: formatting both languages, ESLint, clippy with no features and with the GPU backend alone.")]
 precommit: ensure-deps check-docs check-cargo-lock
     cargo +{{ fmt_toolchain }} fmt --all -- --check
     bun run format:check
     bun run lint
     cargo clippy --all-targets --no-default-features -- -D warnings
+    cargo clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
 
 # Catch a doc comment stacked above another instead of above its own item.
 #

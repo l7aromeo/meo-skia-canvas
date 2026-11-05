@@ -70,9 +70,10 @@ independently of the npm package.
 what goes stale.
 
 `just install-hooks` puts a pre-commit hook in front of `just precommit`, which is the subset fast
-enough to sit there: formatting for both languages, ESLint, and clippy without features, about four
-seconds. It leaves out the feature-carrying clippy passes and the test suite, which are what make
-`just ci` take minutes. Opt-in and run once per clone -- it writes a single file into `.git/hooks/`
+enough to sit there: formatting for both languages, ESLint, and clippy twice -- without features,
+and with this platform's GPU backend alone, which is the only pass that compiles backend-only code.
+About 10 s when no Rust source has changed, about a minute when one has. It leaves out the
+full-feature clippy pass and the test suite, which are what make `just ci` take minutes. Opt-in and run once per clone -- it writes a single file into `.git/hooks/`
 and leaves alone the git-lfs hooks a pre-switch clone still carries, rather than redirecting
 `core.hooksPath` and disabling them.
 
