@@ -41,7 +41,7 @@ use crate::{
     },
     context::{
         BoxedContext2D,
-        chain::pool::LayerScope,
+        chain::pool::{LayerScope, PlaneScope},
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
@@ -3437,6 +3437,8 @@ impl RecordingSurface {
         let target = page.layers.len();
 
         let _tiles = TileScope::open();
+        // Kept planes for the tiles' blurred draws: see `chain::pool`.
+        let _planes = PlaneScope::open();
         for origin in wanted {
             let rect = Self::tile_rect(*origin, page_size);
             if rect.is_empty() {
