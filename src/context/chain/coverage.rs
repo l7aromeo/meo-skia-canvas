@@ -16,12 +16,12 @@
 
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, ColorType, IRect, ImageInfo, Matrix, Rect,
-    Surface,
+    Surface, image::RequiredProperties,
 };
 
 use super::{
     Depth, Outcome, Step, clear_unless_zeroed, layer_info, layer_surface,
-    placed, region, split,
+    placed, region, split, trims_composite,
 };
 use crate::{
     context::{blur_mask::baked_image, exact_blur},
@@ -351,11 +351,23 @@ pub(crate) fn coloured(
     let info = layer_info(canvas, Depth::Bytes, blurred.region);
     let bgra = info.color_type() == ColorType::BGRA8888;
     let w = blurred.region.width() as usize;
+    // The pixels that are not transparent black, as each is written: the
+    // blur's tails round to zero well inside the region it works on.
+    let mut inked = IRect::new_empty();
     let image = baked_image(&info, |out, stride| {
-        for (row, values) in
-            out.chunks_mut(stride).zip(blurred.values.chunks(w))
+        for (y, (row, values)) in out
+            .chunks_mut(stride)
+            .zip(blurred.values.chunks(w))
+            .enumerate()
         {
-            for (px, &b) in row.as_chunks_mut::<4>().0.iter_mut().zip(values) {
+            let (mut first, mut last) = (usize::MAX, 0);
+            for (x, (px, &b)) in row
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(values)
+                .enumerate()
+            {
                 let alpha = (b * gain + 0.5) as u8;
                 let scaled = f64::from(b) * f64::from(gain);
                 let [r, g, bl] =
@@ -364,14 +376,41 @@ pub(crate) fn coloured(
                     true => [bl, g, r, alpha],
                     false => [r, g, bl, alpha],
                 };
+                if *px != [0; 4] {
+                    first = first.min(x);
+                    last = x;
+                }
+            }
+            if first <= last {
+                let row = IRect::new(
+                    first as i32,
+                    y as i32,
+                    last as i32 + 1,
+                    y as i32 + 1,
+                );
+                inked = IRect::join(&inked, &row);
             }
         }
     })?;
-    Some(Outcome {
+    // The inked part alone is kept, copied out of the region: it is what a
+    // composite draws -- see `Outcome::composite`.
+    if !trims_composite() {
+        return Some(Outcome::whole(image, blurred.region, blurred.rest));
+    }
+    let image = match inked.is_empty() {
+        true => image,
+        false => image.make_subset(
+            None,
+            inked,
+            RequiredProperties { mipmapped: false },
+        )?,
+    };
+    Some(Outcome::with_inked(
         image,
-        region: blurred.region,
-        rest: blurred.rest,
-    })
+        blurred.region,
+        blurred.rest,
+        inked,
+    ))
 }
 
 #[cfg(test)]
@@ -750,6 +789,114 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_composite_drawn_only_where_inked_lands_every_byte() {
+        // Blurred shapes and text over a page already painted, through the
+        // coverage route, composited only where inked and as the whole
+        // region: the same bytes under every blend, at either density and
+        // under a turn. Counted, so that the trim is shown to have been
+        // taken where a transparent pixel changes nothing and only there.
+        use crate::{
+            context::{
+                chain::{TRIMMED, TRIMS_COMPOSITE},
+                kept::release_kept_results,
+                run_mask::release_cached_runs,
+            },
+            paint::BlendMode,
+        };
+        let page = |blend: BlendMode, density: u32, turn: f32, trims: bool| {
+            // Nothing kept from the other run: each page makes its results.
+            release_cached_runs();
+            release_kept_results();
+            TRIMS_COMPOSITE.set(trims);
+            let mut canvas = Canvas::with_options(
+                160.0,
+                120.0,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            for (i, colour) in
+                ["rgb(30 140 200)", "rgb(240 200 20 / 0.6)", "rgb(90 20 60)"]
+                    .iter()
+                    .enumerate()
+            {
+                ctx.set_fill_style_css(colour).expect("a colour");
+                ctx.fill_rect(i as f32 * 41.3, 10.0, 70.0, 100.0);
+            }
+            ctx.set_global_composite_operation(blend);
+            ctx.rotate(turn);
+            for (k, (sigma, colour, alpha)) in [
+                (1.0, "rgb(200 120 40)", 1.0),
+                (2.5, "black", 0.6),
+                (4.0, "rgb(20 200 90 / 0.7)", 1.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let k = k as f32;
+                ctx.set_filter_css(&format!("blur({sigma}px)"))
+                    .expect("a filter");
+                ctx.set_fill_style_css(colour).expect("a colour");
+                ctx.set_global_alpha(alpha);
+                ctx.begin_path();
+                ctx.ellipse(
+                    30.3 + 45.0 * k,
+                    35.6,
+                    9.5,
+                    6.0,
+                    0.3,
+                    0.0,
+                    std::f32::consts::TAU,
+                    false,
+                )
+                .expect("an ellipse");
+                ctx.fill(FillRule::NonZero);
+                assert!(ctx.set_font_css("28px sans-serif"));
+                ctx.fill_text("Ag", 12.4 + 48.0 * k, 92.7, None);
+            }
+            let before = TRIMMED.get();
+            let pixels = canvas
+                .to_image_data(
+                    None,
+                    &ImageDataExport {
+                        density,
+                        ..ImageDataExport::default()
+                    },
+                )
+                .expect("pixels")
+                .pixels()
+                .to_vec();
+            TRIMS_COMPOSITE.set(true);
+            (pixels, TRIMMED.get() - before)
+        };
+        let leaves = [BlendMode::SourceOver];
+        let clears = [
+            BlendMode::Copy,
+            BlendMode::DestinationIn,
+            BlendMode::SourceIn,
+            BlendMode::Lighter,
+            BlendMode::Multiply,
+        ];
+        for (blend, density, turn) in leaves
+            .into_iter()
+            .chain(clears)
+            .flat_map(|b| [(b, 1, 0.0), (b, 2, 0.0), (b, 1, 0.05)])
+        {
+            let what = format!("{blend:?} at density {density}, turned {turn}");
+            let (whole, untrimmed) = page(blend, density, turn, false);
+            let (trimmed, trims) = page(blend, density, turn, true);
+            assert_eq!(untrimmed, 0, "{what}: the control trims nothing");
+            assert!(whole == trimmed, "{what}: a byte moved");
+            // A turn is drawn in the plane, so `rest` is the identity.
+            let expected = leaves.contains(&blend);
+            assert_eq!(trims > 0, expected, "{what}: trimmed {trims}");
         }
     }
 
