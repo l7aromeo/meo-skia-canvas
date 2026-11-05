@@ -58,7 +58,7 @@ tests/assets/** -filter -diff -merge
 # a commit that shows `Binary files differ` has not been reviewed.
 tests/assets/*-cases.json diff merge
 
-# And the recorded workflow runs `tests/static/retry-starved.test.js` decides
-# on, which are text for the same reason: a job's recorded conclusion is what
-# a case asserts about it.
+# And the recorded workflow runs and cache list the retry and prune tests
+# decide on, which are text for the same reason: a recorded conclusion or key
+# is what a case asserts about it.
 tests/assets/workflow-runs/*.json diff merge

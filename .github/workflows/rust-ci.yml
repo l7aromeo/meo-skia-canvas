@@ -239,10 +239,11 @@ jobs:
       # justfile's `dotenv-command` names locally, which the `skia-source` job
       # above saved for this platform. This job runs cargo directly, so the
       # action sets `SKIA_SOURCE_DIR` itself.
-      - uses: ./.github/actions/skia-source
+      - id: skia
+        uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: ${{ matrix.os }}-${{ matrix.cacheKey }}
+          key: ${{ steps.skia.outputs.key }}-${{ matrix.os }}-${{ matrix.cacheKey }}
           # Cache reads inherit downward from the base branch, so a cache written on a PR
           # is read by nothing once that PR merges — it only consumes the shared 10 GB and
           # pushes out entries main still wants. PRs still restore main's.
@@ -299,10 +300,11 @@ jobs:
           toolchain: stable
       - name: Install Skia build dependencies (macOS)
         run: brew install ninja
-      - uses: ./.github/actions/skia-source
+      - id: skia
+        uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: macos-graphite-bindings
+          key: ${{ steps.skia.outputs.key }}-graphite-bindings
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Point the build at the patched rust-skia
         run: node scripts/skia-source.mjs cargo-patch
@@ -354,7 +356,8 @@ jobs:
       # The patched Skia tree the skia-source job saved: on Linux it carries
       # the brotli sources Skia's build list leaves out, which a `freetype`
       # link needs. It also keeps any `just` recipe here from fetching one.
-      - uses: ./.github/actions/skia-source
+      - id: skia
+        uses: ./.github/actions/skia-source
       # poppler's `pdftoppm`, which `tests/pdf_blend.rs` renders the PDF's
       # blends with; the test fails on CI where it is missing, rather than
       # skip and stop guarding them. The runner's own distribution package.
@@ -362,7 +365,7 @@ jobs:
         run: .github/scripts/apt-install.sh poppler-utils
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: test-freetype-fetch
+          key: ${{ steps.skia.outputs.key }}-test-freetype-fetch
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           cargo test \
@@ -453,10 +456,11 @@ jobs:
       # The patched Skia tree the skia-source job saved: on Linux it carries
       # the brotli sources Skia's build list leaves out, which a `freetype`
       # link needs. It also keeps any `just` recipe here from fetching one.
-      - uses: ./.github/actions/skia-source
+      - id: skia
+        uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: binding
+          key: ${{ steps.skia.outputs.key }}-binding
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # --ignore-scripts so the install does not fetch a published binary; the
       # build below is the one under test.
@@ -579,8 +583,9 @@ jobs:
   # already existed, and rust-cache does not save over an existing key, so
   # every run rebuilt it. Here the first run on main saves it and later runs
   # restore it. The feature set is the release addon's, `CARGO_FEATURES` in
-  # lib/prebuild.mjs, so skia-bindings resolves the prebuilt Skia rather than
-  # building one.
+  # lib/prebuild.mjs, and skia-bindings builds it from the patched tree in the
+  # release profile -- about 8 minutes on a runner, a Skia no other job builds,
+  # so it is cached under a key of its own.
   release-tests:
     needs: [changes, skia-source]
     if: needs.changes.outputs.native == 'true'
@@ -611,10 +616,11 @@ jobs:
       # The patched Skia tree the skia-source job saved: on Linux it carries
       # the brotli sources Skia's build list leaves out, which a `freetype`
       # link needs. It also keeps any `just` recipe here from fetching one.
-      - uses: ./.github/actions/skia-source
+      - id: skia
+        uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: release-tests
+          key: ${{ steps.skia.outputs.key }}-release-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Lint the release test build
         run: just check-release-tests
@@ -799,10 +805,11 @@ jobs:
       # The patched Skia tree the skia-source job saved: on Linux it carries
       # the brotli sources Skia's build list leaves out, which a `freetype`
       # link needs. It also keeps any `just` recipe here from fetching one.
-      - uses: ./.github/actions/skia-source
+      - id: skia
+        uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: parity
+          key: ${{ steps.skia.outputs.key }}-parity
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: just check-parity
 
@@ -860,6 +867,30 @@ jobs:
   # in the script. The pattern cannot be made exact, so a tree-wide gate would
   # cost reworded prose and buy nothing; "do not add another one" is the failure
   # that actually happens.
+  # Deletes main's cache entries for a Skia tree a patch change superseded --
+  # the tree's own cache and every Rust cache keyed on it -- so they stop
+  # holding room in the repository's 10 GB while current ones are evicted.
+  # `.github/scripts/prune-caches.mjs` decides, from each platform's current
+  # key; a pull request's entries are left to expire with it. On a push to
+  # main only, which is also when the caches it would replace are saved.
+  prune-caches:
+    name: prune superseded caches
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Deleting a cache entry needs write; listing it needs read.
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Delete entries naming a superseded tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/prune-caches.mjs --delete
+
   doc-anchors:
     needs: changes
     if: needs.changes.outputs.native == 'true'
@@ -914,6 +945,7 @@ jobs:
         parity,
         docs,
         doc-anchors,
+        prune-caches,
       ]
     runs-on: ubuntu-latest
     timeout-minutes: 10

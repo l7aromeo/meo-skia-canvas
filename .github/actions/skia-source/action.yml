@@ -3,6 +3,15 @@ description: >-
   Restore the patched Skia tree the skia-source job saved for this runner's
   platform, name it with `node scripts/skia-source.mjs prepare`, and export it
   as SKIA_SOURCE_DIR, so skia-bindings builds offline from it.
+outputs:
+  # The tree's cache key, `skia-source-<platform>-<tree>`. A job's Rust cache
+  # carries it in its own key: skia-bindings rebuilds Skia whenever
+  # SKIA_SOURCE_DIR names another tree, and rust-cache never saves over a
+  # key it already has, so a Rust cache keyed without the tree kept a Skia
+  # built from a superseded one and every job compiled Skia again.
+  key:
+    description: The tree's cache key, `skia-source-<platform>-<tree>`.
+    value: ${{ steps.skia-key.outputs.key }}
 runs:
   using: composite
   steps:

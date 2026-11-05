@@ -1,0 +1,313 @@
+{
+  "recorded": "2026-11-06",
+  "actions_caches": [
+    {
+      "id": 9908897266,
+      "key": "v0-rust-public-api-public-api-Linux-x64-1c912312-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 453943679,
+      "created_at": "2026-11-02T23:30:17.573868Z"
+    },
+    {
+      "id": 9908898949,
+      "key": "v0-rust-msrv-1.90-msrv-Linux-x64-b75ed0f5-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 634803017,
+      "created_at": "2026-11-02T23:30:21.448694Z"
+    },
+    {
+      "id": 9908903860,
+      "key": "v0-rust-release-tests-release-tests-Linux-x64-01b81e85-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 457855393,
+      "created_at": "2026-11-02T23:30:28.088759Z"
+    },
+    {
+      "id": 9908904627,
+      "key": "v0-rust-ubuntu-latest-none-clippy-Linux-x64-01b81e85-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 527193872,
+      "created_at": "2026-11-02T23:30:30.412978Z"
+    },
+    {
+      "id": 9908932512,
+      "key": "v0-rust-macos-latest-metal-window-node-addon-fetch-clippy-Darwin-arm64-fc985acc-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 470250545,
+      "created_at": "2026-11-02T23:31:20.794954Z"
+    },
+    {
+      "id": 9908940407,
+      "key": "v0-rust-macos-latest-metal-vulkan-window-clippy-Darwin-arm64-fc985acc-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 497916263,
+      "created_at": "2026-11-02T23:31:34.116799Z"
+    },
+    {
+      "id": 9908948175,
+      "key": "v0-rust-ubuntu-latest-vulkan-window-node-addon-fetch-clippy-Linux-x64-01b81e85-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 621796988,
+      "created_at": "2026-11-02T23:31:43.193936Z"
+    },
+    {
+      "id": 9909099073,
+      "key": "v0-rust-test-freetype-fetch-test-Linux-x64-01b81e85-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 782270455,
+      "created_at": "2026-11-02T23:35:48.527078Z"
+    },
+    {
+      "id": 9909535232,
+      "key": "v0-rust-binding-binding-Linux-x64-01b81e85-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 1206674037,
+      "created_at": "2026-11-02T23:47:46.337351Z"
+    },
+    {
+      "id": 10055965747,
+      "key": "buildkit-blob-1-sha256:e4823734d021fb59037a73a04dabdab1482f0f95a3e1403e05aff3bd26ad37d2",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 613731,
+      "created_at": "2026-11-05T11:48:01.797841Z"
+    },
+    {
+      "id": 10055966106,
+      "key": "buildkit-blob-1-sha256:fd3039f73246286d19d9bf931eff9e7ca44e7ccd240eb951867cf0f0fa6ea454",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 240,
+      "created_at": "2026-11-05T11:48:02.153140Z"
+    },
+    {
+      "id": 10063102216,
+      "key": "index-buildkit-1-f921bd05#7",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 11722,
+      "created_at": "2026-11-05T14:11:06.818539Z"
+    },
+    {
+      "id": 10063634450,
+      "key": "v0-rust-parity-parity-Linux-x64-1c912312-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 360152895,
+      "created_at": "2026-11-05T14:20:35.781208Z"
+    },
+    {
+      "id": 10064358047,
+      "key": "v0-rust-macos-graphite-bindings-graphite-bindings-Darwin-arm64-fc985acc-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 396709830,
+      "created_at": "2026-11-05T14:33:32.384402Z"
+    },
+    {
+      "id": 10067787173,
+      "key": "skia-source-linux-skia-0.156.0-981c74032fd1",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 493495566,
+      "created_at": "2026-11-05T15:34:45.498264Z"
+    },
+    {
+      "id": 10067816193,
+      "key": "skia-source-darwin-skia-0.156.0-81002cd180ff",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 489542891,
+      "created_at": "2026-11-05T15:35:20.645689Z"
+    },
+    {
+      "id": 10077781145,
+      "key": "buildkit-blob-1-sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 32,
+      "created_at": "2026-11-05T18:51:19.591817Z"
+    },
+    {
+      "id": 10077806688,
+      "key": "docker.io--tonistiigi--binfmt-latest-linux-x64",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 32698183,
+      "created_at": "2026-11-05T18:51:54.514307Z"
+    },
+    {
+      "id": 10077913748,
+      "key": "buildkit-blob-1-sha256:4f7a0ebc0d0abd55ec1b9cf341ae608b9b7f1b6583a452e7698cbdb5c0a13493",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 72762012,
+      "created_at": "2026-11-05T18:54:10.671089Z"
+    },
+    {
+      "id": 10077956519,
+      "key": "index-buildkit-1-f4e4ac9a#2",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 5941,
+      "created_at": "2026-11-05T18:55:00.115206Z"
+    },
+    {
+      "id": 10082869113,
+      "key": "skia-source-darwin-skia-0.156.0-8ac1c2ede3a4",
+      "ref": "refs/heads/fix/face-load-order",
+      "size_in_bytes": 489422072,
+      "created_at": "2026-11-05T20:38:56.454496Z"
+    },
+    {
+      "id": 10083050307,
+      "key": "skia-source-darwin-skia-0.156.0-8ac1c2ede3a4",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 489430256,
+      "created_at": "2026-11-05T20:42:23.393429Z"
+    },
+    {
+      "id": 10083094482,
+      "key": "skia-source-win32-skia-0.156.0-3c14a33a3aca",
+      "ref": "refs/heads/fix/face-load-order",
+      "size_in_bytes": 487467122,
+      "created_at": "2026-11-05T20:43:21.903302Z"
+    },
+    {
+      "id": 10083120198,
+      "key": "buildkit-blob-1-sha256:3a6a9ee7e777da68b27987671eb2ceefa6a3dc8b27c8a19e983bda82676c23d6",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 13680838,
+      "created_at": "2026-11-05T20:43:53.026432Z"
+    },
+    {
+      "id": 10083121193,
+      "key": "buildkit-blob-1-sha256:5f51306b9dfc76b98ebd74b3ea0bbf7440a8e9cf135a7b4647c3fb4f0483b2e5",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 263,
+      "created_at": "2026-11-05T20:43:53.421183Z"
+    },
+    {
+      "id": 10083121437,
+      "key": "buildkit-blob-1-sha256:68ac0b4fd4ced0e168936e88994a1ae696b75cd26b4fe62bfd3645488022947a",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 441,
+      "created_at": "2026-11-05T20:43:53.780031Z"
+    },
+    {
+      "id": 10083121649,
+      "key": "buildkit-blob-1-sha256:74c614fb2c68574f50c582dcc9c18c46618bd6ff2019768190aacfb861ce51d2",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 3852589,
+      "created_at": "2026-11-05T20:43:54.427862Z"
+    },
+    {
+      "id": 10083122068,
+      "key": "buildkit-blob-1-sha256:7ae4a8a948507f4f4047e5039f8561328db2aec9be3f54ba6f909d018620ae6f",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 26192292,
+      "created_at": "2026-11-05T20:43:57.037801Z"
+    },
+    {
+      "id": 10083123826,
+      "key": "buildkit-blob-1-sha256:7f10d658e549124cbdc2043983d2833b66a80cc90f4736caf38b5688ae04d4db",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 147642147,
+      "created_at": "2026-11-05T20:44:08.979448Z"
+    },
+    {
+      "id": 10083133467,
+      "key": "buildkit-blob-1-sha256:8cbc5827df6a12f3df0790a659d0c147d4f678fc3348791f3b295dc6ef3c7a38",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 58949537,
+      "created_at": "2026-11-05T20:44:13.871286Z"
+    },
+    {
+      "id": 10083143644,
+      "key": "skia-source-linux-skia-0.156.0-f01e39a87d09",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 493815968,
+      "created_at": "2026-11-05T20:44:25.437112Z"
+    },
+    {
+      "id": 10083137359,
+      "key": "buildkit-blob-1-sha256:9442707cf92031d42667b84b40cbd3783a8b7ce594587442db2a10516b024a48",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 259449086,
+      "created_at": "2026-11-05T20:44:33.249723Z"
+    },
+    {
+      "id": 10083151404,
+      "key": "buildkit-blob-1-sha256:af3b8d282eaf2444f75965e50438aeb84c92215f060505236b0aad3e431efcd9",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 624613,
+      "created_at": "2026-11-05T20:44:33.746506Z"
+    },
+    {
+      "id": 10083151751,
+      "key": "buildkit-blob-1-sha256:d51d17a00376b211f504a8efc8eee147c3995a82b0bca04c006358b91ca53145",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 2379,
+      "created_at": "2026-11-05T20:44:34.104646Z"
+    },
+    {
+      "id": 10083152061,
+      "key": "buildkit-blob-1-sha256:e0759c7d2555e22b98fce05bb5df77ad554e11c2690dd88515e22cc67af78262",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 1918,
+      "created_at": "2026-11-05T20:44:34.370211Z"
+    },
+    {
+      "id": 10083152273,
+      "key": "index-buildkit-1-f4e4ac9a#3",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 6122,
+      "created_at": "2026-11-05T20:44:34.776962Z"
+    },
+    {
+      "id": 10083226795,
+      "key": "buildkit-blob-1-sha256:4ce301aa9b86d04e36acf50529713feca95c6619503a8329a722f177c92fe281",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 3738389,
+      "created_at": "2026-11-05T20:46:15.095114Z"
+    },
+    {
+      "id": 10083228198,
+      "key": "buildkit-blob-1-sha256:544d1a9dcccbe2e1e7c9fd3732cfe25477e95967b6447909b2b660c8f2b1c624",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 240,
+      "created_at": "2026-11-05T20:46:15.856351Z"
+    },
+    {
+      "id": 10083228708,
+      "key": "buildkit-blob-1-sha256:580b5d41ec56b20245bfa1da778aad8b0075d4b53c7d7a4a89c3c6f819dc0842",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 13680842,
+      "created_at": "2026-11-05T20:46:18.682564Z"
+    },
+    {
+      "id": 10083231183,
+      "key": "buildkit-blob-1-sha256:7d1b85b68e12ef7d86845099553303728e2e2ec90f0b9a123caf8b46040ada8e",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 613737,
+      "created_at": "2026-11-05T20:46:19.749861Z"
+    },
+    {
+      "id": 10083232040,
+      "key": "buildkit-blob-1-sha256:84fba4339b388a4db00a52ed51d62eac96d5e0904f8c83a4936b92dc6adf3ff6",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 59232649,
+      "created_at": "2026-11-05T20:46:26.803010Z"
+    },
+    {
+      "id": 10083237765,
+      "key": "buildkit-blob-1-sha256:e7e75768b80e815ee5600251474e4dc4706d8b5c74d220c449a99172167c7981",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 570188323,
+      "created_at": "2026-11-05T20:47:55.631870Z"
+    },
+    {
+      "id": 10083306407,
+      "key": "index-buildkit-1-f4e4ac9a#4",
+      "ref": "refs/pull/570/merge",
+      "size_in_bytes": 5943,
+      "created_at": "2026-11-05T20:47:56.317615Z"
+    },
+    {
+      "id": 10085288979,
+      "key": "v0-rust-docs-docs-Linux-x64-01b81e85-d028a097",
+      "ref": "refs/heads/main",
+      "size_in_bytes": 363840613,
+      "created_at": "2026-11-05T21:31:31.593339Z"
+    }
+  ]
+}
