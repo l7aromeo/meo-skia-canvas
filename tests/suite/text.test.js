@@ -2362,6 +2362,34 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     );
   });
 
+  test("a family's face for plain text does not depend on the order its faces came in", () => {
+    // Two pairs of faces, each loaded both ways round. The flagged one is told
+    // apart from the upright face only by `fsSelection` bit 9, so CoreText
+    // reports the two alike -- as DirectWrite does any face flagged oblique --
+    // and Skia's matcher keeps whichever was registered first. RecursiveStatic
+    // is the control: its oblique face states an `italicAngle`, every platform
+    // reports it slanted, and nothing ties.
+    const UP = `${R}/Recursive-upright-subset.ttf`;
+    FontLibrary.use("PlainOrderUpright", [UP]);
+    const upright = pixels("200px PlainOrderUpright");
+    const wrong = [];
+    for (const [name, leaning] of [
+      ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
+      ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
+    ]) {
+      for (const [order, files] of [
+        ["upright first", [UP, leaning]],
+        ["leaning first", [leaning, UP]],
+      ]) {
+        const family = `PlainOrder${name}${order === "upright first" ? "U" : "L"}`;
+        FontLibrary.use(family, files);
+        if (!pixels(`200px ${family}`).equals(upright))
+          wrong.push(`${name}, ${order}: "200px" draws the upright face`);
+      }
+    }
+    assert.deepEqual(wrong, []);
+  });
+
   // A sheared glyph is drawn in a sheared font, not under a sheared canvas:
   // the canvas transform carries the paint too, so a gradient, a pattern, a
   // shadow's blur and a stroke's pen would lean with the glyphs. Each is

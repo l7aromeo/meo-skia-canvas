@@ -171,6 +171,41 @@ describe("an SVG containing text", () => {
   // `a_declining_system_manager_does_not_take_the_null_family_down` in
   // `src/node/font_library.rs` is the one that does not depend on the
   // platform -- it substitutes a manager that answers nothing.
+  test("a document's text takes the upright face whatever order its family came in", async () => {
+    // An upright face and one flagged oblique only by `fsSelection` bit 9,
+    // which CoreText and an unpatched DirectWrite report alike: Skia's matcher
+    // keeps whichever was registered first, so the library registers the face
+    // its tables call upright first. The subsets hold `I` and `H`, which is
+    // what is drawn: a glyph they lack would fall back to another family for
+    // every order alike.
+    const R = "tests/assets/fonts/Recursive";
+    const UP = `${R}/Recursive-upright-subset.ttf`,
+      FLAG = `${R}/Recursive-oblique-flag-subset.ttf`;
+    FontLibrary.use("SvgOrderUpright", [UP]);
+    FontLibrary.use("SvgOrderFlagged", [FLAG]);
+    FontLibrary.use("SvgOrderU", [UP, FLAG]);
+    FontLibrary.use("SvgOrderL", [FLAG, UP]);
+    const drawn = async (family) => {
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">` +
+        `<text x="60" y="250" font-size="200" font-family="${family}"` +
+        ` fill="#000">IH</text></svg>`;
+      const image = await loadImage(
+        "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+      );
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    const upright = await drawn("SvgOrderUpright");
+    assert.ok(
+      !upright.equals(await drawn("SvgOrderFlagged")),
+      "the faces differ",
+    );
+    assert.ok((await drawn("SvgOrderU")).equals(upright), "upright first");
+    assert.ok((await drawn("SvgOrderL")).equals(upright), "flagged first");
+  });
+
   test("renders when the family cannot be resolved", async () => {
     // The trigger is a family that does not resolve, not an absent one: this
     // killed the process for a document naming any font the machine lacks.

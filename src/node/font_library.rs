@@ -29,7 +29,8 @@ use crate::{
     context2d::{Font, FontFields, FontKey},
     font::{
         FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
-        designed_oblique_angle, optical_size, quarantine::font_data,
+        designed_oblique_angle, hides_its_lean, optical_size,
+        quarantine::font_data,
     },
     image::x_height_ratio,
     memory::note_font_use,
@@ -982,7 +983,7 @@ impl FontLibrary {
         //
         // So making the two providers match here is not a tidy-up. It puts
         // back a typeable name with an unexplained rendering.
-        for (font, alias) in &self.fonts {
+        for (font, alias) in self.in_registration_order() {
             register_under(&mut assets, font.clone(), alias.as_deref());
         }
 
@@ -1319,7 +1320,7 @@ impl FontLibrary {
         // the claimed face under `Helvetica` too would answer that with the
         // caller's face and make a list behave like the bare name it is
         // documented not to.
-        for (font, alias) in &self.fonts {
+        for (font, alias) in self.in_registration_order() {
             match alias {
                 Some(name) => {
                     let private = private_alias(name);
@@ -1675,6 +1676,26 @@ impl FontLibrary {
             self.engine_names.insert(families.to_vec(), names.clone());
         }
         names
+    }
+
+    /// The registered faces in the order a provider is given them: every
+    /// face that does not [hide its lean](hides_its_lean) before every face
+    /// that does, each kind in the order it was registered.
+    ///
+    /// Skia's matcher keeps the face registered first of any it scores alike,
+    /// and it scores on the reported style, which is all a face hiding its
+    /// lean and the upright face it ties with differ by for it. Registered
+    /// in the order they came, the face drawn for plain text went by the
+    /// order the caller loaded them in. Registered this way it is the
+    /// upright one, which is what its tables say it is.
+    fn in_registration_order(
+        &self,
+    ) -> impl Iterator<Item = &(Typeface, Option<String>)> {
+        let (upright, leaning): (Vec<_>, Vec<_>) = self
+            .fonts
+            .iter()
+            .partition(|(font, _)| !hides_its_lean(font));
+        upright.into_iter().chain(leaning)
     }
 
     /// The name a registered family is filed under, where `name` is that

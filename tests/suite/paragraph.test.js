@@ -1819,6 +1819,33 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     }
   });
 
+  test("an upright range's face does not depend on the order the faces came in", () => {
+    // The canvas test of the same name, for Paragraph ranges.
+    const UP = `${R}/Recursive-upright-subset.ttf`;
+    FontLibrary.use("ParagraphPlainUpright", [UP]);
+    const upright = paragraph("ParagraphPlainUpright", [
+      ["IH", slanted(UPRIGHT)],
+    ]);
+    const wrong = [];
+    for (const [name, leaning] of [
+      ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
+      ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
+    ]) {
+      for (const [order, files] of [
+        ["upright first", [UP, leaning]],
+        ["leaning first", [leaning, UP]],
+      ]) {
+        const family = `ParagraphPlain${name}${order === "upright first" ? "U" : "L"}`;
+        FontLibrary.use(family, files);
+        if (!same(paragraph(family, [["IH", slanted(UPRIGHT)]]), upright))
+          wrong.push(
+            `${name}, ${order}: an upright range draws the upright face`,
+          );
+      }
+    }
+    assert.deepEqual(wrong, []);
+  });
+
   test("sheared by tan(14deg)", () => {
     register();
     for (const family of FAMILIES) {

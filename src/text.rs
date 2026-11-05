@@ -2800,6 +2800,65 @@ mod tests {
         font_arguments::{VariationPosition, variation_position::Coordinate},
     };
 
+    /// What a paragraph in `family` at `slant` draws, the faces in `files`
+    /// registered in that order: `IH` at 200px, read back as pixels.
+    fn drawn_at(family: &str, files: &[&str], slant: TextSlant) -> Vec<u8> {
+        use crate::canvas::Canvas;
+        let fonts = FontLibrary::new();
+        for file in files {
+            fonts
+                .register_font_from_path(family, file)
+                .expect("a bundled font registers");
+        }
+        let engine = TextEngine::new(&fonts);
+        let style = TextStyle {
+            font_families: vec![family.into()],
+            font_size: 200.0,
+            slant,
+            ..TextStyle::default()
+        };
+        let mut builder = engine.paragraph_builder(&style);
+        builder.add_text("IH");
+        let paragraph = builder.build(400.0);
+        let mut canvas = Canvas::new(300.0, 300.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.draw_paragraph(&paragraph, 60.0, 20.0);
+        ctx.get_image_data(0.0, 0.0, 300.0, 300.0)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec()
+    }
+
+    /// A family whose oblique face is told from its upright face only by
+    /// `fsSelection` bit 9 draws its upright face for upright text whichever
+    /// of the two was registered first. CoreText reports that face upright,
+    /// and so does DirectWrite through crates.io's Skia, which the crate
+    /// builds against on Windows; Skia's matcher scores the two alike and
+    /// keeps the one registered first.
+    #[test]
+    fn a_family_draws_its_upright_face_in_either_load_order() {
+        const UPRIGHT: &str =
+            "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf";
+        const FLAGGED: &str =
+            "tests/assets/fonts/Recursive/Recursive-oblique-flag-subset.ttf";
+        let upright =
+            drawn_at("CratePlainUpright", &[UPRIGHT], TextSlant::Upright);
+        let flagged =
+            drawn_at("CratePlainFlagged", &[FLAGGED], TextSlant::Upright);
+        assert_ne!(upright, flagged, "the two faces draw differently");
+        for (order, files) in [
+            ("upright first", [UPRIGHT, FLAGGED]),
+            ("flagged first", [FLAGGED, UPRIGHT]),
+        ] {
+            let family = format!("CratePlain {order}");
+            assert!(
+                drawn_at(&family, &files, TextSlant::Upright) == upright,
+                "{order}: upright text draws the upright face"
+            );
+        }
+    }
+
     /// Whether skia-safe still turns an empty family list into a slice
     /// built from a null pointer, which a debug build aborts on: the defect
     /// the npm binding's `font_families` and this module's `is_empty` tests

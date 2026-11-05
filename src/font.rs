@@ -10,7 +10,8 @@ use parking_lot::Mutex;
 use skia_safe::{
     FontMgr, FourByteTag, Typeface,
     font_arguments::variation_position::Coordinate,
-    font_parameters::variation::Axis, textlayout::TypefaceFontProvider,
+    font_parameters::variation::Axis, font_style::Slant,
+    textlayout::TypefaceFontProvider,
 };
 use ttf_parser::{
     Face as TtfFace, RawFaceTables, Tag, avar::Table as AvarTable,
@@ -651,6 +652,21 @@ pub(crate) fn designed_oblique_angle(face: &Typeface) -> Option<f32> {
     })
 }
 
+/// Whether `face` is an oblique face its platform reports upright: one its
+/// own tables flag oblique -- see [`designed_oblique_angle`] -- whose Skia
+/// slant is `Upright`.
+///
+/// CoreText reports a face flagged only by `fsSelection` bit 9, with an
+/// `italicAngle` of zero, as upright, and DirectWrite reports any face
+/// flagged by the bit so wherever Skia's DirectWrite port is unpatched -- the
+/// crate's build on Windows. Such a face ties with the upright face of its
+/// weight and width in Skia's matcher, which scores on the reported style
+/// alone and keeps the face registered first.
+pub(crate) fn hides_its_lean(face: &Typeface) -> bool {
+    face.font_style().slant() == Slant::Upright
+        && designed_oblique_angle(face).is_some()
+}
+
 /// The oblique angle `face` is instanced at on a `slnt` axis, in CSS
 /// degrees, or `None` where it has no such axis or sits upright on it.
 ///
@@ -985,6 +1001,34 @@ struct FontManagerInner {
     font_mgr: FontMgr,
     /// Registered family names in registration order.
     families: Vec<String>,
+    /// Every registered face with the family it was registered under, in
+    /// registration order: what `provider` is rebuilt from -- see
+    /// [`FontManagerInner::register`].
+    faces: Vec<(Typeface, String)>,
+}
+
+impl FontManagerInner {
+    /// Adds `face` under `family` and builds `provider` again from every
+    /// face, in the order the shared library registers them -- see
+    /// `FontLibrary::in_registration_order` in `node::font_library`.
+    ///
+    /// Built again rather than added to: a `TypefaceFontProvider` keeps
+    /// faces in the order they arrived, and Skia's matcher keeps the first
+    /// of any two it scores alike, so a face that hides its lean, loaded
+    /// before the upright face it ties with, would otherwise answer plain
+    /// text.
+    fn register(&mut self, face: Typeface, family: &str) {
+        self.faces.push((face, family.to_string()));
+        let mut provider = TypefaceFontProvider::new();
+        let (upright, leaning): (Vec<_>, Vec<_>) = self
+            .faces
+            .iter()
+            .partition(|(face, _)| !hides_its_lean(face));
+        for (face, family) in upright.into_iter().chain(leaning) {
+            provider.register_typeface(face.clone(), Some(family.as_str()));
+        }
+        self.provider = provider;
+    }
 }
 
 impl Default for FontLibrary {
@@ -1003,6 +1047,7 @@ impl FontLibrary {
                     library.system_font_mgr()
                 }),
                 families: Vec::new(),
+                faces: Vec::new(),
             }),
         }
     }
@@ -1021,6 +1066,7 @@ impl FontLibrary {
         let mut inner = self.inner.lock();
         inner.provider = TypefaceFontProvider::new();
         inner.families.clear();
+        inner.faces.clear();
     }
 
     /// Registers a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2, depending
@@ -1069,9 +1115,7 @@ impl FontLibrary {
                     "could not parse typeface for family {family:?}"
                 ),
             })?;
-        inner
-            .provider
-            .register_typeface(typeface.clone(), Some(family));
+        inner.register(typeface.clone(), family);
         SharedFontRegistry::with_shared(|library| {
             library.register_typeface(typeface, Some(family.to_string()));
         });
@@ -1277,9 +1321,7 @@ impl FontLibrary {
             file,
         };
         let mut inner = self.inner.lock();
-        inner
-            .provider
-            .register_typeface(typeface.clone(), Some(family.as_str()));
+        inner.register(typeface.clone(), &family);
         SharedFontRegistry::with_shared(|library| {
             library.register_typeface(typeface, Some(family.clone()));
         });
