@@ -1167,31 +1167,38 @@ mod tests {
 
     #[test]
     fn the_fft_writes_no_negative_zero() {
-        // An F32 layer of one opaque grey rect, blurred through the FFT at
-        // a sigma of 6, where the round-off left two alphas of -0.0 before
-        // `positive_zero` was applied to what the FFT writes.
-        let (w, h) = (144, 108);
-        let pixels: Vec<f32> = (0..w * h)
-            .flat_map(|i| {
-                let (x, y) = (i % w, i / w);
-                match (72..120).contains(&x) && (10..46).contains(&y) {
-                    true => [0.4, 0.4, 0.4, 1.0],
-                    false => [0.0; 4],
-                }
-            })
-            .collect();
-        assert_eq!(method(6.0), Method::Fourier);
-        let blurred = blur(pixels, w, h, 6.0, 6.0);
-        let negative: Vec<usize> = blurred
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| **v == 0.0 && v.is_sign_negative())
-            .map(|(i, _)| i)
-            .collect();
-        assert!(negative.is_empty(), "-0.0 at values {negative:?}");
-        // The two alphas the round-off signed are zeros still.
-        for at in [7370, 14282] {
-            assert_eq!(blurred[at * 4 + 3].to_bits(), 0, "alpha {at}");
+        // F32 layers of one opaque grey rect, blurred through the FFT, where
+        // the round-off left -0.0 before `positive_zero` was applied to what
+        // the FFT writes. Where it lands depends on the machine, since
+        // rustfft picks its arithmetic for the processor: the first layer
+        // left two alphas of -0.0 on arm64 and none on an x86-64 with AVX2
+        // and FMA, and the second left one colour value of -0.0 there and
+        // none on arm64. Each was found by a search of 828 such layers on
+        // both machines.
+        for (w, h, (x0, y0, x1, y1), sigma) in [
+            (144, 108, (72, 10, 120, 46), 6.0),
+            (192, 144, (48, 36, 112, 84), 8.0),
+        ] {
+            let pixels: Vec<f32> = (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    match (x0..x1).contains(&x) && (y0..y1).contains(&y) {
+                        true => [0.4, 0.4, 0.4, 1.0],
+                        false => [0.0; 4],
+                    }
+                })
+                .collect();
+            assert_eq!(method(sigma), Method::Fourier);
+            let negative: Vec<usize> = blur(pixels, w, h, sigma, sigma)
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| **v == 0.0 && v.is_sign_negative())
+                .map(|(i, _)| i)
+                .collect();
+            assert!(
+                negative.is_empty(),
+                "{w} by {h} at a sigma of {sigma}: -0.0 at values {negative:?}"
+            );
         }
     }
 

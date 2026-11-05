@@ -1898,10 +1898,15 @@ mod tests {
         // A float layer blurred through the FFT, then coloured and then
         // given a drop shadow by Skia, as a chain of `blur()` and a colour
         // step or `drop-shadow()` runs them. This layer's blur leaves a few
-        // alphas at zero where the FFT's round-off lands; an alpha of -0.0
-        // there is one Skia's colour matrix divides the colour by, making
-        // NaN of every channel, which a page then draws in place of what it
-        // held.
+        // alphas at zero where the FFT's round-off lands, and through Skia's
+        // colour matrix a pixel of alpha -0.0 came out NaN in every channel,
+        // which a page then draws in place of what it held. Where the
+        // round-off signs a zero depends on the machine: on arm64 this
+        // layer's alphas at two pixels, and on an x86-64 with AVX2 and FMA
+        // no alpha of the 828 layers `the_fft_writes_no_negative_zero`'s two
+        // were found among, so this fails without the fix on arm64 alone.
+        // A -0.0 in a colour value, which is all x86-64 showed, came out of
+        // the matrix as +0.0, NaN nowhere.
         let (w, h) = (144, 108);
         let info = ImageInfo::new(
             (w, h),
