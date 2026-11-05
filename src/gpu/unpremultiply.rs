@@ -26,11 +26,10 @@ use skia_safe::{
     AlphaType, BlendMode, ColorType, Data, IRect, Image, ImageInfo, Paint,
     Rect, RuntimeEffect, SamplingOptions, Surface, TileMode,
     gpu::{Budgeted, SurfaceOrigin, surfaces},
-    images,
     runtime_effect::ChildPtr,
 };
 
-use crate::context::page::unpremultiply_table;
+use crate::{context::page::unpremultiply_table, started};
 
 /// The pass. Each byte of the source is recovered from the half the GPU
 /// samples it as -- a half holds k/255 to within 1.2e-4, so `floor(v * 255 +
@@ -93,7 +92,7 @@ static TABLE: LazyLock<Option<Image>> = LazyLock::new(|| {
     }
     let info =
         ImageInfo::new((256, 256), ColorType::Alpha8, AlphaType::Premul, None);
-    images::raster_from_data(&info, Data::new_copy(&bytes), 256)
+    started::raster_from_data(&info, Data::new_copy(&bytes), 256)
 });
 
 /// The `info`-sized area at `at` of `surface`, a GPU page, unpremultiplied
