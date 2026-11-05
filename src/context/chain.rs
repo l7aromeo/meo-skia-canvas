@@ -39,6 +39,7 @@ use crate::{
         blur_mask::baked_image,
         exact_blur::{self, REACH_SIGMAS},
         keeps_two_recordings,
+        kept::ChainInput,
         layer::ExactColour,
     },
     node::utils::color_in_canvas_space,
@@ -472,6 +473,25 @@ impl Drawn {
         }
 
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
+        // On the CPU a chain handed an input it has run on before takes the
+        // result it left, once the input is that one to the byte -- see
+        // `kept`.
+        let input = match context.is_none() {
+            true => ChainInput::of(
+                &image,
+                steps,
+                Vector::new(scale.0, scale.1),
+                paint.alpha_f(),
+            ),
+            false => None,
+        };
+        if let Some(kept) = input.as_ref().and_then(ChainInput::kept) {
+            return Some(Outcome {
+                image: kept,
+                region: worked,
+                rest,
+            });
+        }
         let last = steps.len().saturating_sub(1);
         for (i, step) in steps.iter().enumerate() {
             let gain = match i == last {
@@ -507,6 +527,9 @@ impl Drawn {
                 }
             };
             image = next?;
+        }
+        if let Some(input) = input {
+            input.keep(image.clone());
         }
         Some(Outcome {
             image,
