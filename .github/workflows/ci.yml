@@ -157,6 +157,19 @@ jobs:
       - name: Type-check the shipped declarations
         run: bun run typecheck
 
+      # `PATCHES` in scripts/skia-source.mjs is the only list of Skia patches:
+      # this refuses a workflow that names a patch file, a Skia cache not keyed
+      # by `cache-key`, a patch check-patched-skia cannot vouch for, and a
+      # platform that neither takes nor withholds a patch. A list kept beside
+      # it builds green without a patch it lacks. Here because this workflow
+      # runs on every change to a workflow, a patch or a script. One leg is
+      # enough: it reads files, and its answer is the same everywhere.
+      - name: Check PATCHES is the only list of Skia patches
+        if: matrix.label == 'linux' && matrix.node == 24
+        run: |
+          node scripts/check-skia-patches.mjs --self-test
+          node scripts/check-skia-patches.mjs
+
       # Download only, never `--or-compile`. Building Skia from source takes roughly an hour and
       # needs a toolchain this job deliberately does not install, so a compile fallback would turn
       # every pull request into an hour-long job rather than the minute this is meant to take.

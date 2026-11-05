@@ -99,7 +99,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches typecheck lint-check check-rust-api check-dts-surface check-parity check-bench-parity docs licenses test build
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -162,7 +162,7 @@ typecheck: ensure-deps
 # `install-hooks` is what puts this in front of a commit; it is opt-in and
 # run once per clone.
 [doc("The pre-commit subset: formatting both languages, ESLint, clippy with no features and with the GPU backend alone.")]
-precommit: ensure-deps check-docs check-cargo-lock
+precommit: ensure-deps check-docs check-cargo-lock check-skia-patches
     cargo +{{ fmt_toolchain }} fmt --all -- --check
     bun run format:check
     bun run lint
@@ -227,6 +227,18 @@ check-docs base="":
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
     fi
+
+# `PATCHES` in scripts/skia-source.mjs is the only list of Skia patches: CI
+# applies and keys them through `skia-source.mjs apply` and `cache-key`, and a
+# list kept beside it builds green without a patch it lacks -- which is how a
+# patch once merged without reaching the Linux binary. This is in `precommit`
+# so that a list coming back fails at the commit, not after the release.
+# scripts/check-skia-patches.mjs says what it refuses, and how a platform goes
+# without a patch on purpose.
+[doc("Fail when CI keeps a Skia patch list of its own, or a patch is unmarked or undecided.")]
+check-skia-patches: ensure-deps
+    node scripts/check-skia-patches.mjs --self-test
+    node scripts/check-skia-patches.mjs
 
 # Every job in a gated workflow is named by that workflow's aggregate.
 #

@@ -127,13 +127,21 @@ jobs:
             os: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The same key .github/actions/skia-source restores under.
+      # The same key .github/actions/skia-source restores under: the tree's
+      # name for this runner's platform, from scripts/skia-source.mjs, which
+      # carries the version and the patches' digest. Assigned before it is
+      # written out, so that a failing `cache-key` fails the step.
+      - name: Name the Skia source's cache key
+        id: skia-key
+        run: |
+          key=$(node scripts/skia-source.mjs cache-key)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
       - name: Look up the Skia source
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/meo-skia-canvas
-          key: ${{ runner.os == 'macOS' && format('skia-source-{0}', hashFiles('Cargo.lock', 'containers/skia-metal-untimed-compile.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch')) || format('skia-source-linux-{0}', hashFiles('Cargo.lock', 'containers/skia-brotli-sources.patch', 'containers/skia-atlas-size.patch', 'containers/skia-triangulation-tolerance.patch', 'containers/rust-skia-graphite-bindings.patch')) }}
+          key: ${{ steps.skia-key.outputs.key }}
           lookup-only: true
       - name: Prepare the Skia source
         if: steps.cache.outputs.cache-hit != 'true'

@@ -5,6 +5,14 @@
 //   node scripts/skia-source.mjs env       `SKIA_SOURCE_DIR=<dir>` on a platform with patches, nothing elsewhere
 //   node scripts/skia-source.mjs dir       the directory, prepared or not
 //   node scripts/skia-source.mjs prepare   make it once, from a tree already here or the network; print the directory
+//   node scripts/skia-source.mjs apply <checkout>   apply this platform's patches to a rust-skia checkout
+//   node scripts/skia-source.mjs cache-key  the key CI caches this platform's tree under, alone on stdout
+//
+// `apply` and `cache-key` are how CI reaches `PATCHES` where it does not build
+// through `just`: the Linux release build patches its own rust-skia checkout,
+// and a cache key has to be known before the tree it names is restored.
+// `scripts/check-skia-patches.mjs` refuses a workflow that names a patch file
+// instead.
 //
 // Against a local rust-skia checkout (`just use-local-skia`) both `env` and
 // `prepare` do nothing: skia-bindings builds the checkout's own Skia.
@@ -123,10 +131,27 @@ const ASYNC_TRANSFER_REUSE = join(
   "skia-async-transfer-reuse.patch",
 );
 
+// The Metal compile timeout -- see the UPSTREAM note in the justfile.
+const METAL_UNTIMED_COMPILE = join(
+  "containers",
+  "skia-metal-untimed-compile.patch",
+);
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: link a Linux build with `freetype` from a tree prepared without this patch, with build.rs's shim returning at once; it fails on undefined `kCmdLut` and `BrotliDecoderEnsureStaticInit`
+//
+// Skia's `third_party/brotli/BUILD.gn` leaves out `c/dec/prefix.c` and
+// `c/dec/static_init.c`, which define `kCmdLut` and
+// `BrotliDecoderEnsureStaticInit` since the brotli roll in M156's DEPS.
+// Only `freetype-woff2` links brotli and skia-bindings drops it on macOS,
+// so the patch is Linux's alone. build.rs carries the same fix for builds
+// that do not come through here, and stands aside where this patch has
+// applied.
+const BROTLI_SOURCES = join("containers", "skia-brotli-sources.patch");
+
 export const PATCHES = {
   darwin: [
-    // The Metal compile timeout -- see the UPSTREAM note in the justfile.
-    join("containers", "skia-metal-untimed-compile.patch"),
+    METAL_UNTIMED_COMPILE,
     ATLAS_SIZE,
     TRIANGULATION,
     GRAPHITE_BINDINGS,
@@ -146,22 +171,41 @@ export const PATCHES = {
     // why it is not taken. Seen on Metal only; not looked for elsewhere.
   ],
   linux: [
-    // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
-    // Re-check: link a Linux build with `freetype` from a tree prepared without this patch, with build.rs's shim returning at once; it fails on undefined `kCmdLut` and `BrotliDecoderEnsureStaticInit`
-    //
-    // Skia's `third_party/brotli/BUILD.gn` leaves out `c/dec/prefix.c` and
-    // `c/dec/static_init.c`, which define `kCmdLut` and
-    // `BrotliDecoderEnsureStaticInit` since the brotli roll in M156's DEPS.
-    // Only `freetype-woff2` links brotli and skia-bindings drops it on macOS,
-    // so the patch is Linux's alone. build.rs carries the same fix for builds
-    // that do not come through here, and stands aside where this patch has
-    // applied.
-    join("containers", "skia-brotli-sources.patch"),
+    BROTLI_SOURCES,
     ATLAS_SIZE,
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
   ],
+};
+
+/**
+ * The patches a platform's tree goes without, each with why. Every patch
+ * `PATCHES` names for one platform is, on each other, either in its list
+ * there or here -- `scripts/check-skia-patches.mjs` refuses one that is
+ * neither, so a platform cannot go without a patch by omission.
+ */
+export const WITHHELD = {
+  darwin: {
+    [BROTLI_SOURCES]:
+      "skia-bindings drops brotli on macOS, so there is nothing for it to link",
+  },
+  linux: {
+    [METAL_UNTIMED_COMPILE]:
+      "it changes Metal's code, which Linux does not build",
+  },
+  win32: {
+    [METAL_UNTIMED_COMPILE]:
+      "it changes Metal's code, which Windows does not build",
+    [BROTLI_SOURCES]:
+      "Windows builds against rust-skia's prebuilt Skia (#546), whose brotli links",
+    [ATLAS_SIZE]: "Windows builds against rust-skia's prebuilt Skia (#546)",
+    [TRIANGULATION]: "Windows builds against rust-skia's prebuilt Skia (#546)",
+    [GRAPHITE_BINDINGS]:
+      "Windows builds against rust-skia's prebuilt Skia (#546)",
+    [ASYNC_TRANSFER_REUSE]:
+      "skbug.com/40042671: the switch crashed Chromium's GPU process on Windows, with no cause found",
+  },
 };
 
 /** This platform's patches, or none. */
@@ -832,16 +876,55 @@ function prepare() {
   if (base) console.error(`skia-source: derived ${treeName()} from ${base}`);
   else fetchTree(partial, checkout);
 
-  // `-F0`: a hunk that no longer matches fails here rather than being placed
-  // by guesswork.
-  for (const patch of patches())
-    run("patch", ["-p1", "-F0", "-d", checkout, "-i", join(ROOT, patch)]);
+  applyPatches(checkout);
   writeFileSync(join(partial, READY), `${lockedVersion()}\n`);
   renameSync(partial, tree);
 
   // This checkout is one of the worktrees, so the new tree is kept with them.
   removeSuperseded(cacheRoot(), treesToKeep());
   return sourceDir(tree);
+}
+
+/**
+ * Applies `list` -- this platform's patches from `PATCHES`, by default -- in
+ * its order to the rust-skia checkout at `checkout`, with paths read from
+ * `root`. `prepare` patches a tree with it, and `apply` the rust-skia checkout
+ * the Linux release build compiles from, so there is one list and one way of
+ * applying it. `-F0`: a hunk that no longer matches fails rather than being
+ * placed by guesswork, and the error names the patch it is in. `--forward`: a
+ * patch already applied fails too, where without it macOS's `patch` takes one
+ * as reversed, with no terminal to ask, and undoes it with a zero exit.
+ */
+export function applyPatches(checkout, list = patches(), root = ROOT) {
+  for (const patch of list) {
+    try {
+      run("patch", [
+        "-p1",
+        "-F0",
+        "--forward",
+        "-d",
+        checkout,
+        "-i",
+        join(root, patch),
+      ]);
+    } catch (error) {
+      throw new Error(
+        `skia-source: ${patch} does not apply to ${checkout}: ${error.message}`,
+        { cause: error },
+      );
+    }
+  }
+}
+
+/**
+ * The key a CI cache of this platform's tree is saved and restored under: the
+ * platform and the tree's name, which carries the locked version and the
+ * digest of the patches. The keys follow `PATCHES` because they are made from
+ * it, rather than from a list of patch files a workflow would have to keep in
+ * step.
+ */
+export function cacheKey(root = ROOT, platform = process.platform) {
+  return `skia-source-${platform}-${treeName(root)}`;
 }
 
 /**
@@ -928,13 +1011,29 @@ if (
   } else if (command === "prepare") {
     const dir = prepare();
     if (dir !== null) console.log(dir);
+  } else if (command === "apply") {
+    const checkout = process.argv[3];
+    if (!checkout) {
+      console.error(
+        "usage: node scripts/skia-source.mjs apply <rust-skia checkout>",
+      );
+      process.exit(2);
+    }
+    try {
+      applyPatches(checkout);
+    } catch (error) {
+      console.error(error.message);
+      process.exit(1);
+    }
+  } else if (command === "cache-key") {
+    console.log(cacheKey());
   } else if (command === "cargo-patch") {
     const remove = process.argv[3] === "--remove";
     const path = cargoPatch(ROOT, treeDir(), { remove });
     if (path !== null) console.log(path);
   } else {
     console.error(
-      "usage: node scripts/skia-source.mjs env|dir|prepare|cargo-patch [--remove]",
+      "usage: node scripts/skia-source.mjs env|dir|prepare|apply <checkout>|cache-key|cargo-patch [--remove]",
     );
     process.exit(2);
   }
