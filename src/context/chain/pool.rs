@@ -52,6 +52,11 @@ const KEPT: usize = MAX_RUN_LAYERS;
 /// context is kept unused for (`MTL_CONTEXT_LIFESPAN`,
 /// `VK_CONTEXT_LIFESPAN`), so that a layer is held no longer than the
 /// context it belongs to would be.
+///
+/// The span starts when a run lets the layer go, before the page's read
+/// waits on the GPU, so where drawing a page takes longer than this the
+/// next page finds nothing kept: on llvmpipe a 4000 by 2600 page of 40
+/// blurred shapes took over 15 s beside other tests.
 const KEPT_FOR: Duration = Duration::from_secs(5);
 
 /// What a layer is kept under: everything that decides how a draw lands on
@@ -182,8 +187,22 @@ pub(crate) fn release() {
 
 impl Pool {
     fn expire(&mut self) {
-        self.kept.retain(|(.., since)| since.elapsed() <= KEPT_FOR);
+        let kept_for = kept_for();
+        self.kept.retain(|(.., since)| since.elapsed() <= kept_for);
     }
+}
+
+/// How long a layer is kept on this thread: [`KEPT_FOR`].
+#[cfg(not(test))]
+fn kept_for() -> Duration {
+    KEPT_FOR
+}
+
+/// How long a layer is kept on this thread: what a test set in
+/// [`KEPT_FOR_HERE`].
+#[cfg(test)]
+fn kept_for() -> Duration {
+    KEPT_FOR_HERE.get()
 }
 
 /// How many layers this thread keeps, for the debug addon's `__keptLayers`.
@@ -197,12 +216,30 @@ thread_local! {
     /// Whether layers are kept on this thread, so that a test can draw the
     /// same page with every layer made afresh.
     pub(crate) static KEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+
+    /// How long a layer is kept on this thread, [`KEPT_FOR`] unless a test
+    /// sets it, so that a test can count what a page takes on a device that
+    /// draws it more slowly than that.
+    pub(crate) static KEPT_FOR_HERE: std::cell::Cell<Duration> =
+        const { std::cell::Cell::new(KEPT_FOR) };
 }
 
 #[cfg(test)]
 mod tests {
-    use super::KEEP;
-    use crate::{context::chain::MADE_LAYERS, prelude::*};
+    use std::time::Duration;
+
+    use skia_safe::ImageInfo;
+
+    use super::{KEEP, KEPT_FOR, KEPT_FOR_HERE};
+    use crate::{
+        context::{
+            chain::{MADE_LAYERS, shares_layers},
+            layer::MAX_RUN_LAYERS,
+            page::ExportOptions,
+        },
+        gpu::RenderingEngine,
+        prelude::*,
+    };
 
     /// Whether this machine has a GPU engine to keep layers on.
     fn on_gpu() -> bool {
@@ -280,12 +317,15 @@ mod tests {
         // of another depth, which the kept one would not serve.
         let small = [(260.3, 170.6, 80.0, 40.0, "rgb(20 60 200)")];
         let (fresh, _) = read(SIZE, &small, false);
+        // Counted however slowly the device draws -- see `KEPT_FOR_HERE`.
+        KEPT_FOR_HERE.set(Duration::MAX);
         // Fills the layer it leaves kept: opaque red over the small shape's
         // region and well past it.
         let (_, made) =
             read(SIZE, &[(40.0, 40.0, 520.0, 320.0, "rgb(255 0 0)")], true);
         assert_eq!(made, 1, "the filling page made no layer to keep");
         let (kept, made) = read(SIZE, &small, true);
+        KEPT_FOR_HERE.set(KEPT_FOR);
         assert_eq!(made, 0, "the small shape did not take the kept layer");
         let differ = fresh.iter().zip(&kept).filter(|(a, b)| a != b).count();
         assert_eq!(differ, 0, "a kept layer read what it held before");
@@ -310,16 +350,44 @@ mod tests {
         assert_eq!(differ, 0, "the one-sample page changed with layers kept");
     }
 
-    /// #499's 40 shapes along a line, on two pages one after the other, take
-    /// the two layers the first page's run makes, and the second page makes
-    /// none; each page reads the bytes it does with every layer made afresh.
+    /// A layer kept longer than its span is let go, and the next page of its
+    /// size makes its own.
+    #[test]
+    fn a_layer_kept_past_its_span_is_made_again() {
+        if !on_gpu() {
+            return;
+        }
+        const SIZE: (f32, f32) = (600.0, 400.0);
+        let shape = [(260.3, 170.6, 80.0, 40.0, "rgb(20 60 200)")];
+        super::release();
+        let (_, made) = read(SIZE, &shape, true);
+        assert_eq!(made, 1, "the first page made no layer to keep");
+        KEPT_FOR_HERE.set(Duration::ZERO);
+        let (_, made) = read(SIZE, &shape, true);
+        KEPT_FOR_HERE.set(KEPT_FOR);
+        assert_eq!(made, 1, "a layer kept past its span was taken");
+    }
+
+    /// #499's 40 shapes along a line, on two pages one after the other: the
+    /// second page takes the layers the first page's first run made, and
+    /// makes none; each page reads the bytes it does with every layer made
+    /// afresh.
+    ///
+    /// A run holds at most [`MAX_RUN_LAYERS`] layers open whether or not its
+    /// chains share them -- see `layer::Run` -- so the first run makes that
+    /// many with layers kept, and every later run takes them. Made afresh,
+    /// what a page makes follows from [`shares_layers`]: where chains share,
+    /// the shapes, each meeting the next and not the one after, take two
+    /// layers between them in one run; where they do not, each takes its
+    /// own.
     #[test]
     fn forty_blurred_draws_on_two_pages_make_two_layers() {
         if !on_gpu() {
             return;
         }
         const SIZE: (f32, f32) = (4000.0, 2600.0);
-        let shapes: Vec<_> = (0..40)
+        const SHAPES: usize = 40;
+        let shapes: Vec<_> = (0..SHAPES)
             .map(|i| {
                 (
                     40.0 + (i * 97) as f32 + 0.37,
@@ -330,24 +398,31 @@ mod tests {
                 )
             })
             .collect();
+        let shares = RenderingEngine::GPU
+            .make_surface(
+                &ImageInfo::new_n32_premul((1, 1), None),
+                &ExportOptions::default(),
+            )
+            .map(|mut surface| shares_layers(surface.canvas()))
+            .expect("a GPU surface");
+        let fresh_layers = if shares { 2 } else { SHAPES };
         let (fresh, made_fresh) = read(SIZE, &shapes, false);
         let (_, again) = read(SIZE, &shapes, false);
-        // On Metal the run holds two layers open; elsewhere each chain takes
-        // one of its own -- see `chain::shares_layers` -- and lets it go
-        // before the next is made, so one serves every chain once kept.
-        let (layers, kept) = match cfg!(feature = "metal") {
-            true => (2, 2),
-            false => (40, 1),
-        };
-        assert_eq!(made_fresh, layers, "not a run's layers made afresh");
-        assert_eq!(again, layers, "a page without kept layers made fewer");
+        assert_eq!(made_fresh, fresh_layers, "not a page's layers made afresh");
+        assert_eq!(
+            again, fresh_layers,
+            "a page without kept layers made fewer"
+        );
+        // Counted however slowly the device draws -- see `KEPT_FOR_HERE`.
+        KEPT_FOR_HERE.set(Duration::MAX);
         // Whatever an earlier test on this thread left kept goes first.
         super::release();
         let (first, made_first) = read(SIZE, &shapes, true);
         let (second, made_second) = read(SIZE, &shapes, true);
+        KEPT_FOR_HERE.set(KEPT_FOR);
         assert_eq!(
-            made_first + made_second,
-            kept,
+            (made_first, made_second),
+            (MAX_RUN_LAYERS, 0),
             "two pages made {made_first} and {made_second} layers"
         );
         for (name, page) in [("first", &first), ("second", &second)] {
