@@ -39,6 +39,7 @@ use crate::{
     },
     context::{
         BoxedContext2D,
+        chain::pool::LayerScope,
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
@@ -3655,6 +3656,9 @@ impl RecordingSurface {
 
         if let Some(surface) = self.surface.as_mut() {
             let canvas = surface.canvas();
+            // The surface was made with `opts`, so its chains' layers are
+            // kept for the next run -- see `chain::pool`.
+            let _layers = LayerScope::open(canvas, opts.msaa);
             let (cache_image, cache_depth) =
                 PageCache::get(page.id, opts, page.depth());
 
@@ -4880,6 +4884,8 @@ impl Page {
             &options.surface_color_space,
         )?;
         let canvas = surface.canvas();
+        // Made with `options`: see `chain::pool`.
+        let _layers = LayerScope::open(canvas, options.msaa);
 
         // The cached bitmap stands in for the layers already drawn -- but only
         // where compositing it is the same operation as drawing them.
@@ -5228,6 +5234,8 @@ impl Page {
                 &options.surface_color_space,
             )?;
             let canvas = surface.canvas();
+            // Made with `options`: see `chain::pool`.
+            let _layers = LayerScope::open(canvas, options.msaa);
             if let Some(matte) = &options.matte {
                 matte.paint(canvas);
             }
