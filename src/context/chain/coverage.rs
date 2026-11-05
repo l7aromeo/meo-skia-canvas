@@ -51,16 +51,16 @@ thread_local! {
 }
 
 /// Writes the alpha of `surface`'s pixels in `read` into `rows`, one row of
-/// `read` each, as each byte's value. A raster surface's pixels are read
-/// where they lie where each holds its alpha as a byte -- an A8 plane, or a
-/// premultiplied or unpremultiplied RGBA or BGRA one -- which takes the byte
-/// `read_pixels` to A8 would copy, without its conversion or a copy of the
-/// plane. Any other surface goes through `read_pixels`. `false` where the
-/// pixels cannot be read.
+/// `read` each. A raster surface's pixels are read where they lie where each
+/// holds its alpha as a byte -- an A8 plane, or a premultiplied or
+/// unpremultiplied RGBA or BGRA one -- which takes the byte `read_pixels` to
+/// A8 would copy, without its conversion or a copy of the plane. Any other
+/// surface goes through `read_pixels`. `false` where the pixels cannot be
+/// read.
 fn alpha_into<'a>(
     surface: &mut Surface,
     read: IRect,
-    rows: impl Iterator<Item = &'a mut [f32]>,
+    rows: impl Iterator<Item = &'a mut [u8]>,
 ) -> bool {
     let line = read.width() as usize;
     if let Some(pixmap) = surface.peek_pixels()
@@ -107,11 +107,10 @@ fn alpha_into<'a>(
 }
 
 /// Writes byte `AT` of each `STEP`-byte pixel of `bytes`, whose rows start
-/// `stride` bytes apart, into `rows` as its value. Each a constant, so that
-/// a row is read as fixed-size pixels and the compiler can take several at
-/// once.
+/// `stride` bytes apart, into `rows`. Each a constant, so that a row is read
+/// as fixed-size pixels and the compiler can take several at once.
 fn alpha_rows<'a, const STEP: usize, const AT: usize>(
-    rows: impl Iterator<Item = &'a mut [f32]>,
+    rows: impl Iterator<Item = &'a mut [u8]>,
     bytes: &[u8],
     stride: usize,
 ) {
@@ -119,7 +118,7 @@ fn alpha_rows<'a, const STEP: usize, const AT: usize>(
         let (pixels, _) = pixels.as_chunks::<STEP>();
         row.iter_mut()
             .zip(pixels)
-            .for_each(|(v, pixel)| *v = f32::from(pixel[AT]));
+            .for_each(|(v, pixel)| *v = pixel[AT]);
     });
 }
 
@@ -200,10 +199,17 @@ impl Blurred {
     }
 }
 
-/// A draw's coverage before it is blurred: one float a pixel of `region`,
-/// a byte's value, and the device sigmas the blur takes along x and y.
+/// A draw's coverage before it is blurred: one byte a pixel of `region`, and
+/// the device sigmas the blur takes along x and y.
+///
+/// Bytes rather than the floats the blur takes, because a kept result is
+/// found by comparing a draw's coverage with the coverage it was made from
+/// -- see `run_mask::drawn` and `kept::CoverageInput` -- and a draw that finds
+/// one is never blurred: comparing and keeping bytes costs a quarter of the
+/// memory and none of the conversion, and [`Self::blurred`] widens them to
+/// the same floats.
 pub(crate) struct Coverage {
-    values: Vec<f32>,
+    bytes: Vec<u8>,
     region: IRect,
     rest: Matrix,
     sigma: (f32, f32),
@@ -261,17 +267,17 @@ impl Coverage {
         let origin = Matrix::translate((-drawn.left as f32, -drawn.top as f32));
         offscreen.set_matrix(&Matrix::concat(&origin, &layer).into());
         draw(offscreen);
-        // The region's coverage, as floats, on a plane of what the blur works
-        // on: +0.0 around it, where nothing is painted.
+        // The region's coverage on a plane of what the blur works on: zero
+        // around it, where nothing is painted.
         let (w, h) = (worked.width() as usize, worked.height() as usize);
         let read = region.with_offset((-drawn.left, -drawn.top));
-        let mut values = vec![0.0f32; w * h];
+        let mut bytes = vec![0u8; w * h];
         let (dx, dy) = (
             (region.left - worked.left) as usize,
             (region.top - worked.top) as usize,
         );
         let line = read.width() as usize;
-        let rows = values[dy * w..]
+        let rows = bytes[dy * w..]
             .chunks_mut(w)
             .take(read.height() as usize)
             .map(|row| &mut row[dx..][..line]);
@@ -280,21 +286,21 @@ impl Coverage {
         }
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
         Some(Coverage {
-            values,
+            bytes,
             region: worked,
             rest,
             sigma: (sigma * scale.0, sigma * scale.1),
         })
     }
 
-    /// Each pixel's coverage, a byte's value, row by row across
-    /// [`Self::region`]: the read rectangle's and +0.0 around it, out to
-    /// what the blur works on. Everything the blur reads but the sigmas.
-    pub(crate) fn values(&self) -> &[f32] {
-        &self.values
+    /// Each pixel's coverage, row by row across [`Self::region`]: the read
+    /// rectangle's and zero around it, out to what the blur works on.
+    /// Everything the blur reads but the sigmas.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
-    /// The device pixels [`Self::values`] cover: the read rectangle widened
+    /// The device pixels [`Self::bytes`] cover: the read rectangle widened
     /// by what the blur works on.
     pub(crate) fn region(&self) -> IRect {
         self.region
@@ -315,7 +321,7 @@ impl Coverage {
         let (w, h) =
             (self.region.width() as usize, self.region.height() as usize);
         let values = exact_blur::blur_alpha(
-            self.values,
+            self.bytes.iter().copied().map(f32::from).collect(),
             w,
             h,
             self.sigma.0,
@@ -533,16 +539,10 @@ mod tests {
                 line,
                 (read.left, read.top)
             ));
-            let mut got = vec![0.5f32; want.len()];
+            // Not zero, so that a row the read misses shows.
+            let mut got = vec![0x5au8; want.len()];
             let before = READ_IN_PLACE.with(|n| n.get());
             assert!(alpha_into(&mut surface, read, got.chunks_mut(line)));
-            let got: Vec<u8> = got
-                .iter()
-                .map(|&v| {
-                    assert_eq!(v.fract(), 0.0, "{colour:?}: a byte's value");
-                    v as u8
-                })
-                .collect();
             assert_eq!(got, want, "{colour:?} {alpha:?}");
             assert_eq!(
                 READ_IN_PLACE.with(|n| n.get()) - before,
@@ -613,9 +613,9 @@ mod tests {
                             coverage.region.height() as usize,
                         );
                         let plane: Vec<u8> = coverage
-                            .values
+                            .bytes
                             .iter()
-                            .flat_map(|&v| [0, 0, 0, v as u8])
+                            .flat_map(|&v| [0, 0, 0, v])
                             .collect();
                         let exact = exact_blur::reference(
                             &plane,

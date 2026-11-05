@@ -424,9 +424,7 @@ impl CoverageInput {
         if !coverage.rest().is_identity() {
             return None;
         }
-        // A byte's value a pixel, so kept and compared as the byte.
-        let input: Vec<u8> =
-            coverage.values().iter().map(|&v| v as u8).collect();
+        let input = coverage.bytes().to_vec();
         let (region, sigma) = (coverage.region(), coverage.sigma());
         Some(Self {
             key: CoverageKey {
@@ -941,7 +939,7 @@ mod tests {
         // A sigma whose reach is the same three pixels, so the same
         // coverage over the same region.
         let wider = sharp((64, 48), rect, 0.45, &identity);
-        assert_eq!(wider.values(), kept.values(), "the control");
+        assert_eq!(wider.bytes(), kept.bytes(), "the control");
         assert!(!found(&wider, rgb, 1.0, &page), "another sigma");
     }
 
