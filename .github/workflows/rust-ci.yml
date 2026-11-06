@@ -393,7 +393,15 @@ jobs:
     if: needs.changes.outputs.native == 'true'
     name: binding (Rust + JS on a fresh build)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Sized for a run with nothing cached, which every new Skia tree starts
+    # with, and which must finish for rust-cache to save at all -- it saves in
+    # its post step, which a cancelled job skips, so a timeout here would leave
+    # every later run as cold. Measured on #594's first run: 15 minutes to the
+    # end of the addon build, 16.6 for the engine's `cargo test`, 11.9 for
+    # `just typecheck` -- `cargo check` runs skia-bindings' build script into an
+    # out-dir of its own, so it compiles Skia a second time -- and about 2 for
+    # the rest, about 47 in all; a warm run skips both Skia compiles.
+    timeout-minutes: 60
     steps:
       # A debug build of the addon plus every test binary and example, on top
       # of the restored cache, fills the runner's disk: the link fails with
@@ -519,8 +527,11 @@ jobs:
       - name: The two benchmarks run the same cases
         run: just check-bench-parity
       # `just typecheck`, as `just ci` runs it: every target checked with
-      # `vulkan,window,freetype`, the same Skia as this job's build, and the
-      # shipped TypeScript declarations.
+      # `vulkan,window,freetype`, and the shipped TypeScript declarations. The
+      # Skia features are this job's build's, but `cargo check` runs
+      # skia-bindings' build script into an out-dir of its own, so a cold run
+      # compiles Skia again here, about 12 minutes; the job's Rust cache keeps
+      # both.
       - name: Type-check every target with the Linux feature set
         run: just typecheck
       # The engine's `cargo test` runs `window_handle` with no display, where
@@ -871,8 +882,13 @@ jobs:
   # the tree's own cache and every Rust cache keyed on it -- so they stop
   # holding room in the repository's 10 GB while current ones are evicted.
   # `.github/scripts/prune-caches.mjs` decides, from each platform's current
-  # key; a pull request's entries are left to expire with it. On a push to
-  # main only, which is also when the caches it would replace are saved.
+  # key; a pull request's entries are left to expire with it, and an entry
+  # created since this run started is kept, since a newer commit's run --
+  # build.yml's, say -- may have saved it for a tree this checkout does not
+  # know. On a push to main only, which is also when the caches it would
+  # replace are saved. Main's runs of this workflow queue rather than
+  # overlap, and an entry this run saves names its current tree, which is
+  # never stale.
   prune-caches:
     name: prune superseded caches
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

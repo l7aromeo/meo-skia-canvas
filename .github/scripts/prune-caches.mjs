@@ -17,7 +17,8 @@
 // Usage: node .github/scripts/prune-caches.mjs [--delete]
 // Lists the repository's caches through `gh api`, in the repository
 // `GITHUB_REPOSITORY` names, prints what is stale, and deletes it only with
-// `--delete`.
+// `--delete`. In a workflow run, entries created since the run started
+// (`GITHUB_RUN_ID`'s `run_started_at`) are kept; run by hand, since now.
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
@@ -36,13 +37,22 @@ const TREE =
 /**
  * The entries of `caches` that a superseded tree left on main.
  *
- * `caches` are REST cache entries -- `id`, `key`, `ref` are read -- and
- * `current` maps each platform to its tree's key. Throws unless every
+ * `caches` are REST cache entries -- `id`, `key`, `ref`, `created_at` are
+ * read -- and `current` maps each platform to its tree's key. An entry
+ * created at or after `before`, an ISO time, is kept whatever it names: a run
+ * of a newer commit may have saved it for a newer tree than this run's
+ * checkout knows, and it is not this run's to judge. Throws unless every
  * platform's key is a whole tree name for that platform: against an empty or
  * garbled one, every entry of that platform, the current tree's included,
  * would read as superseded.
  */
-export function stale(caches, current) {
+export function stale(caches, current, before) {
+  const cutoff = Date.parse(before);
+  if (!Number.isFinite(cutoff)) {
+    throw new Error(
+      `no cutoff time (got ${JSON.stringify(before)}), so nothing is pruned`,
+    );
+  }
   for (const platform of PLATFORMS) {
     const key = current[platform];
     const found = typeof key === "string" ? key.match(TREE) : null;
@@ -54,6 +64,7 @@ export function stale(caches, current) {
   }
   return caches.filter((entry) => {
     if (entry.ref !== MAIN) return false;
+    if (!(Date.parse(entry.created_at) < cutoff)) return false;
     const found = entry.key.match(TREE);
     if (!found) return false;
     return found[0] !== current[found[1]];
@@ -82,7 +93,12 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const caches = JSON.parse(
     gh("--paginate", "--slurp", `repos/${repo}/actions/caches?per_page=100`),
   ).flatMap((page) => page.actions_caches);
-  const remove = stale(caches, current);
+  const before = process.env.GITHUB_RUN_ID
+    ? JSON.parse(gh(`repos/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`))
+        .run_started_at
+    : new Date().toISOString();
+  console.log(`keeping entries created since ${before}`);
+  const remove = stale(caches, current, before);
   const mib = (n) => `${Math.round(n / 2 ** 20)} MiB`;
   const total = remove.reduce((sum, entry) => sum + entry.size_in_bytes, 0);
   console.log(

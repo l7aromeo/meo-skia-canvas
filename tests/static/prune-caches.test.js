@@ -24,6 +24,8 @@ const CURRENT = {
   win32: "skia-source-win32-skia-0.156.0-9165c96ba5ed",
 };
 const keys = (entries) => entries.map((e) => e.key).sort();
+/** A run that started after every recorded entry was created. */
+const BEFORE = "2026-11-07T00:00:00Z";
 
 describe("pruning caches a superseded Skia tree left", () => {
   test("the recording holds what the cases below say it holds", () => {
@@ -52,7 +54,7 @@ describe("pruning caches a superseded Skia tree left", () => {
 
   test("leaves everything alone while main's trees are current", async () => {
     const { stale } = await load();
-    assert.deepEqual(stale(recorded(), CURRENT), []);
+    assert.deepEqual(stale(recorded(), CURRENT, BEFORE), []);
   });
 
   test("names main's tree once its platform's patches move", async () => {
@@ -61,7 +63,7 @@ describe("pruning caches a superseded Skia tree left", () => {
       ...CURRENT,
       linux: "skia-source-linux-skia-0.156.0-000000000000",
     };
-    assert.deepEqual(keys(stale(recorded(), moved)), [CURRENT.linux]);
+    assert.deepEqual(keys(stale(recorded(), moved, BEFORE)), [CURRENT.linux]);
   });
 
   test("names a main Rust cache keyed on a superseded tree", async () => {
@@ -71,10 +73,11 @@ describe("pruning caches a superseded Skia tree left", () => {
       key: `v0-rust-${tree}-test-freetype-fetch-test-Linux-x64-01b81e85-d028a097`,
       ref: "refs/heads/main",
       size_in_bytes: 1,
+      created_at: "2026-11-06T00:00:00Z",
     });
     const old = rust("skia-source-linux-skia-0.156.0-0123456789ab");
     const now = rust(CURRENT.linux);
-    assert.deepEqual(keys(stale([old, now], CURRENT)), [old.key]);
+    assert.deepEqual(keys(stale([old, now], CURRENT, BEFORE)), [old.key]);
   });
 
   test("leaves a pull request's and a branch's trees to expire", async () => {
@@ -85,7 +88,7 @@ describe("pruning caches a superseded Skia tree left", () => {
       darwin: "skia-source-darwin-skia-0.156.0-000000000000",
       win32: "skia-source-win32-skia-0.156.0-000000000000",
     };
-    assert.deepEqual(stale(others, moved), []);
+    assert.deepEqual(stale(others, moved, BEFORE), []);
   });
 
   test("leaves an entry naming no tree alone", async () => {
@@ -94,7 +97,7 @@ describe("pruning caches a superseded Skia tree left", () => {
       (e) => e.ref === "refs/heads/main" && !e.key.includes("skia-source-"),
     );
     assert.ok(untreed.length > 0);
-    assert.deepEqual(stale(untreed, CURRENT), []);
+    assert.deepEqual(stale(untreed, CURRENT, BEFORE), []);
   });
 
   test("names a tree whose Skia version moved, whatever its digest", async () => {
@@ -103,7 +106,7 @@ describe("pruning caches a superseded Skia tree left", () => {
       ...CURRENT,
       darwin: CURRENT.darwin.replace("0.156.0", "0.157.0"),
     };
-    assert.deepEqual(keys(stale(recorded(), moved)), [CURRENT.darwin]);
+    assert.deepEqual(keys(stale(recorded(), moved, BEFORE)), [CURRENT.darwin]);
   });
 
   test("refuses to prune against a missing or malformed current tree", async () => {
@@ -118,11 +121,33 @@ describe("pruning caches a superseded Skia tree left", () => {
       `${CURRENT.linux}-extra`,
     ]) {
       assert.throws(
-        () => stale(recorded(), { ...CURRENT, linux }),
+        () => stale(recorded(), { ...CURRENT, linux }, BEFORE),
         /no current tree for linux/,
         String(linux),
       );
     }
+  });
+
+  test("keeps an entry created after the run started, whatever it names", async () => {
+    // A newer commit's run may save entries for a tree this checkout calls
+    // superseded; the older run's prune must not delete them.
+    const { stale } = await load();
+    const entry = (created_at) => ({
+      id: 1,
+      key: "skia-source-linux-skia-0.156.0-0123456789ab",
+      ref: "refs/heads/main",
+      size_in_bytes: 1,
+      created_at,
+    });
+    assert.deepEqual(
+      stale([entry("2026-11-07T00:00:01Z")], CURRENT, BEFORE),
+      [],
+    );
+    assert.equal(
+      stale([entry("2026-11-06T23:59:59Z")], CURRENT, BEFORE).length,
+      1,
+    );
+    assert.throws(() => stale([], CURRENT, undefined), /no cutoff time/);
   });
 
   test("tells one platform's tree from another's", async () => {
@@ -134,8 +159,12 @@ describe("pruning caches a superseded Skia tree left", () => {
       key: "skia-source-linux-skia-0.156.0-81002cd180ff",
       ref: "refs/heads/main",
       size_in_bytes: 1,
+      created_at: "2026-11-06T00:00:00Z",
     };
-    assert.deepEqual(keys(stale([entry], CURRENT)), [entry.key]);
-    assert.deepEqual(stale([entry], { ...CURRENT, linux: entry.key }), []);
+    assert.deepEqual(keys(stale([entry], CURRENT, BEFORE)), [entry.key]);
+    assert.deepEqual(
+      stale([entry], { ...CURRENT, linux: entry.key }, BEFORE),
+      [],
+    );
   });
 });
