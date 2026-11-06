@@ -165,8 +165,11 @@ across the five passes, where the CPU row held between 4.53 and 4.65.
 The changes that made 7.0.0 and 0.17.0 faster are one entry in each
 changelog, "A string costs less to measure again ...", which links the PRs.
 Its figures are below, against 6.0.2: medians on an Apple M4 Pro, release
-builds of 6.0.2 and of 78960e8e, four runs of each interleaved in pairs, 11
-rounds a run, with no other build or test running. A time is the median of the
+builds of 6.0.2 and of 78960e8e, except a new string's first and second draws,
+which are of c54ae873, after
+[#603](https://github.com/l7aromeo/meo-skia-canvas/pull/603) changed what laying
+a string out costs. Four runs of each build are interleaved in pairs, 11 rounds
+a run, with no other build or test running. A time is the median of the
 four runs' medians, and a ratio the median of the four pairs' ratios.
 
 | what                                                                            | per  | 6.0.2    | 7.0.0    | 7.0.0 / 6.0.2 |
@@ -174,8 +177,8 @@ four runs' medians, and a ratio the median of the four pairs' ratios.
 | `measureText("Hello world")` in 16px, width read                                | call | 6.95 µs  | 3.92 µs  | 0.565×        |
 | the same, width and the four ink values read                                    | call | 6.89 µs  | 5.69 µs  | 0.824×        |
 | `fillText` of a label already drawn, recorded                                   | draw | 10.77 µs | 0.49 µs  | 0.046×        |
-| `fillText` of a new string, its second draw                                     | draw | 8.81 µs  | 10.31 µs | 1.171×        |
-| `fillText` of a string never drawn before                                       | draw | 8.83 µs  | 9.13 µs  | 1.030×        |
+| `fillText` of a new string, its second draw                                     | draw | 8.69 µs  | 9.79 µs  | 1.131×        |
+| `fillText` of a string never drawn before                                       | draw | 8.66 µs  | 8.76 µs  | 1.009×        |
 | 200 rects, each in its own hex colour, on an sRGB canvas, exported              | page | 200.4 µs | 192.0 µs | 0.956×        |
 | the same, each in a `color(display-p3 …)`                                       | page | 296.7 µs | 234.3 µs | 0.795×        |
 | a `fillRect` recorded                                                           | rect | 0.192 µs | 0.120 µs | 0.622×        |
