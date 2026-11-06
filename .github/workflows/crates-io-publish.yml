@@ -122,6 +122,13 @@ jobs:
       # skip and stop guarding them. The runner's own distribution package.
       - name: Install poppler (apt)
         run: .github/scripts/apt-install.sh poppler-utils
+      # The suite is built with `vulkan`, and its Vulkan tests create a Vulkan
+      # instance, which needs a Vulkan driver: the runner has none. The same
+      # software device rust-ci's binding job runs the suite on, lavapipe, from
+      # the same script. Without it the publish of rust-v0.17.0 failed here,
+      # creating that instance, after 862 tests had passed (#613).
+      - name: Install a headless display and a software GPU (apt)
+        run: .github/scripts/install-software-gpu.sh
       - name: Run the native test suite
         run: cargo test --no-default-features --features "vulkan,window,freetype"
 
