@@ -618,6 +618,51 @@ thread_local! {
     static KNOWN_TYPO_SHARES: RefCell<TypoShares> = RefCell::default();
 }
 
+/// The designed oblique angles of the faces already asked about, by
+/// `Typeface::unique_id`, as [`designed_oblique_angle`] gives them.
+///
+/// A face's tables are fixed when it is made, and a face registered again is
+/// made again, with an id of its own, so an entry is never wrong. Reading
+/// them copies `OS/2` and `post` out of the platform, and every layout asks
+/// for each run's face -- `runs_to_restyle` takes the run's style from
+/// [`designed_style`] -- so reading on every ask costs about 0.15
+/// microseconds a `fillText` of a string never drawn before, on macOS.
+/// Bounded at [`KNOWN_AXES`], as [`TypoShares`] is.
+#[derive(Debug, Default)]
+pub(crate) struct DesignedObliques {
+    angles: CacheMap<u32, Option<f32>>,
+    /// How many times a face's tables were read.
+    #[cfg(test)]
+    pub(crate) read: usize,
+}
+
+impl DesignedObliques {
+    /// `face`'s designed oblique angle, as [`designed_oblique_angle`]
+    /// describes it.
+    pub(crate) fn of(&mut self, face: &Typeface) -> Option<f32> {
+        let id = face.unique_id();
+        if let Some(angle) = self.angles.get(&id) {
+            return *angle;
+        }
+        if self.angles.len() >= KNOWN_AXES {
+            self.angles.clear();
+        }
+        #[cfg(test)]
+        {
+            self.read += 1;
+        }
+        let angle = read_designed_oblique_angle(face);
+        self.angles.insert(id, angle);
+        angle
+    }
+}
+
+thread_local! {
+    /// The angles [`designed_oblique_angle`] has read on this thread.
+    static KNOWN_DESIGNED_OBLIQUES: RefCell<DesignedObliques> =
+        RefCell::default();
+}
+
 /// The oblique angle `face` is drawn at by its own design, in CSS degrees --
 /// clockwise positive, as `oblique <angle>` counts them -- or `None` where
 /// the face is not an oblique one.
@@ -626,8 +671,14 @@ thread_local! {
 /// a face flagged oblique as italic, so the slant cannot tell the two apart
 /// on macOS, and CSS Fonts 4 matches an oblique request against oblique
 /// faces only. An oblique face whose `italicAngle` is zero leans by an angle
-/// it does not state, and is taken as the default 14deg.
+/// it does not state, and is taken as the default 14deg. Each face's tables
+/// are read once -- see [`DesignedObliques`].
 pub(crate) fn designed_oblique_angle(face: &Typeface) -> Option<f32> {
+    KNOWN_DESIGNED_OBLIQUES.with(|known| known.borrow_mut().of(face))
+}
+
+/// [`designed_oblique_angle`], read from `face`'s `OS/2` and `post` tables.
+fn read_designed_oblique_angle(face: &Typeface) -> Option<f32> {
     let mut os2 = [0u8; OS2_FS_SELECTION_AT + 2];
     face.get_table_data(*OS2, &mut os2);
     let fs_selection = u16::from_be_bytes([
@@ -1484,7 +1535,7 @@ impl FontLibrary {
 mod tests {
     use std::fs;
 
-    use skia_safe::{FontMgr, FourByteTag};
+    use skia_safe::{FontMgr, FontStyle, FourByteTag};
 
     use skia_safe::{
         FontArguments,
@@ -1493,9 +1544,10 @@ mod tests {
     use ttf_parser::{RawFaceTables, Tag};
 
     use super::{
-        FontAxisTag, KNOWN_AXES, KnownAxes, TypoShares, optical_size,
-        quarantine::font_data, read_typo_ascent_share, typo_variation,
-        variation_axes,
+        DesignedObliques, FontAxisTag, FontLibrary, KNOWN_AXES, KnownAxes,
+        TypoShares, designed_oblique_angle, optical_size,
+        quarantine::font_data, read_designed_oblique_angle,
+        read_typo_ascent_share, typo_variation, variation_axes,
     };
 
     fn face(path: &str) -> skia_safe::Typeface {
@@ -1930,5 +1982,68 @@ mod tests {
             assert_eq!(shares.of(&monoton), read_typo_ascent_share(&monoton));
         }
         assert_eq!(shares.read, 2, "once for each face");
+    }
+
+    /// A face's tables are read once for its designed oblique angle, however
+    /// often it is asked, and two faces of different designed slants each
+    /// keep their own answer.
+    #[test]
+    fn a_face_is_read_for_its_designed_slant_once() {
+        let upright =
+            face("tests/assets/fonts/Recursive/Recursive-upright-subset.ttf");
+        let oblique =
+            face("tests/assets/fonts/Recursive/Recursive-oblique12-subset.ttf");
+        let (upright_angle, oblique_angle) = (
+            read_designed_oblique_angle(&upright),
+            read_designed_oblique_angle(&oblique),
+        );
+        assert_eq!(upright_angle, None, "the upright face is not oblique");
+        assert!(oblique_angle.is_some(), "the 12deg face is flagged oblique");
+        let mut obliques = DesignedObliques::default();
+        for _ in 0..3 {
+            assert_eq!(obliques.of(&upright), upright_angle);
+            assert_eq!(obliques.of(&oblique), oblique_angle);
+        }
+        assert_eq!(obliques.read, 2, "once for each face");
+    }
+
+    /// A family registered again with a face of another designed slant
+    /// answers for the new face, not for the one it held before: the new
+    /// face is a typeface of its own, with an id of its own.
+    #[test]
+    fn a_family_registered_again_answers_for_its_new_face() {
+        let in_family = |library: &FontLibrary| {
+            library
+                .registry()
+                .provider()
+                .1
+                .match_family_style("Again", FontStyle::normal())
+                .expect("the family has a face")
+        };
+        let upright = fs::read(
+            "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf",
+        )
+        .expect("the upright face");
+        let oblique = fs::read(
+            "tests/assets/fonts/Recursive/Recursive-oblique12-subset.ttf",
+        )
+        .expect("the oblique face");
+        let library = FontLibrary::new();
+        library
+            .register_font_from_data("Again", &upright)
+            .expect("the upright face registers");
+        let before = in_family(&library);
+        assert_eq!(designed_oblique_angle(&before), None);
+        library.reset();
+        library
+            .register_font_from_data("Again", &oblique)
+            .expect("the oblique face registers");
+        let after = in_family(&library);
+        assert_ne!(before.unique_id(), after.unique_id());
+        assert_eq!(
+            designed_oblique_angle(&after),
+            read_designed_oblique_angle(&after),
+        );
+        assert!(designed_oblique_angle(&after).is_some());
     }
 }
