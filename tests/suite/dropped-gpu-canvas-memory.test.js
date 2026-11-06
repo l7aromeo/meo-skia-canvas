@@ -3,50 +3,45 @@
 "use strict";
 
 // GPU canvases made and dropped are collected without anything forcing it,
-// as CPU ones are -- see `dropped-canvas-memory.test.js`. A GPU page is held
-// by the driver, and on macOS outside the process's resident memory, so what
-// is judged here is what this addon has reported to V8 for the pages it
-// holds, through `__reportedMemory`, which debug builds alone export. A
-// canvas is counted until it is finalized, so the count falls when V8
-// collects the dropped ones and climbs only if it never does. What is judged
-// is its floor -- see `tests/support/memory-floor.js`.
+// as CPU ones are -- see `dropped-canvas-memory.test.js`, which this file
+// follows: what is judged is the count of canvases still alive -- see
+// `tests/support/live-canvases.js` -- so that a GPU page, held by the driver
+// and on macOS outside the process's resident memory, is judged as a CPU one
+// is.
 //
-// Skipped against a release binary, and where a canvas does not take the
-// GPU: there the CPU test already judges the same pages.
+// Skipped where a canvas does not take the GPU: there the CPU test already
+// judges the same canvases.
 //
-// A file of its own, so that no other test's canvases land in the count:
-// node runs each test file in a process of its own. The control, which keeps
-// its canvases, runs last for the same reason.
+// A file of its own, so that no other test's canvases land in the count: node
+// runs each test file in a process of its own. The control, which keeps its
+// canvases, runs last for the same reason.
 
 const { assert, describe, test } = require("../runner"),
   { Canvas } = require("../../lib"),
-  { skiaNode } = require("../../lib/classes/neon"),
   {
     PASSES,
     PER_PASS,
     afterEachPass,
     judged,
-  } = require("../support/memory-floor");
+  } = require("../support/live-canvases");
 
-const why = !skiaNode.__reportedMemory
-  ? "skipped: a release binary does not export __reportedMemory"
-  : new Canvas(1, 1).engine.renderer != "GPU"
+const why =
+  new Canvas(1, 1).engine.renderer != "GPU"
     ? `skipped: a canvas takes the CPU here (${new Canvas(1, 1).engine.device})`
     : null;
 
-/** What this addon has reported to V8, in bytes. */
-const reported = () => /** @type {number} */ (skiaNode.__reportedMemory());
-
-/** The count after each pass of GPU canvases handed to `hold`. */
+/** The count, and what is resident, after each pass of GPU canvases. */
 const counted = (/** @type {(canvas: any) => void} */ hold) =>
-  afterEachPass({ gpu: true, hold, measure: reported });
+  afterEachPass({ gpu: true, hold });
 
 describe("GPU canvases that are dropped", () => {
   test(
     "are collected without a forced collection",
     { skip: why ?? false },
-    async () => {
-      const { kept, message } = judged(await counted(() => {}), "the count");
+    async (t) => {
+      const { alive, resident } = await counted(() => {});
+      const { kept, message } = judged(alive, resident);
+      t.diagnostic(message);
       assert.ok(kept, message);
     },
   );
@@ -57,13 +52,12 @@ describe("GPU canvases that are dropped", () => {
   test(
     "are told from GPU canvases kept alive",
     { skip: why ?? false },
-    async () => {
+    async (t) => {
       /** @type {unknown[]} */
       const held = [];
-      const { kept, message } = judged(
-        await counted((canvas) => held.push(canvas)),
-        "the count",
-      );
+      const { alive, resident } = await counted((canvas) => held.push(canvas));
+      const { kept, message } = judged(alive, resident);
+      t.diagnostic(message);
       assert.equal(held.length, PASSES * PER_PASS);
       assert.ok(!kept, `kept canvases passed: ${message}`);
     },
