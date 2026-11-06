@@ -3,7 +3,7 @@ use std::{borrow::Cow, ops::Range, sync::Mutex};
 use quick_xml::{Reader, events::Event};
 
 use skia_safe::{
-    AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
+    AlphaType, Codec, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
     FontMgr, FontStyle, FourByteTag, Image as SkImage, ImageInfo,
     Size as SkSize, Typeface, codec,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
@@ -282,7 +282,7 @@ pub(crate) fn decode_frame(
             reason: "skia could not reopen the image to reach its frames"
                 .to_string(),
         })?;
-    let info = codec.info();
+    let info = frame_info(&mut codec, index);
     let options = codec::Options {
         frame_index: index,
         ..codec::Options::default()
@@ -292,6 +292,36 @@ pub(crate) fn decode_frame(
         .map_err(|result| Error::DecodeImage {
             reason: format!("skia could not decode frame {index}: {result:?}"),
         })
+}
+
+/// The pixels frame `index` of `codec` decodes into: the codec's own, with
+/// the frame's alpha where the codec says opaque and the frame does not.
+///
+/// Skia takes an animated WebP's image info from its first frame alone
+/// (Skia M156, `SkWebpCodec::MakeFromStream`, `SkWebpCodec.cpp:298-359`), so
+/// a file whose first frame is opaque reports opaque pixels for every
+/// frame, and decoding a later frame that holds alpha into opaque pixels is
+/// a conversion it refuses with `kInvalidConversion`
+/// (`SkCodec::handleFrameIndex`, `SkCodec.cpp:479-480`). The alpha it reports
+/// for that frame is unpremultiplied, what the codec reports for an image
+/// whose first frame holds alpha (`SkEncodedInfo::makeImageInfo`,
+/// `SkEncodedInfo.cpp:17-18`), so such a frame decodes as one would have.
+///
+/// The frames are counted first: a WebP codec lists its frames as it counts
+/// them, and until then knows none (`SkWebpCodec::onGetFrameCount` and
+/// `onGetFrameInfo`, `SkWebpCodec.cpp:428-496`).
+fn frame_info(codec: &mut Codec, index: usize) -> ImageInfo {
+    let info = codec.info();
+    codec.get_frame_count();
+    match codec.get_frame_info(index) {
+        Some(frame)
+            if info.alpha_type() == AlphaType::Opaque
+                && frame.alpha_type != AlphaType::Opaque =>
+        {
+            info.with_alpha_type(frame.alpha_type)
+        }
+        Some(_) | None => info,
+    }
 }
 
 impl Image {

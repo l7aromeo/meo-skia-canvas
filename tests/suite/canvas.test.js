@@ -1983,6 +1983,53 @@ describe("animated decode", () => {
     }
   });
 
+  test("decodes a WebP frame with alpha after an opaque one", () => {
+    // Skia takes an animated WebP's pixel format from its first frame, and
+    // refused to decode a later frame holding alpha into an opaque one:
+    // frame(1) threw "skia could not decode frame 1: InvalidConversion".
+    // Any page after an opaque first one is written as the rectangle that
+    // changed, transparent around it; page 1 here also clears a hole and
+    // paints translucent columns in it. Lossless at quality 1, so every
+    // frame reads back as its page does, to the byte.
+    const SIDE = 24,
+      fills = ["rgb(200 40 40)", "rgb(40 40 200)", "rgb(40 160 40)"];
+    const paint = (ctx, page) => {
+      ctx.fillStyle = fills[page];
+      ctx.fillRect(0, 0, SIDE, SIDE);
+      if (page == 1) {
+        ctx.clearRect(6, 5, 9, 11);
+        [0.1, 0.3, 0.5, 0.7, 0.9].forEach((alpha, step) => {
+          ctx.fillStyle = `rgb(250 130 20 / ${alpha})`;
+          ctx.fillRect(6 + step, 5, 1, 11);
+        });
+      }
+    };
+    const read = (draw) => {
+      let out = new Canvas(SIDE, SIDE);
+      out.gpu = false;
+      let ctx = out.getContext("2d");
+      draw(ctx);
+      return [...ctx.getImageData(0, 0, SIDE, SIDE).data];
+    };
+
+    let canvas = new Canvas(SIDE, SIDE);
+    canvas.gpu = false;
+    fills.forEach((_, page) => {
+      let ctx = page == 0 ? canvas.getContext("2d") : canvas.newPage();
+      paint(ctx, page);
+    });
+    let image = new Image();
+    image.src = canvas.toBufferSync("webp", { quality: 1 });
+    assert.equal(image.frames, 3);
+    fills.forEach((_, page) => {
+      assert.deepEqual(
+        read((ctx) => ctx.drawImage(image.frame(page), 0, 0)),
+        read((ctx) => paint(ctx, page)),
+        `frame ${page}`,
+      );
+    });
+  });
+
   test("still images stay still", () => {
     // The guard the APNG path leans on. A plain PNG must not be diverted
     // from Skia by the animation check.
