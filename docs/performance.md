@@ -178,8 +178,6 @@ four runs' medians, and a ratio the median of the four pairs' ratios.
 | a `fillRect` recorded                                                           | rect | 0.192 µs | 0.120 µs | 0.622×        |
 | a 40×24 rect under `blur(4px)` recorded, CPU                                    | rect | 1.48 µs  | 0.94 µs  | 0.636×        |
 | 2,000 of those on 800×600, exported, CPU                                        | page | 12.4 ms  | 4.41 ms  | 0.354×        |
-| a 200×200 rect under `blur(2px)` on 800×600, drawn and read, GPU                | draw | 381.3 µs | 299.0 µs | 0.779×        |
-| the same under `blur(100px)`, GPU                                               | draw | 374.5 µs | 305.1 µs | 0.818×        |
 | 500 15×12 rects under `drop-shadow(2px 2px 3px black)`, 400×300 sRGB, read once | rect | 22.48 µs | 8.06 µs  | 0.358×        |
 
 A string's second draw costs more than in 6.0.2, and its first about the same.
