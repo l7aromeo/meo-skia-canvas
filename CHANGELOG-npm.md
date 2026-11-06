@@ -9,7 +9,7 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
-## 📦 ⟩ [v7.0.0] (npm) ⟩ Unreleased
+## 📦 ⟩ [v7.0.0] (npm) ⟩ November 7, 2026
 
 **A major release. Request headers given as an array of pairs went out under the
 wrong names, which a redirect to another host does not strip, so a credential
@@ -139,6 +139,7 @@ system colours are added, and the CSS strings read the math functions and every 
 
 ### Fixed
 
+- **An install on a platform with a platform package makes no request to GitHub, so it succeeds offline or behind a proxy that lets only the npm registry through.** ([#608](https://github.com/l7aromeo/meo-skia-canvas/pull/608), [#606](https://github.com/l7aromeo/meo-skia-canvas/issues/606))
 - **A `blur()` of 5px or more in `ctx.filter` on a float canvas, followed by a colour function or `drop-shadow()`, cannot turn a pixel it leaves at zero alpha into NaN.** ([#550](https://github.com/l7aromeo/meo-skia-canvas/pull/550), [#549](https://github.com/l7aromeo/meo-skia-canvas/issues/549))
 - **A family two of whose faces the platform reports in the same style, such as an upright face and one flagged oblique on Windows, keeps both; the face loaded second replaced the first.** ([#555](https://github.com/l7aromeo/meo-skia-canvas/issues/555))
 - **Plain, `oblique` and `italic` text in a family whose platform reports an upright face and one flagged oblique alike take the same face whichever of the two was loaded first, and an `italic` drawn in a face that already leans is not skewed again.** ([#565](https://github.com/l7aromeo/meo-skia-canvas/issues/565))
@@ -5723,7 +5724,10 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 **Initial public release** 🎉
 
-[unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v7.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.2...npm-v7.0.0
+[v6.0.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.1...npm-v6.0.2
+[v6.0.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.0...npm-v6.0.1
+[v6.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...npm-v6.0.0
 [v5.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.6...v5.7.0
 [v5.6.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.5...v5.6.6
 [v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5
