@@ -33,7 +33,7 @@
 #
 set -euo pipefail
 
-MAX_GLIBC=2.34
+MAX_GLIBC=2.28
 MAX_GLIBCXX=3.4.25
 
 WORK=$(mktemp -d)
@@ -113,7 +113,7 @@ if [ -z "$GLIBC" ]; then
   echo "::error::No GLIBC version references found at all -- this probe is no longer reading its own output. Investigate before trusting a pass."
   fail=1
 elif exceeds "$MAX_GLIBC" "$GLIBC"; then
-  echo "::error::The toolchain in this image emits GLIBC_$GLIBC, above the $MAX_GLIBC commitment. AWS Lambda and RHEL 9 are both 2.34 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and say so in docs/getting-started.md. See #7."
+  echo "::error::The toolchain in this image emits GLIBC_$GLIBC, above the $MAX_GLIBC commitment. RHEL 8 is 2.28 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and say so in docs/getting-started.md. See #7."
   fail=1
 fi
 if [ -n "$GLIBCXX" ] && exceeds "$MAX_GLIBCXX" "$GLIBCXX"; then

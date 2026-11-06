@@ -28,11 +28,14 @@ Two of them, and both fail the same way: the binary does not load at all, with
 
 |           | ceiling    | set by                                          |
 | --------- | ---------- | ----------------------------------------------- |
-| glibc     | **2.34**   | the base image in `containers/Dockerfile.glibc` |
+| glibc     | **2.28**   | the base image in `containers/Dockerfile.glibc` |
 | `GLIBCXX` | **3.4.25** | gcc-toolset, via the same file                  |
 
 Neither is a measurement. Each is the lowest value across the platforms this
-project supports -- RHEL 8, AWS Lambda and Amazon Linux 2023, RHEL 9.
+project supports: RHEL 8 sets both, glibc 2.28 and `GLIBCXX` 3.4.25, beside
+Ubuntu 20.04 and Debian 11 at glibc 2.31, and RHEL 9, AWS Lambda and Amazon
+Linux 2023 at 2.34. The ceilings are `MAX_GLIBC` and `MAX_GLIBCXX` in
+`build.yml` and in `containers/abi-probe.sh`.
 
 libstdc++ is the one that hides: it was invisible behind glibc until glibc was
 fixed. gcc-toolset links its own newer libstdc++ statically and leaves only

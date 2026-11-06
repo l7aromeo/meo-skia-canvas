@@ -329,7 +329,7 @@ jobs:
       # `mac` and `windows` legs take their toolchain from a SHA-pinned action, so
       # this was the one leg of the three acquiring its installer from a moving
       # target -- and it is the leg that compiles the Linux binaries carrying the
-      # glibc 2.34 and GLIBCXX 3.4.25 commitments.
+      # glibc 2.28 and GLIBCXX 3.4.25 commitments.
       #
       # The toolchain is still `stable`, as on the other two legs. What is pinned
       # here is the installer, which is the question that was actually open: all
@@ -489,37 +489,31 @@ jobs:
             exit 1
           fi
 
-      # 2.34 is a support commitment, not a measurement. It is the glibc of the two platforms this
-      # project has to clear, both supported for years yet frozen by design:
+      # Two ceilings, and they fail identically at load: a glibc symbol newer than the target's,
+      # or a libstdc++ one. Each is a support commitment, not a measurement: the *lowest* across
+      # the platforms this project supports, so the binary loads on all of them.
       #
-      #   AWS Lambda / Amazon Linux 2023   2.34   supported to 2028
-      #   RHEL / Rocky / Alma 9            2.34   supported to 2032
+      #   RHEL / Rocky / Alma 8            glibc 2.28   GLIBCXX 3.4.25
+      #   Ubuntu 20.04, Debian 11          glibc 2.31
+      #   RHEL / Rocky / Alma 9            glibc 2.34   GLIBCXX 3.4.29
+      #   AWS Lambda / Amazon Linux 2023   glibc 2.34   GLIBCXX 3.4.33
       #
       # The floor is invisible until someone loads the binary on one of them, which is how it
       # drifted to 2.35 and left the AWS layer below unloadable on every release (#7). Asserting
       # it here makes the promise checkable, and makes the build base an implementation detail:
       # any base satisfying this is fine, and swapping one cannot quietly break the commitment.
-      #
-      # AlmaLinux 8 currently gives 2.28, so this passes with margin. The margin is deliberate:
-      # tightening the assertion to whatever the base happens to allow would fail the build on any
-      # future base that still honours every promise above.
-      # Two ceilings, and they fail identically at load: a glibc symbol newer than the target's,
-      # or a libstdc++ one.
-      #
-      #   RHEL / Rocky / Alma 8            glibc 2.28   GLIBCXX 3.4.25
-      #   RHEL / Rocky / Alma 9            glibc 2.34   GLIBCXX 3.4.29
-      #   AWS Lambda / Amazon Linux 2023   glibc 2.34   GLIBCXX 3.4.33
-      #
-      # Each ceiling is the *lowest* of those, so the binary loads on all of them.
+      # The ceiling moves only when the platforms supported do, never to what a base happens to
+      # give.
       #
       # 3.4.25 looks impossibly tight for a C++20 build, and would be, except that gcc-toolset
       # links its newer libstdc++ statically and leaves only the old baseline symbols dynamic.
-      # Measured on a real build: glibc 2.28, GLIBCXX 3.4.21 — comfortably under both.
+      # Measured on a real build: glibc 2.28, at its ceiling, since the base is AlmaLinux 8 and has
+      # RHEL 8's glibc, and GLIBCXX 3.4.21, under its own.
       - name: Check the ABI floors have not drifted
         if: ${{ matrix.libc == 'glibc' }}
         run: |
           set -euo pipefail
-          MAX_GLIBC=2.34
+          MAX_GLIBC=2.28
           MAX_GLIBCXX=3.4.25
 
           command -v objdump >/dev/null || dnf -y install binutils
@@ -544,7 +538,7 @@ jobs:
             echo "::error::No GLIBC version references found at all — this check is no longer reading the binary. Investigate before trusting a pass."
             fail=1
           elif exceeds "$MAX_GLIBC" "$GLIBC"; then
-            echo "::error::Binary requires GLIBC_$GLIBC, above the $MAX_GLIBC commitment — AWS Lambda and RHEL 9 are both 2.34 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and say so in docs/getting-started.md. See #7."
+            echo "::error::Binary requires GLIBC_$GLIBC, above the $MAX_GLIBC commitment — RHEL 8 is 2.28 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and say so in docs/getting-started.md. See #7."
             fail=1
           fi
           if [ -n "$GLIBCXX" ] && exceeds "$MAX_GLIBCXX" "$GLIBCXX"; then
