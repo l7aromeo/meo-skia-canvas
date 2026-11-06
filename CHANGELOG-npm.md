@@ -314,7 +314,7 @@ system colours are added, and the CSS strings read the math functions and every 
 - **Exporting a GPU canvas of shapes drawn over blurred shadows costs about 1.2 times what it did in 6.0.2.** ([#601](https://github.com/l7aromeo/meo-skia-canvas/issues/601))
 - **Laying out a `Paragraph` of two styles costs about 7% more than in 6.0.2.** ([#579](https://github.com/l7aromeo/meo-skia-canvas/issues/579))
 - **Exporting a GPU canvas of many blurred rectangles costs about 1.4 times what it did in 6.0.2.** ([#578](https://github.com/l7aromeo/meo-skia-canvas/issues/578))
-- **A second draw of text already drawn costs about 1.2 times what it did in 6.0.2.** ([#577](https://github.com/l7aromeo/meo-skia-canvas/issues/577))
+- **A second draw of text already drawn costs about 1.1 times what it did in 6.0.2.** ([#577](https://github.com/l7aromeo/meo-skia-canvas/issues/577))
 - **On the CPU, a small shape under `blur()` costs about 9% more than in 6.0.2 at 500 draws a page, and less at 50.** ([#506](https://github.com/l7aromeo/meo-skia-canvas/issues/506))
 - **On the GPU, a draw under `blur()` costs up to about 3 times what it did in 6.0.2, and more under a wider blur.** ([#499](https://github.com/l7aromeo/meo-skia-canvas/issues/499))
 - **On the CPU, text under `blur()` costs about 2 to 4.4 times what it did in 6.0.2, more for larger text and wider blurs.** ([#493](https://github.com/l7aromeo/meo-skia-canvas/issues/493))
