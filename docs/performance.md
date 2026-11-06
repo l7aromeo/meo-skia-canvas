@@ -14,7 +14,7 @@ median, p10 and p90 of every case and the binary, commit, machine and load it wa
 two line up row by row, so their ratio is what the binding costs. `just bench-npm` and
 `just bench-crate` run one; `--quick` runs every case once as a smoke test, and `--only PREFIX` the
 cases whose id starts with it. Figures are one machine — an Apple M4 Pro on Metal, 1200×900,
-macOS 27.2. Down to [What a release changed](#what-a-release-changed), which says where its own figures are from, the npm figures are the medians of five `just bench-npm` passes on c54ae873 (2026-11-06), binary md5 `8819fb77523b31a3df6639012d83f4f2`, and the crate's are one `just bench-crate` pass on 78960e8e, which differs from c54ae873 only in font matching, and the crate rows quoted draw no text.
+macOS 27.2. Down to [What a release changed](#what-a-release-changed), which says where its own figures are from, the npm figures are the medians of five `just bench-npm` passes on c54ae873 (2026-11-06), binary md5 `8819fb77523b31a3df6639012d83f4f2`, and the crate's are one `just bench` pass on 22737b25, whose source is c54ae873's.
 **Treat the ratios as the transferable part and the milliseconds as local colour.**
 
 Both build release first, which matters: run the script directly and it measures whatever
@@ -53,8 +53,8 @@ half as much again on one backend and next to nothing on the other. The gpu colu
 the two for the same reason: each round ends in a read, and waiting for the device costs more than
 the drawing and swamps the difference between the sources.
 
-The crate is where the sub-linearity is legible, because nothing there is at the floor: 16.7
-microseconds against 39.8 for the same two sources, 2.38× for a hundredfold more work. Sub-linear
+The crate is where the sub-linearity is legible, because nothing there is at the floor: 16.5
+microseconds against 41.1 for the same two sources, 2.50× for a hundredfold more work. Sub-linear
 rather than flat — replaying the source still walks its picture to cull it.
 
 **Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
