@@ -93,8 +93,8 @@ canvas stores a translucent colour's exact product, rounded once.
 
 ## Performance and memory
 
-A mixed vector scene takes 2.4 ms on the GPU against 4.1 on the CPU on an Apple M4 Pro; a float
-canvas costs between 0.74× and 7.33× an eight-bit one depending on what is drawn.
+A mixed vector scene takes 2.8 ms on the GPU against 4.6 on the CPU on an Apple M4 Pro; a float
+canvas costs between 0.73× and 6.52× an eight-bit one depending on what is drawn.
 [docs/performance.md](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/performance.md) has drawing, encoding, decoding and memory, measured with
 `just bench`, and how to read the figures.
 
