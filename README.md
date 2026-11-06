@@ -52,10 +52,10 @@ ctx.fillText("Hello", 60, 140);
 await canvas.toFile("out.png"); // or .pdf, .svg, .jpg, .webp
 ```
 
-The binary arrives as a platform package, so nothing runs at install on the seven platforms
-published. Elsewhere an install script fetches or builds one, which bun runs only for a package the
-project lists in its own `trustedDependencies`: [docs/readme/npm.md](docs/readme/npm.md) has the
-details.
+The binary arrives as a platform package, so on the seven platforms published the install script
+downloads nothing. Elsewhere, an Intel Mac among them, no binary is published and an install from
+npm fails; build the addon from a clone of the repository instead.
+[docs/readme/npm.md](docs/readme/npm.md) has the details.
 
 ### Rust
 
@@ -70,16 +70,22 @@ meo-skia-canvas = { version = "0.16", default-features = false, features = ["vul
 ```rust
 use meo_skia_canvas::prelude::*;
 
-let mut canvas = Canvas::new(800.0, 600.0);
-{
-    let ctx = canvas.context();
-    ctx.set_fill_style_css("#1e293b")?;
-    ctx.fill_rect(0.0, 0.0, 800.0, 600.0);
-    ctx.set_font_css("600 72px Helvetica");
-    ctx.set_fill_style_css("#f8fafc")?;
-    ctx.fill_text("Hello", 60.0, 140.0, None);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut canvas = Canvas::new(800.0, 600.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("#1e293b")?;
+        ctx.fill_rect(0.0, 0.0, 800.0, 600.0);
+
+        let mut font = Font::new("Helvetica", 72.0);
+        font.weight = 600;
+        ctx.set_font(&font);
+        ctx.set_fill_style_css("#f8fafc")?;
+        ctx.fill_text("Hello", 60.0, 140.0, Some(680.0));
+    }
+    canvas.to_file("out.png", &EncodeOptions::default())?;
+    Ok(())
 }
-canvas.to_file("out.png", &EncodeOptions::default())?;
 ```
 
 The default feature set is empty; [docs/readme/crate.md](docs/readme/crate.md) lists the features
@@ -169,8 +175,8 @@ Amazon Linux 2023 are supported. [docs/internals/packaging.md](docs/internals/pa
 ## Why this fork exists
 
 **Two surfaces, one implementation.** A Rust crate and a Node addon from one source, the same calls
-in each language's spelling. No public Rust signature hands you a `skia_safe`, `neon`, `ureq` or
-`http` type, which `scripts/check-public-api.mjs` checks in CI.
+in each language's spelling. No public Rust signature hands you a type from Skia, Neon or the HTTP
+stack; `scripts/check-public-api.mjs` names those crates and checks it in CI.
 
 **The binary arrives without running anything.** One npm package per target, chosen by
 `os`/`cpu`/`libc`, rather than fetched by an install script that bun and `--ignore-scripts` block.

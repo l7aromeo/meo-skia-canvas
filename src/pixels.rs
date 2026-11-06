@@ -124,7 +124,7 @@ impl PixelColorSpace {
     /// -- this returns the canonical spelling. Derived `Debug` is not usable
     /// here: it renders `DisplayP3Linear` where the caller wrote
     /// `display-p3-linear`, which is a Rust identifier surfacing in a message
-    /// that reaches JavaScript and Python callers.
+    /// that reaches JavaScript callers.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Srgb => "srgb",

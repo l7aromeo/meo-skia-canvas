@@ -52,17 +52,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The crate is a consumer API, not a byproduct of building the addon. Every public type is reachable
-as `meo_skia_canvas::Thing` — the modules group them by subject for reading, but one drawing reaches
-across several and nothing should require knowing which — and the `prelude` globs the same set. The
-Node binding stays behind an internal module, and no signature anywhere in the crate hands you a
-`skia_safe` or `neon` type — windowing included — nor, behind `fetch`, a `ureq` or `http` one.
-`scripts/check-public-api.mjs` reads rustdoc's JSON
-in CI and fails on a leak, with no module exempted, so the promise is checked rather than kept by
-hand.
+The crate is a consumer API, not a byproduct of building the addon. Every public type outside
+windowing is reachable as `meo_skia_canvas::Thing` -- the modules group them by subject for
+reading, but one drawing reaches across several and nothing should require knowing which. The
+windowing types live under `meo_skia_canvas::gui`, behind the `window` feature, and the `prelude`
+globs the root's set and adds the windowing types a program uses, such as `App`, `Window` and
+`UiEvent`. The Node binding stays behind an internal module, and no public signature hands you a
+type from Skia, Neon or the HTTP stack, windowing included: `scripts/check-public-api.mjs` names
+those crates, reads rustdoc's JSON in CI and fails on a leak, with no module exempted, so the
+promise is checked rather than kept by hand.
 
 Reference: [`docs/rust.md`](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/rust.md). Runnable code:
-[`examples/rust`](https://github.com/l7aromeo/meo-skia-canvas/tree/main/examples/rust) — six programs, five of them drawing the same scene as their
+[`examples/rust`](https://github.com/l7aromeo/meo-skia-canvas/tree/main/examples/rust) -- six programs, five of them drawing the same scene as their
 [`examples/node`](https://github.com/l7aromeo/meo-skia-canvas/tree/main/examples/node) counterpart, so anything one surface can draw the other can too.
 
 ## Cargo features
@@ -81,7 +82,7 @@ The default feature set is empty; opt in to the backend you need.
 ## Skia version
 
 Built on `skia-safe` 0.156.0, which pins Skia
-[M156](https://skia.googlesource.com/skia/+/refs/heads/chrome/m156/RELEASE_NOTES.md) — the branch
+[M156](https://skia.googlesource.com/skia/+/refs/heads/chrome/m156/RELEASE_NOTES.md) -- the branch
 Chrome 156 builds from, which is what "output matches Chrome's canvas" is measured against.
 
 The Skia revision comes from `skia-safe`; bumping it is a minor-version event for this crate, and
@@ -113,12 +114,12 @@ Everything a browser canvas does, and then:
 
 ## Colour and precision
 
-A canvas composites in the space you name and exports in it: fifteen names across eight spaces,
-sRGB, Display P3, Rec. 2020, HDR10 (PQ), HLG and linear variants, read back in any of them, with the
-CSS Color 4 functions and `color-mix()`. A float `colorType` composites in float; an eight-bit
-canvas stores a translucent colour's exact product, rounded once.
+A canvas composites in the `PixelColorSpace` you give it and exports in it: eight spaces, sRGB,
+Display P3, Rec. 2020, HDR10 (PQ), HLG and the linear variants, read back in any of them, with the
+CSS Color 4 functions and `color-mix()`. A canvas at `PixelDepth::F16` or `F32` composites in
+float; an eight-bit canvas stores a translucent colour's exact product, rounded once.
 [docs/colour.md](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/colour.md) has the spaces, the formats that carry them and what each
-`colorType` costs.
+depth costs.
 
 ## Performance and memory
 

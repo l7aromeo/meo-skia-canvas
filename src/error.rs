@@ -292,8 +292,8 @@ impl fmt::Display for Error {
             }
             // A rectangle reads as a rectangle. The derived Debug renders
             // `Rect { left: 0.0, top: 0.0, right: 40.0, bottom: 20.0 }` --
-            // a Rust struct dump in a message that reaches JavaScript and
-            // Python callers, where the line above it already prints
+            // a Rust struct dump in a message that reaches JavaScript
+            // callers, where the line above it already prints
             // `40x20`. Width and height come first because that is what a
             // caller passed; the origin follows because it is context.
             // The value, not the shape it would have described. A caller
