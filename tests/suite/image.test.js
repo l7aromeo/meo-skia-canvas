@@ -171,6 +171,321 @@ describe("an SVG containing text", () => {
   // `a_declining_system_manager_does_not_take_the_null_family_down` in
   // `src/node/font_library.rs` is the one that does not depend on the
   // platform -- it substitutes a manager that answers nothing.
+  test("a document's text takes the upright face whatever order its family came in", async () => {
+    // An upright face and one flagged oblique only by `fsSelection` bit 9,
+    // which CoreText and an unpatched DirectWrite report alike: Skia's matcher
+    // keeps whichever was registered first, so the library registers the face
+    // its tables call upright first. The subsets hold `I` and `H`, which is
+    // what is drawn: a glyph they lack would fall back to another family for
+    // every order alike.
+    const R = "tests/assets/fonts/Recursive";
+    const UP = `${R}/Recursive-upright-subset.ttf`,
+      FLAG = `${R}/Recursive-oblique-flag-subset.ttf`;
+    FontLibrary.use("SvgOrderUpright", [UP]);
+    FontLibrary.use("SvgOrderFlagged", [FLAG]);
+    FontLibrary.use("SvgOrderU", [UP, FLAG]);
+    FontLibrary.use("SvgOrderL", [FLAG, UP]);
+    const drawn = async (family) => {
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">` +
+        `<text x="60" y="250" font-size="200" font-family="${family}"` +
+        ` fill="#000">IH</text></svg>`;
+      const image = await loadImage(
+        "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+      );
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    const upright = await drawn("SvgOrderUpright");
+    assert.ok(
+      !upright.equals(await drawn("SvgOrderFlagged")),
+      "the faces differ",
+    );
+    assert.ok((await drawn("SvgOrderU")).equals(upright), "upright first");
+    assert.ok((await drawn("SvgOrderL")).equals(upright), "flagged first");
+  });
+
+  test("a document's italic and oblique text take a family's oblique face whatever order it came in", async () => {
+    // The flagged face ties with the upright one in Skia's matcher where the
+    // platform reports it upright, so a slanted `font-style` is sent to the
+    // family's oblique faces by name, as canvas text is. RecursiveStatic, whose
+    // oblique face reports itself, is the control. Skia's SVG text synthesises
+    // no slant, so every face is drawn as it is.
+    const R = "tests/assets/fonts/Recursive";
+    const UP = `${R}/Recursive-upright-subset.ttf`;
+    const draw = async (body) => {
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">` +
+        body +
+        `</svg>`;
+      const image = await loadImage(
+        "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+      );
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    const text = (family, attrs = "") =>
+      draw(
+        `<text x="60" y="250" font-size="200" font-family="${family}"${attrs} fill="#000">IH</text>`,
+      );
+    FontLibrary.use("SvgSlantUpright", [UP]);
+    const upright = await text("SvgSlantUpright");
+    const wrong = [];
+    for (const [name, leaning] of [
+      ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
+      ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
+    ]) {
+      FontLibrary.use(`SvgSlant${name}Alone`, [leaning]);
+      const leans = await text(`SvgSlant${name}Alone`);
+      for (const [order, files] of [
+        ["upright first", [UP, leaning]],
+        ["leaning first", [leaning, UP]],
+      ]) {
+        const family = `SvgSlant${name}${order === "upright first" ? "U" : "L"}`;
+        FontLibrary.use(family, files);
+        for (const [style, want, face] of [
+          ["normal", upright, "upright"],
+          ["italic", leans, "leaning"],
+          ["oblique", leans, "leaning"],
+        ]) {
+          if (!(await text(family, ` font-style="${style}"`)).equals(want))
+            wrong.push(`${name}, ${order}: ${style} draws the ${face} face`);
+        }
+        // Inherited, and stated in `style`, the same.
+        const inherited = await draw(
+          `<g font-style="italic"><text x="60" y="250" font-size="200" font-family="${family}" fill="#000">IH</text></g>`,
+        );
+        if (!inherited.equals(leans))
+          wrong.push(
+            `${name}, ${order}: an inherited italic draws the leaning face`,
+          );
+        if (!(await text(family, ` style="font-style:oblique"`)).equals(leans))
+          wrong.push(
+            `${name}, ${order}: a style declaration draws the leaning face`,
+          );
+        // And an upright span inside slanted text goes back to the upright face.
+        const back = await draw(
+          `<text x="60" y="250" font-size="200" font-family="${family}" font-style="italic" fill="#000"><tspan font-style="normal">IH</tspan></text>`,
+        );
+        if (!back.equals(upright))
+          wrong.push(
+            `${name}, ${order}: a normal span in italic text draws the upright face`,
+          );
+      }
+    }
+    // A family with an italic face beside the tie keeps it for italic.
+    const RALEWAY_ITALIC =
+      "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf";
+    FontLibrary.use("SvgSlantItalicAlone", [RALEWAY_ITALIC]);
+    FontLibrary.use("SvgSlantMixed", [
+      `${R}/Recursive-oblique-flag-subset.ttf`,
+      UP,
+      RALEWAY_ITALIC,
+    ]);
+    if (
+      !(await text("SvgSlantMixed", ' font-style="italic"')).equals(
+        await text("SvgSlantItalicAlone", ' font-style="italic"'),
+      )
+    )
+      wrong.push("with an italic face: italic draws the italic face");
+    // The family's oblique faces cannot be named by a document.
+    const alias =
+      "meo-skia-canvas private family: oblique faces of SvgSlantFlaggedU";
+    if ((await text(alias)).equals(await text("SvgSlantFlaggedAlone")))
+      wrong.push("the alias reaches the oblique face by name");
+    assert.deepEqual(wrong, []);
+  });
+
+  test("a document's italic text takes a family's italic face whatever its weight", async () => {
+    // The canvas test of the same name, for an SVG document: an italic asked
+    // of a family with an upright 400 face and an italic 900 one draws the
+    // italic face, by CSS Fonts 4 section 5.2's style before weight.
+    const R = "tests/assets/fonts/Recursive";
+    const draw = async (family) => {
+      const svg =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">` +
+        `<text x="60" y="250" font-size="200" font-family="${family}" font-style="italic" fill="#000">IH</text></svg>`;
+      const image = await loadImage(
+        "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+      );
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    FontLibrary.use("SvgWeightItalicAlone", [
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    FontLibrary.use("SvgWeightItalicMixed", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    assert.ok(
+      (await draw("SvgWeightItalicMixed")).equals(
+        await draw("SvgWeightItalicAlone"),
+      ),
+      "italic draws the italic face",
+    );
+  });
+
+  test("a document's slanted text in a family with no slanted face is slanted as canvas text is", async () => {
+    // CSS Fonts 4 section 5.2 synthesises a slant a family has no face for:
+    // canvas text skews `italic` by a quarter and shears `oblique <angle>` to
+    // tan(angle), 14deg where none is given, back for a negative one. An SVG
+    // document's text is held to the same rule. A face that leans already, by
+    // its reported slant or by `fsSelection` bit 9, is drawn as it is.
+    const R = "tests/assets/fonts/Recursive";
+    const slope = (data) => {
+      const alpha = (x, y) => data[(y * 300 + x) * 4 + 3],
+        rows = [];
+      for (let y = 0; y < 300; y++) {
+        let left = null;
+        for (let x = 0; x < 300; x++)
+          if (alpha(x, y) >= 128) {
+            left = x;
+            break;
+          }
+        if (left === null) continue;
+        const below = left > 0 ? alpha(left - 1, y) : 0;
+        rows.push([y, left - 1 + (128 - below) / (alpha(left, y) - below)]);
+      }
+      const inner = rows.slice(
+          Math.floor(rows.length * 0.15),
+          Math.floor(rows.length * 0.85),
+        ),
+        n = inner.length,
+        my = inner.reduce((sum, [y]) => sum + y, 0) / n,
+        mx = inner.reduce((sum, [, x]) => sum + x, 0) / n;
+      let num = 0,
+        den = 0;
+      for (const [y, x] of inner) {
+        num += (y - my) * (x - mx);
+        den += (y - my) ** 2;
+      }
+      return num / den;
+    };
+    // `group`, where given, is the `font-style` of a `<g>` around the text;
+    // `attrs`, where given, replaces the attribute `style` would write.
+    const svg = async (family, style, group, attrs) => {
+      const attr =
+        attrs ??
+        (style === undefined
+          ? ""
+          : style.includes(" ")
+            ? `style="font-style:${style}"`
+            : `font-style="${style}"`);
+      const text = `<text x="100" y="250" font-size="200" font-family="${family}" ${attr} fill="#000">I</text>`;
+      const doc =
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">` +
+        (group === undefined
+          ? text
+          : `<g style="font-style:${group}">${text}</g>`) +
+        `</svg>`;
+      const image = await loadImage(
+        "data:image/svg+xml;base64," + Buffer.from(doc).toString("base64"),
+      );
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return slope(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    const canvas = (family, style) => {
+      const ctx = new Canvas(300, 300).getContext("2d");
+      ctx.font = `${style === "normal" ? "" : style + " "}200px ${family}`;
+      ctx.fillText("I", 100, 250);
+      return slope(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    const near = (got, want) => Math.abs(got - want) <= 0.003;
+    const STYLES = [
+      "normal",
+      "italic",
+      "oblique",
+      "oblique 14deg",
+      "oblique 10deg",
+      "oblique -14deg",
+    ];
+    FontLibrary.use("SvgSynthUpright", [`${R}/Recursive-upright-subset.ttf`]);
+    const wrong = [];
+    for (const style of STYLES) {
+      const got = await svg("SvgSynthUpright", style),
+        want = canvas("SvgSynthUpright", style);
+      if (!near(got, want))
+        wrong.push(
+          `upright face, ${style}: ${got.toFixed(4)} against ${want.toFixed(4)}`,
+        );
+    }
+    // `font-style` sets the angle with the slant, so the two inherit
+    // together, and a bare `oblique` leans by 14deg whatever an ancestor's
+    // angle.
+    for (const [group, style, as] of [
+      ["oblique 10deg", undefined, "oblique 10deg"],
+      ["oblique -14deg", "inherit", "oblique -14deg"],
+      ["oblique 10deg", "oblique", "oblique"],
+    ]) {
+      const got = await svg("SvgSynthUpright", style, group),
+        want = canvas("SvgSynthUpright", as);
+      if (!near(got, want))
+        wrong.push(
+          `upright face, ${style ?? "no font-style"} in a group of ${group}: ${got.toFixed(4)} against ${want.toFixed(4)}`,
+        );
+    }
+    // An `inherit` after an angle on the same element inherits the angle too.
+    const reinherited = await svg(
+        "SvgSynthUpright",
+        undefined,
+        "oblique -14deg",
+        `font-style="oblique 10deg" style="font-style:inherit"`,
+      ),
+      reinheritedWant = canvas("SvgSynthUpright", "oblique -14deg");
+    if (!near(reinherited, reinheritedWant))
+      wrong.push(
+        `upright face, oblique 10deg then inherit in a group of oblique -14deg: ${reinherited.toFixed(4)} against ${reinheritedWant.toFixed(4)}`,
+      );
+    // An angle outside -90deg to 90deg makes the declaration invalid, so the
+    // text keeps the style it inherits.
+    const outOfRange = await svg("SvgSynthUpright", "oblique 100deg");
+    if (!near(outOfRange, 0))
+      wrong.push(
+        `upright face, oblique 100deg: ${outOfRange.toFixed(4)} against 0`,
+      );
+    // Beside an oblique face, an oblique of zero or a negative angle takes the
+    // upright face, sheared, and a positive one the oblique face as it is.
+    FontLibrary.use("SvgSynthPair", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-oblique12-subset.ttf`,
+    ]);
+    for (const style of [
+      "italic",
+      "oblique 10deg",
+      "oblique 0deg",
+      "oblique -14deg",
+    ]) {
+      const got = await svg("SvgSynthPair", style),
+        want = canvas("SvgSynthPair", style);
+      if (!near(got, want))
+        wrong.push(
+          `upright and oblique faces, ${style}: ${got.toFixed(4)} against ${want.toFixed(4)}`,
+        );
+    }
+    // Faces that lean already take no skew on top.
+    for (const [name, file] of [
+      ["an oblique face", `${R}/Recursive-oblique12-subset.ttf`],
+      ["a face flagged oblique", `${R}/Recursive-oblique-flag-subset.ttf`],
+    ]) {
+      const family = `SvgSynth ${name}`;
+      FontLibrary.use(family, [file]);
+      const own = await svg(family, "normal");
+      for (const style of ["italic", "oblique", "oblique 10deg"]) {
+        const got = await svg(family, style);
+        if (!near(got, own))
+          wrong.push(
+            `${name}, ${style}: ${got.toFixed(4)} against its own ${own.toFixed(4)}`,
+          );
+      }
+    }
+    assert.deepEqual(wrong, []);
+  });
+
   test("renders when the family cannot be resolved", async () => {
     // The trigger is a family that does not resolve, not an absent one: this
     // killed the process for a document naming any font the machine lacks.

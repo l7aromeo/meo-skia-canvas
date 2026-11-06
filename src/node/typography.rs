@@ -10,8 +10,8 @@ use crate::{
     },
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{
-        FontFamily, ObliqueAngle, leans_as_asked, typo_ascent_share,
-        variation_axes,
+        FontFamily, ObliqueAngle, designed_style, leans_as_asked,
+        typo_ascent_share, variation_axes,
     },
     font_library::{FontEpoch, FontLibrary, base_face},
     node::{
@@ -1456,7 +1456,9 @@ const SKIA_FAKE_BOLD_GAP: i32 = 200;
 ///   paints exactly as 700.
 /// - **The slant is italic where the request is slanted and the face is
 ///   upright**, so the run is skewed; a face that is itself italic or oblique
-///   keeps its own slant and is not skewed a second time.
+///   keeps its own slant and is not skewed a second time. `face` is the style
+///   the face's own tables give -- see [`designed_style`] -- so a face flagged
+///   oblique that its platform reports upright counts as oblique.
 /// - **An `oblique` request is never synthesised here.** `leans` says whether
 ///   the face already leans as asked -- see [`leans_as_asked`]: such a face
 ///   keeps its slant, and any other is laid out upright, an italic face
@@ -1955,7 +1957,8 @@ fn runs_to_restyle(
         .filter_map(|run| {
             let face = run.font.typeface();
             let leans = oblique.map(|angle| leans_as_asked(&face, angle));
-            let style = synthesis_style(requested, face.font_style(), leans);
+            let style =
+                synthesis_style(requested, designed_style(&face), leans);
             (style != base).then_some((run.text_range, style))
         })
         .collect()

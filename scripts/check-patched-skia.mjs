@@ -58,6 +58,20 @@ const TRIANGULATION = {
   marker: "info->fTolerance == tol",
 };
 
+/// containers/skia-svg-synthetic-slant.patch, on every platform.
+const SVG_SYNTHETIC_SLANT = {
+  patch: "containers/skia-svg-synthetic-slant.patch",
+  file: "modules/svg/src/SkSVGText.cpp",
+  marker: "!Leans(font.getTypeface())",
+};
+
+/// containers/skia-font-match-slant-first.patch, on every platform.
+const FONT_MATCH_SLANT_FIRST = {
+  patch: "containers/skia-font-match-slant-first.patch",
+  file: "src/core/SkFontMgr.cpp",
+  marker: "currentScore <<= kWeightScoreBits;",
+};
+
 /// containers/skia-async-transfer-reuse.patch, on macOS and Linux. The
 /// marker names the enum's scope because the unpatched file already holds a
 /// bare `kDynamic_GrAccessPattern`, in the comment the patch replaces.
@@ -81,8 +95,16 @@ export const PATCHED = {
     ATLAS_SIZE,
     TRIANGULATION,
     ASYNC_TRANSFER_REUSE,
+    SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
   ],
-  linux: [ATLAS_SIZE, TRIANGULATION, ASYNC_TRANSFER_REUSE],
+  linux: [
+    ATLAS_SIZE,
+    TRIANGULATION,
+    ASYNC_TRANSFER_REUSE,
+    SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
+  ],
   win32: [
     ATLAS_SIZE,
     TRIANGULATION,
@@ -91,6 +113,8 @@ export const PATCHED = {
       file: "src/ports/SkTypeface_win_dw.cpp",
       marker: "fsSelection.field.Oblique",
     },
+    SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
   ],
 };
 

@@ -150,7 +150,7 @@ const METAL_UNTIMED_COMPILE = join(
 const BROTLI_SOURCES = join("containers", "skia-brotli-sources.patch");
 
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-// Re-check: node scripts/test.mjs tests/suite/text.test.js on Windows, against a binary built from a tree prepared without this patch; "an oblique face of the angle's sign is drawn as it is" draws the upright face sheared for a positive angle
+// Re-check: node scripts/test.mjs tests/suite/text.test.js on Windows, against a binary built from a tree prepared without this patch; "a face flagged oblique is reported slanted" fails
 //
 // Skia's DirectWrite port takes a face's slant from DirectWrite alone
 // (`DWriteFontTypeface::GetStyle`), and DirectWrite reports a face
@@ -159,7 +159,50 @@ const BROTLI_SOURCES = join("containers", "skia-brotli-sources.patch");
 // Windows such a face matched as its family's upright one: an oblique
 // request got the upright face sheared rather than the oblique face CSS
 // Fonts 4 matches. The patch reads the bit as the FreeType port does.
+// Text chooses between such faces from their own tables now --
+// `FontLibrary::slanted` in src/node/font_library.rs -- so what the patch
+// still earns is the slant reported: what `FontLibrary.family().styles`
+// lists, and what an SVG document's `font-style` is matched against.
 const DWRITE_OBLIQUE = join("containers", "skia-dwrite-oblique.patch");
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: node scripts/test.mjs tests/suite/image.test.js against a binary built from a tree prepared without this patch; "a document's slanted text in a family with no slanted face is slanted as canvas text is" fails
+//
+// Skia's SVG text draws with `SkFont(typeface, size)` and never sets the
+// font's skew (`ResolveFont` in modules/svg/src/SkSVGText.cpp), so an
+// `italic` or `oblique` in a family with no slanted face draws upright, where
+// CSS Fonts 4 section 5.2 synthesises the slant. And its attribute parser
+// reads `font-style` as four keywords, so `oblique 10deg` fails to parse and
+// takes the inherited style. The patch parses the angle and keeps it in an
+// inherited presentation attribute of its own, `fFontObliqueAngle`, which
+// `font-style` sets with the slant. It does not widen `SkSVGFontStyle`:
+// skia-safe builds that struct field by field, and a field it does not name
+// fails its build. `ResolveFont` skews a face that does not lean -- by its
+// reported slant or by `OS/2` `fsSelection` bit 9 -- a quarter for `italic`
+// and to the tangent of the angle for `oblique`, as canvas text does. An
+// oblique of zero or a negative angle is matched as upright and sheared.
+const SVG_SYNTHETIC_SLANT = join(
+  "containers",
+  "skia-svg-synthetic-slant.patch",
+);
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: node scripts/test.mjs tests/suite/text.test.js against a binary built from a tree prepared without this patch; "a family's italic face is drawn for italic whatever its weight" fails
+//
+// `SkFontStyleSet::matchStyleCSS3` (src/core/SkFontMgr.cpp) scores a
+// face's slant and then shifts it by 8 bits before adding a weight score
+// that reaches 1000, so a face far closer in weight outranks one whose
+// slant is the one asked for -- an italic request took a family's upright
+// 400 face over its italic 900 one, and on a platform that reports a face
+// flagged by `OS/2` `fsSelection` bit 9 oblique, its oblique 400 face over
+// a variable italic face whose default instance is 100. CSS Fonts 4
+// section 5.2 narrows by style before weight, and the comment above that
+// shift says the slant "takes priority over all valid weights". The patch
+// shifts by enough bits to hold the whole weight score.
+const FONT_MATCH_SLANT_FIRST = join(
+  "containers",
+  "skia-font-match-slant-first.patch",
+);
 
 export const PATCHES = {
   darwin: [
@@ -168,6 +211,8 @@ export const PATCHES = {
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
+    SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -188,11 +233,20 @@ export const PATCHES = {
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
+    SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
   // fix for it as one outside this script does.
-  win32: [ATLAS_SIZE, TRIANGULATION, GRAPHITE_BINDINGS, DWRITE_OBLIQUE],
+  win32: [
+    ATLAS_SIZE,
+    TRIANGULATION,
+    GRAPHITE_BINDINGS,
+    DWRITE_OBLIQUE,
+    SVG_SYNTHETIC_SLANT,
+    FONT_MATCH_SLANT_FIRST,
+  ],
 };
 
 /**

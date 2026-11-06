@@ -100,26 +100,33 @@ one. Skia keeps `kStream` for a crash of Chromium's GPU process in a Windows
 test (skbug.com/40042671), whose cause is not known; the UPSTREAM note beside
 it in `PATCHES` says why Metal and Vulkan get the same memory either way.
 
+Every platform carries `containers/skia-svg-synthetic-slant.patch`, which makes
+Skia's SVG text synthesise the slant a `font-style` asks a family with no
+slanted face for, as canvas text does, and parse `oblique <angle>`. Its
+UPSTREAM note in `scripts/skia-source.mjs` says how.
+
 Windows binaries are built from a patched source too, carrying the atlas-size
 cap, the triangulation tolerance, the Graphite bindings and
 `containers/skia-dwrite-oblique.patch`. The last makes Skia's DirectWrite port
 read `OS/2` `fsSelection` bit 9 as its FreeType port does: DirectWrite reports
 a face flagged oblique only by that bit as upright, so the family's upright
-face and its oblique one matched alike, and an oblique request drew the
-upright face sheared. `WITHHELD` in `scripts/skia-source.mjs` records each
-patch a platform goes without and why: Windows goes without the transfer-buffer
-patch on purpose, for the crash above, and without the Metal timeout and the
-brotli sources, which change nothing it builds.
+face and its oblique one are reported alike. Text chooses between such faces
+from their tables either way; the patch makes the reported slant right, which
+`FontLibrary.family().styles` and an SVG document's `font-style` go by.
+`WITHHELD` in `scripts/skia-source.mjs` records each patch a platform goes
+without and why: Windows goes without the transfer-buffer patch on purpose, for
+the crash above, and without the Metal timeout and the brotli sources, which
+change nothing it builds.
 
 **Build through `just`.** The justfile's `dotenv-command`,
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe, and
 `ensure-deps` prepares the tree it names: rust-skia at the Cargo.lock tag,
 Skia's DEPS and gn, and the platform's patches from `PATCHES` applied with
 `-F0` -- on macOS the Metal timeout, the atlas-size cap, the triangulation
-tolerance, the Graphite bindings and the transfer buffer; on Linux
-`containers/skia-brotli-sources.patch` and the last four of those; and on
-Windows the atlas-size cap, the triangulation tolerance, the Graphite bindings
-and the DirectWrite oblique patch. `env`
+tolerance, the Graphite bindings, the transfer buffer and the SVG slant; on
+Linux `containers/skia-brotli-sources.patch` and the last five of those; and on
+Windows the atlas-size cap, the triangulation tolerance, the Graphite bindings,
+the DirectWrite oblique patch and the SVG slant. `env`
 single-quotes a directory holding a backslash, a space, a quote or `$`, which
 just's dotenv reader would otherwise take as an escape or the value's end; a
 plain path stays bare, so `export $(... env)` still works where it did. The brotli

@@ -8,9 +8,10 @@ use std::{
 
 use parking_lot::Mutex;
 use skia_safe::{
-    FontMgr, FourByteTag, Typeface,
+    FontMgr, FontStyle, FourByteTag, Typeface,
     font_arguments::variation_position::Coordinate,
-    font_parameters::variation::Axis, textlayout::TypefaceFontProvider,
+    font_parameters::variation::Axis, font_style::Slant,
+    textlayout::TypefaceFontProvider,
 };
 use ttf_parser::{
     Face as TtfFace, RawFaceTables, Tag, avar::Table as AvarTable,
@@ -23,7 +24,7 @@ use crate::{
     cache_map::{CacheMap, CacheSet},
     context2d::{FontSlant, FontStretch},
     error::Error,
-    node::font_library::FontLibrary as SharedFontRegistry,
+    node::font_library::{FontLibrary as SharedFontRegistry, oblique_alias},
 };
 
 pub(crate) mod caseless;
@@ -651,6 +652,35 @@ pub(crate) fn designed_oblique_angle(face: &Typeface) -> Option<f32> {
     })
 }
 
+/// Whether `face` is an oblique face its platform reports upright: one its
+/// own tables flag oblique -- see [`designed_oblique_angle`] -- whose Skia
+/// slant is `Upright`.
+///
+/// CoreText reports a face flagged only by `fsSelection` bit 9, with an
+/// `italicAngle` of zero, as upright, and DirectWrite reports any face
+/// flagged by the bit so wherever Skia's DirectWrite port is unpatched -- the
+/// crate's build on Windows. Such a face ties with the upright face of its
+/// weight and width in Skia's matcher, which scores on the reported style
+/// alone and keeps the face registered first.
+pub(crate) fn hides_its_lean(face: &Typeface) -> bool {
+    face.font_style().slant() == Slant::Upright
+        && designed_oblique_angle(face).is_some()
+}
+
+/// `face`'s style with the slant its own tables give: `Oblique` for a face
+/// that [hides its lean](hides_its_lean), and the reported style otherwise.
+///
+/// What decides whether a run is synthesised: SkParagraph skews a run
+/// italic wherever the style asks for italic and the face is not, and a
+/// face that already leans is not to be leaned a second time.
+pub(crate) fn designed_style(face: &Typeface) -> FontStyle {
+    let style = face.font_style();
+    match hides_its_lean(face) {
+        true => FontStyle::new(style.weight(), style.width(), Slant::Oblique),
+        false => style,
+    }
+}
+
 /// The oblique angle `face` is instanced at on a `slnt` axis, in CSS
 /// degrees, or `None` where it has no such axis or sits upright on it.
 ///
@@ -972,7 +1002,9 @@ pub struct FontFace {
 /// so the same manager can be shared across threads without exposing `RefCell`
 /// to consumers.
 pub struct FontLibrary {
-    inner: Mutex<FontManagerInner>,
+    /// Shared with every [`TextEngine`](crate::text::TextEngine) built from
+    /// this library -- see [`FontRegistry`].
+    inner: Rc<Mutex<FontManagerInner>>,
 }
 
 struct FontManagerInner {
@@ -985,6 +1017,75 @@ struct FontManagerInner {
     font_mgr: FontMgr,
     /// Registered family names in registration order.
     families: Vec<String>,
+    /// Every registered face with the family it was registered under, in
+    /// registration order: what `provider` is rebuilt from -- see
+    /// [`FontManagerInner::register`].
+    faces: Vec<(Typeface, String)>,
+    /// How many times `provider` has been replaced, so that an engine
+    /// holding an earlier one can tell -- see [`FontRegistry`].
+    generation: u64,
+}
+
+impl FontManagerInner {
+    /// Adds `face` under `family` and builds `provider` again from every
+    /// face, in the order the shared library registers them -- see
+    /// `FontLibrary::in_registration_order` in `node::font_library` -- and
+    /// with each face its tables flag oblique under its family's
+    /// [`oblique_alias`] too, which `FontLibrary::slanted` sends a
+    /// slanted style to.
+    ///
+    /// Built again rather than added to: a `TypefaceFontProvider` keeps
+    /// faces in the order they arrived, and Skia's matcher keeps the first
+    /// of any two it scores alike, so a face that hides its lean, loaded
+    /// before the upright face it ties with, would otherwise answer plain
+    /// text.
+    fn register(&mut self, face: Typeface, family: &str) {
+        self.faces.push((face, family.to_string()));
+        let mut provider = TypefaceFontProvider::new();
+        let (upright, leaning): (Vec<_>, Vec<_>) = self
+            .faces
+            .iter()
+            .partition(|(face, _)| !hides_its_lean(face));
+        for (face, family) in upright.into_iter().chain(leaning) {
+            provider.register_typeface(face.clone(), Some(family.as_str()));
+        }
+        for (face, family) in &self.faces {
+            if designed_oblique_angle(face).is_some() {
+                provider.register_typeface(
+                    face.clone(),
+                    Some(oblique_alias(family).as_str()),
+                );
+            }
+        }
+        self.provider = provider;
+        self.generation += 1;
+    }
+}
+
+/// A [`FontLibrary`]'s registered faces as a
+/// [`TextEngine`](crate::text::TextEngine) holds them: the library's own
+/// state, so that a face registered after the engine was built, or a
+/// [`reset`](FontLibrary::reset), reaches it.
+///
+/// The engine cannot hold the provider itself. The library builds a new
+/// one on each registration, to keep the order Skia's matcher breaks ties
+/// by -- see [`FontManagerInner::register`] -- so a provider taken once
+/// would miss every face registered after it.
+#[derive(Clone)]
+pub(crate) struct FontRegistry(Rc<Mutex<FontManagerInner>>);
+
+impl FontRegistry {
+    /// How many times the registry's provider has been replaced: an engine
+    /// whose collection was built at another generation builds it again.
+    pub(crate) fn generation(&self) -> u64 {
+        self.0.lock().generation
+    }
+
+    /// The registry's provider, with the generation it stands at.
+    pub(crate) fn provider(&self) -> (u64, TypefaceFontProvider) {
+        let inner = self.0.lock();
+        (inner.generation, inner.provider.clone())
+    }
 }
 
 impl Default for FontLibrary {
@@ -997,13 +1098,15 @@ impl FontLibrary {
     /// Creates an empty registry holding no typefaces.
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(FontManagerInner {
+            inner: Rc::new(Mutex::new(FontManagerInner {
                 provider: TypefaceFontProvider::new(),
                 font_mgr: SharedFontRegistry::with_shared(|library| {
                     library.system_font_mgr()
                 }),
                 families: Vec::new(),
-            }),
+                faces: Vec::new(),
+                generation: 0,
+            })),
         }
     }
 
@@ -1016,11 +1119,14 @@ impl FontLibrary {
     /// and [`register_font_from_path`](Self::register_font_from_path) added.
     ///
     /// A layout already built keeps the typefaces it resolved; this affects
-    /// what the next one can find.
+    /// what the next one can find, through an engine built before it as
+    /// much as one built after.
     pub fn reset(&self) {
         let mut inner = self.inner.lock();
         inner.provider = TypefaceFontProvider::new();
         inner.families.clear();
+        inner.faces.clear();
+        inner.generation += 1;
     }
 
     /// Registers a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2, depending
@@ -1033,15 +1139,12 @@ impl FontLibrary {
     /// [`TextEngine`](crate::text::TextEngine): one built before this call
     /// still sees the font, and still instances it at the axes a
     /// [`font_variations`](crate::text::TextStyle::font_variations) asks
-    /// for. An engine holds a *handle* to the provider these registrations
-    /// write into rather than a copy of it.
-    ///
-    /// This used to say the opposite -- that the engine snapshots the
-    /// registry at construction, so a later typeface was invisible to it.
-    /// Measured on Oswald registered after the engine was built: 359.04 at
-    /// `wght` 200 and 446.46 at 700, the same pair an engine built after
-    /// the registration reports, where a family resolving to nothing
-    /// measures 483.78.
+    /// for. An engine holds this library's registered faces themselves
+    /// rather than a copy of them, and builds its font collection again at
+    /// its next layout after a registration. Measured on Oswald registered
+    /// after the engine was built: 359.04 at `wght` 200 and 446.46 at 700,
+    /// the same pair an engine built after the registration reports, where a
+    /// family resolving to nothing measures 483.78.
     ///
     /// The typeface is also added to the registry
     /// [`Context2D::set_font`](crate::context2d::Context2D::set_font)
@@ -1069,9 +1172,7 @@ impl FontLibrary {
                     "could not parse typeface for family {family:?}"
                 ),
             })?;
-        inner
-            .provider
-            .register_typeface(typeface.clone(), Some(family));
+        inner.register(typeface.clone(), family);
         SharedFontRegistry::with_shared(|library| {
             library.register_typeface(typeface, Some(family.to_string()));
         });
@@ -1277,9 +1378,7 @@ impl FontLibrary {
             file,
         };
         let mut inner = self.inner.lock();
-        inner
-            .provider
-            .register_typeface(typeface.clone(), Some(family.as_str()));
+        inner.register(typeface.clone(), &family);
         SharedFontRegistry::with_shared(|library| {
             library.register_typeface(typeface, Some(family.clone()));
         });
@@ -1374,14 +1473,10 @@ impl FontLibrary {
         }
     }
 
-    /// Internal accessor used by `TextEngine` to wire the registry into a
-    /// paragraph `FontCollection`.
-    ///
-    /// Returns a clone of the `TypefaceFontProvider` (Skia-side ref-counted, so
-    /// the clone shares typeface storage with the manager).
-    pub(crate) fn snapshot_provider(&self) -> TypefaceFontProvider {
-        let inner = self.inner.lock();
-        inner.provider.clone()
+    /// The registry a `TextEngine` built from this library resolves its
+    /// families against -- see [`FontRegistry`].
+    pub(crate) fn registry(&self) -> FontRegistry {
+        FontRegistry(self.inner.clone())
     }
 }
 

@@ -1819,6 +1819,108 @@ describe("an oblique range in a Paragraph draws as canvas `oblique` text does", 
     }
   });
 
+  test("a range's face for its slant does not depend on the order the faces came in", () => {
+    // The canvas test of the same name, for Paragraph ranges: the flagged face
+    // ties with the upright one where its platform reports it upright, and
+    // RecursiveStatic is the control that never ties.
+    const pairs = [
+      ["Flagged", `${R}/Recursive-oblique-flag-subset.ttf`],
+      ["Oblique12", `${R}/Recursive-oblique12-subset.ttf`],
+    ];
+    const UP = `${R}/Recursive-upright-subset.ttf`;
+    FontLibrary.use("ParagraphOrderUpright", [UP]);
+    const upright = paragraph("ParagraphOrderUpright", [
+      ["IH", slanted(UPRIGHT)],
+    ]);
+    const wrong = [];
+    for (const [name, leaning] of pairs) {
+      FontLibrary.use(`ParagraphOrder${name}Alone`, [leaning]);
+      const leans = paragraph(`ParagraphOrder${name}Alone`, [
+        ["IH", slanted(UPRIGHT)],
+      ]);
+      if (
+        !same(
+          paragraph(`ParagraphOrder${name}Alone`, [["IH", slanted(ITALIC)]]),
+          leans,
+        )
+      )
+        wrong.push(`${name} alone: an italic range draws the face as it is`);
+      for (const [order, files] of [
+        ["upright first", [UP, leaning]],
+        ["leaning first", [leaning, UP]],
+      ]) {
+        const family = `ParagraphOrder${name}${order === "upright first" ? "U" : "L"}`;
+        FontLibrary.use(family, files);
+        const angled = (obliqueAngle) => ({
+          fontStyle: { slant: OBLIQUE, obliqueAngle },
+        });
+        for (const [label, style, want] of [
+          ["an upright", slanted(UPRIGHT), upright],
+          ["an oblique", slanted(OBLIQUE), leans],
+          ["an italic", slanted(ITALIC), leans],
+          ["a 10deg oblique", angled(10), leans],
+          [
+            "a -14deg oblique",
+            angled(-14),
+            paragraph("ParagraphOrderUpright", [["IH", angled(-14)]]),
+          ],
+        ]) {
+          if (!same(paragraph(family, [["IH", style]]), want))
+            wrong.push(
+              `${name}, ${order}: ${label} range draws the face that is`,
+            );
+        }
+      }
+    }
+    // An upright face alone is still skewed for an italic range: the skew is
+    // skipped only for a face whose own tables say it leans.
+    if (
+      same(
+        paragraph("ParagraphOrderUpright", [["IH", slanted(ITALIC)]]),
+        upright,
+      )
+    )
+      wrong.push("an upright face alone: an italic range is skewed");
+    // A family with an italic face beside its oblique one keeps the italic
+    // face for an italic range: only a family without one falls back.
+    const RALEWAY_ITALIC =
+      "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf";
+    FontLibrary.use("ParagraphOrderItalicAlone", [RALEWAY_ITALIC]);
+    FontLibrary.use("ParagraphOrderMixed", [
+      `${R}/Recursive-oblique-flag-subset.ttf`,
+      UP,
+      RALEWAY_ITALIC,
+    ]);
+    if (
+      !same(
+        paragraph("ParagraphOrderMixed", [["IH", slanted(ITALIC)]]),
+        paragraph("ParagraphOrderItalicAlone", [["IH", slanted(ITALIC)]]),
+      )
+    )
+      wrong.push("with an italic face: an italic range draws the italic face");
+    assert.deepEqual(wrong, []);
+  });
+
+  test("a range's italic face is drawn for italic whatever its weight", () => {
+    // The canvas test of the same name, for a Paragraph range: CSS Fonts 4
+    // section 5.2 narrows by style before weight, so the italic 900 face is
+    // drawn rather than the upright 400 face skewed.
+    FontLibrary.use("ParagraphWeightItalicAlone", [
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    FontLibrary.use("ParagraphWeightItalicMixed", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    assert.ok(
+      same(
+        paragraph("ParagraphWeightItalicMixed", [["IH", slanted(ITALIC)]]),
+        paragraph("ParagraphWeightItalicAlone", [["IH", slanted(ITALIC)]]),
+      ),
+      "an italic range draws the italic face",
+    );
+  });
+
   test("sheared by tan(14deg)", () => {
     register();
     for (const family of FAMILIES) {

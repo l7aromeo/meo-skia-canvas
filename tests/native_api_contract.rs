@@ -3853,6 +3853,57 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
     Ok(())
 }
 
+/// An engine resolves against its library's fonts as they stand at each
+/// layout, not as they stood when it was built: a face registered after
+/// the engine has laid the family out is found, with its axis, and a reset
+/// lets every registered face go.
+#[test]
+fn an_engine_follows_its_library_after_it_was_built() -> Result<()> {
+    const TTF: &str = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+    let width_at = |engine: &TextEngine, wght: f32| {
+        let style = TextStyle {
+            font_families: vec!["Oswald".into()],
+            font_size: 64.0,
+            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)]
+                .into(),
+            ..TextStyle::default()
+        };
+        engine
+            .layout_text("Hamburgefonstiv", &style, 4000.0)
+            .max_intrinsic_width()
+    };
+
+    let control = FontLibrary::new();
+    control.register_font_from_path("Oswald", TTF)?;
+    let registered = {
+        let engine = TextEngine::new(&control);
+        (width_at(&engine, 200.0), width_at(&engine, 700.0))
+    };
+
+    let library = FontLibrary::new();
+    let engine = TextEngine::new(&library);
+    let missing = (width_at(&engine, 200.0), width_at(&engine, 700.0));
+    assert_ne!(
+        missing, registered,
+        "the family must be missing before it is registered for this test \
+         to mean anything"
+    );
+    library.register_font_from_path("Oswald", TTF)?;
+    assert_eq!(
+        (width_at(&engine, 200.0), width_at(&engine, 700.0)),
+        registered,
+        "a face registered after a layout of its family was not found"
+    );
+
+    library.reset();
+    assert_eq!(
+        (width_at(&engine, 200.0), width_at(&engine, 700.0)),
+        missing,
+        "a reset left the engine its faces"
+    );
+    Ok(())
+}
+
 /// Every `fcTL` rectangle in an APNG: x, y, width, height, dispose, blend.
 ///
 /// Read out of the container rather than through a decoder, because the

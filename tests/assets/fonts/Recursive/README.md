@@ -1,6 +1,6 @@
 # Recursive fixtures
 
-Six files from Recursive, `Recursive[CASL,CRSV,MONO,slnt,wght].ttf` from
+Seven files from Recursive, `Recursive[CASL,CRSV,MONO,slnt,wght].ttf` from
 github.com/google/fonts, under the SIL Open Font License in `OFL.txt`. Each
 holds only the glyphs the oblique tests draw, and each was made with
 `hb-subset` at `CASL=0,MONO=0,CRSV=0,wght=400`:
@@ -29,5 +29,13 @@ this tree has.
   `checkSumAdjustment` recomputed. Every other bundled face has the two
   thicknesses equal, which hides a line-through drawn at the underline's
   thickness or scaled by their ratio.
+
+- `Recursive-italic900-subset.ttf`: `Recursive-oblique12-subset.ttf` flagged
+  italic instead -- `OS/2` `fsSelection` bit 0 set and bit 9 cleared,
+  `usWeightClass` 900, and `head` `macStyle` italic and bold -- with its table
+  checksums and `checkSumAdjustment` recomputed. Every platform reports it
+  italic 900, and it leans 12deg of its own, so it tells apart from an upright
+  face skewed; it stands in for a family's italic face far in weight from its
+  upright one.
 
 A modified version may keep the name: `OFL.txt` reserves no font name.
