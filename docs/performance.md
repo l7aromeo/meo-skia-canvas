@@ -52,8 +52,8 @@ on one backend and nothing measurable on the other. The gpu column is the higher
 the two for the same reason: each round ends in a read, and waiting for the device costs more than
 the drawing and swamps the difference between the sources.
 
-The crate is where the sub-linearity is legible, because nothing there is at the floor: 16.6
-microseconds against 43.5 for the same two sources, 2.62× for a hundredfold more work. Sub-linear
+The crate is where the sub-linearity is legible, because nothing there is at the floor: 16.7
+microseconds against 39.8 for the same two sources, 2.38× for a hundredfold more work. Sub-linear
 rather than flat — replaying the source still walks its picture to cull it.
 
 **Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
@@ -160,59 +160,95 @@ across runs where the CPU row held between 4.3 and 4.7.
 ## What a release changed
 
 The changes that made 7.0.0 and 0.17.0 faster are one entry in each
-changelog, "Text costs less to lay out, draw and measure ...", which links
-the PRs. Its figures are timed in the release-prep window and kept here:
+changelog, "A string costs less to measure again ...", which links the PRs.
+Its figures are below, against 6.0.2: medians on an Apple M4 Pro, release
+builds of 6.0.2 and of 78960e8e, four runs of each interleaved in pairs, 11
+rounds a run, with no other build or test running. A time is the median of the
+four runs' medians, and a ratio the median of the four pairs' ratios.
 
-[RE-TIME at release prep: the kept-line, unchanged-setting, colour-lookup,
-blurred-shape and GPU-read figures from that entry, against 6.0.2.]
+| what                                                                            | per  | 6.0.2    | 7.0.0    | 7.0.0 / 6.0.2 |
+| ------------------------------------------------------------------------------- | ---- | -------- | -------- | ------------- |
+| `measureText("Hello world")` in 16px, width read                                | call | 6.95 µs  | 3.92 µs  | 0.565×        |
+| the same, width and the four ink values read                                    | call | 6.89 µs  | 5.69 µs  | 0.824×        |
+| `fillText` of a label already drawn, recorded                                   | draw | 10.77 µs | 0.49 µs  | 0.046×        |
+| `fillText` of a new string, its second draw                                     | draw | 8.81 µs  | 10.31 µs | 1.171×        |
+| `fillText` of a string never drawn before                                       | draw | 8.83 µs  | 9.13 µs  | 1.030×        |
+| 200 rects, each in its own hex colour, on an sRGB canvas, exported              | page | 200.4 µs | 192.0 µs | 0.956×        |
+| the same, each in a `color(display-p3 …)`                                       | page | 296.7 µs | 234.3 µs | 0.795×        |
+| a `fillRect` recorded                                                           | rect | 0.192 µs | 0.120 µs | 0.622×        |
+| a 40×24 rect under `blur(4px)` recorded, CPU                                    | rect | 1.48 µs  | 0.94 µs  | 0.636×        |
+| 2,000 of those on 800×600, exported, CPU                                        | page | 12.4 ms  | 4.41 ms  | 0.354×        |
+| a 200×200 rect under `blur(2px)` on 800×600, drawn and read, GPU                | draw | 381.3 µs | 299.0 µs | 0.779×        |
+| the same under `blur(100px)`, GPU                                               | draw | 374.5 µs | 305.1 µs | 0.818×        |
+| 500 15×12 rects under `drop-shadow(2px 2px 3px black)`, 400×300 sRGB, read once | rect | 22.48 µs | 8.06 µs  | 0.358×        |
 
-Three of its changes took a page of many filtered draws or layers from time
-growing with the square of their count to time growing with the count. As
-measured in their pull requests, before the release-prep timing:
+A string's second draw costs more than in 6.0.2, and its first about the same.
+The entry's claim for drawing again starts at the third draw.
 
-- An F16 or F32 canvas outside sRGB filters what a filtered draw covers, not
-  the whole canvas: 50 rects under a drop shadow drew in about 26 ms rather
-  than 1.7 s on F16 Display P3
-  ([#462](https://github.com/l7aromeo/meo-skia-canvas/pull/462)).
-- On the GPU, 16,384 rects under a drop shadow drew and read back in 1.3 s
-  rather than 31 s ([#465](https://github.com/l7aromeo/meo-skia-canvas/pull/465)).
-- On the GPU, 16,384 `saveLayer` groups of one rect drew and read back in
-  0.43 s rather than 10.7 s
-  ([#469](https://github.com/l7aromeo/meo-skia-canvas/pull/469)).
+Three of its changes took a page of many filtered draws or groups from time
+growing with the square of their count to time growing with the count. Per
+draw, measured the same way, at two page sizes each:
 
-A read of a GPU canvas after a draw waits on the GPU once rather than twice
-([#497](https://github.com/l7aromeo/meo-skia-canvas/issues/497)): the one
-wait answers for the draws as well as the copy out. On Metal the draws are
-committed first, in a command buffer of their own, and the status of every
-buffer Skia committed is read after that wait. Medians of three interleaved
-passes on an Apple M4 Pro, against the two waits before it and against
-6.0.2, with no other build or test running:
+| page                                                              | draws a page | 6.0.2    | 7.0.0    |
+| ----------------------------------------------------------------- | ------------ | -------- | -------- |
+| 15×12 rects under a drop shadow, F16 Display P3, 400×300 ([#462]) | 50           | 29.02 µs | 16.47 µs |
+|                                                                   | 500          | 24.59 µs | 14.73 µs |
+| 3×3 rects under a drop shadow, GPU, 520×520 ([#465])              | 4,096        | 232.2 µs | 105.5 µs |
+|                                                                   | 16,384       | 1,876 µs | 104.4 µs |
+| `saveLayer` groups of one 3×3 rect, GPU, 520×520 ([#469])         | 4,096        | 158.2 µs | 26.2 µs  |
+|                                                                   | 16,384       | 680.4 µs | 26.2 µs  |
 
-| read after a draw   | 6.0.2      | two waits    | one wait     |
-| ------------------- | ---------- | ------------ | ------------ |
-| 8x8                 | 184–191 µs | 248–253 µs   | 185–208 µs   |
-| 64x48               | 203–224 µs | 253–258 µs   | 199–202 µs   |
-| whole 1200x900 page | 546–630 µs | 1237–1351 µs | 1075–1155 µs |
+7.0.0's cost a draw holds as a page grows; 6.0.2's grows with it on the GPU.
+A page of 16,384 rects under a drop shadow takes about 1.7 s against 31 s, and
+16,384 groups 0.43 s against 11.1 s. On the F16 page 6.0.2's cost a draw holds
+too: #462 measured its 26 ms against 1.7 s for 50 rects against its parent
+commit, not against 6.0.2.
+
+[#462]: https://github.com/l7aromeo/meo-skia-canvas/pull/462
+[#465]: https://github.com/l7aromeo/meo-skia-canvas/pull/465
+[#469]: https://github.com/l7aromeo/meo-skia-canvas/pull/469
+
+**A read of a GPU canvas** waits on the GPU once
+([#497](https://github.com/l7aromeo/meo-skia-canvas/issues/497)): the copy is
+asked for through Skia's asynchronous read, and the one wait that answers for
+the copy answers for the draws too. On Metal the draws are committed first, in
+a command buffer of their own, and the status of every buffer Skia committed is
+read after that wait; elsewhere the copy goes in the buffer the draws are in.
+
+What happens to the bytes then depends on the read:
+
+- **Unpremultiplied from an eight-bit page**, which is what `getImageData` asks
+  of an eight-bit canvas, is converted through the exact table, never through
+  Skia's conversion, which rounds down. On the GPU engine, from 160×120 pixels,
+  the table is looked up on the GPU, by a pass drawn into a target of its own
+  whose bytes are read as they stand. A smaller read converts on the CPU as each
+  row is copied out, on one thread, and across the thread pool from 512×512.
+- **A read that converts nothing** is copied as Skia hands it back, on one
+  thread up to a mebibyte, across the pool above that.
+- **The buffer the copy lands in** is kept and reused by the next read of its
+  size, in the npm package's macOS and Linux binaries. A crate build's Skia,
+  which this repository does not patch, makes one for every read.
+
+Measured the same way, a fill and then a read of the GPU canvas:
+
+| read after a draw                         | 6.0.2    | 7.0.0    | 7.0.0 / 6.0.2 |
+| ----------------------------------------- | -------- | -------- | ------------- |
+| 8x8, of a 1200×900 canvas                 | 195.2 µs | 175.4 µs | 0.908×        |
+| all of a 64x48 canvas                     | 229.9 µs | 195.6 µs | 0.844×        |
+| all of a 160x120 canvas, the pass's least | 252.2 µs | 239.4 µs | 0.952×        |
+| all of a 1200×900 canvas                  | 521.8 µs | 388.9 µs | 0.743×        |
+| the same, premultiplied                   | 908.0 µs | 367.9 µs | 0.405×        |
+| 8x8 again, with nothing drawn since       | 2.13 µs  | 1.93 µs  | 0.905×        |
 
 The draws go first because of Apple's GPU clock. Read after read, a copy
-committed in the buffer its draws are in holds the GPU at its lowest state,
-and the same passes take longer for it; with the draws first it rises.
-powermetrics' `gpu_power` sampler, every 50 ms over 20 s of back-to-back
-whole 1200x900 reads after an 8x8 draw, same machine:
+committed in the buffer its draws are in holds the GPU at its lowest state, and
+the same passes take longer for it; with the draws first it rises.
+powermetrics' `gpu_power` sampler, every 50 ms over 20 s of back-to-back whole
+1200x900 reads after an 8x8 draw, measured when the draws were moved to a
+buffer of their own:
 
 | whole 1200x900 reads         | median read | GPU active frequency, median (p10–p90) |
 | ---------------------------- | ----------- | -------------------------------------- |
 | draws and copy in one buffer | 724 µs      | 338 MHz (338–338)                      |
 | draws first                  | 684 µs      | 426 MHz (351–474)                      |
 | 6.0.2                        | 620 µs      | 672 MHz (482–763)                      |
-
-The GPU is busy throughout in all three. The read stays about 65 µs above
-6.0.2's, which also runs the GPU at a higher clock, for a reason not yet
-found. The exact unpremultiply, which 6.0.2 left to the GPU and its rounding
-down, costs 34–41 µs a read on the thread pool.
-
-The unpremultiply is made as each row is copied out of the buffer the
-GPU's copy lands in, rather than as a copy and then a second pass over the
-destination. A whole read of a translucent 1200x900 page after an 8x8 draw,
-same machine and method, takes 916–950 µs, against 1117–1147 µs in two
-passes.
