@@ -111,7 +111,7 @@ canvas costs between 0.73× and 6.52× an eight-bit one depending on what is dra
 ## Platform support
 
 Prebuilt binaries for Linux (x64/arm64, glibc and musl), macOS (arm64) and Windows (x64/arm64). The
-Linux binaries are held to symbol ceilings, glibc 2.34 and `GLIBCXX` 3.4.25, and each build is
+Linux binaries are held to symbol ceilings, glibc 2.28 and `GLIBCXX` 3.4.25, and each build is
 loaded and made to render inside AlmaLinux 8, glibc 2.28: RHEL 8 and 9, Ubuntu 20.04, Debian 11 and
 Amazon Linux 2023 are supported. [docs/internals/packaging.md](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/internals/packaging.md) has how they are held.
 
