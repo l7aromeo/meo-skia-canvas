@@ -4858,6 +4858,11 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
   clamp during compositing; pin `RenderEngine::Cpu` for bit-exact HDR
   round-trips.
 
+[v0.17.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.3...rust-v0.17.0
+[v0.16.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.2...rust-v0.16.3
+[v0.16.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.1...rust-v0.16.2
+[v0.16.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.0...rust-v0.16.1
+[v0.16.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.15.0...rust-v0.16.0
 [v5.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.6...v5.7.0
 [v5.6.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.5...v5.6.6
 [v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5

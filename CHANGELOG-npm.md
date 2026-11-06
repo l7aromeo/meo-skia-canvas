@@ -5724,6 +5724,10 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 **Initial public release** 🎉
 
+[v7.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.2...npm-v7.0.0
+[v6.0.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.1...npm-v6.0.2
+[v6.0.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.0...npm-v6.0.1
+[v6.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...npm-v6.0.0
 [v5.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.6...v5.7.0
 [v5.6.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.5...v5.6.6
 [v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5
