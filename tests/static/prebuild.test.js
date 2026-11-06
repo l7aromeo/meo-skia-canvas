@@ -57,6 +57,22 @@ describe("prebuild download", () => {
       join(SANDBOX, "package.json"),
     );
     rmSync(join(SANDBOX, "lib/skia.node"), { force: true });
+    // The sandbox is shaped like the published package, so `download` does nothing where a
+    // platform package resolves -- and walking up from here finds the repository's own. A
+    // package directory per probed name, exporting nothing, stops that walk: each name then
+    // fails to resolve, as on a platform with no package, and every case below downloads.
+    const probed =
+      (require(join(SANDBOX, "lib/binary.js")).PLATFORM_PACKAGES[
+        process.platform
+      ] || {})[process.arch] || [];
+    for (const name of probed) {
+      const dir = join(SANDBOX, "node_modules", name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ name, version: "0.0.0", exports: {} }),
+      );
+    }
 
     manifestPath = join(SANDBOX, "package.json");
     assetPath = join(SANDBOX, "lib/skia.node");
@@ -338,4 +354,110 @@ describe("prebuild compile", () => {
       );
     },
   );
+});
+
+// The install script on a platform whose package already holds the binary. `install` runs
+// `download --or-compile`, and a platform package installs its binary where `lib/binary.js`
+// resolves it, not at `lib/skia.node` -- so the early return for an existing `lib/skia.node`
+// never saw it, and an install with no route to GitHub failed although npm had delivered the
+// binary. Each case runs the script as `install` does, in a sandbox shaped like the published
+// package (no `Cargo.toml`), with every proxy variable pointed at a port nothing listens on:
+// a request shows as ECONNREFUSED and a failed install, no request as a clean exit.
+describe("prebuild download beside a platform package", () => {
+  const { spawnSync } = require("child_process");
+  const sandbox = join(
+    __dirname,
+    "../../.test-sandbox",
+    `${process.pid}-packaged`,
+  );
+  const binary = join(sandbox, "lib/skia.node");
+  const refused = "http://127.0.0.1:9";
+  let candidates;
+
+  // A package directory for each name `lib/binary.js` probes on this host, in the sandbox's own
+  // node_modules, so the repository's installed platform package -- found by walking up -- cannot
+  // decide the case. Without `./skia.node` in its exports a candidate fails to resolve with
+  // ERR_PACKAGE_PATH_NOT_EXPORTED, which `lib/binary.js` reads as absent; with it, it resolves.
+  const shadow = (resolving) => {
+    for (const name of candidates) {
+      const dir = join(sandbox, "node_modules", name);
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(dir, { recursive: true });
+      const pkg = { name, version: "0.0.0", exports: {} };
+      if (resolving) {
+        pkg.exports = { "./skia.node": "./skia.node" };
+        writeFileSync(join(dir, "skia.node"), "a platform package's binary");
+      }
+      writeFileSync(join(dir, "package.json"), JSON.stringify(pkg));
+    }
+  };
+
+  const install = (...args) => {
+    const env = { ...process.env };
+    for (const key of [
+      "https_proxy",
+      "HTTPS_PROXY",
+      "http_proxy",
+      "HTTP_PROXY",
+      "npm_config_https_proxy",
+      "npm_config_proxy",
+    ])
+      env[key] = refused;
+    const run = spawnSync(
+      process.execPath,
+      [join(sandbox, "lib/prebuild.mjs"), "download", ...args],
+      { env, encoding: "utf8" },
+    );
+    return { status: run.status, output: `${run.stdout}${run.stderr}` };
+  };
+
+  before(() => {
+    mkdirSync(sandbox, { recursive: true });
+    cpSync(join(__dirname, "../../lib"), join(sandbox, "lib"), {
+      recursive: true,
+    });
+    cpSync(
+      join(__dirname, "../../package.json"),
+      join(sandbox, "package.json"),
+    );
+    candidates =
+      (require(join(sandbox, "lib/binary.js")).PLATFORM_PACKAGES[
+        process.platform
+      ] || {})[process.arch] || [];
+  });
+
+  after(() => {
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    rmSync(binary, { force: true });
+    rmSync(join(sandbox, "Cargo.toml"), { force: true });
+  });
+
+  test("does nothing where the platform package resolves", () => {
+    assert.ok(candidates.length > 0, "a platform package for this host");
+    shadow(true);
+    const { status, output } = install("--or-compile");
+    assert.strictEqual(status, 0, output);
+    assert.doesNotMatch(output, /ECONNREFUSED|Fetched/);
+    assert.ok(!existsSync(binary), "downloaded beside the package");
+  });
+
+  test("downloads where no platform package resolves", () => {
+    shadow(false);
+    const { status, output } = install("--or-compile");
+    assert.notStrictEqual(status, 0, output);
+    assert.match(output, /ECONNREFUSED/);
+  });
+
+  // A source checkout asks for `lib/skia.node` itself: CI pins its suite to the binary this
+  // downloads, and so does `npm test`, both with the platform packages installed.
+  test("downloads in a source checkout even beside a platform package", () => {
+    shadow(true);
+    writeFileSync(join(sandbox, "Cargo.toml"), "");
+    const { status, output } = install();
+    assert.notStrictEqual(status, 0, output);
+    assert.match(output, /ECONNREFUSED/);
+  });
 });

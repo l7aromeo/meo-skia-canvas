@@ -13,6 +13,14 @@ manager selects one without running any script. This exists because bun blocks
 postinstall scripts unless the consuming project lists the package in
 `trustedDependencies`, and that list is not inherited from dependencies.
 
+**The install script downloads only where no platform package resolves.**
+`download` in `lib/prebuild.mjs` asks `lib/binary.js`'s own
+`resolvePlatformPackage`, so the two cannot disagree, and in the published
+package returns without a request when one does: an install with no route to
+GitHub then succeeds wherever npm delivered the binary. A source checkout
+downloads regardless, because CI and `npm test` load `lib/skia.node` in place
+of the installed platform package.
+
 ## The ABI floors
 
 Two of them, and both fail the same way: the binary does not load at all, with

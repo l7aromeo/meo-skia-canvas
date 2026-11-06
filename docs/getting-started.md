@@ -40,7 +40,7 @@ Alternatively, you can add a [`pnpm.onlyBuiltDependencies`](https://pnpm.io/9.x/
 
 ## Platform Support
 
-Skia Canvas runs on Linux, macOS, or Windows as well as serverless platforms like Vercel and AWS Lambda. Precompiled versions of the library’s native code are downloaded automatically when you install it via npm: Linux and Windows on `x64` and `arm64`, macOS on `arm64` only. There is no Intel macOS build — an Intel Mac has to build from source.
+Skia Canvas runs on Linux, macOS, or Windows as well as serverless platforms like Vercel and AWS Lambda. Precompiled versions of the library’s native code arrive with the npm install, each platform’s in a package of its own: Linux and Windows on `x64` and `arm64`, macOS on `arm64` only. There is no Intel macOS build — an Intel Mac has to build from source.
 
 The underlying Rust library uses [N-API][node_napi] v8, so it runs on every [currently supported](https://nodejs.org/en/about/previous-releases) Node.js release. **Node 22 is the floor** — that is what `engines` declares and what CI tests, since Node 20 reached end of life on 2026-04-30.
 
