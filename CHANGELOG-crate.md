@@ -17,7 +17,7 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
-## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
+## 📦 ⟩ [v0.17.0] (crate) ⟩ November 7, 2026
 
 **A breaking release. Thirty-one changes can break working code, each under
 Breaking with what to change.**

@@ -9,7 +9,7 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
-## 📦 ⟩ [v7.0.0] (npm) ⟩ Unreleased
+## 📦 ⟩ [v7.0.0] (npm) ⟩ November 7, 2026
 
 **A major release. Request headers given as an array of pairs went out under the
 wrong names, which a redirect to another host does not strip, so a credential
@@ -5724,7 +5724,6 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 **Initial public release** 🎉
 
-[unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
 [v5.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.6...v5.7.0
 [v5.6.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.5...v5.6.6
 [v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5
