@@ -33,7 +33,7 @@ use skia_safe::{
     Image, ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap,
     PaintJoin, PaintStyle, Path, PathDirection, Picture, PictureRecorder,
     Point, Rect, RoundOut, RuntimeEffect, SamplingOptions, Shader, Surface,
-    TileMode, canvas::SaveLayerRec, color_filters, image_filters,
+    TileMode, canvas::SaveLayerRec, color_filters, image_filters, shaders,
 };
 
 use crate::{
@@ -485,6 +485,42 @@ thread_local! {
 
     /// The probe of each page space this thread has verified a colour for.
     static PROBES: RefCell<Vec<Probe>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The colour shader of `plain` named in sRGB that a dyed text paint draws
+/// over -- see `Context2D::exact_text_paint` -- the one this thread made
+/// last for that colour. Kept, rather than made for every draw, because a
+/// kept run keeps its blobs for a paint only while the next draw's paint
+/// compares equal to it, and two paints compare their shaders by identity
+/// -- see `LaidOut::kept_blobs` -- so a shader made afresh built the run's
+/// blobs again on every draw of a float page.
+pub(crate) fn plain_colour_shader(plain: Color4f) -> Shader {
+    let key = [plain.r, plain.g, plain.b, plain.a].map(f32::to_bits);
+    let hash = plain_shader_hash(&key);
+    if let Some(shader) =
+        PLAIN_SHADERS.with_borrow(|shaders| shaders.get(hash, &key).cloned())
+    {
+        return shader;
+    }
+    let shader = shaders::color_in_space(plain, ColorSpace::new_srgb());
+    PLAIN_SHADERS
+        .with_borrow_mut(|shaders| shaders.file(hash, key, shader.clone()));
+    shader
+}
+
+/// Where [`PLAIN_SHADERS`] files a colour's bits: folded together and
+/// multiplied by [`GOLDEN_RATIO_64`].
+fn plain_shader_hash(key: &[u32; 4]) -> u64 {
+    let [r, g, b, a] = key.map(u64::from);
+    (r ^ g.rotate_left(16) ^ b.rotate_left(32) ^ a.rotate_left(48))
+        .wrapping_mul(GOLDEN_RATIO_64)
+}
+
+thread_local! {
+    /// The colour shaders [`plain_colour_shader`] has made on this thread,
+    /// in as many sets and ways as the dyes they are drawn under.
+    static PLAIN_SHADERS: RefCell<KeptSets<[u32; 4], Shader, DYE_SETS, DYE_WAYS>> =
+        const { RefCell::new(KeptSets::new()) };
 }
 
 /// The paint colour that stores `want`, premultiplied bytes, on a page in

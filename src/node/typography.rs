@@ -580,8 +580,10 @@ impl LaidOut {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`RunPaint::paint`] -- from the blobs kept for `paint`, and answers
-    /// what it can have inked -- see [`RunPaint::reach`].
+    /// [`RunPaint::paint`] -- from the blobs kept for `paint`, and, where
+    /// `reach` asks, answers what it can have inked -- see
+    /// [`RunPaint::reach`]. Working that out reads every glyph's outline, so
+    /// a caller with no use for the answer does not ask.
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -589,6 +591,7 @@ impl LaidOut {
         paint: &Paint,
         global_alpha: f32,
         faint: Faint,
+        reach: bool,
     ) -> Option<Rect> {
         let built;
         let kept = self.kept_blobs(paint);
@@ -607,7 +610,9 @@ impl LaidOut {
             faint,
             blobs,
         );
-        self.drawn.reach(origin, &faint.drawable(paint), blobs)
+        reach
+            .then(|| self.drawn.reach(origin, &faint.drawable(paint), blobs))
+            .flatten()
     }
 }
 
@@ -635,6 +640,8 @@ impl RunPaint {
     /// this way than by `Paragraph::paint`, which a kept run cannot use: it
     /// was laid out with no paint.
     fn built_blobs(&self) -> Vec<Option<TextBlob>> {
+        #[cfg(test)]
+        BLOB_BUILDS.set(BLOB_BUILDS.get() + 1);
         zip(&self.runs, &self.shears)
             .map(|(run, &shear)| {
                 sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
@@ -850,8 +857,9 @@ impl DrawnRun {
     }
 
     /// Paints the run with its anchor at `origin` in `paint` -- see
-    /// [`LaidOut::paint`] -- and answers what it can have inked, where that
-    /// is known -- see [`RunPaint::reach`]. A run laid out for one draw paints
+    /// [`LaidOut::paint`] -- and, where `reach` asks, answers what it can
+    /// have inked, where that is known -- see [`RunPaint::reach`]. A run laid
+    /// out for one draw paints
     /// in the paint it was laid out for, so a caller drawing onto pixels
     /// that keep a faint paint lays it out for `faint.drawable(paint)`. One
     /// `Paragraph::paint` draws is not bounded: it draws what the paragraph
@@ -863,18 +871,29 @@ impl DrawnRun {
         paint: &Paint,
         global_alpha: f32,
         faint: Faint,
+        reach: bool,
     ) -> Option<Rect> {
         match self {
-            Self::Kept(laid_out) => {
-                laid_out.paint(canvas, origin, paint, global_alpha, faint)
-            }
+            Self::Kept(laid_out) => laid_out.paint(
+                canvas,
+                origin,
+                paint,
+                global_alpha,
+                faint,
+                reach,
+            ),
             Self::Plain(layout) => {
                 layout.paragraph.paint(canvas, origin);
                 None
             }
-            Self::Runs(laid_out) => {
-                laid_out.paint(canvas, origin, paint, global_alpha, faint)
-            }
+            Self::Runs(laid_out) => laid_out.paint(
+                canvas,
+                origin,
+                paint,
+                global_alpha,
+                faint,
+                reach,
+            ),
         }
     }
 }
@@ -1217,6 +1236,9 @@ thread_local! {
     /// [`ReachBound`].
     pub(crate) static REACH_BOUND: Cell<ReachBound> =
         const { Cell::new(ReachBound::Stroked) };
+    /// How many times [`RunPaint::built_blobs`] has built a run's blobs on
+    /// this thread.
+    pub(crate) static BLOB_BUILDS: Cell<usize> = const { Cell::new(0) };
     /// How far, in the units a run is laid out in, [`RunPaint::reach`]
     /// draws its answer in on this thread: a mutant, a reach that cuts ink,
     /// for the checks on it to refuse.
