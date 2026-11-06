@@ -259,6 +259,58 @@ pub(crate) fn encoder_quality(quality: f32) -> f32 {
     (quality * QUALITY_SCALE).clamp(0.0, QUALITY_SCALE)
 }
 
+/// Whether `format` is coded losslessly, given the `lossless` and the
+/// `quality` asked for: as asked where `lossless` was given, and otherwise
+/// by the format's own rule -- a WebP at a quality of `1.0`, the top of a
+/// dial that there means "lose nothing", and an AVIF never.
+///
+/// One function for both surfaces, so the crate and the binding decide the
+/// same file from the same options.
+pub(crate) fn lossless_for(
+    format: ImageFormat,
+    lossless: Option<bool>,
+    quality: Option<f32>,
+) -> bool {
+    lossless.unwrap_or(
+        format == ImageFormat::Webp
+            && quality.unwrap_or(DEFAULT_QUALITY) >= 1.0,
+    )
+}
+
+/// Why `format` refuses a `lossless` of `true`, or `None` for the two that
+/// take it, WebP and AVIF.
+///
+/// A reason for each, because each lacks the choice for a reason of its own:
+/// a caller told only that a format "has no lossless form" cannot tell a
+/// format that is always exact from one that never is.
+pub(crate) fn lossless_refusal(format: ImageFormat) -> Option<&'static str> {
+    Some(match format {
+        ImageFormat::Webp | ImageFormat::Avif => return None,
+        ImageFormat::Png => "png is always lossless",
+        ImageFormat::Apng => "apng is always lossless",
+        ImageFormat::Tiff => "tiff is always lossless: it is deflated",
+        ImageFormat::Bmp => "bmp is always lossless: it is uncompressed",
+        ImageFormat::Ico => "ico is always lossless: it holds PNG images",
+        ImageFormat::Raw => {
+            "raw is the pixels themselves, with nothing to lose"
+        }
+        ImageFormat::Jpeg => {
+            "jpeg is always lossy: this library writes no lossless JPEG"
+        }
+        ImageFormat::Gif => {
+            "gif reduces each frame to a palette of 256 colours"
+        }
+        ImageFormat::Pdf => {
+            "pdf holds its pixels losslessly unless a `quality` below 1.0 \
+             asks for JPEG"
+        }
+        ImageFormat::Svg => {
+            "svg embeds its pixels as PNG, or as the JPEG bytes an image \
+             already holds"
+        }
+    })
+}
+
 /// Inches in a metre, for the formats that record resolution per metre.
 ///
 /// PNG's `pHYs` chunk and BMP's `bV4XPelsPerMeter` both do; JPEG's JFIF
@@ -458,8 +510,9 @@ pub enum ImageFormat {
     /// Lossy raster. Honours [`EncodeOptions::quality`], and flattens
     /// transparency against [`EncodeOptions::matte`] or black.
     Jpeg,
-    /// Raster, lossy or lossless depending on
-    /// [`EncodeOptions::quality`].
+    /// Raster, lossy or lossless: lossless where
+    /// [`EncodeOptions::lossless`] asks for it, and otherwise at a
+    /// [`EncodeOptions::quality`] of `1.0`.
     Webp,
     /// Animated raster, one frame per page, from a 256-color palette per
     /// frame. Timed by [`EncodeOptions::fps`] or
@@ -875,7 +928,9 @@ pub enum ChromaSampling {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodeOptions {
     /// Lossy-encoder quality, from `0.0` to `1.0`. Ignored by the lossless
-    /// formats. `None`, the default, is each format's own: 0.92 for JPEG,
+    /// formats, and refused below `1.0` beside a
+    /// [`lossless`](Self::lossless) of `Some(true)`, which it contradicts.
+    /// `None`, the default, is each format's own: 0.92 for JPEG,
     /// WebP and AVIF, and lossless for the pixels a PDF holds. A PDF writes
     /// its images as JPEG only at an explicit quality below `1.0` -- the
     /// pixels it embeds for what it cannot draw as vectors at full chroma
@@ -961,31 +1016,51 @@ pub struct EncodeOptions {
     /// [`jpeg_downsample`](Self::jpeg_downsample), which predates this and is
     /// a plain boolean because JPEG offers the one alternative.
     pub chroma: Option<ChromaSampling>,
-    /// Whether an [`Avif`](ImageFormat::Avif) is coded with no loss at all.
+    /// Whether a [`Webp`](ImageFormat::Webp) or an
+    /// [`Avif`](ImageFormat::Avif) is coded with no loss at all.
     ///
-    /// Defaults to `false`, and deliberately: AVIF is reached for because it
-    /// is small, and a lossless one is several times the size of a lossy one
-    /// and often larger than the PNG it would replace. Every encoder in the
-    /// ecosystem defaults to lossy for the same reason.
+    /// `None`, the default, keeps each format's own rule: a WebP is lossless
+    /// at a [`quality`](Self::quality) of `1.0` and lossy below it, and an
+    /// AVIF is lossy at every quality. `Some(true)` asks for lossless and
+    /// `Some(false)` for lossy, so `Some(false)` at a quality of `1.0` writes
+    /// a WebP at its finest lossy setting: VP8 at libwebp's quality 100, from
+    /// a picture converted to YUV 4:2:0 as every lossy WebP is, so a colour
+    /// edge softens even at the top of the dial (Skia's
+    /// `SkWebpEncoderImpl.cpp`, under the skia-bindings crate). A
+    /// [`quality`](Self::quality) below
+    /// `1.0` beside `Some(true)` is refused for both: the two ask for
+    /// different files, and quietly honouring one would hand back a file
+    /// neither option promised.
     ///
-    /// This is lossless in *red, green and blue*, not merely in what the
-    /// encoder was handed. Getting there needs two things beyond the flag,
-    /// both of which this sets: full chroma, and the identity matrix, where
-    /// the three coded planes are green, blue and red rather than a luma and
-    /// two colour differences. Without the second the picture is rounded by
-    /// the conversion before quantisation ever runs, and the file faithfully
-    /// preserves data that was already lossy.
+    /// A lossless WebP is VP8L, the encoder a quality of `1.0` reaches, and
+    /// decodes to the pixels it was given.
+    ///
+    /// An AVIF is lossy unless asked, and deliberately: AVIF is reached for
+    /// because it is small, and a lossless one is several times the size of a
+    /// lossy one and often larger than the PNG it would replace. Every
+    /// encoder in the ecosystem defaults to lossy for the same reason.
+    ///
+    /// A lossless AVIF is lossless in *red, green and blue*, not merely in
+    /// what the encoder was handed. Getting there needs two things beyond the
+    /// flag, both of which this sets: full chroma, and the identity
+    /// matrix, where the three coded planes are green, blue and red rather
+    /// than a luma and two colour differences. Without the second the
+    /// picture is rounded by the conversion before quantisation ever runs,
+    /// and the file faithfully preserves data that was already lossy.
     ///
     /// Because of that, naming a [`chroma`](Self::chroma) other than
     /// [`Full`](ChromaSampling::Full) alongside this is refused rather than
     /// silently overridden: subsampled identity planes would be discarding
     /// literal red and blue samples.
     ///
-    /// [`quality`](Self::quality) is ignored when this is set. It is not
-    /// promoted at `1.0` either -- that means the finest quantizer, which is
-    /// near-lossless but still filtered, and changing what it meant would
-    /// change every file this crate has already written.
-    pub lossless: bool,
+    /// An AVIF's quality is not promoted to lossless at `1.0` -- that means
+    /// the finest quantizer, which is near-lossless but still filtered, and
+    /// changing what it meant would change every file this crate has already
+    /// written.
+    ///
+    /// Every other format refuses `Some(true)`, saying why it has no such
+    /// choice, and takes `Some(false)` as it takes `None`.
+    pub lossless: Option<bool>,
     /// Color space the export is converted into.
     ///
     /// `None` -- the default -- exports in the canvas's own space, which is
@@ -1099,7 +1174,7 @@ impl Default for EncodeOptions {
             color_type: None,
             bit_depth: None,
             chroma: None,
-            lossless: false,
+            lossless: None,
             color_space: None,
             jpeg_downsample: false,
             msaa: None,
@@ -1180,14 +1255,20 @@ impl EncodeOptions {
             );
         }
 
-        if self.lossless {
-            if format != ImageFormat::Avif {
+        if self.lossless == Some(true) {
+            if let Some(reason) = lossless_refusal(format) {
+                return refuse("lossless", reason.to_string());
+            }
+            // Refused rather than one of the two winning: a quality below
+            // 1.0 asks for a lossy file and `lossless` for an exact one.
+            if let Some(quality) = self.quality
+                && quality < 1.0
+            {
                 return refuse(
-                    "lossless",
+                    "quality",
                     format!(
-                        "{} is either lossless already or has no lossless \
-                         form",
-                        format.as_str()
+                        "{quality} asks for a lossy file and `lossless` for an \
+                         exact one -- leave `quality` out, or drop `lossless`"
                     ),
                 );
             }

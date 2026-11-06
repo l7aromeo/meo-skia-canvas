@@ -207,8 +207,8 @@ fn plane_info(canvas: &SkCanvas, plane: Plane, drawn: IRect) -> ImageInfo {
 /// the plane made for this draw alone would be, but as large as the page, so
 /// that the playback's later draws fit in it. Made by the canvas's own
 /// device, as that plane is, so in main memory and made with the canvas's
-/// props. `None` off the CPU, where planes are not kept, or where the canvas
-/// makes no plane.
+/// props. `None` off the CPU, where planes are not kept, where the canvas
+/// reports no props, or where the canvas makes no plane.
 fn kept_plane(
     canvas: &SkCanvas,
     plane: Plane,
@@ -221,9 +221,20 @@ fn kept_plane(
         | RenderingEngine::Graphite => return None,
     }
     let info = plane_info(canvas, plane, drawn);
-    if let Some(kept) =
-        pool::take_plane(plane, &info, &canvas.base_props(), drawn.size())
-    {
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: cargo test skia_safe_reads_base_props_as_props_does on Windows
+    // `Canvas::base_props` declares the C++ method `SkCanvas::getBaseProps`,
+    // which returns a struct by value, as a C function. MSVC hands such a
+    // method its return slot after `this`, where a C function takes it before
+    // `this` on x64 and takes none on arm64, so on Windows Skia writes the
+    // props over the canvas, or through whatever the register holds.
+    // `clippy.toml` refuses the call. The canvas's base props, which
+    // `new_surface` below gives a plane, are read through `SkCanvas::getProps`
+    // instead, which writes through a pointer: in Skia M156 it and
+    // `getBaseProps` both copy them through `onGetProps(props, false)`
+    // (`SkCanvas.cpp:1232`).
+    let props = canvas.props()?;
+    if let Some(kept) = pool::take_plane(plane, &info, &props, drawn.size()) {
         return Some((kept, true));
     }
     let page = canvas.base_layer_size();
@@ -505,11 +516,15 @@ pub(crate) fn coloured(
 #[cfg(test)]
 mod tests {
     use skia_safe::{
-        AlphaType, ColorType, IRect, ImageInfo, Matrix, Paint, PaintStyle,
-        Path, PathBuilder, Rect,
+        AlphaType, Color, ColorType, IRect, ImageInfo, Matrix, Paint,
+        PaintStyle, Path, PathBuilder, PixelGeometry, Rect, SurfaceProps,
+        SurfacePropsFlags,
     };
 
-    use super::{Coverage, READ_IN_PLACE, alpha_into, coloured};
+    use super::{
+        Coverage, Plane, READ_IN_PLACE, alpha_into, coloured, kept_plane,
+        pool::{self, PlaneScope},
+    };
     use crate::{
         canvas::{Canvas, CanvasOptions},
         context::{
@@ -1182,5 +1197,70 @@ mod tests {
         assert_eq!(runs(PixelDepth::F16, 3.0), 0, "a half-float page");
         assert_eq!(runs(PixelDepth::F32, 3.0), 0, "a float page");
         assert_eq!(runs(PixelDepth::Uint8, 6.0), 0, "a sigma through the FFT");
+    }
+
+    /// Props no canvas has by default, told apart by their pixel geometry.
+    fn props(geometry: PixelGeometry) -> SurfaceProps {
+        SurfaceProps::new(SurfacePropsFlags::default(), geometry)
+    }
+
+    #[test]
+    fn a_kept_plane_is_taken_only_for_a_canvas_of_its_props() {
+        // A plane takes its canvas's props, which decide how text is drawn
+        // on it, so a plane kept for one canvas is not taken for a canvas
+        // of other props.
+        let info = ImageInfo::new_n32_premul((40, 30), None);
+        let mut own =
+            started::raster(&info, None, Some(&props(PixelGeometry::RGBH)))
+                .expect("a surface");
+        let mut other =
+            started::raster(&info, None, Some(&props(PixelGeometry::BGRV)))
+                .expect("a surface");
+        let drawn = IRect::from_wh(20, 10);
+        let _planes = PlaneScope::open();
+        let (plane, used) =
+            kept_plane(own.canvas(), Plane::Drawn, drawn).expect("a plane");
+        assert!(!used, "a plane before any was kept");
+        assert_eq!(plane.props(), &props(PixelGeometry::RGBH));
+        pool::keep_plane(Plane::Drawn, plane);
+        let (_, used) =
+            kept_plane(other.canvas(), Plane::Drawn, drawn).expect("a plane");
+        assert!(!used, "a plane kept for other props was taken");
+        let (_, used) =
+            kept_plane(own.canvas(), Plane::Drawn, drawn).expect("a plane");
+        assert!(used, "the plane kept for these props was not taken");
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "skia-safe 0.156.0 calls getBaseProps with the wrong ABI on Windows"
+    )]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the call `clippy.toml` refuses, tested"
+    )]
+    fn skia_safe_reads_base_props_as_props_does() {
+        // `kept_plane` reads a canvas's props through `Canvas::props`; this
+        // is the call it does not make. Where `base_props` passes its
+        // arguments as Skia expects, both read the same props and the canvas
+        // still draws.
+        let info = ImageInfo::new_n32_premul((4, 4), None);
+        let mut surface =
+            started::raster(&info, None, Some(&props(PixelGeometry::RGBH)))
+                .expect("a surface");
+        let canvas = surface.canvas();
+        assert_eq!(canvas.base_props(), props(PixelGeometry::RGBH));
+        assert_eq!(canvas.props(), Some(props(PixelGeometry::RGBH)));
+        canvas.clear(Color::RED);
+        let mut pixel = [0u8; 4];
+        let rgba = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        assert!(surface.read_pixels(&rgba, &mut pixel, 4, (0, 0)));
+        assert_eq!(pixel, [255, 0, 0, 255], "a red pixel");
     }
 }

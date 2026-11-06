@@ -10,55 +10,89 @@
 //
 // No forced collection here, on purpose: what is tested is that V8 decides to
 // collect on its own. The loop does turn between passes, because a server
-// does between requests and Neon runs a finalizer only once it has.
+// does between requests and Neon runs a finalizer only once it has. What is
+// judged is the floor of resident memory -- see `tests/support/memory-floor.js`.
+//
+// The pages are on the CPU, where what a context keeps is resident. A page on
+// the GPU is held by the driver, outside the process's resident memory on
+// macOS: two hundred GPU canvases kept alive there, reporting 640 MB to V8,
+// raised it by 6 MB, so a GPU page would pass with or without collection.
+// `dropped-gpu-canvas-memory.test.js` judges those by what is reported to V8.
 //
 // A file of its own, so that no other test's memory lands in the process this
-// measures: node runs each test file in a process of its own.
+// measures: node runs each test file in a process of its own. The control,
+// which keeps its canvases, runs last for the same reason.
 
 const { assert, describe, test } = require("../runner"),
-  { setImmediate: turn } = require("node:timers/promises"),
-  { Canvas } = require("../../lib");
-
-/** The canvas each pass makes and reads. */
-const SIDE = [1000, 800];
-
-/** Canvases made, read back whole and dropped per pass. */
-const PER_PASS = 10;
+  {
+    PASSES,
+    PER_PASS,
+    afterEachPass,
+    judged,
+  } = require("../support/memory-floor");
 
 /**
- * Passes; the growth judged is from the end of the third to the end of the
- * last, after the first two have warmed the allocator and the caches.
+ * Resident memory after each of 20 passes of a run on CI's Linux runner, in
+ * MB: collected throughout, its last pass on a peak. Run 42103176700, the
+ * `binding (Rust + JS on a fresh build)` job, where the last sample's rise of
+ * 170.6 MB over pass 3 was refused (#595).
  */
-const PASSES = 20;
+const SAWTOOTH_ON_CI = [
+  369.1, 556.5, 514.9, 521.3, 515.0, 563.4, 595.7, 760.3, 518.4, 524.8, 605.3,
+  517.8, 566.3, 517.9, 524.3, 524.2, 572.6, 524.2, 530.7, 685.5,
+];
 
 /**
- * The most of what the judged passes read that may stay resident. Collected
- * canvases leave a sawtooth well under this; uncollected ones keep all of it.
+ * Resident memory after each of 20 passes of a run on CI's Linux arm64
+ * release leg, in MB: collected throughout, settling only by pass 11, where
+ * it stayed. Run 42122640796, where the last sample's rise of 249.7 MB over
+ * pass 3 was refused (#595).
  */
-const KEPT_SHARE = 0.25;
+const PLATEAU_ON_CI = [
+  75.8, 136.6, 146.2, 146.2, 207.1, 207.1, 264.7, 267.9, 331.9, 331.9, 395.9,
+  395.9, 395.9, 395.9, 395.9, 395.9, 395.9, 395.9, 395.9, 395.9,
+];
 
-/** The bytes a 32-bit pixel takes. */
-const PIXEL_BYTES = 4;
+/** Resident bytes after each pass of CPU canvases handed to `hold`. */
+const resident = (/** @type {(canvas: any) => void} */ hold) =>
+  afterEachPass({ gpu: false, hold, measure: () => process.memoryUsage().rss });
 
 describe("Canvases that are dropped", () => {
   test("are collected without a forced collection", async () => {
-    const after = [];
-    for (let pass = 0; pass < PASSES; pass++) {
-      for (let i = 0; i < PER_PASS; i++) {
-        const ctx = new Canvas(SIDE[0], SIDE[1]).getContext("2d");
-        ctx.fillRect(10, 10, 80, 40);
-        ctx.getImageData(0, 0, SIDE[0], SIDE[1]);
-      }
-      await turn();
-      after.push(process.memoryUsage().rss);
-    }
-    const read = (PASSES - 3) * PER_PASS * SIDE[0] * SIDE[1] * PIXEL_BYTES;
-    const kept = after[PASSES - 1] - after[2];
-    assert.ok(
-      kept <= KEPT_SHARE * read,
-      `${(kept / 1e6).toFixed(1)} MB of the ${(read / 1e6).toFixed(1)} MB ` +
-        `the last ${PASSES - 3} passes read stayed resident; after each ` +
-        `pass ${after.map((b) => (b / 1e6).toFixed(1)).join(", ")} MB`,
+    const { kept, message } = judged(
+      await resident(() => {}),
+      "resident memory",
     );
+    assert.ok(kept, message);
+  });
+
+  test("are not taken for kept by a collection peak on the last pass", () => {
+    const { kept, message } = judged(
+      SAWTOOTH_ON_CI.map((mb) => mb * 1e6),
+      "resident memory",
+    );
+    assert.ok(kept, message);
+  });
+
+  test("are not taken for kept by memory settling late", () => {
+    const { kept, message } = judged(
+      PLATEAU_ON_CI.map((mb) => mb * 1e6),
+      "resident memory",
+    );
+    assert.ok(kept, message);
+  });
+
+  // The control: the judgement has to refuse canvases that are never
+  // collected, or the tests above show nothing. Last in the file, so that
+  // what it keeps lands in no other test's measure.
+  test("are told from canvases kept alive", async () => {
+    /** @type {unknown[]} */
+    const held = [];
+    const { kept, message } = judged(
+      await resident((canvas) => held.push(canvas)),
+      "resident memory",
+    );
+    assert.equal(held.length, PASSES * PER_PASS);
+    assert.ok(!kept, `kept canvases passed: ${message}`);
   });
 });
