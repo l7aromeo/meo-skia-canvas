@@ -450,7 +450,15 @@ const EFFECTS = [
       ctx.drawCanvas(src, 140, 14, 120, 84);
       const table = new Uint8Array(256);
       for (let i = 0; i < 256; i++) table[i] = 255 - i;
-      ctx.colorFilter = new ColorFilter("table", table);
+      // The colour channels alone: one table for every channel would invert
+      // alpha too and leave the swatch transparent.
+      ctx.colorFilter = new ColorFilter(
+        "table-argb",
+        null,
+        table,
+        table,
+        table,
+      );
       ctx.drawCanvas(src, 8, 110, 120, 84);
       ctx.colorFilter = new ColorFilter("blend", "#1f6feb", "multiply");
       ctx.drawCanvas(src, 140, 110, 120, 84);
