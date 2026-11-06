@@ -438,29 +438,10 @@ jobs:
             python3 libvulkan-dev
       # What it takes to open a window on a runner with no screen and no GPU,
       # which is the difference between the `gui` suite running here and
-      # skipping as it does everywhere else.
-      #
-      # `mesa-vulkan-drivers` supplies lavapipe, a software Vulkan device, so
-      # the check that reports "No windowing support: Vulkan initialization
-      # failed" passes. `xvfb` supplies the display. The X client libraries
-      # are the part that is easy to miss: with only `libx11-xcb1` a window
-      # still *registers* -- `openWindow` records the spec and returns -- and
-      # then `App.launch` fails to build the winit loop and reports no
-      # display, on a runner whose display is fine. Verified in a container:
-      # with this list the loop runs and delivers frames, without it the
-      # launch fails.
-      #
-      # The list was verified as a set. No package here was tested for
-      # individual necessity, so trimming one because it looks unrelated is
-      # untested either way -- and it will still pass on a developer machine,
-      # which has a display of its own.
+      # skipping as it does everywhere else. The list and why each part is
+      # there are in the script, which crates-io-publish.yml runs too.
       - name: Install a headless display and a software GPU (apt)
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            xvfb mesa-vulkan-drivers libvulkan1 \
-            libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 \
-            libxcb-randr0 libxcb-xkb1 libxcb-shape0 libxcb-xfixes0 \
-            libxcursor1 libxrandr2 libxi6 libxinerama1
+        run: .github/scripts/install-software-gpu.sh
       # The patched Skia tree the skia-source job saved: on Linux it carries
       # the brotli sources Skia's build list leaves out, which a `freetype`
       # link needs. It also keeps any `just` recipe here from fetching one.
