@@ -28,7 +28,7 @@ configure time.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.16", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust,no_run
