@@ -14,6 +14,7 @@ package.json
 docs/rust.md
 Cargo.toml
 rustfmt.toml
+clippy.toml
 .github/workflows/rust-ci.yml
 :(glob).github/scripts/**
 .github/workflows/paths/rust-ci.txt

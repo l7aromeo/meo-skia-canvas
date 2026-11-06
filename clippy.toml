@@ -1,0 +1,13 @@
+# skia-safe methods that call a C++ instance method returning a struct by
+# value as though it were a C function. MSVC hands such a method its return
+# slot after `this`, where a C function takes it before `this` on x64 and
+# takes none on arm64, so on Windows each call writes its result over the
+# object it was asked about or through a stray register. Each entry names what
+# to call instead; the marker at `coverage::kept_plane` says how to tell when
+# skia-safe no longer needs it.
+disallowed-methods = [
+  { path = "skia_safe::Canvas::base_props", reason = "wrong ABI on Windows; use `Canvas::props`" },
+  { path = "skia_safe::Canvas::top_props", reason = "wrong ABI on Windows; no shimmed equivalent" },
+  { path = "skia_safe::Handle::get_point", reason = "`Path::get_point`: wrong ABI on Windows; use `Path::points`" },
+  { path = "skia_safe::Pixmap::get_color_4f", reason = "wrong ABI on Windows; read the pixels" },
+]
