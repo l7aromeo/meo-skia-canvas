@@ -19,17 +19,19 @@
 
 **Changelog**
 
-- [ ] One line in `CHANGELOG-npm.md` and/or `CHANGELOG-crate.md`, for each channel it reaches, in
-      the terms of someone using it and linking the issue or this PR; a Breaking entry adds one
-      line saying what to change
+- [ ] A fragment, `changelog.d/npm/<n>.md` and/or `changelog.d/crate/<n>.md` with `<n>` this PR's
+      number, for each channel it reaches: one line an entry, in the terms of someone using it and
+      linking the issue or this PR; a Breaking entry adds one line saying what to change
 - [ ] None: it reaches neither channel
 
-<!-- A change that only makes something faster adds its levers to the release's one combined
-     Changed entry, rather than a line of its own. -->
+<!-- A change that only makes something faster joins the release's one combined Changed entry
+     rather than taking a line of its own: `- Joins **<start of its title>** (<links>)`.
+     changelog.d/README.md has the form. -->
 
 ## Checks
 
-- [ ] `just ci` passes -- the recipe is the authority on what that covers
+- [ ] `just prepush` passes -- `just ci` but the suites and the build, which PR CI runs; the
+      recipe is the authority on what that covers
 - [ ] New behaviour is tested, and a fix's test fails without the fix
 - [ ] Every new `unwrap`/`expect` under `src/` carries a `// SAFETY:` comment
 - [ ] The docs and comments the change affects are updated in it, including those outside the diff

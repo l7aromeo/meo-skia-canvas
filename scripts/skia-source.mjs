@@ -1045,14 +1045,14 @@ export function applyPatches(checkout, list = patches(), root = ROOT) {
 }
 
 /**
- * The key a CI cache of this platform's tree is saved and restored under: the
+ * The key a CI cache of a platform's tree is saved and restored under: the
  * platform and the tree's name, which carries the locked version and the
- * digest of the patches. The keys follow `PATCHES` because they are made from
- * it, rather than from a list of patch files a workflow would have to keep in
- * step.
+ * digest of that platform's patches, so one runner can name every platform's
+ * key. The keys follow `PATCHES` because they are made from it, rather than
+ * from a list of patch files a workflow would have to keep in step.
  */
 export function cacheKey(root = ROOT, platform = process.platform) {
-  return `skia-source-${platform}-${treeName(root)}`;
+  return `skia-source-${platform}-${treeName(root, patches(platform))}`;
 }
 
 /**

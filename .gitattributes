@@ -57,3 +57,8 @@ tests/assets/** -filter -diff -merge
 # claim about what Chrome does and what both packages do, and a row changed in
 # a commit that shows `Binary files differ` has not been reviewed.
 tests/assets/*-cases.json diff merge
+
+# And the recorded workflow runs and cache list the retry and prune tests
+# decide on, which are text for the same reason: a recorded conclusion or key
+# is what a case asserts about it.
+tests/assets/workflow-runs/*.json diff merge

@@ -1,0 +1,231 @@
+{
+  "run": {
+    "conclusion": "cancelled",
+    "event": "pull_request",
+    "id": 42093953518,
+    "name": "Rust CI",
+    "path": ".github/workflows/rust-ci.yml",
+    "run_attempt": 1
+  },
+  "jobs": [
+    {
+      "completed_at": "2026-11-05T19:26:58Z",
+      "conclusion": "success",
+      "id": 127478986628,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "changes",
+      "runner_id": 1000036300,
+      "runner_name": "GitHub Actions 1000036300",
+      "started_at": "2026-11-05T19:26:50Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:16Z",
+      "conclusion": "success",
+      "id": 127479077156,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "licenses (notices match what links)",
+      "runner_id": 1000036306,
+      "runner_name": "GitHub Actions 1000036306",
+      "started_at": "2026-11-05T19:27:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:25Z",
+      "conclusion": "success",
+      "id": 127479077196,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "changelog (every shipped tag has a section)",
+      "runner_id": 1000036305,
+      "runner_name": "GitHub Actions 1000036305",
+      "started_at": "2026-11-05T19:27:10Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:09Z",
+      "conclusion": "success",
+      "id": 127479077251,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "skia source (Linux)",
+      "runner_id": 1000036304,
+      "runner_name": "GitHub Actions 1000036304",
+      "started_at": "2026-11-05T19:27:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127479077252,
+      "labels": [
+        "macos-latest"
+      ],
+      "name": "skia source (macOS)",
+      "runner_id": 0,
+      "runner_name": "",
+      "started_at": "2026-11-05T19:26:58Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:47Z",
+      "conclusion": "success",
+      "id": 127479077354,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "public API (no leaked types)",
+      "runner_id": 1000036307,
+      "runner_name": "GitHub Actions 1000036307",
+      "started_at": "2026-11-05T19:27:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:44Z",
+      "conclusion": "success",
+      "id": 127479077447,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "msrv (from Cargo.toml)",
+      "runner_id": 1000036309,
+      "runner_name": "GitHub Actions 1000036309",
+      "started_at": "2026-11-05T19:27:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:27Z",
+      "conclusion": "success",
+      "id": 127479077500,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "fmt (nightly)",
+      "runner_id": 1000036311,
+      "runner_name": "GitHub Actions 1000036311",
+      "started_at": "2026-11-05T19:27:10Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:09Z",
+      "conclusion": "success",
+      "id": 127479077511,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "doc-anchors",
+      "runner_id": 1000036308,
+      "runner_name": "GitHub Actions 1000036308",
+      "started_at": "2026-11-05T19:27:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:27:40Z",
+      "conclusion": "success",
+      "id": 127479077611,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "docs (rustdoc)",
+      "runner_id": 1000036310,
+      "runner_name": "GitHub Actions 1000036310",
+      "started_at": "2026-11-05T19:27:00Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:27Z",
+      "conclusion": "failure",
+      "id": 127482022031,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "rust-ci",
+      "runner_id": 1000036350,
+      "runner_name": "GitHub Actions 1000036350",
+      "started_at": "2026-11-05T19:32:24Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127482023362,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "binding (Rust + JS on a fresh build)",
+      "runner_id": null,
+      "runner_name": null,
+      "started_at": "2026-11-05T19:32:20Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127482023695,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "parity (crate and npm surfaces agree)",
+      "runner_id": null,
+      "runner_name": null,
+      "started_at": "2026-11-05T19:32:20Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127482023742,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "test (freetype,fetch)",
+      "runner_id": null,
+      "runner_name": null,
+      "started_at": "2026-11-05T19:32:20Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127482023863,
+      "labels": [
+        "macos-latest"
+      ],
+      "name": "graphite bindings (patched, Metal)",
+      "runner_id": null,
+      "runner_name": null,
+      "started_at": "2026-11-05T19:32:20Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127482024012,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "name": "release tests (Linux)",
+      "runner_id": null,
+      "runner_name": null,
+      "started_at": "2026-11-05T19:32:20Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-11-05T19:32:20Z",
+      "conclusion": "cancelled",
+      "id": 127482024433,
+      "labels": [],
+      "name": "clippy ${{ matrix.name }}",
+      "runner_id": null,
+      "runner_name": null,
+      "started_at": "2026-11-05T19:32:20Z",
+      "status": "completed"
+    }
+  ]
+}

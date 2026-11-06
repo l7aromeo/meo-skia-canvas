@@ -33,6 +33,9 @@ test/assets/Raleway
 !/.github
 !/.blueprints
 !/.gitmodules
+# The changelog fragments, a directory the rule above would hide for the dot
+# in its name -- and with it every fragment a pull request adds.
+!/changelog.d/
 .staging
 .test-sandbox
 

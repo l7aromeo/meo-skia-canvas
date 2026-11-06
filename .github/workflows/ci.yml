@@ -46,13 +46,11 @@ permissions:
   contents: read
 
 jobs:
-  # Which of this workflow's concerns actually moved. The list is the one the
-  # trigger used to carry, in git's pathspec spelling rather than GitHub's:
-  # `:(glob)` makes `*` stop at a directory separator, which is what makes
-  # `*.md` mean a top-level Markdown file here exactly as it did there.
-  # Verified against a tree holding `README.md`, `docs/guide.md`,
-  # `docs/img/a.png`, `LICENSE`, `Cargo.toml` and `src/lib.rs`: the first four
-  # are excluded and the last two are not.
+  # Whether anything the test matrix covers moved: everything but prose, as
+  # `paths/ci.txt` spells it in git's pathspec form. That is wider than the
+  # push trigger's `paths-ignore`, whose `*.md` is a top-level file only, and
+  # the difference is harmless in that direction: a push run the trigger lets
+  # through still skips its matrix here.
   changes:
     name: changes
     runs-on: ubuntu-latest
@@ -88,6 +86,79 @@ jobs:
             echo "relevant=false" >> "$GITHUB_OUTPUT"
             echo "nothing this workflow covers has moved"
           fi
+
+  # Prettier checks prose as well as code, and the matrix skips a change to
+  # prose, so this runs on every pull request rather than behind `changes`: a
+  # pull request changing only Markdown is checked here and nowhere else in
+  # this workflow.
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Check formatting
+        run: bun run format:check
+
+  # `just check-repo`: the checks in `just prepush` that build no Skia -- the
+  # changelog, release-guard, release-tag, upstream-note, lockfile, link,
+  # README-fact, fetch-dependency, workflow-gate and Skia-patch checks, and
+  # ESLint -- several of which ran in no workflow at all. On every pull
+  # request, outside `changes`, since some of them read nothing but prose.
+  # The checks that compile against Skia run in rust-ci.yml.
+  repo:
+    name: repo checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The release `check-workflow-gates` lints with, by actionlint's own tag,
+      # held to the sha256 GitHub's release API reports for its Linux amd64
+      # archive.
+      ACTIONLINT_TAG: v1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      # The whole history and its tags: check-changelog holds every shipped
+      # tag reachable from HEAD to a section, and refuses to judge in a
+      # shallow clone, where every tag looks unreachable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+      # `cargo metadata` for the lockfile and fetch-dependency checks; nothing
+      # here compiles.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - name: Install actionlint
+        run: |
+          archive="actionlint_${ACTIONLINT_TAG#v}_linux_amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 -sSfL -o "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_TAG}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$archive" -C "$HOME/.local/bin" actionlint
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Run the checks that build no Skia
+        run: just check-repo
 
   test:
     needs: changes
@@ -143,10 +214,11 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
-      # Needs no native binary, so it runs before the download and reports separately from a
-      # rendering failure. Checked on every leg rather than once because the config pins
-      # endOfLine, and Windows is the only runner that can catch a CRLF slipping in.
-      - name: Check formatting
+      # The `format` job checks the committed text once. This leg checks it again as Windows
+      # checks it out: the config pins endOfLine, and Windows is the only runner where a
+      # `.gitattributes` that stopped normalising would turn every file to CRLF.
+      - name: Check formatting (Windows checkout)
+        if: ${{ runner.os == 'Windows' }}
         run: bun run format:check
 
       # The declaration files are what the package ships as its `types`, and until this
@@ -380,7 +452,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [changes, test]
+    needs: [changes, format, repo, test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -1269,6 +1269,28 @@ describe("skia-source names a tree's cache key", () => {
     );
     assert.notEqual(cacheKey(r), edited);
   });
+
+  test("a key asked for another platform names that platform's tree", async () => {
+    // What the prune step reads to tell a current tree from a superseded
+    // one on every platform from one runner: a key naming the asking host's
+    // tree under another platform's prefix would have it delete the live one.
+    const { cacheKey, treeName, PATCHES } = await import(
+      pathToFileURL(SCRIPT).href
+    );
+    const repo = join(__dirname, "..", "..");
+    for (const platform of ["linux", "darwin", "win32"]) {
+      assert.equal(
+        cacheKey(repo, platform),
+        `skia-source-${platform}-${treeName(repo, PATCHES[platform] ?? [])}`,
+        platform,
+      );
+    }
+    assert.notEqual(
+      cacheKey(repo, "linux").replace("linux", ""),
+      cacheKey(repo, "darwin").replace("darwin", ""),
+      "the Linux and macOS patch lists differ, so their trees do",
+    );
+  });
 });
 
 // Two worktrees running `just` while the tree they name is missing run two
