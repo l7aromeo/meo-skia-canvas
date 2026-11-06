@@ -47,10 +47,16 @@ No `trustedDependencies` entry and no `--ignore-scripts` exception is needed: th
 one of seven platform packages, `darwin-arm64`, `linux-{x64,arm64}-{glibc,musl}` and
 `win32-{x64,arm64}`, chosen by `os`, `cpu` and `libc`.
 
-**Unless your platform has none.** Anything else, an Intel Mac among them, falls back to the
-`install` script in `package.json`, which downloads a prebuilt binary or compiles one. npm runs that
-script. bun does not, unless the consuming project lists the package in its own
-`trustedDependencies` -- a list that is not inherited from a dependency:
+**Unless your platform has none.** Anything else, an Intel Mac among them, has no platform package
+and no prebuilt binary on the release, so an install from npm fails. Build the addon from a clone of
+the repository instead, as
+[Compiling from Source](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/node.md#compiling-from-source)
+describes.
+
+On a platform that has one, an install that leaves optional dependencies out (`--omit=optional`)
+falls back to the `install` script in `package.json`, which downloads that platform's binary from
+the release. npm runs that script. bun does not, unless the consuming project lists the package in
+its own `trustedDependencies` -- a list that is not inherited from a dependency:
 
 ```json
 { "trustedDependencies": ["meo-skia-canvas"] }
