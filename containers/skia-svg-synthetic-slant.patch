@@ -1,0 +1,203 @@
+--- a/skia-bindings/skia/modules/svg/include/SkSVGAttribute.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGAttribute.h
+@@ -90,6 +90,9 @@
+ 
+     SkSVGProperty<SkSVGFontFamily, true> fFontFamily;
+     SkSVGProperty<SkSVGFontStyle , true> fFontStyle;
++    // The angle in degrees `fFontStyle` leans by when it is oblique, clockwise
++    // positive as CSS counts it. `font-style` sets both.
++    SkSVGProperty<SkSVGNumberType, true> fFontObliqueAngle;
+     SkSVGProperty<SkSVGFontSize  , true> fFontSize;
+     SkSVGProperty<SkSVGFontWeight, true> fFontWeight;
+     SkSVGProperty<SkSVGTextAnchor, true> fTextAnchor;
+--- a/skia-bindings/skia/modules/svg/include/SkSVGAttributeParser.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGAttributeParser.h
+@@ -35,6 +35,11 @@
+     //      so they can be used by parse<T>():
+     bool parse(SkSVGIntegerType* v) { return parseInteger(v); }
+ 
++    // The angle in degrees a `font-style` value leans by when it is oblique:
++    // `oblique <angle>`'s, or `SkSVGFontStyle::kDefaultObliqueAngle`. False
++    // where the value is not a `font-style`.
++    static bool ParseObliqueAngle(const char* value, SkScalar* degrees);
++
+     template <typename T> using ParseResult = std::optional<T>;
+ 
+     template <typename T> static ParseResult<T> parse(const char* value) {
+@@ -103,6 +108,8 @@
+ 
+     template <typename T>
+     bool parse(T*);
++
++    bool parseFontStyle(SkSVGFontStyle*, SkScalar* obliqueDegrees);
+ 
+     template <typename F>
+     bool advanceWhile(F func);
+--- a/skia-bindings/skia/modules/svg/include/SkSVGNode.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGNode.h
+@@ -134,6 +134,7 @@
+     SVG_PRES_ATTR(FontFamily               , SkSVGFontFamily, true)
+     SVG_PRES_ATTR(FontSize                 , SkSVGFontSize  , true)
+     SVG_PRES_ATTR(FontStyle                , SkSVGFontStyle , true)
++    SVG_PRES_ATTR(FontObliqueAngle         , SkSVGNumberType, true)
+     SVG_PRES_ATTR(FontWeight               , SkSVGFontWeight, true)
+     SVG_PRES_ATTR(Stroke                   , SkSVGPaint     , true)
+     SVG_PRES_ATTR(StrokeDashArray          , SkSVGDashArray , true)
+--- a/skia-bindings/skia/modules/svg/include/SkSVGTypes.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGTypes.h
+@@ -509,6 +509,10 @@
+         kInherit,
+     };
+ 
++    // The angle in degrees an oblique leans by where none is given: CSS Fonts 4,
++    // 3.4. `SkSVGPresentationAttributes::fFontObliqueAngle` carries the angle.
++    static constexpr SkScalar kDefaultObliqueAngle = 14;
++
+     SkSVGFontStyle() : fType(Type::kInherit) {}
+     explicit SkSVGFontStyle(Type t) : fType(t) {}
+ 
+--- a/skia-bindings/skia/modules/svg/src/SkSVGAttribute.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGAttribute.cpp
+@@ -34,6 +34,7 @@
+ 
+     result.fFontFamily.init("Sans");
+     result.fFontStyle.init(SkSVGFontStyle::Type::kNormal);
++    result.fFontObliqueAngle.init(SkSVGFontStyle::kDefaultObliqueAngle);
+     result.fFontSize.init(SkSVGLength(24));
+     result.fFontWeight.init(SkSVGFontWeight::Type::kNormal);
+     result.fTextAnchor.init(SkSVGTextAnchor::Type::kStart);
+--- a/skia-bindings/skia/modules/svg/src/SkSVGAttributeParser.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGAttributeParser.cpp
+@@ -1007,6 +1007,17 @@
+ // https://www.w3.org/TR/SVG11/text.html#FontStyleProperty
+ template <>
+ bool SkSVGAttributeParser::parse(SkSVGFontStyle* style) {
++    SkScalar obliqueDegrees;
++    return this->parseFontStyle(style, &obliqueDegrees);
++}
++
++bool SkSVGAttributeParser::ParseObliqueAngle(const char* value, SkScalar* degrees) {
++    SkSVGFontStyle style;
++    return SkSVGAttributeParser(value).parseFontStyle(&style, degrees);
++}
++
++// CSS Fonts 4, 3.4: `oblique` may take an angle within -90deg to 90deg.
++bool SkSVGAttributeParser::parseFontStyle(SkSVGFontStyle* style, SkScalar* obliqueDegrees) {
+     static constexpr std::tuple<const char*, SkSVGFontStyle::Type> gStyleMap[] = {
+         { "normal" , SkSVGFontStyle::Type::kNormal  },
+         { "italic" , SkSVGFontStyle::Type::kItalic  },
+@@ -1019,7 +1030,25 @@
+ 
+     if (this->parseEnumMap(gStyleMap, &type)) {
+         *style = SkSVGFontStyle(type);
++        *obliqueDegrees = SkSVGFontStyle::kDefaultObliqueAngle;
+         parsedValue = true;
++        if (type == SkSVGFontStyle::Type::kOblique && this->parseWSToken() &&
++            !this->parseEOSToken()) {
++            // Degrees per unit: CSS Values 4, 7.1.
++            static constexpr std::tuple<const char*, SkScalar> gAngleUnits[] = {
++                { "deg" , 1                 },
++                { "grad", 0.9f              },
++                { "rad" , 180 / SK_ScalarPI },
++                { "turn", 360               },
++            };
++            SkScalar value, degreesPerUnit;
++            parsedValue = this->parseScalarToken(&value) &&
++                          this->parseEnumMap(gAngleUnits, &degreesPerUnit);
++            if (parsedValue) {
++                *obliqueDegrees = value * degreesPerUnit;
++                parsedValue = *obliqueDegrees >= -90 && *obliqueDegrees <= 90;
++            }
++        }
+     }
+ 
+     return parsedValue && this->parseEOSToken();
+--- a/skia-bindings/skia/modules/svg/src/SkSVGNode.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGNode.cpp
+@@ -101,6 +101,18 @@
+             SkSVGAttributeParser::parseProperty<decltype(fPresentationAttributes.f##attrName)>( \
+                     svgName, n, v))
+ 
++    // `font-style` sets an oblique's angle along with its slant, so the two
++    // inherit together: 14deg where the value names none.
++    if (!strcmp(n, "font-style")) {
++        using AngleProperty = decltype(fPresentationAttributes.fFontObliqueAngle);
++        SkScalar degrees;
++        if (!strcmp(v, "inherit")) {
++            this->setFontObliqueAngle(AngleProperty(SkSVGPropertyState::kInherit));
++        } else if (SkSVGAttributeParser::ParseObliqueAngle(v, &degrees)) {
++            this->setFontObliqueAngle(AngleProperty(degrees));
++        }
++    }
++
+     return PARSE_AND_SET(   "clip-path"                  , ClipPath)
+            || PARSE_AND_SET("clip-rule"                  , ClipRule)
+            || PARSE_AND_SET("color"                      , Color)
+--- a/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
+@@ -236,6 +236,7 @@
+     ApplyLazyInheritedAttribute(FontFamily);
+     ApplyLazyInheritedAttribute(FontSize);
+     ApplyLazyInheritedAttribute(FontStyle);
++    ApplyLazyInheritedAttribute(FontObliqueAngle);
+     ApplyLazyInheritedAttribute(FontWeight);
+     ApplyLazyInheritedAttribute(ClipRule);
+     ApplyLazyInheritedAttribute(Stroke);
+--- a/skia-bindings/skia/modules/svg/src/SkSVGText.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGText.cpp
+@@ -47,6 +47,21 @@
+ 
+ namespace {
+ 
++// Whether `tf` leans by its own design: a slant it reports, or `OS/2`
++// `fsSelection` bit 9, the oblique flag.
++static bool Leans(const SkTypeface* tf) {
++    if (tf->fontStyle().slant() != SkFontStyle::kUpright_Slant) {
++        return true;
++    }
++    // OpenType `OS/2` table: `fsSelection` is the uint16 at byte 62.
++    static constexpr size_t kFsSelectionOffset = 62;
++    static constexpr uint16_t kFsSelectionOblique = 1 << 9;
++    uint8_t fsSelection[2];
++    return tf->getTableData(SkSetFourByteTag('O', 'S', '/', '2'), kFsSelectionOffset,
++                            sizeof(fsSelection), fsSelection) == sizeof(fsSelection) &&
++           ((fsSelection[0] << 8 | fsSelection[1]) & kFsSelectionOblique);
++}
++
+ static SkFont ResolveFont(const SkSVGRenderContext& ctx) {
+     auto weight = [](const SkSVGFontWeight& w) {
+         switch (w.type()) {
+@@ -85,9 +100,15 @@
+     };
+ 
+     const auto& family = ctx.presentationContext().fInherited.fFontFamily->family();
++    const SkSVGFontStyle& fontStyle = *ctx.presentationContext().fInherited.fFontStyle;
++    const SkScalar obliqueDegrees = *ctx.presentationContext().fInherited.fFontObliqueAngle;
++    // CSS Fonts 4, 5.2: an oblique of zero or a negative angle matches no face
++    // that leans forward, and is the upright face sheared.
++    const bool obliqueBack =
++            fontStyle.type() == SkSVGFontStyle::Type::kOblique && obliqueDegrees <= 0;
+     const SkFontStyle style(weight(*ctx.presentationContext().fInherited.fFontWeight),
+                             SkFontStyle::kNormal_Width,
+-                            slant(*ctx.presentationContext().fInherited.fFontStyle));
++                            obliqueBack ? SkFontStyle::kUpright_Slant : slant(fontStyle));
+ 
+     const auto size =
+             ctx.lengthContext().resolve(ctx.presentationContext().fInherited.fFontSize->size(),
+@@ -103,6 +124,16 @@
+     SkFont font(std::move(tf), size);
+     font.setHinting(SkFontHinting::kNone);
+     font.setSubpixel(true);
++    // CSS Fonts 4, 5.2: a slant the face does not have is synthesised. An italic
++    // is skewed by a quarter, as SkParagraph's fake italic is, and an oblique to
++    // the tangent of its angle. A face that leans already -- by the slant it
++    // reports, or by `OS/2` `fsSelection` bit 9, which CoreText and DirectWrite
++    // report upright -- is drawn as it is.
++    if (fontStyle.type() != SkSVGFontStyle::Type::kNormal && !Leans(font.getTypeface())) {
++        font.setSkewX(fontStyle.type() == SkSVGFontStyle::Type::kItalic
++                              ? -SK_Scalar1 / 4
++                              : -SkScalarTan(SkDegreesToRadians(obliqueDegrees)));
++    }
+     font.setLinearMetrics(true);
+     font.setBaselineSnap(false);
+     font.setEdging(SkFont::Edging::kAntiAlias);

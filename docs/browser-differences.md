@@ -358,6 +358,15 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   tests/assets/fonts/Recursive: its `slnt` axis, and a static upright with
   a static `slnt` -12 instance flagged oblique. A family with both an italic
   and an oblique face would take the oblique; none was available to pin.
+  The same oblique face with its `italicAngle` set to 0, flagged only by
+  `OS/2` `fsSelection` bit 9, is drawn as the last row's is for `oblique`
+  and `italic`, in either load order, though CoreText and an unpatched
+  DirectWrite report it upright -- `FontLibrary::slanted` in
+  `src/node/font_library.rs`. Chrome was not measured on that face.
+  An SVG document's text follows the same rule, `oblique <angle>` included:
+  Chrome 153 draws an inline SVG's `italic` and an oblique of 14deg or more
+  in a family with no slanted face with a quarter's skew, and a smaller or
+  negative angle upright, as its canvas text does.
 
   Chrome draws neither the shear nor the angle. For a font loaded as a
   `FontFace` -- Oswald, Raleway with its italic face, and Arial, Georgia,
