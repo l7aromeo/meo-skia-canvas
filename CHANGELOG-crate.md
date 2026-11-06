@@ -19,18 +19,20 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.17.0] (crate) ⟩ Unreleased
 
-**A breaking release. Twenty-nine changes can break working code, each under
+**A breaking release. Thirty-one changes can break working code, each under
 Breaking with what to change.**
 
 Signatures and types change: `FontSlant::Oblique` and `TextSlant::Oblique` carry
 an `ObliqueAngle`; a family list is `Vec<FontFamily>`, so a quoted generic
 keyword is a family name, and the details `family_details` returns are
 `FontFamilyDetails`; `TextStyle::font_variations` is a `FontVariationSettings`;
-`UiEvent::Input` carries a `TextInputType`; and `Error` is `#[non_exhaustive]`.
+`UiEvent::Input` carries a `TextInputType`; `EncodeOptions::lossless` is an
+`Option<bool>`; and `Error` is `#[non_exhaustive]`.
 Values that were taken are refused: a text contrast or gamma outside Skia's
 range, from `Canvas::with_options`; a `ColorFilter::lighting` coefficient that
 is not finite; a blank string in `set_filter_css`, which cleared the filter; a
-number ending in a point; and colour, font, filter and spacing strings Chrome
+number ending in a point; a `lossless` beside a quality below 1.0, which AVIF
+ignored; and colour, font, filter and spacing strings Chrome
 153 refuses, a space before `(`, legacy commas CSS Color 4 does not allow and
 `hwba()`, `hsv()` and hex without `#` among them. Values read back differently:
 `Context2D::font()` as CSSOM serializes a font, `filter()` as the chain was
@@ -56,12 +58,16 @@ puts them and beneath the glyphs, a family with no italic or bold face slanted
 or emboldened, `FontSlant::Oblique` as CSS Fonts 4 matches it, and a variable
 font at the weight asked and at the optical size of its font size.
 `Image::from_url` and `ImageData::from_url` load over `http` and `https` behind
-an opt-in `fetch` feature, `set_font_kerning`, `set_text_rendering`,
+an opt-in `fetch` feature, lossless WebP, `set_font_kerning`, `set_text_rendering`,
 `color-mix()` and CSS Color 4's system colours are added, and the CSS strings
 read the math functions and every length unit.
 
 ### Breaking
 
+- **`EncodeOptions::lossless` is an `Option<bool>`, `None` meaning each format's own rule.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+  Write `lossless: Some(true)` where you wrote `lossless: true`, and leave it out where you wrote `false`.
+- **`lossless: Some(true)` beside a quality below 1.0 is refused, for AVIF as for WebP.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
+  Pass one or the other: AVIF ignored the quality.
 - **`EncodeOptions::quality` is an `Option<f32>`, `None` meaning each format's own default.** ([#456](https://github.com/l7aromeo/meo-skia-canvas/pull/456), [#444](https://github.com/l7aromeo/meo-skia-canvas/issues/444))
   Write `quality: Some(0.8)` where you wrote `quality: 0.8`.
 - **A paragraph style's text shadows paint the first listed on top.** ([#399](https://github.com/l7aromeo/meo-skia-canvas/pull/399))
@@ -249,9 +255,11 @@ read the math functions and every length unit.
 - **Word spacing reaches every space.** ([#380](https://github.com/l7aromeo/meo-skia-canvas/pull/380))
 - **Centred and right-aligned text counts a trailing space.** ([#380](https://github.com/l7aromeo/meo-skia-canvas/pull/380))
 - **An animated GIF is the same file on any machine.** ([#407](https://github.com/l7aromeo/meo-skia-canvas/pull/407))
+- **`Image::frame` returns a frame of an animated WebP that holds alpha after an opaque first frame; it failed with `InvalidConversion`.** ([#589](https://github.com/l7aromeo/meo-skia-canvas/pull/589), [#586](https://github.com/l7aromeo/meo-skia-canvas/issues/586))
 
 ### Added
 
+- **`EncodeOptions::lossless` writes a lossless WebP, still or animated, as a quality of 1.0 does.** ([#582](https://github.com/l7aromeo/meo-skia-canvas/pull/582), [#575](https://github.com/l7aromeo/meo-skia-canvas/issues/575))
 - **`just bench` runs the npm and crate benchmarks over the same cases and writes a dated report of each.** ([#470](https://github.com/l7aromeo/meo-skia-canvas/pull/470), [#468](https://github.com/l7aromeo/meo-skia-canvas/issues/468))
 - **CSS Color 4's system colours.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))
 - **`color-mix()` in the CSS colours the crate reads.** ([#331](https://github.com/l7aromeo/meo-skia-canvas/pull/331))

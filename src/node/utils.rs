@@ -5297,7 +5297,7 @@ pub fn from_color_type(color_type: ColorType) -> String {
 
 use crate::{
     context::page::{ExportOptions, Matte},
-    export::{ChromaSampling, ImageFormat},
+    export::{ChromaSampling, ImageFormat, lossless_refusal},
 };
 
 /// `defaults` supplies the canvas's own settings for keys the call omits, so
@@ -5379,31 +5379,40 @@ pub fn export_options_arg(
             Some(chroma_or_throw(cx, &name)?)
         }
     };
-    // Refused for the same reason `chromaSampling` is, and additionally
-    // against subsampling: the two cannot both be honoured.
-    let lossless = match opt_bool_for_key(cx, &opts, "lossless") {
-        None | Some(false) => false,
-        Some(true) => {
-            if format != ImageFormat::Avif {
-                return cx.throw_type_error(format!(
-                    "\"{}\" is either lossless already or has no lossless \
-                     form -- only \"avif\" takes `lossless`",
-                    format.as_str()
-                ));
-            }
-            if matches!(
-                chroma,
-                Some(ChromaSampling::Half | ChromaSampling::Quarter)
-            ) {
-                return cx.throw_type_error(
-                    "Subsampled chroma discards colour before the encoder \
-                     sees it, so `lossless` cannot be combined with a \
-                     `chromaSampling` other than \"4:4:4\"",
-                );
-            }
-            true
+    // `true` is refused for the same reason `chromaSampling` is, against a
+    // quality below 1.0, and against subsampling: none of those pairs can
+    // both be honoured. `false` is taken by every format, as leaving it out
+    // is, and keeps a WebP lossy at a quality of 1.0.
+    let lossless = opt_bool_for_key(cx, &opts, "lossless");
+    if lossless == Some(true) {
+        if let Some(reason) = lossless_refusal(format) {
+            // A value outside the formats that take it: case 2 of the
+            // refusal rules, like `chromaSampling` above.
+            return cx.throw_type_error(format!(
+                "{reason} -- only \"avif\" and \"webp\" take `lossless`"
+            ));
         }
-    };
+        if let Some(quality) = quality
+            && quality < 1.0
+        {
+            // A number outside what `lossless` permits beside it: case 4.
+            return cx.throw_range_error(format!(
+                "`quality` of {quality} asks for a lossy file and \
+                 `lossless` for an exact one -- leave `quality` out, or \
+                 drop `lossless`"
+            ));
+        }
+        if matches!(
+            chroma,
+            Some(ChromaSampling::Half | ChromaSampling::Quarter)
+        ) {
+            return cx.throw_type_error(
+                "Subsampled chroma discards colour before the encoder \
+                 sees it, so `lossless` cannot be combined with a \
+                 `chromaSampling` other than \"4:4:4\"",
+            );
+        }
+    }
     let text_contrast = float_for_key(cx, &opts, "textContrast")?;
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;

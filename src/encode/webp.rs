@@ -124,12 +124,6 @@ const MAX_DURATION_MS: u32 = (1 << 24) - 1;
 /// [`SequenceSpec::loops`] of `None` is meant.
 const LOOP_FOREVER: u16 = 0;
 
-/// The quality at which a frame is encoded losslessly rather than lossily.
-///
-/// The same rule the still path applies, and for the same reason: `quality`
-/// is a dial from 0 to 100 and the top of it means "do not lose anything".
-const LOSSLESS_AT: f32 = 100.0;
-
 /// Effort, not quality, once the encoder is lossless.
 ///
 /// Kept in step with `WEBP_LOSSLESS_EFFORT` in `context::page`, which
@@ -184,6 +178,7 @@ impl FrameEncoder for AnimatedWebp {
             out,
             encoding: Encoding {
                 quality: spec.quality,
+                lossless: spec.lossless,
                 space: spec.space.to_skia_color_space().unwrap_or_else(|_| {
                     // Every space this crate exports is one Skia builds, so
                     // the fallback is unreachable rather than lenient -- and
@@ -208,6 +203,10 @@ impl FrameEncoder for AnimatedWebp {
 /// to write in. This half has neither, so it is what the threads share.
 struct Encoding {
     quality: f32,
+    /// Whether every frame is VP8L, which `export::lossless_for` decided
+    /// from the caller's `lossless` and `quality` -- the same rule the still
+    /// path follows, so a page encodes alike in a still and an animation.
+    lossless: bool,
     /// The space the frames are in, handed back to Skia so the profile it
     /// writes describes the pixels rather than assuming sRGB.
     space: ColorSpace,
@@ -326,7 +325,8 @@ impl Encoding {
     ) -> Result<Prepared, String> {
         let region = Self::region(previous, pixels, frame);
         let part = crop(frame, pixels, region);
-        let still = encode_still(&part, self.quality, &self.space)?;
+        let still =
+            encode_still(&part, self.quality, self.lossless, &self.space)?;
         let profile = match opening {
             true => chunk(&still, b"ICCP")?.map(<[u8]>::to_vec),
             false => None,
@@ -503,6 +503,7 @@ struct Payload {
 fn encode_still(
     frame: &Frame,
     quality: f32,
+    lossless: bool,
     space: &ColorSpace,
 ) -> Result<Vec<u8>, String> {
     let info = ImageInfo::new(
@@ -531,7 +532,7 @@ fn encode_still(
     // by a factor of 1.7: the question of whether that is tunable has an
     // answer, and the answer is not here.
     let mut options = webp_encoder::Options::default();
-    if quality >= LOSSLESS_AT {
+    if lossless {
         options.compression = webp_encoder::Compression::Lossless;
         // Effort rather than quality once lossless, which is what
         // `LOSSLESS_EFFORT` records -- and the one dial on this path that
