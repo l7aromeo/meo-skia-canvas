@@ -66,7 +66,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * skia-bindings as it always has, and `env` names no tree there.
  */
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-// Re-check: cargo test a_path_covers_a_crowded_flush_as_it_covers_a_small_one with `metal` on macOS, on a tree prepared without this patch; 28 pixels read a step above or below a small flush of the same stars
+// Re-check: cargo test a_path_covers_a_crowded_flush_as_it_covers_a_small_one -- --include-ignored against crates.io's Skia, where it is ignored for this; pixels read a step off a small flush of the same stars, 28 on Metal and 6 on lavapipe (Mesa 25.0.7, arm64)
 //
 // A path Ganesh's atlas path renderer places at an atlas row of 512 or more
 // can have a pixel's coverage moved a step up or down -- about 50 of 255
@@ -82,7 +82,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // the atlas.
 const ATLAS_SIZE = join("containers", "skia-atlas-size.patch");
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-// Re-check: cargo test a_curve_on_the_gpu_draws_alike_after_a_larger_draw_of_it with `metal` on macOS, on a tree prepared without this patch; a curve exported at density 1 after a density-3 export of it moves 128 levels
+// Re-check: cargo test a_curve_after_a_larger_draw_of_it_draws_alike_where_skia_is_patched against crates.io's Skia, as the crates.io publish runs it; it holds that build to moving bytes, 416 by up to 128 levels on lavapipe, and fails there once Skia reuses a triangulation only at its own tolerance
 //
 // Ganesh's triangulating path renderer keeps a path's triangles in the
 // context's thread-safe cache, keyed by the path's shape and not by the
@@ -109,7 +109,7 @@ const GRAPHITE_BINDINGS = join(
   "rust-skia-graphite-bindings.patch",
 );
 // UPSTREAM: skia-safe 0.156.0 -- https://issues.skia.org/issues/40042671 -- worked around
-// Re-check: cargo test a_read_leaves_its_transfer_buffer_for_the_next with `metal` on macOS, on a tree prepared without this patch; the read keeps no buffer while `SurfaceContext::transferPixels` asks for `kStream_GrAccessPattern`
+// Re-check: cargo test a_read_leaves_its_transfer_buffer_where_skia_keeps_one against crates.io's Skia, as the crates.io publish runs it; it holds that build to keeping no buffer, and fails there once `SurfaceContext::transferPixels` stops asking for `kStream_GrAccessPattern`
 //
 // Every `getImageData` on a GPU page goes through Skia's asynchronous read,
 // whose transfer buffer `SurfaceContext::transferPixels` asks for as

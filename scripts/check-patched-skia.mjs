@@ -44,20 +44,6 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/// containers/skia-atlas-size.patch, on every platform.
-const ATLAS_SIZE = {
-  patch: "containers/skia-atlas-size.patch",
-  file: "src/gpu/ganesh/ops/AtlasPathRenderer.cpp",
-  marker: "fAtlasMaxSize = 512;",
-};
-
-/// containers/skia-triangulation-tolerance.patch, on every platform.
-const TRIANGULATION = {
-  patch: "containers/skia-triangulation-tolerance.patch",
-  file: "src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp",
-  marker: "info->fTolerance == tol",
-};
-
 /// containers/skia-svg-synthetic-slant.patch, on every platform.
 const SVG_SYNTHETIC_SLANT = {
   patch: "containers/skia-svg-synthetic-slant.patch",
@@ -72,13 +58,68 @@ const FONT_MATCH_SLANT_FIRST = {
   marker: "currentScore <<= kWeightScoreBits;",
 };
 
-/// containers/skia-async-transfer-reuse.patch, on macOS and Linux. The
-/// marker names the enum's scope because the unpatched file already holds a
-/// bare `kDynamic_GrAccessPattern`, in the comment the patch replaces.
+/**
+ * The entries of `SKIA_PATCHES` in `rust`, build.rs's text, by cfg: each
+ * `SkiaPatch { cfg, file, marker }` with all three a plain string literal.
+ * Refused, with why, where the table is missing or empty, an entry lacks a
+ * field, or two entries share a cfg.
+ */
+export function skiaPatchTable(rust) {
+  const table = rust.match(
+    /^const SKIA_PATCHES: \[SkiaPatch; \d+\] = \[([\s\S]*?)^\];/m,
+  );
+  if (!table) return { error: "no SKIA_PATCHES table" };
+  const literal = (body, field) =>
+    body.match(
+      new RegExp(`^\\s*${field}: "((?:[^"\\\\]|\\\\.)*)",$`, "m"),
+    )?.[1];
+  const entries = {};
+  for (const [, body] of table[1].matchAll(/SkiaPatch \{([^}]*)\}/g)) {
+    const [cfg, file, marker] = ["cfg", "file", "marker"].map((field) =>
+      literal(body, field),
+    );
+    if (!cfg || !file || !marker)
+      return { error: `an entry without a literal cfg, file and marker` };
+    if (entries[cfg]) return { error: `two entries for ${cfg}` };
+    entries[cfg] = { file, marker };
+  }
+  if (!Object.keys(entries).length) return { error: "an empty SKIA_PATCHES" };
+  return { entries };
+}
+
+/**
+ * The file and marker build.rs names for the patch whose cfg is `cfg`, from
+ * which it turns that cfg on.
+ */
+function buildRsPatch(cfg) {
+  const read = skiaPatchTable(readFileSync(join(ROOT, "build.rs"), "utf8"));
+  if (read.error)
+    throw new Error(`check-patched-skia: build.rs: ${read.error}`);
+  const entry = read.entries[cfg];
+  if (!entry) throw new Error(`check-patched-skia: build.rs names no ${cfg}`);
+  return entry;
+}
+
+// The patches a test holds a build to. Their files and markers are build.rs's,
+// which turns a cfg on from each, so the build and this check cannot disagree
+// about what a patched file holds.
+
+/// containers/skia-atlas-size.patch, on every platform.
+const ATLAS_SIZE = {
+  patch: "containers/skia-atlas-size.patch",
+  ...buildRsPatch("meo_atlas_size"),
+};
+
+/// containers/skia-triangulation-tolerance.patch, on every platform.
+const TRIANGULATION = {
+  patch: "containers/skia-triangulation-tolerance.patch",
+  ...buildRsPatch("meo_triangulation_tolerance"),
+};
+
+/// containers/skia-async-transfer-reuse.patch, on macOS and Linux.
 const ASYNC_TRANSFER_REUSE = {
   patch: "containers/skia-async-transfer-reuse.patch",
-  file: "src/gpu/ganesh/SurfaceContext.cpp",
-  marker: "GrAccessPattern::kDynamic_GrAccessPattern",
+  ...buildRsPatch("meo_async_transfer_reuse"),
 };
 
 /// Each file a patch for the platform changes, under Skia's source root, with
@@ -433,6 +474,64 @@ function selfTest() {
     "MARKER",
     false,
   );
+  // build.rs's table as rustfmt writes it; anything else is refused rather
+  // than read as some other entry.
+  const entry = (cfg, file, marker) =>
+    `    // a comment\n    SkiaPatch {\n        cfg: "${cfg}",\n        file: "${file}",\n        marker: "${marker}",\n    },\n`;
+  const table = (...entries) =>
+    `const SKIA_PATCHES: [SkiaPatch; ${entries.length}] = [\n${entries.join("")}];\n`;
+  for (const [rust, expected, what] of [
+    [
+      table(entry("a", "f.cpp", "x::y;")),
+      { a: { file: "f.cpp", marker: "x::y;" } },
+      "one entry",
+    ],
+    [
+      table(entry("a", "f.cpp", "x"), entry("b", "g.cpp", "p->q == r")),
+      {
+        a: { file: "f.cpp", marker: "x" },
+        b: { file: "g.cpp", marker: "p->q == r" },
+      },
+      "two entries",
+    ],
+    ["const OTHER: [SkiaPatch; 0] = [\n];\n", null, "no table"],
+    ["const SKIA_PATCHES: [SkiaPatch; 0] = [\n];\n", null, "an empty table"],
+    [
+      table(entry("a", "f.cpp", "x"), entry("a", "g.cpp", "y")),
+      null,
+      "a cfg twice",
+    ],
+    [
+      table(entry("a", "f.cpp", "x").replace(/ +marker.*\n/, "")),
+      null,
+      "an entry with no marker",
+    ],
+    [
+      table(entry("a", "f.cpp", "x").replace('"x"', "MARKER")),
+      null,
+      "a marker that is no literal",
+    ],
+  ]) {
+    const read = skiaPatchTable(rust);
+    if (JSON.stringify(read.entries ?? null) !== JSON.stringify(expected)) {
+      console.error(
+        `check-patched-skia self-test: ${what} read as ${JSON.stringify(read.entries ?? read.error)}`,
+      );
+      process.exit(1);
+    }
+    count += 1;
+  }
+  // The real table, with an entry for every patch read from it.
+  const real = skiaPatchTable(readFileSync(join(ROOT, "build.rs"), "utf8"));
+  for (const cfg of [
+    "meo_atlas_size",
+    "meo_triangulation_tolerance",
+    "meo_async_transfer_reuse",
+  ])
+    if (!real.entries?.[cfg]) {
+      console.error(`check-patched-skia self-test: build.rs has no ${cfg}`);
+      process.exit(1);
+    }
   try {
     for (const [platform, patched] of Object.entries(PATCHED)) {
       for (const [files, text, accepted, what] of cases(root, patched)) {

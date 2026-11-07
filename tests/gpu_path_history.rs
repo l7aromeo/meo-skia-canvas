@@ -10,21 +10,13 @@
 //! export left, and under 4x MSAA the two move edge pixels by up to two
 //! samples' worth of coverage: 128 levels. `containers/
 //! skia-triangulation-tolerance.patch` reuses an entry only at the draw's own
-//! tolerance.
-
-use std::path::Path;
+//! tolerance. A crate build's Skia does not carry it, and
+//! `cfg(meo_triangulation_tolerance)`, from `build.rs`, says which this build
+//! compiled.
 
 use meo_skia_canvas::prelude::*;
 
 const SIZE: (f32, f32) = (300.0, 220.0);
-
-/// The file `containers/skia-triangulation-tolerance.patch` changes, under
-/// Skia's source root.
-const PATCHED_FILE: &str = "src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp";
-
-/// What only the patched file holds: the cache's exact-tolerance match. The
-/// same string `scripts/check-patched-skia.mjs` looks for in a release build.
-const PATCHED_MARKER: &str = "info->fTolerance == tol";
 
 /// The turn the text is drawn under in issue #511: about 17 degrees.
 const TURN: Affine = Affine {
@@ -81,8 +73,27 @@ fn apart(a: &[u8], b: &[u8]) -> (u8, usize) {
     (worst.unwrap_or(0), count)
 }
 
+/// Holds a scene's first and last density-1 exports to what the Skia
+/// compiled does: the same bytes where it carries the patch, and some bytes
+/// moved where it does not, since crates.io's Skia then draws the last from
+/// the triangles the density-3 export cut. How many move, and how far,
+/// depends on the device's multisampling, so only that some do is held; the
+/// day none do there, the cache rule this note describes has changed.
+fn assert_drawn_as_the_skia_compiled_draws(first: &[u8], again: &[u8]) {
+    let (worst, count) = apart(first, again);
+    if cfg!(meo_triangulation_tolerance) {
+        assert_eq!((worst, count), (0, 0));
+    } else {
+        assert!(
+            count > 0,
+            "crates.io's Skia drew the curve again from its own triangles; \
+             it reuses another tolerance's no longer"
+        );
+    }
+}
+
 #[test]
-fn a_curve_on_the_gpu_draws_alike_after_a_larger_draw_of_it() {
+fn a_curve_after_a_larger_draw_of_it_draws_alike_where_skia_is_patched() {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(false);
     let ctx = canvas.context();
@@ -98,13 +109,22 @@ fn a_curve_on_the_gpu_draws_alike_after_a_larger_draw_of_it() {
     let Some((first, again)) = before_and_after(canvas) else {
         return;
     };
-    assert_eq!(apart(&first, &again), (0, 0));
+    assert_drawn_as_the_skia_compiled_draws(&first, &again);
 }
 
-/// The scene of issue #511: Zapfino, where the system has it, turned, at
-/// 96px. Its large glyphs are drawn as paths, through the same cache.
+/// The scene of issue #511: Zapfino, turned, at 96px. Its large glyphs are
+/// drawn as paths, through the same cache. Skipped, saying so, where the
+/// system has no Zapfino, as on Linux: the text then falls back to another
+/// face, which drew alike on either Skia when measured on Linux, so the
+/// scene would hold nothing there.
 #[test]
-fn turned_text_on_the_gpu_draws_alike_after_a_larger_draw_of_it() {
+fn turned_text_after_a_larger_draw_of_it_draws_alike_where_skia_is_patched() {
+    if FontLibrary::new().family_details("Zapfino").is_none() {
+        eprintln!(
+            "skipped: no Zapfino, which the scene of issue #511 is set in"
+        );
+        return;
+    }
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(false);
     let ctx = canvas.context();
@@ -116,26 +136,22 @@ fn turned_text_on_the_gpu_draws_alike_after_a_larger_draw_of_it() {
     let Some((first, again)) = before_and_after(canvas) else {
         return;
     };
-    assert_eq!(apart(&first, &again), (0, 0));
+    assert_drawn_as_the_skia_compiled_draws(&first, &again);
 }
 
-/// The Skia these tests were built against carries
-/// `containers/skia-triangulation-tolerance.patch`, so that a build from an
-/// unpatched tree fails here by name rather than only by the pixels above.
-/// Skipped where no source tree is named -- on Windows, which builds against
-/// rust-skia's prebuilt Skia, and under `just use-local-skia`.
+/// This repository's builds compile the tree `scripts/skia-source.mjs`
+/// prepared, which carries `containers/skia-triangulation-tolerance.patch` on
+/// every platform, and name it in `SKIA_SOURCE_DIR`: such a build from an
+/// unpatched tree fails here by name rather than only by the pixels above. A
+/// build that names no tree compiles crates.io's Skia, which does not carry
+/// it, and `build.rs` must say so, or the tests above would hold it to pixels
+/// it cannot draw.
 #[test]
-fn the_skia_built_from_carries_the_triangulation_patch() {
-    let Some(root) = option_env!("SKIA_SOURCE_DIR") else {
-        eprintln!("skipped: no SKIA_SOURCE_DIR named a Skia source tree");
-        return;
-    };
-    let path = Path::new(root).join(PATCHED_FILE);
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    assert!(
-        source.contains(PATCHED_MARKER),
-        "{} lacks the triangulation patch",
-        path.display()
+fn a_build_carries_the_triangulation_patch_where_it_names_a_patched_tree() {
+    assert_eq!(
+        cfg!(meo_triangulation_tolerance),
+        option_env!("SKIA_SOURCE_DIR").is_some(),
+        "cfg(meo_triangulation_tolerance) against SKIA_SOURCE_DIR {:?}",
+        option_env!("SKIA_SOURCE_DIR"),
     );
 }
