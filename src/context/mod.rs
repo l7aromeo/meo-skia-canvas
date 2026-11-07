@@ -7085,8 +7085,8 @@ mod text_reach_tests {
     use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
     use crate::{
         node::typography::{
-            MATCH_IGNORES_STROKE, REACH_BOUND, REACH_INSET, REACHED_FAMILIES,
-            ReachBound, forget_laid_out,
+            FONT_BOX_FLOOR, MATCH_IGNORES_STROKE, REACH_BOUND, REACH_INSET,
+            REACHED_FAMILIES, ReachBound, forget_laid_out,
         },
         prelude::*,
     };
@@ -7794,6 +7794,41 @@ mod text_reach_tests {
             vec![("cpu drawn at 0.5", 1.0)],
             "a pixel past with no margin"
         );
+    }
+
+    #[test]
+    fn the_font_box_widens_a_reach_only_where_it_is_kept() {
+        // A run's reach takes in its font's declared box only where the
+        // sweep has not been played without it -- see `keeps_font_box`.
+        // Helvetica's box reaches far past "Ag": on macOS the reach is the
+        // glyphs' own boxes and lies inside the one with the font's box.
+        let scene = Scene {
+            font: "Helvetica",
+            filter: "blur(3px)",
+            ..BASE
+        };
+        if !resolves(scene.font) {
+            return;
+        }
+        forget_laid_out();
+        let own = reached(&scene).expect("a reach");
+        FONT_BOX_FLOOR.set(true);
+        forget_laid_out();
+        let boxed = reached(&scene).expect("a reach");
+        FONT_BOX_FLOOR.set(false);
+        forget_laid_out();
+        eprintln!(
+            "own {own:?}, {} wide; with the font's box {boxed:?}, {} wide",
+            own.width(),
+            boxed.width()
+        );
+        let mut joined = own;
+        joined.join(boxed);
+        assert_eq!(joined, boxed, "the font's box holds the glyphs' own");
+        match cfg!(target_os = "macos") {
+            true => assert!(own.width() < boxed.width() / 2.0, "{own:?}"),
+            false => assert_eq!(own, boxed),
+        }
     }
 
     /// The reach of each of `scenes`, drawn in turn on fresh canvases that

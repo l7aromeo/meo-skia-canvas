@@ -204,26 +204,26 @@ fn keeps_text_reach() -> bool {
 /// kept, at densities 1 to 3 and drawn into another canvas at 0.5 and 1.5.
 ///
 /// - On CoreText, in Oswald, Helvetica, Times New Roman, Zapfino, Apple Color
-///   Emoji and Monoton: on the CPU raster 98 of 25,600 playbacks inked past the
-///   reach with no margin, and on Metal 92 of 25,600, each by at most 1.29
-///   pixels.
+///   Emoji and Monoton, with each glyph's own box and not the font's -- see
+///   `typography::keeps_font_box`: on the CPU raster 2,558 of 25,600 playbacks
+///   inked past the reach with no margin, and on Metal 2,510 of 25,600, each by
+///   at most 1.73 pixels: Helvetica's 40px "fj Wq", scaled 1.7, kept and drawn
+///   at 0.5.
 /// - On FreeType, on the Linux runner's CPU raster, in Oswald, DejaVu Sans,
-///   Noto Color Emoji and Monoton, 142 of 16,640 did, by at most 1.70: DejaVu
-///   Sans's 13px "fj Wq", scaled 1.7 and stroked 40, at density 1. The runner's
-///   Vulkan device plays the sweep a test run plays, not the full one.
+///   Noto Color Emoji and Monoton, with the font's box as well, 142 of 16,640
+///   did, by at most 1.70: DejaVu Sans's 13px "fj Wq", scaled 1.7 and stroked
+///   40, at density 1. The runner's Vulkan device plays the sweep a test run
+///   plays, not the full one.
 ///
 /// Two pixels, the smallest whole number at or above the worst measured,
-/// 1.70. What a reading measures is the ink's whole-pixel edge less the
+/// 1.73. What a reading measures is the ink's whole-pixel edge less the
 /// reach's own, `ceil(reach + s) - reach`, where `s` is how far the ink truly
 /// spills past the reach, so a reading of `o` says only `o - 1 < s <= o`; and
 /// a pixel is cut past `ceil(reach + HINTED_INK_DRIFT)`, so every phase of the
-/// reach against the pixel grid is held exactly when `s` is within this. One
-/// pixel would hold the 1.29 on CoreText at every phase -- moved through 64
-/// phases to a whole-pixel reach edge it inked no further, so no test here
-/// can hold such an edge with an overshoot between one pixel and two -- but
-/// FreeType's 1.70 bounds its spill only by 1.70, and its phases could not be
-/// swept on this machine; no reading measured needs more than one. The worst on
-/// each are strokes whose join half their width bounds exactly: the stroke's
+/// reach against the pixel grid is held exactly when `s` is within this. A
+/// reach shrunk by 1.1 pixels on every side fails the CoreText sweep, 15,686
+/// playbacks inking past it by up to 7. The worst with the font's box were
+/// strokes whose join half their width bounds exactly: the stroke's
 /// anti-aliased fringe. On CoreText that case is held by
 /// `a_wide_round_stroke_inks_a_pixel_past_its_reach`.
 pub(crate) const HINTED_INK_DRIFT: f32 = 2.0;

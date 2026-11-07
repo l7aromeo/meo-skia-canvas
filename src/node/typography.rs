@@ -730,10 +730,8 @@ impl RunPaint {
     /// box widened as far as `paint`'s stroke can reach, or for a glyph with
     /// no outline, a bitmap or colour emoji, the box `Font::get_bounds`
     /// reports -- at its position and through the run's shear, as
-    /// [`sheared_bounds`] takes them, and the run's blob's bounds, which for
-    /// a positioned run are the box the font declares around every glyph. A
-    /// font's declared box need not hold its ink, so it is not taken alone;
-    /// it stays as a floor under a glyph whose box is empty and inks.
+    /// [`sheared_bounds`] takes them, and the run's blob's bounds, which
+    /// [`Self::place`] takes in where [`keeps_font_box`] says.
     ///
     /// Each glyph's box is kept rather than a run's union of them, so that
     /// [`Self::place`] sums each with the anchor as the boxes were summed
@@ -803,7 +801,9 @@ impl RunPaint {
                 for glyph in &inks.glyphs {
                     all.join(glyph.with_offset(at));
                 }
-                all.join(inks.blob.with_offset(at));
+                if keeps_font_box() {
+                    all.join(inks.blob.with_offset(at));
+                }
                 all
             },
         );
@@ -1008,7 +1008,27 @@ struct Inks {
 #[derive(Clone, Debug)]
 struct RunInks {
     glyphs: Vec<Rect>,
+    /// The blob's bounds, which for a positioned run are the box the font
+    /// declares around every glyph -- see [`keeps_font_box`].
     blob: Rect,
+}
+
+/// Whether a run's reach takes in the box its font declares around every
+/// glyph, as well as each glyph's own box.
+///
+/// Not where the reach sweep -- `text_in_a_chain_is_bounded_by_all_it_inks`
+/// with TEXT_REACH_SWEEP=full -- has been played without it: on CoreText each
+/// glyph's own box holds the ink within `layer::HINTED_INK_DRIFT`, and the
+/// font's box only widened what a blurred run reads, zeroes and blurs --
+/// Helvetica's, from 45.6 pixels across 40px "Ag" to 122.5. FreeType's and
+/// DirectWrite's sweeps were measured with it, and keep it until they are
+/// played without it.
+fn keeps_font_box() -> bool {
+    #[cfg(test)]
+    if FONT_BOX_FLOOR.get() {
+        return true;
+    }
+    !cfg!(target_os = "macos")
 }
 
 /// How many paints a kept run keeps blobs for: a shadowed run is drawn in
@@ -1351,6 +1371,10 @@ thread_local! {
     /// inks kept beside them must fail under it.
     pub(crate) static MATCH_IGNORES_STROKE: Cell<bool> =
         const { Cell::new(false) };
+    /// Whether a run's reach takes in the box its font declares around
+    /// every glyph wherever it is drawn -- see [`keeps_font_box`]: for a test
+    /// to hold the reach to what that box adds.
+    pub(crate) static FONT_BOX_FLOOR: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The mutants of [`glyph_boxes`] the reach sweep must refuse, so that a
