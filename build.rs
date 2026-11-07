@@ -42,7 +42,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 5] = [
+const SKIA_PATCHES: [SkiaPatch; 6] = [
     // `containers/skia-atlas-size.patch`: Ganesh's path atlas capped at 512 by
     // 512, where an atlas row of 512 or more can move a path's coverage.
     SkiaPatch {
@@ -81,6 +81,14 @@ const SKIA_PATCHES: [SkiaPatch; 5] = [
         cfg: "meo_transformed_mask_reuse",
         file: "src/text/gpu/SubRunContainer.cpp",
         marker: "fMadeFor",
+    },
+    // `containers/skia-exact-blend-division.patch`: the CPU raster's
+    // colour-dodge, colour-burn, hue, saturation, color and luminosity stages
+    // divide with `/` rather than through a SIMD reciprocal estimate.
+    SkiaPatch {
+        cfg: "meo_exact_blend_division",
+        file: "src/opts/SkRasterPipeline_opts.h",
+        marker: "(d*sa) / (sa - s)",
     },
 ];
 

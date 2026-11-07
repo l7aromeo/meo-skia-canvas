@@ -244,6 +244,26 @@ const TRANSFORMED_MASK_REUSE = join(
   "skia-transformed-mask-reuse.patch",
 );
 
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test the_dividing_blend_modes_draw_their_formulas_with_exact_division against crates.io's Skia, as the crates.io publish runs it; it holds that build to bytes off the exact quotient, and fails there once these stages divide exactly
+//
+// The CPU raster's colour-dodge, colour-burn, hue, saturation, color and
+// luminosity stages (src/opts/SkRasterPipeline_opts.h) divide through
+// `rcp_fast`, which outside the scalar and SSE2 builds is the instruction's
+// reciprocal estimate: `_mm256_rcp_ps` at the AVX2 level, `_mm512_rcp14_ps`
+// at AVX-512, NEON's estimate and one refinement step on arm64.
+// `SkGraphics::Init` moves an x86 machine onto its widest level, so the same
+// page drew a level apart in places on an AMD EPYC with AVX-512 and one
+// without (#642). The patch divides with `/`, correctly rounded at every
+// level. Skia builds with `-ffp-contract=off`, and an explicit `mad` is a
+// fused multiply-add at both the AVX2 and the AVX-512 level, so every other
+// operation in these stages is the same correctly rounded one at each level
+// too, and the bytes are the same.
+const EXACT_BLEND_DIVISION = join(
+  "containers",
+  "skia-exact-blend-division.patch",
+);
+
 export const PATCHES = {
   darwin: [
     METAL_UNTIMED_COMPILE,
@@ -255,6 +275,7 @@ export const PATCHES = {
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
+    EXACT_BLEND_DIVISION,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -279,6 +300,7 @@ export const PATCHES = {
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
+    EXACT_BLEND_DIVISION,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
@@ -292,6 +314,7 @@ export const PATCHES = {
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
+    EXACT_BLEND_DIVISION,
   ],
 };
 

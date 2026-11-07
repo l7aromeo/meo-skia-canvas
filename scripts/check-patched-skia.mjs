@@ -150,6 +150,15 @@ const TRANSFORMED_MASK_REUSE = {
   ...buildRsPatch("meo_transformed_mask_reuse"),
 };
 
+/// containers/skia-exact-blend-division.patch, on every platform. It patches
+/// a header, which ninja never compiles on its own, so the build is held to
+/// `src/core/SkOpts.cpp`, which includes it and which every build compiles.
+const EXACT_BLEND_DIVISION = {
+  patch: "containers/skia-exact-blend-division.patch",
+  ...buildRsPatch("meo_exact_blend_division"),
+  unit: "src/core/SkOpts.cpp",
+};
+
 /// Each file a patch for the platform changes, under Skia's source root, with
 /// what only the patched file contains, and the patch that puts it there.
 /// `just check-skia-patches` refuses a patch in `PATCHES` that is neither
@@ -168,6 +177,7 @@ export const PATCHED = {
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
+    EXACT_BLEND_DIVISION,
   ],
   linux: [
     ATLAS_SIZE,
@@ -177,6 +187,7 @@ export const PATCHED = {
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
+    EXACT_BLEND_DIVISION,
   ],
   win32: [
     ATLAS_SIZE,
@@ -190,6 +201,7 @@ export const PATCHED = {
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
+    EXACT_BLEND_DIVISION,
   ],
 };
 
@@ -201,6 +213,14 @@ export const UNVERIFIED = {
   "containers/rust-skia-graphite-bindings.patch":
     "it changes rust-skia's bindings rather than Skia, and `cfg(meo_graphite)` is what says whether a build took it",
 };
+
+/**
+ * The source ninja compiles for `patch`: the patched file, or for a patched
+ * header the source the entry names as its `unit`, which includes it.
+ */
+export function unitOf({ file, unit }) {
+  return unit ?? file;
+}
 
 /**
  * The ninja line that names `file` compiled, capturing the path it gave: with
@@ -283,13 +303,18 @@ export function refusal(output, patched) {
   if (output.includes("DOWNLOAD AND INSTALL"))
     return "skia-bindings tried to download prebuilt Skia";
   const ninja = ninjaDir(output);
-  for (const { file, marker } of applicable(patched, output)) {
-    const compiled = output.match(compiledLine(file))?.[1];
-    if (!compiled) return `ninja did not compile ${file}`;
+  for (const patch of applicable(patched, output)) {
+    const { file, marker } = patch;
+    const unit = unitOf(patch);
+    const compiled = output.match(compiledLine(unit))?.[1];
+    if (!compiled) return `ninja did not compile ${unit}`;
     if (!ninja) return "the output does not say where ninja ran";
+    // The patched file in the tree the unit was compiled from: the unit's
+    // own path, or a header's beside it under the same source root.
+    const source = compiled.slice(0, compiled.length - unit.length) + file;
     // `/` resolves on every platform, where `\` is a separator on Windows
     // alone.
-    const path = resolve(ninja, compiled.replaceAll("\\", "/"));
+    const path = resolve(ninja, source.replaceAll("\\", "/"));
     if (!existsSync(path)) return `the compiled ${path} is gone`;
     if (!readFileSync(path, "utf8").includes(marker))
       return `${path} is not the patched source`;
@@ -418,6 +443,8 @@ const COMPILED_WITH = {
   "modules/svg/src/SkSVGText.cpp": null,
   "src/core/SkFontMgr.cpp": null,
   "src/ports/SkTypeface_win_dw.cpp": null,
+  "src/core/SkOpts.cpp": null,
+  "src/opts/SkRasterPipeline_opts.h": null,
 };
 
 /** The self-test's cases for one platform's `patched` list, under `root`. */
@@ -431,7 +458,8 @@ function cases(root, patched) {
     "STARTING OFFLINE BUILD",
     `ninja: Entering directory \`${ninja}'`,
     ...patched.map(
-      ({ file }, i) => `[${i + 1}/${patched.length}] compile ${relative(file)}`,
+      (patch, i) =>
+        `[${i + 1}/${patched.length}] compile ${relative(unitOf(patch))}`,
     ),
   ].join("\n");
   const crlf = good.replaceAll("\n", "\r\n");
@@ -448,8 +476,8 @@ function cases(root, patched) {
   // A build whose gn arguments are `args`, which compiles the patched files
   // `COMPILED_WITH` says a build with those backends compiles.
   const built = (args, backends) => {
-    const compiled = patched.filter(({ file }) => {
-      const backend = COMPILED_WITH[file];
+    const compiled = patched.filter((patch) => {
+      const backend = COMPILED_WITH[unitOf(patch)];
       return backend === null || backends.includes(backend);
     });
     const text = [
@@ -457,15 +485,16 @@ function cases(root, patched) {
       `Skia args: is_debug=false ${args} skia_enable_pdf=true`,
       `ninja: Entering directory \`${ninja}'`,
       ...compiled.map(
-        ({ file }, i) => `[${i + 1}/0] compile ${relative(file)}`,
+        (patch, i) => `[${i + 1}/0] compile ${relative(unitOf(patch))}`,
       ),
     ].join("\n");
     return { compiled, text };
   };
-  const without = (text, file) =>
+  // `text` without the line compiling `patch`'s unit.
+  const without = (text, patch) =>
     text
       .split("\n")
-      .filter((line) => !line.endsWith(relative(file)))
+      .filter((line) => !line.endsWith(relative(unitOf(patch))))
       .join("\n");
   const graphite = built(`${NO_GANESH} ${GRAPHITE}`, ["graphite", "gpu"]);
   const gpuless = built(`${NO_GANESH} skia_enable_graphite=false`, []);
@@ -484,11 +513,11 @@ function cases(root, patched) {
       false,
       `a build with Graphite and no Ganesh of an unpatched ${file}`,
     ]),
-    ...graphite.compiled.map(({ file }) => [
+    ...graphite.compiled.map((patch) => [
       files,
-      without(graphite.text, file),
+      without(graphite.text, patch),
       false,
-      `a build with Graphite and no Ganesh that did not compile ${file}`,
+      `a build with Graphite and no Ganesh that did not compile ${unitOf(patch)}`,
     ]),
     [files, gpuless.text, true, "a build with no GPU backend"],
     ...gpuless.compiled.map(({ file }) => [
@@ -497,11 +526,11 @@ function cases(root, patched) {
       false,
       `a build with no GPU backend of an unpatched ${file}`,
     ]),
-    ...gpuless.compiled.map(({ file }) => [
+    ...gpuless.compiled.map((patch) => [
       files,
-      without(gpuless.text, file),
+      without(gpuless.text, patch),
       false,
-      `a build with no GPU backend that did not compile ${file}`,
+      `a build with no GPU backend that did not compile ${unitOf(patch)}`,
     ]),
     [files, crlf, true, "an offline build with CRLF line ends"],
     [files, backslashed, true, "an offline build naming files with `\\`"],
@@ -523,14 +552,11 @@ function cases(root, patched) {
       false,
       `an offline build of an unpatched ${file}`,
     ]),
-    ...patched.map(({ file }) => [
+    ...patched.map((patch) => [
       files,
-      good
-        .split("\n")
-        .filter((line) => !line.endsWith(relative(file)))
-        .join("\n"),
+      without(good, patch),
       false,
-      `no ${file} compiled`,
+      `no ${unitOf(patch)} compiled`,
     ]),
     [
       files,
