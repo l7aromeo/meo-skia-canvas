@@ -132,24 +132,92 @@ fn class(step: i64) -> i64 {
         + (1..=within).filter(|&step| turns_at(step)).count() as i64
 }
 
-/// Each glyph's placement class -- see [`class`] -- less the classes of
-/// `origin`, the whole pixels of the run's origin: alike for two placements
-/// of a run exactly where each glyph's moved by the whole pixels its origin
-/// did and lies in the class it lay in.
-fn classes(eighths: &[[i64; 2]], origin: (i32, i32)) -> Arc<[[i64; 2]]> {
-    let per_pixel = turns_per_pixel();
-    let origin = [origin.0, origin.1].map(|whole| i64::from(whole) * per_pixel);
-    eighths
-        .iter()
-        .map(|glyph| {
-            let [x, y] = [0, 1].map(|k| class(glyph[k]) - origin[k]);
-            #[cfg(test)]
-            if RULE.get() == Rule::AcrossOnly {
-                return [x, 0];
+/// How many glyphs' classes [`Classes`] holds without an allocation: a
+/// word's worth, which most runs a canvas draws are.
+const INLINE_GLYPHS: usize = 8;
+
+/// Each glyph's placement class -- see [`class`] -- less the classes of the
+/// whole pixels of the run's origin: alike for two placements of a run
+/// exactly where each glyph moved by the whole pixels its origin did and
+/// lies in the class it lay in. Held inline for a run of up to
+/// [`INLINE_GLYPHS`] glyphs, so that asking for a kept run allocates
+/// nothing; compared and hashed as the classes it holds, however held.
+#[derive(Clone, Debug)]
+pub(crate) enum Classes {
+    Inline(usize, [[i64; 2]; INLINE_GLYPHS]),
+    Spilled(Arc<[[i64; 2]]>),
+}
+
+impl Classes {
+    fn as_slice(&self) -> &[[i64; 2]] {
+        match self {
+            Classes::Inline(len, glyphs) => &glyphs[..*len],
+            Classes::Spilled(glyphs) => glyphs,
+        }
+    }
+}
+
+impl PartialEq for Classes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for Classes {}
+
+impl Hash for Classes {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
+/// [`Classes`] as they are worked out, glyph by glyph, relative to the whole
+/// pixels of a run's origin.
+struct ClassesOf {
+    origin: [i64; 2],
+    inline: [[i64; 2]; INLINE_GLYPHS],
+    len: usize,
+    spilled: Vec<[i64; 2]>,
+}
+
+impl ClassesOf {
+    fn new(origin: (i32, i32)) -> Self {
+        let per_pixel = turns_per_pixel();
+        Self {
+            origin: [origin.0, origin.1]
+                .map(|whole| i64::from(whole) * per_pixel),
+            inline: [[0; 2]; INLINE_GLYPHS],
+            len: 0,
+            spilled: Vec::new(),
+        }
+    }
+
+    /// Adds a glyph lying `steps` [`PLACEMENT_STEPS`]ths of a pixel past the
+    /// device's origin along each axis, floored.
+    fn push(&mut self, steps: [i64; 2]) {
+        let [x, y] = [0, 1].map(|k| class(steps[k]) - self.origin[k]);
+        #[cfg(test)]
+        let y = if RULE.get() == Rule::AcrossOnly { 0 } else { y };
+        match self.len < INLINE_GLYPHS && self.spilled.is_empty() {
+            true => {
+                self.inline[self.len] = [x, y];
+                self.len += 1;
             }
-            [x, y]
-        })
-        .collect()
+            false => {
+                if self.spilled.is_empty() {
+                    self.spilled.extend_from_slice(&self.inline[..self.len]);
+                }
+                self.spilled.push([x, y]);
+            }
+        }
+    }
+
+    fn done(self) -> Classes {
+        match self.spilled.is_empty() {
+            true => Classes::Inline(self.len, self.inline),
+            false => Classes::Spilled(self.spilled.into()),
+        }
+    }
 }
 
 /// How far Skia's f32 sums of a glyph's position can fall from the exact
@@ -183,17 +251,19 @@ fn slack(largest: f64) -> f64 {
     POSITION_SLACK * largest + PHASE_SLACK
 }
 
-/// Each glyph's position on the device in [`PLACEMENT_STEPS`]ths of a pixel,
-/// floored, for `kept` drawn under `to_picture`, where every glyph lies
-/// further than Skia's sums can err from a step its placement turns at -- see
-/// [`turns_at`] -- and is drawn as a mask; `None` otherwise, for the run to be
-/// compared instead. `offset` is how far, at most, the plane's origin lies from
-/// the device's along each axis: Skia's sums run in the plane's pixels.
-fn eighths(
+/// Each glyph's placement class relative to `origin`, the whole pixels of
+/// the run's origin -- see [`Classes`] -- for `kept` drawn under
+/// `to_picture`, where every glyph lies further than Skia's sums can err
+/// from a step its placement turns at -- see [`turns_at`] -- and is drawn as
+/// a mask; `None` otherwise, for the run to be compared instead. `offset` is
+/// how far, at most, the plane's origin lies from the device's along each
+/// axis: Skia's sums run in the plane's pixels.
+fn placement(
     kept: &Kept,
     to_picture: &Matrix,
     offset: (u32, u32),
-) -> Option<Arc<[[i64; 2]]>> {
+    origin: (i32, i32),
+) -> Option<Classes> {
     let (outer, anchor) = (to_picture, &kept.anchor);
     if !(outer.is_scale_translate() && anchor.is_scale_translate())
         || kept.paint.hairline()
@@ -209,7 +279,7 @@ fn eighths(
     let (outer, anchor) = (axis(outer), axis(anchor));
     let scale = [outer[0].0 * anchor[0].0, outer[1].0 * anchor[1].0];
     let shift = [f64::from(offset.0), f64::from(offset.1)];
-    let mut placed = Vec::new();
+    let mut placed = ClassesOf::new(origin);
     for (font, origin, positions, shear) in kept.run.placed_runs()? {
         match shear {
             Shear::None => {}
@@ -271,13 +341,12 @@ fn eighths(
     #[cfg(test)]
     if RULE.get() == Rule::OriginOnly {
         // The run's anchor alone.
-        let origin = [0, 1].map(|k| {
+        placed.push([0, 1].map(|k| {
             let ((o_scale, o_shift), (_, a_shift)) = (outer[k], anchor[k]);
             ((o_scale * a_shift + o_shift) * PLACEMENT_STEPS).floor() as i64
-        });
-        return Some([origin].into());
+        }));
     }
-    Some(placed.into())
+    Some(placed.done())
 }
 
 /// What a draw's paint decides of the coverage a run inks: its style, its
@@ -408,13 +477,13 @@ impl Hash for RunKey {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Phase {
     /// Each glyph's placement class relative to the origin -- see
-    /// [`classes`] -- where its eighths decide its coverage: a run drawn at
-    /// any fraction in the same classes is blitted alike, so one result
+    /// [`Classes`] -- where its placement decides its coverage: a run drawn
+    /// at any fraction in the same classes is blitted alike, so one result
     /// serves every such fraction.
-    Classes(Arc<[[i64; 2]]>),
+    Classes(Classes),
     /// The sub-pixel phase of the run's origin on the device to a
-    /// [`PHASE_STEPS`]th of a pixel, where its eighths do not decide it: the
-    /// comparison in [`drawn`] decides.
+    /// [`PHASE_STEPS`]th of a pixel, where its placement does not decide it:
+    /// the comparison in [`drawn`] decides.
     Fine([u16; 2]),
 }
 
@@ -443,7 +512,7 @@ impl StoreKey for Filed {
 pub(crate) struct Placed {
     pub(crate) key: RunKey,
     pub(crate) origin: (i32, i32),
-    /// The run and where it is drawn, for [`eighths`].
+    /// The run and where it is drawn, for [`placement`].
     kept: Kept,
     /// The transform its picture is played in.
     to_picture: Matrix,
@@ -501,20 +570,32 @@ impl Placed {
     }
 
     /// What this run's result is filed under when its coverage is placed at
-    /// `at` -- the key, its phase the glyphs' classes where their eighths
-    /// decide the run's coverage, and the rectangles the coverage is worked
-    /// over, read from and inks, relative to the whole pixels of the run's
-    /// origin -- and those eighths -- see [`eighths`].
-    fn filed(&self, at: &Placement) -> (Filed, Option<Arc<[[i64; 2]]>>) {
+    /// `at` -- the key, its phase the glyphs' classes where their placement
+    /// decides the run's coverage -- see [`placement`] -- and the rectangles
+    /// the coverage is worked over, read from and inks, relative to the whole
+    /// pixels of the run's origin -- and whether it took the classes.
+    fn filed(&self, at: &Placement) -> (Filed, bool) {
         let (x, y) = self.origin;
         let relative = |r: IRect| {
             let r = r.with_offset((-x, -y));
             [r.left, r.top, r.right, r.bottom]
         };
-        let eighths = self.eighths(at);
+        // The plane starts at `drawn`, or at the region where no plane that
+        // large could be made -- see `Coverage::of`.
+        let farthest = |a: i32, b: i32| a.unsigned_abs().max(b.unsigned_abs());
+        let classes = placement(
+            &self.kept,
+            &self.to_picture,
+            (
+                farthest(at.drawn.left, at.region.left),
+                farthest(at.drawn.top, at.region.top),
+            ),
+            self.origin,
+        );
+        let classed = classes.is_some();
         let mut key = self.key.clone();
-        if let Some(eighths) = &eighths {
-            key.phase = Phase::Classes(classes(eighths, self.origin));
+        if let Some(classes) = classes {
+            key.phase = Phase::Classes(classes);
         }
         let filed = Filed {
             key,
@@ -522,23 +603,7 @@ impl Placed {
             read: relative(at.region),
             inked: relative(at.inked),
         };
-        (filed, eighths)
-    }
-
-    /// Each glyph's eighths where its coverage is placed at `at` -- see
-    /// [`eighths`].
-    fn eighths(&self, at: &Placement) -> Option<Arc<[[i64; 2]]>> {
-        // The plane starts at `drawn`, or at the region where no plane that
-        // large could be made -- see `Coverage::of`.
-        let farthest = |a: i32, b: i32| a.unsigned_abs().max(b.unsigned_abs());
-        eighths(
-            &self.kept,
-            &self.to_picture,
-            (
-                farthest(at.drawn.left, at.region.left),
-                farthest(at.drawn.top, at.region.top),
-            ),
-        )
+        (filed, classed)
     }
 }
 
@@ -550,9 +615,11 @@ pub(crate) struct Mask {
     pub(crate) outcome: Outcome,
     pub(crate) coverage: Arc<[u8]>,
     pub(crate) origin: (i32, i32),
-    /// Each glyph's eighths where the run was drawn -- see [`eighths`] --
-    /// or `None` where they do not decide its coverage.
-    pub(crate) eighths: Option<Arc<[[i64; 2]]>>,
+    /// The classes the result was filed under, where it was -- see
+    /// [`Phase::Classes`] -- kept in a build with debug assertions for
+    /// [`kept`] to hold the store to them.
+    #[cfg(debug_assertions)]
+    classes: Option<Classes>,
 }
 
 impl Stored for Mask {
@@ -634,11 +701,12 @@ fn put(key: Filed, mask: Mask) {
 }
 
 /// The result kept for `placed` at `at`, moved to where it is drawn now,
-/// where its glyphs' eighths decide its coverage -- see [`eighths`] -- and
-/// every glyph moved by the whole pixels its origin did and lies in the
-/// placement class it lay in -- see [`classes`]: composited without the
-/// run's coverage being drawn again. `None` otherwise, for the run to be
-/// drawn and compared -- see [`drawn`].
+/// where its glyphs' placement decides its coverage and every glyph moved by
+/// the whole pixels its origin did and lies in the placement class it lay in
+/// -- see [`placement`]: composited without the run's coverage being drawn
+/// again. The classes are the key's, so a result filed under them is one
+/// such. `None` otherwise, for the run to be drawn and compared -- see
+/// [`drawn`].
 ///
 /// `redraw` draws the run's coverage. Only a test build calls it, to hold
 /// what this trusts to the comparison it stands in for, unless [`SHADOWS`]
@@ -652,17 +720,21 @@ pub(crate) fn kept(
     if !MASK_CACHE.get() {
         return None;
     }
-    let (filed, now) = placed.filed(at);
-    let now = now?;
+    let (filed, classed) = placed.filed(at);
+    if !classed {
+        return None;
+    }
     #[cfg(test)]
     CLASSED.set(CLASSED.get() + 1);
     let mask = get(&filed)?;
-    let was = mask.eighths.as_deref()?;
-    // The key holds the classes, so a result found under it lay in them;
-    // asked again of what it kept, so that nothing rests on the key alone.
-    if *classes(was, mask.origin) != *classes(&now, placed.origin) {
-        return None;
-    }
+    // Found under the classes this run lies in, so filed under them: what a
+    // build without debug assertions takes from the key alone.
+    #[cfg(debug_assertions)]
+    debug_assert!(
+        matches!(&filed.key.phase, Phase::Classes(now)
+            if mask.classes.as_ref() == Some(now)),
+        "a kept result found under classes it was not filed under"
+    );
     let (x, y) = placed.origin;
     let by = (x - mask.origin.0, y - mask.origin.1);
     let outcome = mask.outcome.at(by)?;
@@ -687,7 +759,7 @@ pub(crate) fn kept(
 /// result kept for `placed` and `at` -- see [`Filed`] -- where the coverage
 /// it was blurred from is `sharp`'s to the byte, moved by the whole pixels
 /// between the two origins; otherwise `colour` of `sharp`, kept for the next
-/// draw in place of the one refused, with its glyphs' eighths for [`kept`].
+/// draw in place of the one refused, under the classes [`kept`] finds it by.
 /// A run with nowhere `placed` is coloured and not kept.
 pub(crate) fn drawn(
     placed: Option<Placed>,
@@ -703,7 +775,7 @@ pub(crate) fn drawn(
         return colour(sharp);
     };
     let (x, y) = placed.origin;
-    let (filed, eighths) = placed.filed(at);
+    let (filed, _) = placed.filed(at);
     if let Some(mask) = get(&filed) {
         let alike = *mask.coverage == *sharp.ink().0;
         let moved = alike
@@ -722,13 +794,19 @@ pub(crate) fn drawn(
     count(|masks| masks.misses += 1);
     let coverage: Arc<[u8]> = sharp.ink().0.into();
     let outcome = colour(sharp)?;
+    #[cfg(debug_assertions)]
+    let classes = match &filed.key.phase {
+        Phase::Classes(classes) => Some(classes.clone()),
+        Phase::Fine(_) => None,
+    };
     put(
         filed,
         Mask {
             outcome: outcome.clone(),
             coverage,
             origin: placed.origin,
-            eighths,
+            #[cfg(debug_assertions)]
+            classes,
         },
     );
     Some(outcome)
@@ -763,7 +841,7 @@ pub(crate) enum Rule {
     /// The halves an axis without sub-pixel positions turns at, not the
     /// odd eighths one with them does.
     HalvesOnly,
-    /// The placement classes across, not those down -- see [`classes`].
+    /// The placement classes across, not those down -- see [`Classes`].
     AcrossOnly,
     /// A kept run placed from its anchor alone, not from where its layout
     /// draws it -- see `context::drawn_from`.
@@ -809,7 +887,7 @@ thread_local! {
     /// a test sees what a build outside tests leaves undrawn.
     pub(crate) static SHADOWS: Cell<bool> = const { Cell::new(true) };
     /// How many runs [`kept`] was asked of whose glyphs' placement decides
-    /// their coverage -- see [`eighths`] -- on this thread.
+    /// their coverage -- see [`placement`] -- on this thread.
     static CLASSED: Cell<usize> = const { Cell::new(0) };
     /// What each result filed on this thread was filed under, in order.
     static FILINGS: std::cell::RefCell<Vec<Filed>> =
@@ -828,8 +906,9 @@ mod tests {
     //! whose clip cuts it otherwise is refused.
 
     use super::{
-        CLASSED, FILINGS, MASK_CACHE, MASKS, Masks, OwnRunCache, Phase, RULE,
-        Rule, SHADOWS, held, release_cached_runs,
+        CLASSED, Classes, ClassesOf, FILINGS, INLINE_GLYPHS, MASK_CACHE, MASKS,
+        Masks, OwnRunCache, Phase, RULE, Rule, SHADOWS, held,
+        release_cached_runs,
     };
     use std::cell::Cell;
 
@@ -2122,5 +2201,33 @@ mod tests {
             }
         }
         WIDE_LAYOUT.set(Layout::Left);
+    }
+
+    #[test]
+    fn a_runs_classes_are_held_whole_however_long() {
+        // Up to a word's worth inline, past it on the heap: every glyph's
+        // class kept, in order, relative to the origin's whole pixels.
+        let glyphs = |n: i64| {
+            let mut of = ClassesOf::new((3, -2));
+            (0..n).for_each(|k| of.push([24 + 9 * k, -16 + k]));
+            of.done()
+        };
+        let expected = |n: i64| {
+            (0..n)
+                .map(|k| {
+                    [
+                        super::class(24 + 9 * k) - 3 * 5,
+                        super::class(-16 + k) + 2 * 5,
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        for n in [0, 1, INLINE_GLYPHS as i64, INLINE_GLYPHS as i64 + 1, 40] {
+            let classes = glyphs(n);
+            assert_eq!(classes.as_slice(), expected(n).as_slice(), "{n}");
+            let inline = matches!(classes, Classes::Inline(..));
+            assert_eq!(inline, n <= INLINE_GLYPHS as i64, "{n}");
+        }
+        assert_eq!(super::turns_per_pixel(), 5);
     }
 }
