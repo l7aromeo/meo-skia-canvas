@@ -479,6 +479,8 @@ describe("prebuild download beside a platform package", () => {
 // on it. It looked the release up in a listing of every release, which `exec` holds to 1 MiB of
 // output and which passed that at npm-v7.0.0 -- 1,141,154 bytes -- so the release stopped with
 // ERR_CHILD_PROCESS_STDIO_MAXBUFFER, and the CLI's exit path printed nothing at all (#617).
+// `publish-npm` also runs it while the release is still a draft, so that a failure leaves nothing
+// public (#620), and GitHub's by-tag endpoint answers 404 for a draft.
 // `gh` and `npm` are stand-ins on PATH here: what `snapshot` asks of `gh`, and what it hands
 // `npm pkg set`, is the whole of what is checked, and nothing reaches the network.
 describe("prebuild snapshot", () => {
@@ -497,8 +499,10 @@ describe("prebuild snapshot", () => {
   let assets;
   let path;
 
-  // Answers what `snapshot` asks of `gh api`. A listing of every release is answered with more
-  // than the 1 MiB `exec` allows, as GitHub's is; `GH_FAIL` makes every call fail as `gh` does.
+  // Answers what `snapshot` asks of `gh`, as GitHub would. A listing of every release is answered
+  // with more than the 1 MiB `exec` allows, as GitHub's is. `GH_DRAFT` makes the release a draft,
+  // which the REST by-tag endpoint answers 404 for and `gh release view` still finds. `GH_FAIL`
+  // makes every call fail as `gh` does.
   const gh = () => `#!/usr/bin/env node
 const args = process.argv.slice(2).join(" ");
 if (process.env.GH_FAIL) {
@@ -511,7 +515,13 @@ if (args.includes("--paginate")) {
   const releases = Array.from({ length: 300 }, (_, i) => ({ id: i, tag_name: "npm-v0.0." + i, body: filler }));
   releases.push({ id: ${releaseId}, tag_name: ${JSON.stringify("TAG")} });
   write(releases);
+} else if (args.startsWith("release view " + ${JSON.stringify("TAG")} + " ") && args.includes("--json databaseId")) {
+  write({ databaseId: ${releaseId} });
 } else if (args.endsWith("/releases/tags/" + ${JSON.stringify("TAG")})) {
+  if (process.env.GH_DRAFT) {
+    process.stderr.write("gh: Not Found (HTTP 404)\\n");
+    process.exit(1);
+  }
   write({ id: ${releaseId}, tag_name: ${JSON.stringify("TAG")} });
 } else if (args.endsWith("/releases/${releaseId}/assets")) {
   write(${JSON.stringify("ASSETS")});
@@ -577,33 +587,42 @@ if (args.includes("--paginate")) {
     return { status: done.status, output: `${done.stdout}${done.stderr}` };
   };
 
+  // In this process rather than through the CLI, so that the failure, if any, arrives as the
+  // error it is rather than as an exit status. Returns the manifest handed to `npm pkg set`.
+  const snapshotHere = async (env = {}) => {
+    const { snapshot } = await import(
+      `file://${join(sandbox, "lib/prebuild.mjs")}`
+    );
+    const cwd = process.cwd();
+    const saved = { ...process.env };
+    process.chdir(sandbox);
+    Object.assign(process.env, env);
+    try {
+      await snapshot();
+    } finally {
+      process.chdir(cwd);
+      for (const key of Object.keys(env))
+        if (key in saved) process.env[key] = saved[key];
+        else delete process.env[key];
+    }
+    const args = readFileSync(npmArgs, "utf8").trim().split("\n");
+    assert.deepStrictEqual(args.slice(0, 2), ["pkg", "set"]);
+    return JSON.parse(args[2].replace(/^prebuild=/, ""));
+  };
+  const digests = () =>
+    Object.fromEntries(assets.map(({ name, digest }) => [name, digest]));
+
   test(
     "records its release's digests however long the list of releases",
     { skip },
     async () => {
-      // In this process rather than through the CLI, so that the failure, if any, arrives as
-      // the error it is rather than as an exit status.
-      const { snapshot } = await import(
-        `file://${join(sandbox, "lib/prebuild.mjs")}`
-      );
-      const cwd = process.cwd();
-      process.chdir(sandbox);
-      try {
-        await snapshot();
-      } finally {
-        process.chdir(cwd);
-      }
-      const [key, value] = readFileSync(npmArgs, "utf8").split("\n");
-      assert.strictEqual(key, "pkg");
-      assert.match(value, /^set$/);
-      const args = readFileSync(npmArgs, "utf8").trim().split("\n");
-      const manifest = JSON.parse(args[2].replace(/^prebuild=/, ""));
-      assert.deepStrictEqual(
-        manifest,
-        Object.fromEntries(assets.map(({ name, digest }) => [name, digest])),
-      );
+      assert.deepStrictEqual(await snapshotHere(), digests());
     },
   );
+
+  test("records a draft release's digests", { skip }, async () => {
+    assert.deepStrictEqual(await snapshotHere({ GH_DRAFT: "1" }), digests());
+  });
 
   // A failure anywhere in an action reaches the terminal: the exit path printed nothing, so a
   // release stopped at `snapshot` with exit status 1 and no reason.

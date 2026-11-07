@@ -5,14 +5,14 @@
 // republished so a package manager can select one declaratively. Nothing is compiled here: this
 // repackages what the release already contains.
 //
-//   node scripts/platform-package.mjs build <triplet> <staging-dir>
+//   node scripts/platform-package.mjs build <triplet> <staging-dir> <assets-dir>
 //   node scripts/platform-package.mjs matrix
 //
 
 import zlib from "zlib";
 import stream from "stream";
 import crypto from "crypto";
-import { createWriteStream } from "fs";
+import { createReadStream, createWriteStream } from "fs";
 import { mkdir, readFile, writeFile, rm } from "fs/promises";
 import { resolve } from "path";
 import { promisify } from "util";
@@ -20,17 +20,8 @@ import { createRequire } from "module";
 
 const pipeline = promisify(stream.pipeline);
 
-const PROXY_URL =
-  process.env.https_proxy ||
-  process.env.HTTPS_PROXY ||
-  process.env.http_proxy ||
-  process.env.HTTP_PROXY ||
-  process.env.npm_config_https_proxy ||
-  process.env.npm_config_proxy;
-
 const ROOT = resolve(`${import.meta.dirname}/..`);
 const PACKAGE_JSON = `${ROOT}/package.json`;
-const REPO_URL = "https://github.com/l7aromeo/meo-skia-canvas";
 
 // The canonical target table, shared with lib/binary.js so a platform can only be added in one
 // place. `os` and `cpu` are matched by every package manager; `libc` is honoured by npm, pnpm,
@@ -61,47 +52,34 @@ async function manifest() {
   return JSON.parse(await readFile(PACKAGE_JSON));
 }
 
-// Downloads and expands `<triplet>.gz`, checking it against the hash the release was snapshotted
-// with. A silent mismatch would ship a corrupt binary to every consumer on that platform, so this
-// refuses rather than warns.
-async function fetchBinary(triplet, version, expected, dest) {
-  // Imported here rather than at the top so `matrix` and `sync`, which only read targets.json,
-  // work without node_modules installed.
-  const { default: https } = await import("follow-redirects/https.js");
-  const { HttpsProxyAgent } = await import("https-proxy-agent");
-
-  // `npm-v` from 6.0.0 on, so neither channel's tag reads as the default.
-  // This URL is baked into the platform package that ships, so the tag it
-  // names has to be the one that version was released under -- which is why
-  // the 113 tags published before the change are frozen rather than renamed.
-  const url = `${REPO_URL}/releases/download/npm-v${version}/${triplet}.gz`,
-    agent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined,
+// Expands `<triplet>.gz` from `assetsDir`, checking it against the hash the release was
+// snapshotted with. A silent mismatch would ship a corrupt binary to every consumer on that
+// platform, so this refuses rather than warns -- and refuses a target with no recorded hash, since
+// nothing would then say whether the file is the one the release holds.
+//
+// Read from a directory rather than downloaded, because the release is still a draft when its
+// platform packages are published (#620), and a draft's assets are not downloadable without a
+// token that sees drafts. The workflow fetches them in a job of their own and hands them here.
+async function expandBinary(triplet, assetsDir, expected, dest) {
+  const source = resolve(assetsDir, `${triplet}.gz`),
     sha = new Hasher();
+  if (!expected)
+    throw Error(
+      `package.json records no hash for '${triplet}.gz', so the release has not been snapshotted for this version. Run \`node lib/prebuild.mjs snapshot\` and commit it first.`,
+    );
 
-  const body = await new Promise((res, rej) => {
-    https
-      .get(url, { agent }, (resp) => {
-        let { statusCode: status } = resp;
-        if (status < 200 || status >= 300) {
-          rej(
-            Error(
-              `Failed to load prebuilt binary from "${url}" (HTTP error ${status})`,
-            ),
-          );
-        } else {
-          res(resp);
-        }
-      })
-      .on("error", rej);
-  });
+  await pipeline(
+    createReadStream(source),
+    sha,
+    zlib.createGunzip(),
+    createWriteStream(dest),
+  );
 
-  await pipeline(body, sha, zlib.createGunzip(), createWriteStream(dest));
-
-  if (expected && sha.digest != expected) {
+  if (sha.digest != expected) {
     await rm(dest, { force: true });
     throw Error(
       `Prebuilt library file '${triplet}.gz' failed integrity check\n` +
-        `Downloaded: ${url}\nExpected: ${expected}\nReceived: ${sha.digest}`,
+        `Read: ${source}\nExpected: ${expected}\nReceived: ${sha.digest}`,
     );
   }
 }
@@ -109,7 +87,7 @@ async function fetchBinary(triplet, version, expected, dest) {
 // The `exports` subpath is what the loader probes. Exposing the binary under a named entry rather
 // than as the package main keeps the bare specifier unresolvable, so a half-installed package
 // fails at resolution instead of loading something unexpected.
-async function build(triplet, stagingDir) {
+async function build(triplet, stagingDir, assetsDir) {
   const target = TARGETS[triplet];
   if (!target) throw new Error(`unknown target: ${triplet}`);
 
@@ -117,10 +95,10 @@ async function build(triplet, stagingDir) {
   const dir = resolve(stagingDir, packageName(triplet));
   await mkdir(dir, { recursive: true });
 
-  await fetchBinary(
+  await expandBinary(
     triplet,
-    version,
-    prebuild[`${triplet}.gz`],
+    assetsDir,
+    prebuild?.[`${triplet}.gz`],
     `${dir}/skia.node`,
   );
 
@@ -175,21 +153,21 @@ async function sync() {
 const [cmd, ...args] = process.argv.slice(2);
 
 if (cmd === "build") {
-  const [triplet, stagingDir] = args;
-  if (!triplet || !stagingDir) {
+  const [triplet, stagingDir, assetsDir] = args;
+  if (!triplet || !stagingDir || !assetsDir) {
     console.error(
-      "usage: node scripts/platform-package.mjs build <triplet> <staging-dir>",
+      "usage: node scripts/platform-package.mjs build <triplet> <staging-dir> <assets-dir>",
     );
     process.exit(1);
   }
-  await build(triplet, stagingDir);
+  await build(triplet, stagingDir, assetsDir);
 } else if (cmd === "matrix") {
   matrix();
 } else if (cmd === "sync") {
   await sync();
 } else {
   console.error(
-    `usage: node scripts/platform-package.mjs [build <triplet> <dir> | matrix | sync]`,
+    `usage: node scripts/platform-package.mjs [build <triplet> <dir> <assets-dir> | matrix | sync]`,
   );
   process.exit(1);
 }
