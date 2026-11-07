@@ -3541,3 +3541,79 @@ describe("the font box is the first available font's own", () => {
     FontLibrary.reset();
   });
 });
+
+describe("text on the GPU draws the same whatever fonts were registered before it", () => {
+  // A draw's pixels do not depend on how many times its font was registered,
+  // nor on fonts registered under other families in between. A new face for
+  // each registration of the same bytes, and a new instance of a variable
+  // face after every registration of any font, each gave the text a typeface
+  // it had not been drawn in, and the GPU drew such glyphs a level apart in
+  // a few edge pixels: on main, 4 and 13 distinct pages of 24 for Monoton,
+  // 3 for Oswald, where a CPU canvas drew one.
+  const fs = require("node:fs");
+  const crypto = require("node:crypto");
+  const MONOTON = "tests/assets/fonts/Monoton-Regular.woff";
+  const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+  const RALEWAY = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf";
+  const FAMILY = "Drawn After Registrations";
+  const DRAWS = 24;
+
+  /** #611's draw on a fresh GPU canvas: its page as a hash, and its ink. */
+  const drawn = () => {
+    const canvas = new Canvas(600, 300);
+    canvas.gpu = true;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(2.4, 2.4);
+    ctx.font = `italic 900 96px "${FAMILY}"`;
+    ctx.fillText("N.T.E", 10, 100);
+    const { data } = ctx.getImageData(0, 0, 600, 300);
+    let inked = 0;
+    for (let i = 3; i < data.length; i += 4) if (data[i] > 0) inked++;
+    const hash = crypto.createHash("sha256").update(data).digest("hex");
+    return { hash, inked, gpu: canvas.gpu };
+  };
+
+  const why = new Canvas(1, 1).gpu ? null : "skipped: no GPU engine";
+
+  for (const [face, file] of [
+    ["Monoton, a static face,", MONOTON],
+    ["Oswald, a variable face,", OSWALD],
+  ]) {
+    for (const [between, register] of /** @type {const} */ ([
+      ["registered again from its file", () => FontLibrary.use(FAMILY, [file])],
+      [
+        "registered again from a buffer",
+        () => FontLibrary.use(FAMILY, [fs.readFileSync(file)]),
+      ],
+      [
+        "with another family registered",
+        () => FontLibrary.use("Registered Between Draws", [RALEWAY]),
+      ],
+    ])) {
+      test(
+        `${face} ${between} before each draw`,
+        { skip: why ?? false },
+        () => {
+          FontLibrary.use(FAMILY, [file]);
+          const pages = new Set();
+          let inked = 0;
+          for (let i = 0; i < DRAWS; i++) {
+            register();
+            const page = drawn();
+            assert.ok(page.gpu, "the canvas is on the GPU");
+            pages.add(page.hash);
+            inked = page.inked;
+          }
+          FontLibrary.reset();
+          // A blank page each time would be one page too.
+          assert.ok(inked > 10000, `the text drew ${inked} pixels`);
+          assert.equal(
+            pages.size,
+            1,
+            `${DRAWS} draws made ${pages.size} pages`,
+          );
+        },
+      );
+    }
+  }
+});
