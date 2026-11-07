@@ -64,8 +64,9 @@ use crate::{
     pixels::PixelColorSpace,
     started,
     typography::{
-        Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, RunPaint,
-        Spacing, TextExtents, TypesetInputs, Typesetter, paragraph_style,
+        Baseline, DecorationStyle, DrawnRun, DrawnText, FontSpec, PendingInk,
+        RunPaint, Spacing, TextExtents, TypesetInputs, Typesetter,
+        paragraph_style,
     },
     utils::*,
 };
@@ -73,9 +74,9 @@ use chain::{Step, canvas_reach};
 use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, CoverageRun, Entries, ExactColour, Group, Layer,
-    LayerRec, Replay, coverage_files, holds_a_cut, holds_a_pair,
-    reach_the_clip,
+    BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
+    Entries, ExactColour, Group, Layer, LayerRec, Replay, coverage_files,
+    holds_a_cut, holds_a_pair, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use run_mask::Kept;
@@ -1653,7 +1654,34 @@ impl Context2D {
             false => paint,
             true => exact.unwrap_or(paint),
         };
+        // A kept run is filed as the draw it is, and recorded when a target
+        // first plays it -- see `layer::DeferredPicture` -- with what it can
+        // ink worked out now: in the paint its pixels are recorded in, and on
+        // a page that keeps a recording for each kind of target in its own
+        // paint for a document too, the reach the two join to.
+        let deferred = text.and_then(|text| text.defer).and_then(|defer| {
+            let (pixels, mut reach) = defer(&recorded(pixels_paint))?;
+            let document = match dual {
+                false => None,
+                true => {
+                    let (document, document_reach) = defer(&recorded(paint))?;
+                    reach = reach.zip(document_reach).map(|(mut a, b)| {
+                        a.join(b);
+                        a
+                    });
+                    Some(document)
+                }
+            };
+            let deferred = Arc::new(DeferredPicture::new(
+                pixels,
+                document,
+                bounds,
+                self.state.matrix,
+            ));
+            Some((Layer::Deferred(deferred), reach))
+        });
         let (entry, reach) = match dual {
+            _ if deferred.is_some() => deferred,
             false => record(paint)
                 .map(|(picture, reach)| (Layer::Picture(picture), reach)),
             true => record(exact.unwrap_or(paint)).zip(record(paint)).map(
@@ -1672,14 +1700,22 @@ impl Context2D {
         // A run of text in one flat colour that the coverage route could
         // play is drawn once more, in its colour opaque, through the paint
         // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
-        // the paint the run's pixels were just recorded in, as it is for an
-        // opaque colour placed on the page's bytes, the same calls would
-        // record the same picture, and the run's own is taken. A run naming
+        // the paint the run's pixels are recorded in, as it is for an opaque
+        // colour placed on the page's bytes, the same calls would record the
+        // same picture, and the run's own is taken -- recorded when first
+        // played where the run's is. A run naming
         // a line colour of its own is drawn in two colours, and keeps the
         // chain.
         let pixels = match &entry {
-            Some(Layer::Picture(picture)) => Some(picture),
-            Some(Layer::Targeted(pictures)) => Some(&pictures.0),
+            Some(Layer::Picture(picture)) => {
+                Some(CoveragePicture::Recorded(picture.clone()))
+            }
+            Some(Layer::Targeted(pictures)) => {
+                Some(CoveragePicture::Recorded(pictures.0.clone()))
+            }
+            Some(Layer::Deferred(deferred)) => {
+                Some(CoveragePicture::Deferred(Arc::clone(deferred)))
+            }
             _ => None,
         };
         let coverage = match exact {
@@ -1709,9 +1745,28 @@ impl Context2D {
                                 #[cfg(test)]
                                 SHARED_COVERAGE_PICTURES
                                     .set(SHARED_COVERAGE_PICTURES.get() + 1);
-                                Some(picture.clone())
+                                Some(picture)
                             }
-                            None => record(&opaque).map(|(picture, _)| picture),
+                            // Its own, recorded when first played where the
+                            // run is kept, as the run's pixels are.
+                            None => match text
+                                .and_then(|text| text.defer)
+                                .and_then(|defer| defer(&recorded(&opaque)))
+                            {
+                                Some((drawn, _)) => {
+                                    Some(CoveragePicture::Deferred(Arc::new(
+                                        DeferredPicture::new(
+                                            drawn,
+                                            None,
+                                            bounds,
+                                            self.state.matrix,
+                                        ),
+                                    )))
+                                }
+                                None => record(&opaque).map(|(picture, _)| {
+                                    CoveragePicture::Recorded(picture)
+                                }),
+                            },
                         };
                         picture.map(|picture| {
                             Arc::new(CoverageRun {
@@ -3432,6 +3487,38 @@ impl Context2D {
             // which draw what `Paragraph::paint` does.
             let reached = Cell::new(None);
             let chained = self.draw_chain(true).is_some();
+            // A kept run is drawn when a target first plays it, from the
+            // blobs it keeps for the paint -- see `layer::DeferredPicture` --
+            // as the draw below would have drawn it: at its offset, not
+            // condensed, and answering what it can ink as it does.
+            let defer = |paint: &Paint| {
+                let kept = kept.as_ref()?;
+                #[cfg(test)]
+                if !DEFERS.get()
+                    || PAINTER_OVERRIDE.get() == Some(Painter::Paragraph)
+                {
+                    return None;
+                }
+                if kept.condensation() != 1.0 {
+                    return None;
+                }
+                let (drawn, reach) = kept.deferred(
+                    origin + kept.offset(),
+                    paint,
+                    global_alpha,
+                    faint,
+                )?;
+                // The draw is recorded under the transform alone, which maps
+                // what it can ink as the recording canvas would.
+                let reach =
+                    reach.map(|reach| self.state.matrix.map_rect(reach).0);
+                #[cfg(test)]
+                if reach.is_some() {
+                    TEXT_REACHED.set(reach);
+                }
+                reached.set(reach);
+                Some((drawn, reach))
+            };
             self.render_to_canvas(
                 &paint,
                 dyed,
@@ -3442,6 +3529,7 @@ impl Context2D {
                     reached: &reached,
                     kept: kept.as_ref().map(|kept| kept.drawn()),
                     at: origin,
+                    defer: Some(&defer),
                 }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
@@ -3940,7 +4028,17 @@ pub struct TextRun<'a> {
     pub kept: Option<Arc<RunPaint>>,
     /// Where the run is drawn, in the canvas's units under its transform.
     pub at: Point,
+    /// The kept run's draw in a paint, to be recorded when a target first
+    /// plays it, and what it can ink, in the units of the canvas it draws
+    /// on -- see `layer::DeferredPicture`. `None`, or answering `None`,
+    /// where the run is recorded as it is drawn.
+    pub(crate) defer: Option<&'a Defer<'a>>,
 }
+
+/// What [`TextRun::defer`] asks: the kept run's draw in the paint it is
+/// handed, and what it can ink.
+pub(crate) type Defer<'a> =
+    dyn Fn(&Paint) -> Option<(DrawnText, Option<Rect>)> + 'a;
 
 /// What a draw handed to [`Context2D::render_to_canvas`] is drawing, which
 /// a run naming a line colour needs: the line holds the `globalAlpha` apart
@@ -4123,6 +4221,10 @@ thread_local! {
     /// their coverage copy.
     pub(crate) static SHARED_COVERAGE_PICTURES: Cell<usize> =
         const { Cell::new(0) };
+    /// Whether a kept run under a chain may be recorded when first played
+    /// -- see `layer::DeferredPicture` -- so that a test can hold it to the
+    /// run recorded as it is drawn.
+    pub(crate) static DEFERS: Cell<bool> = const { Cell::new(true) };
 }
 
 #[cfg(test)]

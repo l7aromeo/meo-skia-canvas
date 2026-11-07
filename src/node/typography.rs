@@ -558,7 +558,7 @@ impl LaidOut {
                 }
                 kept.push(PaintedBlobs {
                     paint: paint.clone(),
-                    blobs: self.drawn.built_blobs(),
+                    blobs: self.drawn.built_blobs().into(),
                     inks: Vec::new(),
                 });
                 kept.len() - 1
@@ -617,12 +617,48 @@ impl LaidOut {
             faint,
             &kept.blobs,
         );
-        if !reach {
-            return None;
-        }
-        // What the run can ink is kept beside the blobs it is read from,
-        // for the paint they were built in -- `inks` reads its stroke, its
-        // path effect and its mask filter -- made faint as `faint` makes it.
+        reach
+            .then(|| self.kept_reach(&mut kept, origin, paint, faint))
+            .flatten()
+    }
+
+    /// What [`Self::paint`] would draw and answer, without drawing it: the
+    /// draw, to make when a target plays it -- see [`DrawnText`] -- and what
+    /// the run can ink with its anchor at `origin`. `None` where the blobs
+    /// are already borrowed, for the caller to draw the run as it stands.
+    pub(crate) fn deferred(
+        &self,
+        origin: Point,
+        paint: &Paint,
+        global_alpha: f32,
+        faint: Faint,
+    ) -> Option<(DrawnText, Option<Rect>)> {
+        let mut kept = self.kept_blobs(paint)?;
+        let reach = self.kept_reach(&mut kept, origin, paint, faint);
+        let text = DrawnText {
+            run: Arc::clone(&self.drawn),
+            blobs: Arc::clone(&kept.blobs),
+            paint: paint.clone(),
+            at: origin,
+            global_alpha,
+            faint,
+        };
+        Some((text, reach))
+    }
+
+    /// What the run can ink with its anchor at `origin` in `paint`, made
+    /// faint as `faint` makes it, from what `kept` holds for that paint.
+    ///
+    /// Kept beside the blobs it is read from, for the paint they were built
+    /// in -- `inks` reads its stroke, its path effect and its mask filter --
+    /// for each `faint`.
+    fn kept_reach(
+        &self,
+        kept: &mut PaintedBlobs,
+        origin: Point,
+        paint: &Paint,
+        faint: Faint,
+    ) -> Option<Rect> {
         if let Some((_, inks)) = kept
             .inks
             .iter()
@@ -637,6 +673,33 @@ impl LaidOut {
             kept.inks.push((faint, inks));
         }
         reach
+    }
+}
+
+/// A kept run's draw in one paint at one place, held so that it can be made
+/// later, on any thread: what [`LaidOut::paint`] draws, from the blobs it
+/// kept for the paint -- see [`LaidOut::deferred`].
+#[derive(Clone, Debug)]
+pub(crate) struct DrawnText {
+    run: Arc<RunPaint>,
+    blobs: Arc<[Option<TextBlob>]>,
+    paint: Paint,
+    at: Point,
+    global_alpha: f32,
+    faint: Faint,
+}
+
+impl DrawnText {
+    /// Draws the run onto `canvas`, as [`LaidOut::paint`] would have.
+    pub(crate) fn draw(&self, canvas: &Canvas) {
+        self.run.paint_from(
+            canvas,
+            self.at,
+            &self.paint,
+            self.global_alpha,
+            self.faint,
+            &self.blobs,
+        );
     }
 }
 
@@ -973,7 +1036,7 @@ struct PaintedBlobs {
     /// shader and other effects alive, so that an address it is compared by
     /// cannot be freed and given to another.
     paint: Paint,
-    blobs: Vec<Option<TextBlob>>,
+    blobs: Arc<[Option<TextBlob>]>,
     /// What the run can ink in the paint, made faint as each [`Faint`]
     /// makes it, worked out the first time a draw asks: reading every
     /// glyph's outline each draw was a tenth of a page of blurred text.

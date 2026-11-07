@@ -10328,6 +10328,7 @@ mod tests {
                     Layer::Cut(_) => "cut",
                     Layer::Clipped(_) => "clipped",
                     Layer::Pattern(_) => "tile",
+                    Layer::Deferred(_) => "deferred",
                 })
                 .collect();
             kinds.join(" ")

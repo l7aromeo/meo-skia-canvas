@@ -567,7 +567,8 @@ fn put(key: Filed, mask: Mask) {
 /// drawn and compared -- see [`drawn`].
 ///
 /// `redraw` draws the run's coverage. Only a test build calls it, to hold
-/// what this trusts to the comparison it stands in for.
+/// what this trusts to the comparison it stands in for, unless [`SHADOWS`]
+/// is off.
 pub(crate) fn kept(
     placed: &Placed,
     at: &Placement,
@@ -591,18 +592,17 @@ pub(crate) fn kept(
     }
     let outcome = mask.outcome.at(by)?;
     #[cfg(test)]
-    {
+    if SHADOWS.get() {
         let same = redraw().is_some_and(|sharp| {
             let (ink, inked) = sharp.ink();
             sharp.region() == at.worked
                 && inked == at.inked
                 && *mask.coverage == *ink
         });
-        count(|masks| {
-            masks.skipped += 1;
-            masks.wrong += usize::from(!same);
-        });
+        count(|masks| masks.wrong += usize::from(!same));
     }
+    #[cfg(test)]
+    count(|masks| masks.skipped += 1);
     #[cfg(not(test))]
     let _ = redraw;
     Some(outcome)
@@ -725,6 +725,9 @@ thread_local! {
     /// The rule [`kept`] decides by: [`Rule::Exact`], or a mutant of it a
     /// test shows the sweep refuses.
     pub(crate) static RULE: Cell<Rule> = const { Cell::new(Rule::Exact) };
+    /// Whether [`kept`] draws again each run it trusts, to compare it: off,
+    /// a test sees what a build outside tests leaves undrawn.
+    pub(crate) static SHADOWS: Cell<bool> = const { Cell::new(true) };
 }
 
 #[cfg(test)]
@@ -739,10 +742,11 @@ mod tests {
     //! whose clip cuts it otherwise is refused.
 
     use super::{
-        MASK_CACHE, MASKS, Masks, OwnRunCache, RULE, Rule, held,
+        MASK_CACHE, MASKS, Masks, OwnRunCache, RULE, Rule, SHADOWS, held,
         release_cached_runs,
     };
     use crate::{
+        canvas::EngineKind,
         context::layer::COVERAGE_RUNS,
         path::FillRule,
         pixels::{ImageDataExport, PixelColorSpace, PixelExportOptions},
@@ -1343,6 +1347,299 @@ mod tests {
                 .count();
             assert_eq!(off, 0, "{case}: sharing moved {off} bytes");
             assert_eq!(*count > 0, shares, "{case}: shared {count}");
+        }
+    }
+
+    /// Each target a page of runs under a chain can be played for, with the
+    /// filter the runs are drawn under there.
+    const DEFERRAL_TARGETS: [(&str, &str); 13] = [
+        ("8-bit, the coverage route", "blur(3px)"),
+        ("8-bit, past the FFT's sigma", "blur(10px)"),
+        ("8-bit, a drop shadow", "drop-shadow(0 0 3px black)"),
+        ("F16", "blur(3px)"),
+        ("F32", "blur(3px)"),
+        ("Display P3", "blur(3px)"),
+        ("GPU", "blur(3px)"),
+        ("drawn into another canvas", "blur(3px)"),
+        ("PDF", "blur(3px)"),
+        ("8-bit, a colour between bytes", "blur(3px)"),
+        ("8-bit, a gradient", "blur(3px)"),
+        ("8-bit, stroked", "blur(3px)"),
+        ("8-bit, at half globalAlpha", "blur(3px)"),
+    ];
+
+    /// A colour no byte holds, which a page that keeps a recording for
+    /// pixels places on bytes in it and leaves as set in a document's -- see
+    /// `ExactColour` -- so that the run's pixels are recorded in a paint of
+    /// their own.
+    const BETWEEN_BYTES: &str = "rgb(200.4, 80.3, 30.2)";
+
+    /// What [`deferral_page`] gives a target, and how its runs fared.
+    struct Deferral {
+        /// The target's pixels, or a PDF's bytes.
+        bytes: Vec<u8>,
+        /// The pictures filed to be recorded when first played: each kept
+        /// run's, and a coverage copy of its own where the run is not drawn
+        /// in its colour opaque.
+        filed: usize,
+        /// The recordings those made when played: as pixels, and for a
+        /// document.
+        recorded: [usize; 2],
+        /// The runs the coverage route composited without drawing them --
+        /// see [`kept`].
+        skipped: usize,
+    }
+
+    /// [`RUN`] drawn four times under `filter` -- once as laid out, again
+    /// where kept, moved by whole pixels and moved by a fraction -- on the
+    /// page `target` names, with runs recorded when first played where
+    /// `defers` says, drawing nothing then where `nothing` says, and with
+    /// [`SHADOWS`] as `shadows` says. `None` for the GPU where there is none.
+    fn deferral_page(
+        target: &str,
+        filter: &str,
+        defers: bool,
+        nothing: bool,
+        shadows: bool,
+    ) -> Option<Deferral> {
+        use crate::{
+            GradientInterpolation, GradientStop, RgbaLinear, Shader,
+            context::{
+                DEFERS,
+                layer::{
+                    DEFERRED_DRAWS_NOTHING, DEFERRED_FILED, DEFERRED_WATCH,
+                },
+            },
+            export::{EncodeOptions, ImageFormat},
+            geometry::Point,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let library = FontLibrary::new();
+        library
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let _own = OwnRunCache::new();
+        let (space, depth, gpu) = match target {
+            "F16" => (PixelColorSpace::Srgb, PixelDepth::F16, false),
+            "F32" => (PixelColorSpace::Srgb, PixelDepth::F32, false),
+            "Display P3" => {
+                (PixelColorSpace::DisplayP3, PixelDepth::Uint8, false)
+            }
+            "GPU" => (PixelColorSpace::Srgb, PixelDepth::Uint8, true),
+            _ => (PixelColorSpace::Srgb, PixelDepth::Uint8, false),
+        };
+        let recorded = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+        DEFERS.set(defers);
+        DEFERRED_DRAWS_NOTHING.set(nothing);
+        DEFERRED_FILED.set(0);
+        DEFERRED_WATCH
+            .with_borrow_mut(|watch| *watch = Some(Arc::clone(&recorded)));
+        SHADOWS.set(shadows);
+        MASKS.set(Masks::default());
+        let options = CanvasOptions {
+            color_space: space,
+            color_type: depth,
+            gpu,
+            ..CanvasOptions::default()
+        };
+        let mut canvas =
+            Canvas::with_options(400.0, 300.0, options).expect("a canvas");
+        let on_gpu = canvas.engine_kind() == EngineKind::Gpu;
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(RUN.font));
+        let fill = match target.ends_with("between bytes") {
+            true => BETWEEN_BYTES,
+            false => RUN.fill,
+        };
+        ctx.set_fill_style_css(fill).expect("a colour");
+        ctx.set_stroke_style_css(fill).expect("a colour");
+        ctx.set_line_width(3.0);
+        ctx.set_filter_css(filter).expect("a filter");
+        match target {
+            "8-bit, a gradient" => ctx.set_fill_shader(
+                &Shader::linear_gradient(
+                    Point::new(100.0, 0.0),
+                    Point::new(250.0, 0.0),
+                    &[
+                        GradientStop {
+                            position: 0.0,
+                            color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                        },
+                        GradientStop {
+                            position: 1.0,
+                            color: RgbaLinear::opaque(0.0, 0.2, 1.0),
+                        },
+                    ],
+                    GradientInterpolation::default(),
+                )
+                .expect("a gradient"),
+            ),
+            "8-bit, at half globalAlpha" => ctx.set_global_alpha(0.5),
+            _ => {}
+        }
+        for (x, y) in [
+            (120.3, 90.6),
+            (120.3, 90.6),
+            (177.3, 131.6),
+            (121.05, 190.6),
+        ] {
+            match target {
+                "8-bit, stroked" => ctx.stroke_text(RUN.text, x, y, None),
+                _ => ctx.fill_text(RUN.text, x, y, None),
+            }
+        }
+        let premultiplied = ImageDataExport {
+            pixels: PixelExportOptions {
+                premultiplied: true,
+                ..PixelExportOptions::default()
+            },
+            ..ImageDataExport::default()
+        };
+        let bytes = match target {
+            _ if target.starts_with("PDF") => canvas
+                .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+                .expect("a PDF"),
+            "drawn into another canvas" => {
+                let mut outer = Canvas::with_options(
+                    400.0,
+                    300.0,
+                    CanvasOptions {
+                        gpu: false,
+                        ..CanvasOptions::default()
+                    },
+                )
+                .expect("a canvas");
+                outer.context().draw_canvas(&mut canvas, 13.0, 7.0);
+                outer
+                    .to_image_data(None, &premultiplied)
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec()
+            }
+            _ => canvas
+                .to_image_data(None, &premultiplied)
+                .expect("pixels")
+                .pixels()
+                .to_vec(),
+        };
+        let deferral = Deferral {
+            bytes,
+            filed: DEFERRED_FILED.get(),
+            recorded: recorded.each_ref().map(|n| n.load(Ordering::Relaxed)),
+            skipped: MASKS.get().skipped,
+        };
+        DEFERS.set(true);
+        DEFERRED_DRAWS_NOTHING.set(false);
+        DEFERRED_WATCH.with_borrow_mut(|watch| *watch = None);
+        SHADOWS.set(true);
+        (gpu == on_gpu).then_some(deferral)
+    }
+
+    #[test]
+    fn a_run_recorded_when_first_played_draws_as_one_recorded_where_drawn() {
+        // A kept run under a chain is recorded when a target first plays it
+        // -- see `layer::DeferredPicture`. Every target that plays it is
+        // given what it was given when the run was recorded as it was drawn,
+        // to the byte; each records a run when played; and a run that
+        // records nothing when played changes what each is given.
+        let parted = |a: &[u8], b: &[u8]| {
+            a.len().abs_diff(b.len())
+                + a.iter().zip(b).filter(|(a, b)| a != b).count()
+        };
+        for (target, filter) in DEFERRAL_TARGETS {
+            let Some(eager) = deferral_page(target, filter, false, false, true)
+            else {
+                eprintln!("{target}: no GPU here, left out");
+                continue;
+            };
+            let deferred = deferral_page(target, filter, true, false, true)
+                .expect("the same engine");
+            let nothing = deferral_page(target, filter, true, true, true)
+                .expect("the same engine");
+            let [pixels, documents] = deferred.recorded;
+            eprintln!(
+                "{target}: {} pictures filed deferred, recorded when played \
+                 {pixels} as pixels and {documents} for a document; drawing \
+                 nothing parts {} bytes",
+                deferred.filed,
+                parted(&eager.bytes, &nothing.bytes)
+            );
+            assert_eq!(
+                (eager.filed, eager.recorded),
+                (0, [0, 0]),
+                "{target}: a run deferred while told not to"
+            );
+            // The first draw lays the run out, and is not yet kept. A run at
+            // half its alpha keeps its coverage copy apart.
+            let filed = match target.ends_with("globalAlpha") {
+                true => 6,
+                false => 3,
+            };
+            assert_eq!(
+                deferred.filed, filed,
+                "{target}: pictures filed deferred"
+            );
+            // A document plays the recording made in the run's own paint,
+            // and pixels the one made in the paint placed for them: a colour
+            // between bytes, rasterized under the filter, does not show which.
+            let played = match target.starts_with("PDF") {
+                true => documents,
+                false => pixels,
+            };
+            assert!(played > 0, "{target}: no run was recorded when played");
+            assert_eq!(
+                pixels + documents,
+                played,
+                "{target}: a recording made for the other kind of target"
+            );
+            assert_eq!(
+                parted(&eager.bytes, &deferred.bytes),
+                0,
+                "{target}: deferring moved bytes"
+            );
+            assert!(
+                parted(&eager.bytes, &nothing.bytes) > 0,
+                "{target}: nothing drawn, nothing changed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_the_coverage_route_composites_as_kept_is_never_recorded() {
+        // What a test build draws again to compare is not drawn here, as
+        // outside tests. The first draw lays the run out and is recorded as
+        // drawn; the second, where it was laid out, is kept, and is recorded
+        // to draw what is kept; the third, moved by whole pixels, composites
+        // that and is never recorded; the fourth, moved by a fraction, is
+        // recorded to be drawn afresh. The same bytes either way. At half
+        // its alpha the coverage is drawn from a copy of its own, and the
+        // run's pictures, which nothing plays, are never recorded.
+        for (target, filed) in [
+            ("8-bit, the coverage route", 3),
+            ("8-bit, at half globalAlpha", 6),
+        ] {
+            let filter = "blur(3px)";
+            let page = |defers| {
+                deferral_page(target, filter, defers, false, false)
+                    .expect("a CPU page")
+            };
+            let (eager, deferred) = (page(false), page(true));
+            assert_eq!(
+                deferred.skipped, 1,
+                "{target}: runs composited as kept"
+            );
+            assert_eq!(
+                (deferred.filed, deferred.recorded),
+                (filed, [2, 0]),
+                "{target}: pictures filed deferred, and recorded when played"
+            );
+            assert_eq!(eager.bytes, deferred.bytes, "{target}");
         }
     }
 
