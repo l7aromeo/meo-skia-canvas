@@ -341,6 +341,16 @@ export function usesLocalSkia(root = ROOT) {
     readFileSync(join(root, "Cargo.toml"), "utf8"),
   );
 }
+
+/**
+ * Whether `env` names a tree for the checkout at `root`: on a platform with
+ * patches, unless it builds a local rust-skia checkout. Where it does, a
+ * build with no `SKIA_SOURCE_DIR` builds unpatched Skia, which
+ * scripts/skia-cache.mjs refuses unless asked for it.
+ */
+export function namesSourceTree(root = ROOT, platform = process.platform) {
+  return patches(platform).length > 0 && !usesLocalSkia(root);
+}
 const RUST_SKIA = "https://github.com/rust-skia/rust-skia.git";
 /// Written last, so a directory without it is a preparation that did not finish.
 const READY = ".ready";
@@ -1318,7 +1328,7 @@ if (
 
   const command = process.argv[2];
   if (command === "env") {
-    if (patches().length > 0 && !usesLocalSkia()) {
+    if (namesSourceTree()) {
       console.log(dotenvLine("SKIA_SOURCE_DIR", sourceDir()));
       // A hold that cannot be written leaves the tree as unprotected as it was
       // before holds existed, which is no reason to stop the recipe.

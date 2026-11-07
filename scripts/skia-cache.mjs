@@ -7,19 +7,74 @@
 //   node scripts/skia-cache.mjs fill [cargo feature and profile args]  build Skia once and store it
 //   node scripts/skia-cache.mjs store <out-dir> <profile> <features>  store a build that already ran
 //   node scripts/skia-cache.mjs entry [cargo feature and profile args]  the entry those args would use
+//
+// `cargo`, `fill` and `entry` refuse where `SKIA_SOURCE_DIR` names no tree
+// and `node scripts/skia-source.mjs env` would name one: skia-bindings would
+// then build against rust-skia's unpatched Skia, and every patch test would
+// expect stock Skia and pass. `SKIA_CACHE_UNPATCHED=1` asks for that build on
+// purpose. Every `just` recipe sets the variable through its dotenv command.
 import { execFileSync, spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheEnv, readArgs, store } from "./skia-binaries.mjs";
 import { PATCHED, refusal } from "./check-patched-skia.mjs";
+import { namesSourceTree } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/// The variable that asks for a build against unpatched Skia, and the one
+/// value that asks: anything else set there is a mistake, and refused.
+const UNPATCHED = "SKIA_CACHE_UNPATCHED";
+const UNPATCHED_ASKED = "1";
+
+/// What sets `SKIA_SOURCE_DIR` outside `just`, as the refusal names it.
+const SETS_SOURCE_DIR = `eval "$(node scripts/skia-source.mjs env | sed 's/^/export /')"`;
+
+/**
+ * Why a build with `env` would link Skia nobody asked for, or `null` when it
+ * would not. `namesTree` is whether this checkout names a tree at all -- see
+ * `namesSourceTree` -- and where it does not, skia-bindings' own choice is
+ * the right one.
+ */
+export function unpatchedRefusal(
+  env = process.env,
+  namesTree = namesSourceTree(),
+) {
+  const asked = env[UNPATCHED];
+  if (asked !== undefined && asked !== UNPATCHED_ASKED)
+    return `skia-cache: ${UNPATCHED} is ${JSON.stringify(asked)}; set it to ${UNPATCHED_ASKED} to build unpatched Skia, or unset it.`;
+  const dir = env.SKIA_SOURCE_DIR;
+  if (asked === UNPATCHED_ASKED)
+    return dir
+      ? `skia-cache: ${UNPATCHED}=${UNPATCHED_ASKED} asks for unpatched Skia, but SKIA_SOURCE_DIR names ${dir}. Unset one of them.`
+      : null;
+  if (dir || !namesTree) return null;
+  return [
+    `skia-cache: SKIA_SOURCE_DIR ${dir === "" ? "is empty" : "is not set"}, so skia-bindings would build against rust-skia's unpatched Skia.`,
+    `Run through \`just\`, or first: ${SETS_SOURCE_DIR}`,
+    `To build unpatched Skia on purpose, set ${UNPATCHED}=${UNPATCHED_ASKED}.`,
+  ].join("\n");
+}
+
+/**
+ * Throws `unpatchedRefusal`'s reason, and says so on stderr where a build of
+ * unpatched Skia was asked for.
+ */
+function refuseUnpatched() {
+  const why = unpatchedRefusal();
+  if (why) throw new Error(why);
+  if (process.env[UNPATCHED] === UNPATCHED_ASKED && namesSourceTree())
+    console.error(
+      `skia-cache: building unpatched Skia (${UNPATCHED}=${UNPATCHED_ASKED})`,
+    );
+}
 
 /**
  * Runs cargo with `args`, linking the cached Skia where an entry fits, and
  * says which on stderr. A miss builds as cargo always does.
  */
 function runCargo(args) {
+  refuseUnpatched();
   const toolchain = args[0]?.startsWith("+") ? [args[0]] : [];
   const rest = args.slice(toolchain.length);
   const { env, dir, why } = cacheEnv(rest);
@@ -43,6 +98,7 @@ function runCargo(args) {
  * messages.
  */
 function fill(args) {
+  refuseUnpatched();
   const read = readArgs(args);
   if (!read) throw new Error("skia-cache: fill builds for the host only");
   const env = { ...process.env };
@@ -102,6 +158,7 @@ if (main) {
         );
       storeChecked(buildDir, profile, features.split(","));
     } else if (command === "entry") {
+      refuseUnpatched();
       const { dir, why } = cacheEnv(args);
       console.log(dir ?? `none: ${why}`);
     } else {
