@@ -117,7 +117,8 @@ Everything a browser canvas does, and then:
 A canvas composites in the `PixelColorSpace` you give it and exports in it: eight spaces, sRGB,
 Display P3, Rec. 2020, HDR10 (PQ), HLG and the linear variants, read back in any of them, with the
 CSS Color 4 functions and `color-mix()`. A canvas at `PixelDepth::F16` or `F32` composites in
-float; an eight-bit canvas stores a translucent colour's exact product, rounded once.
+float; an eight-bit canvas rounds a translucent colour's product with its alpha once, and takes
+the backdrop's share at an eight-bit alpha.
 [docs/colour.md](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/colour.md) has the spaces, the formats that carry them and what each
 depth costs.
 

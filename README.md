@@ -120,7 +120,8 @@ Everything a browser canvas does, and then:
 A canvas composites in the space you name and exports in it: fifteen names across eight spaces,
 sRGB, Display P3, Rec. 2020, HDR10 (PQ), HLG and linear variants, read back in any of them, with the
 CSS Color 4 functions and `color-mix()`. A float `colorType` composites in float; an eight-bit
-canvas stores a translucent colour's exact product, rounded once.
+canvas rounds a translucent colour's product with its alpha once, and takes the backdrop's share at
+an eight-bit alpha.
 [docs/colour.md](docs/colour.md) has the spaces, the formats that carry them and what each
 `colorType` costs.
 
