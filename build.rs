@@ -23,6 +23,81 @@ fn main() {
 
     brotli_command_table();
     graphite_bindings();
+    skia_patches();
+}
+
+/// One of this repository's patches to Skia, as a build can tell whether the
+/// Skia source it compiled carries it.
+struct SkiaPatch {
+    /// The cfg turned on where it does.
+    cfg: &'static str,
+    /// The file the patch changes, under Skia's source root.
+    file: &'static str,
+    /// What only that file as the patch leaves it holds.
+    marker: &'static str,
+}
+
+/// The patches whose effect a test holds a build to, each with the cfg that
+/// says whether the build has it. `scripts/check-patched-skia.mjs` reads the
+/// file and marker of each from here rather than keeping its own, so the
+/// check a release build runs and the cfg cannot disagree, and its self-test
+/// holds each marker to its patch.
+const SKIA_PATCHES: [SkiaPatch; 3] = [
+    // `containers/skia-atlas-size.patch`: Ganesh's path atlas capped at 512 by
+    // 512, where an atlas row of 512 or more can move a path's coverage.
+    SkiaPatch {
+        cfg: "meo_atlas_size",
+        file: "src/gpu/ganesh/ops/AtlasPathRenderer.cpp",
+        marker: "fAtlasMaxSize = 512;",
+    },
+    // `containers/skia-triangulation-tolerance.patch`: a cached triangulation
+    // reused only at the tolerance it was cut for.
+    SkiaPatch {
+        cfg: "meo_triangulation_tolerance",
+        file: "src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp",
+        marker: "info->fTolerance == tol",
+    },
+    // `containers/skia-async-transfer-reuse.patch`: the asynchronous read's
+    // transfer buffer made `kDynamic`, which Skia caches, where crates.io's
+    // Skia makes it `kStream`, which Skia frees once the read lets go. Scoped
+    // by the enum's name because the unpatched file already holds a bare
+    // `kDynamic_GrAccessPattern`, in the comment the patch replaces.
+    SkiaPatch {
+        cfg: "meo_async_transfer_reuse",
+        file: "src/gpu/ganesh/SurfaceContext.cpp",
+        marker: "GrAccessPattern::kDynamic_GrAccessPattern",
+    },
+];
+
+/// Turns on each of [`SKIA_PATCHES`]'s cfgs where the Skia source this build
+/// compiled holds its marker.
+///
+/// This repository's own builds compile the patched source. A crate build
+/// compiles crates.io's, or links rust-skia's prebuilt archive, which is built
+/// from the same unpatched source and leaves no source for [`skia_source`] to
+/// name, so it gets none of them. Only tests read the cfgs: the crate draws
+/// and reads through Skia the same way on both, and what differs is what
+/// Skia does underneath.
+fn skia_patches() {
+    for patch in &SKIA_PATCHES {
+        println!("cargo:rustc-check-cfg=cfg({})", patch.cfg);
+    }
+    println!("cargo:rerun-if-env-changed=SKIA_SOURCE_DIR");
+    let Ok(skia) = skia_source() else {
+        return;
+    };
+    for patch in &SKIA_PATCHES {
+        let file = skia.join(patch.file);
+        // Named only where it exists: Cargo reruns a script on every build
+        // for a path that does not.
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue;
+        };
+        println!("cargo:rerun-if-changed={}", file.display());
+        if source.contains(patch.marker) {
+            println!("cargo:rustc-cfg={}", patch.cfg);
+        }
+    }
 }
 
 /// What this script prints where the patched Graphite bindings are in the
