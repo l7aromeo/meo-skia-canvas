@@ -51,6 +51,9 @@ fn drawn() -> Result<Option<ImageData>, Error> {
     ctx.get_image_data(0.0, 0.0, WIDTH, HEIGHT).map(Some)
 }
 
+/// What is registered before each draw, borrowing the bytes it registers.
+type Registration<'a> = Box<dyn Fn(&FontLibrary) -> Result<(), Error> + 'a>;
+
 /// How many distinct pages [`DRAWS`] draws in `file` make, with `between`
 /// registering something before each.
 fn pages(
@@ -65,11 +68,9 @@ fn pages(
         between(library)?;
         let page = drawn()?.expect("the canvas is on the GPU");
         // A blank page each time would be one page too.
-        let inked = page
-            .pixels()
-            .chunks_exact(4)
-            .filter(|pixel| pixel[3] > 0)
-            .count();
+        let (pixels, rest) = page.pixels().as_chunks::<4>();
+        assert!(rest.is_empty(), "an 8-bit page is whole RGBA pixels");
+        let inked = pixels.iter().filter(|pixel| pixel[3] > 0).count();
         assert!(inked > 10_000, "the text drew {inked} pixels");
         if !pages.contains(&page) {
             pages.push(page);
@@ -106,7 +107,7 @@ fn text_draws_the_same_whatever_fonts_were_registered_before_it()
     let raleway = std::fs::read(RALEWAY).expect("the bundled Raleway");
     for file in [MONOTON, OSWALD] {
         let again = std::fs::read(file).expect("a bundled font");
-        let cases: [(&str, Box<dyn Fn(&FontLibrary) -> Result<(), Error>>); 2] = [
+        let cases: [(&str, Registration); 2] = [
             (
                 "registered again",
                 Box::new(|library| {
