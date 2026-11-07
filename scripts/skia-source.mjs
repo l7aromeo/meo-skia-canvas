@@ -225,6 +225,25 @@ const TEXT_DISTANCE_FIELDS_OFF = join(
   "skia-text-distance-fields-off.patch",
 );
 
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw against crates.io's Skia on macOS, where Apple Color Emoji is; it holds that build to emoji drawn from the earlier scale's masks, and fails there once a transformed mask is reused only at the matrix it was made for
+//
+// A glyph with no outline -- a colour bitmap such as an emoji -- at 254
+// device pixels or more is drawn from a transformed mask, a bitmap made for
+// one matrix, and `TransformedMaskSubRun::canReuse`
+// (src/text/gpu/SubRunContainer.cpp) let a cached blob of them be drawn at
+// any other scale. With the blob cache keying such a run without its matrix,
+// emoji drawn large at one scale were drawn from those masks at every other,
+// up to 117 levels off a fresh draw. The patch reuses the masks only at the
+// scale, rotation and skew they were made for, compared exactly; translation
+// alone still reuses, and a blob only rebuilds when that matrix changes. Not
+// covered: a sub-run read back from a buffer, as a slug is, has no matrix to
+// compare and keeps the old rule. This crate makes no slugs.
+const TRANSFORMED_MASK_REUSE = join(
+  "containers",
+  "skia-transformed-mask-reuse.patch",
+);
+
 export const PATCHES = {
   darwin: [
     METAL_UNTIMED_COMPILE,
@@ -235,6 +254,7 @@ export const PATCHES = {
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -258,6 +278,7 @@ export const PATCHES = {
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
@@ -270,6 +291,7 @@ export const PATCHES = {
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
   ],
 };
 

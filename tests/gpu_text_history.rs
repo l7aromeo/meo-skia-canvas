@@ -1,23 +1,30 @@
 //! A GPU canvas draws text the same whatever the context drew before.
 //!
-//! Ganesh drew a glyph run from 162 to 324 device pixels as distance fields
-//! (`SubRunControl`, src/text/gpu/SubRunControl.cpp), in Skia M156 under the
-//! skia-bindings crate. Their coverage moves by a level or two with where in
-//! the atlas a glyph was placed, so the same `fillText` exported after other
-//! text, on this thread or another, read differently from one exported first.
-//! The blob cache also keys such a run without its matrix
-//! (`TextBlob::Key::Make`), so a path blob cached at a larger scale was drawn
-//! in place of a smaller draw's distance fields.
-//! `containers/skia-text-distance-fields-off.patch` turns distance fields off
-//! where a surface does not ask for them, which none of this crate's do: a run
-//! under 254 device pixels is then a direct mask from the scaler the CPU
-//! raster uses, the same bytes as the CPU page.
+//! Two of Ganesh's text routes made a draw's pixels depend on what came
+//! before it, in Skia M156 under the skia-bindings crate:
 //!
-//! A crate build's Skia does not carry it, and
-//! `cfg(meo_text_distance_fields_off)`, from `build.rs`, says which this
-//! build compiled. Where the patch is missing, each test holds the build to
-//! the defect instead, so the day crates.io's Skia stops showing it, the test
-//! says so.
+//! - A glyph run from 162 to 324 device pixels was drawn as distance fields
+//!   (`SubRunControl`, src/text/gpu/SubRunControl.cpp), whose coverage moves by
+//!   a level or two with where in the atlas a glyph was placed -- so the same
+//!   `fillText` exported after other text, on this thread or another, read
+//!   differently from one exported first. The blob cache also keys such a run
+//!   without its matrix (`TextBlob::Key::Make`), so a path blob cached at a
+//!   larger scale was drawn in place of a smaller draw's distance fields.
+//!   `containers/skia-text-distance-fields-off.patch` turns distance fields off
+//!   where a surface does not ask for them, which none of this crate's do: a
+//!   run under 254 device pixels is then a direct mask from the scaler the CPU
+//!   raster uses, the same bytes as the CPU page.
+//! - A glyph with no outline -- a colour bitmap such as an emoji -- at 254
+//!   device pixels or more is a transformed mask made for one matrix, and a
+//!   cached blob of them was drawn at any other scale.
+//!   `containers/skia-transformed-mask-reuse.patch` reuses one only at the
+//!   matrix it was made for.
+//!
+//! A crate build's Skia carries neither, and
+//! `cfg(meo_text_distance_fields_off)` and `cfg(meo_transformed_mask_reuse)`,
+//! from `build.rs`, say which this build compiled. Where a patch is missing,
+//! each test holds the build to the defect instead, so the day crates.io's Skia
+//! stops showing it, the test says so.
 
 use meo_skia_canvas::{
     export::{EncodeOptions, ImageFormat},
@@ -283,17 +290,69 @@ fn text_after_a_larger_draw_of_it_draws_as_a_fresh_draw() {
     }
 }
 
+/// Apple Color Emoji, a colour bitmap (`sbix`) face, is on macOS only, so
+/// elsewhere the test says it is skipped: no bundled face has bitmap glyphs.
+#[test]
+fn colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw() {
+    if !has_gpu() {
+        return;
+    }
+    if FontLibrary::new()
+        .family_details("Apple Color Emoji")
+        .is_none()
+    {
+        eprintln!("skipped: no Apple Color Emoji, a colour bitmap face");
+        return;
+    }
+    // 200px under 1.7 and 400px under 1: 340 and 400 device pixels at
+    // density 1, past the 254 where a bitmap glyph becomes a transformed
+    // mask, at every density read.
+    let worst: Vec<u8> = [(200.0, 1.7), (400.0, 1.0)]
+        .into_iter()
+        .flat_map(|(px, scale)| {
+            let scene = move || {
+                let mut canvas = Canvas::new(400.0, 200.0);
+                let ctx = canvas.context();
+                ctx.scale(scale, scale);
+                ctx.set_font(&Font::new("Apple Color Emoji", px));
+                ctx.fill_text(
+                    "\u{1F600}\u{1F680}",
+                    4.0,
+                    (200.0 / scale - 4.0).min(px),
+                    None,
+                );
+                canvas
+            };
+            [(3, 1), (1, 3)]
+                .map(|(first, then)| after_another_scale(&scene, first, then))
+        })
+        .collect();
+    if cfg!(meo_transformed_mask_reuse) {
+        assert_eq!(worst, [0, 0, 0, 0]);
+    } else {
+        assert!(
+            worst.iter().any(|&w| w > 0),
+            "crates.io's Skia drew the emoji after another scale's as \
+             afresh; it reuses a transformed mask only at its own matrix now"
+        );
+    }
+}
+
 /// This repository's builds compile the tree `scripts/skia-source.mjs`
-/// prepared, which carries the distance-field patch on every platform, and
-/// name it in `SKIA_SOURCE_DIR`; a build that names no tree compiles
-/// crates.io's Skia, which does not carry it, and `build.rs` must say so, or
-/// the tests above would hold it to pixels it cannot draw.
+/// prepared, which carries both patches on every platform, and name it in
+/// `SKIA_SOURCE_DIR`; a build that names no tree compiles crates.io's Skia,
+/// which carries neither, and `build.rs` must say so, or the tests above
+/// would hold it to pixels it cannot draw.
 #[test]
 fn a_build_carries_the_text_patches_where_it_names_a_patched_tree() {
+    let patched = option_env!("SKIA_SOURCE_DIR").is_some();
     assert_eq!(
-        cfg!(meo_text_distance_fields_off),
-        option_env!("SKIA_SOURCE_DIR").is_some(),
-        "cfg(meo_text_distance_fields_off) against SKIA_SOURCE_DIR {:?}",
+        (
+            cfg!(meo_text_distance_fields_off),
+            cfg!(meo_transformed_mask_reuse)
+        ),
+        (patched, patched),
+        "the text patches' cfgs against SKIA_SOURCE_DIR {:?}",
         option_env!("SKIA_SOURCE_DIR"),
     );
 }

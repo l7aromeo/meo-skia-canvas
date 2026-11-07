@@ -42,7 +42,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 4] = [
+const SKIA_PATCHES: [SkiaPatch; 5] = [
     // `containers/skia-atlas-size.patch`: Ganesh's path atlas capped at 512 by
     // 512, where an atlas row of 512 or more can move a path's coverage.
     SkiaPatch {
@@ -74,6 +74,13 @@ const SKIA_PATCHES: [SkiaPatch; 4] = [
         cfg: "meo_text_distance_fields_off",
         file: "src/gpu/ganesh/GrRecordingContextPriv.cpp",
         marker: "supportsDistanceFieldText() &&",
+    },
+    // `containers/skia-transformed-mask-reuse.patch`: a cached transformed
+    // glyph mask reused only at the scale, rotation and skew it was made for.
+    SkiaPatch {
+        cfg: "meo_transformed_mask_reuse",
+        file: "src/text/gpu/SubRunContainer.cpp",
+        marker: "fMadeFor",
     },
 ];
 

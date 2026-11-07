@@ -143,6 +143,12 @@ const TEXT_DISTANCE_FIELDS_OFF = {
   ...buildRsPatch("meo_text_distance_fields_off"),
 };
 
+/// containers/skia-transformed-mask-reuse.patch, on every platform.
+const TRANSFORMED_MASK_REUSE = {
+  patch: "containers/skia-transformed-mask-reuse.patch",
+  ...buildRsPatch("meo_transformed_mask_reuse"),
+};
+
 /// Each file a patch for the platform changes, under Skia's source root, with
 /// what only the patched file contains, and the patch that puts it there.
 /// `just check-skia-patches` refuses a patch in `PATCHES` that is neither
@@ -160,6 +166,7 @@ export const PATCHED = {
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
   ],
   linux: [
     ATLAS_SIZE,
@@ -168,6 +175,7 @@ export const PATCHED = {
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
   ],
   win32: [
     ATLAS_SIZE,
@@ -180,6 +188,7 @@ export const PATCHED = {
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
   ],
 };
 
