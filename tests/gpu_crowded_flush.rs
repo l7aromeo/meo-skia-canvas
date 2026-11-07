@@ -101,7 +101,17 @@ fn drawn(
 }
 
 /// Skips where there is no GPU, unless [`REQUIRE_GPU`] asks for one.
+///
+/// Ignored, saying why, where the Skia compiled lacks the atlas cap --
+/// `cfg(meo_atlas_size)`, from `build.rs`.
 #[test]
+#[cfg_attr(
+    not(meo_atlas_size),
+    ignore = "crates.io's Skia, without containers/skia-atlas-size.patch, \
+              moves a path's coverage at an atlas row of 512 or more, for a \
+              reason not known and at pixels that vary by device, so there is \
+              no figure to hold it to"
+)]
 fn a_path_covers_a_crowded_flush_as_it_covers_a_small_one() -> Result<(), Error>
 {
     let mut probe = Canvas::new(1.0, 1.0);
