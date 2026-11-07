@@ -859,15 +859,16 @@ jobs:
   # in the script. The pattern cannot be made exact, so a tree-wide gate would
   # cost reworded prose and buy nothing; "do not add another one" is the failure
   # that actually happens.
-  # Deletes main's cache entries for a Skia tree a patch change superseded --
-  # the tree's own cache and every Rust cache keyed on it -- so they stop
-  # holding room in the repository's 10 GB while current ones are evicted.
-  # `.github/scripts/prune-caches.mjs` decides, from each platform's current
-  # key; a pull request's entries are left to expire with it, and an entry
-  # created since this run started is kept, since a newer commit's run --
-  # build.yml's, say -- may have saved it for a tree this checkout does not
-  # know. On a push to main only, which is also when the caches it would
-  # replace are saved. Main's runs of this workflow queue rather than
+  # Deletes the cache entries nothing will restore again, so they stop holding
+  # room in the repository's 10 GB while current ones are evicted: main's
+  # entries for a Skia tree a patch change superseded, a closed pull request's
+  # and a deleted branch's, buildx blobs containers.yml's latest successful
+  # run on main left untouched, and a Rust cache a newer one of its job
+  # replaced. `.github/scripts/prune-caches.mjs` decides, one function a rule.
+  # An entry created since this run started is kept, since a newer commit's
+  # run -- build.yml's, say -- may have saved it for a tree this checkout
+  # does not know. On a push to main only, which is also when the caches it
+  # would replace are saved. Main's runs of this workflow queue rather than
   # overlap, and an entry this run saves names its current tree, which is
   # never stale.
   prune-caches:
@@ -876,14 +877,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      # Deleting a cache entry needs write; listing it needs read.
+      # Deleting a cache entry needs write, which also lets it list the
+      # caches and read containers.yml's runs. Listing the branches needs
+      # contents, and the open pull requests pull-requests: a pull request's
+      # entries go once it is closed.
       actions: write
       contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Delete entries naming a superseded tree
+      - name: Delete entries nothing will restore
         env:
           GH_TOKEN: ${{ github.token }}
         run: node .github/scripts/prune-caches.mjs --delete
