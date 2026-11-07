@@ -16,6 +16,7 @@
 // suite makes rather than starting one of its own.
 
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 /**
  * What is wrong between `npm` and `crate`, two lists of case ids, as one
@@ -116,10 +117,22 @@ const npm = lines(
     encoding: "utf8",
   }),
 );
+// Through scripts/skia-cache.mjs, which links Skia compiled already where the local cache holds it
+// for these features.
 const crate = lines(
   execFileSync(
-    "cargo",
-    ["run", "--quiet", "--example", "benchmark", ...features, "--", "--list"],
+    process.execPath,
+    [
+      fileURLToPath(new URL("skia-cache.mjs", import.meta.url)),
+      "cargo",
+      "run",
+      "--quiet",
+      "--example",
+      "benchmark",
+      ...features,
+      "--",
+      "--list",
+    ],
     { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   ),
 );

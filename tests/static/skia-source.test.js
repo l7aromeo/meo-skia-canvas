@@ -560,13 +560,28 @@ describe("skia-source keeps the trees a worktree builds from", () => {
     ]);
   });
 
+  test("the compiled Skia of a removed tree goes with it", (t) => {
+    const cache = scratch(t);
+    for (const name of ["skia-used", "skia-old"]) {
+      mkdirSync(join(cache, name));
+      mkdirSync(join(cache, "binaries", name), { recursive: true });
+    }
+
+    removeSuperseded(cache, new Set(["skia-used"]));
+
+    assert.deepEqual(readdirSync(join(cache, "binaries")), ["skia-used"]);
+    assert.ok(existsSync(join(cache, "binaries")), "binaries is not a tree");
+  });
+
   test("nothing is removed when the trees in use are unknown", (t) => {
     const cache = scratch(t);
     mkdirSync(join(cache, "skia-old"));
+    mkdirSync(join(cache, "binaries", "skia-old"), { recursive: true });
 
     removeSuperseded(cache, null);
 
     assert.ok(existsSync(join(cache, "skia-old")));
+    assert.ok(existsSync(join(cache, "binaries", "skia-old")));
   });
 
   // A worktree names one tree, by its patch list as it stands, but its target

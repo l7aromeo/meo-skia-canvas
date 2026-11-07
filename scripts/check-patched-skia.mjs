@@ -21,8 +21,9 @@
 //    checkout, which has no crates.io package hash to download against, from
 //    the tree inside it -- "STARTING A FULL BUILD".
 // 2. ninja compiled each file one of this platform's patches changes -- see
-//    `PATCHED`. A build without a GPU backend never compiles them, and has
-//    nothing for this to vouch for.
+//    `PATCHED`. A build with no GPU backend compiles none under Ganesh, and
+//    is held to the others: the SVG slant and the face match -- see
+//    `applicable`.
 // 3. Each file it compiled, resolved against the directory ninja ran in, is
 //    the patched one: it holds what only the patch puts there. A build from
 //    an unpatched tree passes the first two and fails this.
@@ -30,6 +31,13 @@
 // The self-test also holds each marker to its patch: it must be in what the
 // patch writes and nowhere in what it replaces or keeps, or an unpatched file
 // would pass the third check.
+//
+// A build that linked compiled Skia from the local cache instead --
+// "STARTING BIND AGAINST SYSTEM SKIA", see scripts/skia-binaries.mjs -- ran no
+// ninja, so it has nothing of its own to read. It passes when every library
+// it linked is, byte for byte, one an entry of this worktree's tree holds, and
+// that entry's stored seed build passes the three checks above: patched where
+// it was compiled, the same bytes where they were linked. See `bindRefusal`.
 import {
   existsSync,
   mkdirSync,
@@ -41,6 +49,13 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  cachedLibraries,
+  digest,
+  entriesFor,
+  seedLog,
+} from "./skia-binaries.mjs";
+import { cacheRoot, treeName } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -198,9 +213,27 @@ const ninjaDir = (output) =>
 
 const FROM_SOURCE = ["STARTING OFFLINE BUILD", "STARTING A FULL BUILD"];
 
+/// The gn argument skia-bindings passes for a build with no GPU backend
+/// (`skia_enable_ganesh`, skia-bindings' build_support/skia/config.rs), and
+/// the directory of the sources only Ganesh compiles. Such a build compiles
+/// none of the patched files under it, and is held to the others.
+const NO_GANESH = "skia_enable_ganesh=false";
+const GANESH_SOURCES = "src/gpu/ganesh/";
+
+/**
+ * The entries of `patched` the build that printed `output` compiles: all of
+ * them, but for a build its gn arguments say has no Ganesh, those outside
+ * `GANESH_SOURCES`.
+ */
+export function applicable(patched, output) {
+  return output.includes(NO_GANESH)
+    ? patched.filter(({ file }) => !file.startsWith(GANESH_SOURCES))
+    : patched;
+}
+
 /**
  * Why `output` does not show Skia built with `patched`, or `null` when it
- * does.
+ * does -- each of `patched` the build compiles, see `applicable`.
  */
 export function refusal(output, patched) {
   if (!FROM_SOURCE.some((line) => output.includes(line)))
@@ -208,7 +241,7 @@ export function refusal(output, patched) {
   if (output.includes("DOWNLOAD AND INSTALL"))
     return "skia-bindings tried to download prebuilt Skia";
   const ninja = ninjaDir(output);
-  for (const { file, marker } of patched) {
+  for (const { file, marker } of applicable(patched, output)) {
     const compiled = output.match(compiledLine(file))?.[1];
     if (!compiled) return `ninja did not compile ${file}`;
     if (!ninja) return "the output does not say where ninja ran";
@@ -220,6 +253,34 @@ export function refusal(output, patched) {
       return `${path} is not the patched source`;
   }
   return null;
+}
+
+/// What skia-bindings prints when it links libraries from
+/// `SKIA_LIBRARY_SEARCH_PATH` rather than building them (build.rs).
+const LINKED = "STARTING BIND AGAINST SYSTEM SKIA";
+
+/**
+ * Why the build in `buildDir`, which linked cached Skia, does not show Skia
+ * built with `patched`, or `null` when it does: the libraries in its
+ * `out/skia` are each, byte for byte, one an entry of `tree` under `cache`
+ * holds, and the entry's seed build passes `refusal`. An entry of another
+ * tree, or a library changed after it was stored, matches nothing.
+ */
+export function bindRefusal(buildDir, patched, { cache, tree }) {
+  const skia = join(buildDir, "out", "skia");
+  const linked = existsSync(skia) ? cachedLibraries(skia) : [];
+  if (!linked.includes("libskia.a"))
+    return "it linked cached Skia, and its out-dir holds no libskia.a";
+  const digests = Object.fromEntries(
+    linked.map((name) => [name, digest(join(skia, name))]),
+  );
+  const entry = entriesFor(tree, cache).find(([, manifest]) =>
+    linked.every((name) => manifest.libraries[name] === digests[name]),
+  );
+  if (!entry)
+    return `it linked cached Skia that no entry of ${tree} holds, byte for byte`;
+  const why = refusal(seedLog(entry[0]), patched);
+  return why ? `the cache entry it linked, ${entry[0]}: ${why}` : null;
 }
 
 /// Where a patch file names Skia's sources: rust-skia's checkout keeps them
@@ -279,13 +340,20 @@ function check(buildDir) {
     );
     process.exit(1);
   }
+  const where = { cache: cacheRoot(), tree: treeName() };
   const problems = outputs
-    .map((path) => [path, refusal(buildLog(dirname(path)), patched)])
+    .map((path) => {
+      const log = buildLog(dirname(path));
+      const why = log.includes(LINKED)
+        ? bindRefusal(dirname(path), patched, where)
+        : refusal(log, patched);
+      return [path, why];
+    })
     .filter(([, why]) => why);
   for (const [path, why] of problems) console.error(`${path}: ${why}`);
   if (problems.length) process.exit(1);
   console.log(
-    `check-patched-skia: ${outputs.length} skia-bindings build(s) compiled the patched Skia source`,
+    `check-patched-skia: ${outputs.length} skia-bindings build(s) compiled the patched Skia source, or linked it from the cache`,
   );
 }
 
@@ -314,8 +382,42 @@ function cases(root, patched) {
     /compile (\S+)/g,
     (_, path) => `compile ${path.replaceAll("/", "\\")}`,
   );
+  // A build with no Ganesh, which compiles only the patched files outside it.
+  const ganeshless = [
+    "STARTING OFFLINE BUILD",
+    `Skia args: is_debug=false ${NO_GANESH} skia_enable_pdf=true`,
+    `ninja: Entering directory \`${ninja}'`,
+    ...patched
+      .filter(({ file }) => !file.startsWith(GANESH_SOURCES))
+      .map(({ file }, i) => `[${i + 1}/0] compile ${relative(file)}`),
+  ].join("\n");
+  const outsideGanesh = patched.filter(
+    ({ file }) => !file.startsWith(GANESH_SOURCES),
+  );
   return [
     [files, good, true, "an offline build of every patched file"],
+    [files, ganeshless, true, "a build with no Ganesh"],
+    [
+      files,
+      ganeshless.replace(NO_GANESH, "skia_enable_ganesh=true"),
+      patched.length === outsideGanesh.length,
+      "a build with Ganesh that compiled none of its patched files",
+    ],
+    ...outsideGanesh.map(({ file }) => [
+      { ...files, [file]: "unpatched" },
+      ganeshless,
+      false,
+      `a build with no Ganesh of an unpatched ${file}`,
+    ]),
+    ...outsideGanesh.map(({ file }) => [
+      files,
+      ganeshless
+        .split("\n")
+        .filter((line) => !line.endsWith(relative(file)))
+        .join("\n"),
+      false,
+      `a build with no Ganesh that did not compile ${file}`,
+    ]),
     [files, crlf, true, "an offline build with CRLF line ends"],
     [files, backslashed, true, "an offline build naming files with `\\`"],
     ...patched.map(({ file }) => [
@@ -399,6 +501,76 @@ function cases(root, patched) {
       "only make's directory line",
     ],
   ];
+}
+
+/**
+ * The self-test's cases for a build that linked cached Skia, under `root`: an
+ * entry stored from a patched build, and builds that link it or something
+ * else. Returns how many ran.
+ */
+function bindCases(root) {
+  const patched = PATCHED[process.platform] ?? Object.values(PATCHED)[0];
+  const [files, good] = cases(root, patched)[0];
+  const write = (path, text) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  };
+  const cache = join(root, "cache");
+  const tree = "skia-0.0.0-tree";
+  const entry = join(cache, "binaries", tree, "target", "sdk", "dev", "f");
+  const libraries = { "libskia.a": "skia", "libsvg.a": "svg" };
+  for (const [name, text] of Object.entries(libraries))
+    write(join(entry, name), text);
+  write(join(entry, "seed-output"), good);
+  write(
+    join(entry, "manifest.json"),
+    JSON.stringify({
+      version: 1,
+      libraries: Object.fromEntries(
+        Object.keys(libraries).map((name) => [name, digest(join(entry, name))]),
+      ),
+    }),
+  );
+  const build = join(root, "linked");
+  const linked = (changes = {}) => {
+    rmSync(build, { recursive: true, force: true });
+    const all = { ...libraries, "libskia-bindings.a": "its own", ...changes };
+    for (const [name, text] of Object.entries(all))
+      if (text !== null) write(join(build, "out", "skia", name), text);
+    write(join(build, "output"), "STARTING BIND AGAINST SYSTEM SKIA");
+  };
+  const setFiles = (overrides = {}) => {
+    for (const [file, contents] of Object.entries({ ...files, ...overrides }))
+      write(join(root, "skia", file), contents);
+  };
+  const [first] = patched;
+  let count = 0;
+  for (const [changes, overrides, against, accepted, what] of [
+    [{}, {}, tree, true, "the libraries of an entry from a patched build"],
+    [{ "libskia.a": "skiA" }, {}, tree, false, "a library changed by a byte"],
+    [{}, {}, "skia-0.0.0-other", false, "an entry of another tree"],
+    [
+      {},
+      { [first.file]: "unpatched" },
+      tree,
+      false,
+      "an entry whose seed build compiled an unpatched file",
+    ],
+    [{ "libskia.a": null }, {}, tree, false, "no libskia.a"],
+    [{ "libextra.a": "x" }, {}, tree, false, "a library no entry holds"],
+  ]) {
+    setFiles(overrides);
+    linked(changes);
+    const why = bindRefusal(build, patched, { cache, tree: against });
+    if ((why === null) !== accepted) {
+      console.error(
+        `check-patched-skia self-test: linking ${what} was ${accepted ? `refused: ${why}` : "accepted"}`,
+      );
+      process.exit(1);
+    }
+    count += 1;
+  }
+  return count;
 }
 
 function selfTest() {
@@ -581,6 +753,7 @@ function selfTest() {
         count += 1;
       }
     }
+    count += bindCases(root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
