@@ -5,9 +5,10 @@
 //!
 //! What a run covers depends on where it lies, so a kept result is never
 //! trusted on its key alone. The key finds the result a run drawn at the same
-//! sub-pixel phase left -- see [`RunKey`] -- and the run's coverage is drawn
-//! again on the plane the route would blur, then compared byte for byte with
-//! the coverage the result was blurred from. Only where the two are the same
+//! sub-pixel phase left -- see [`RunKey`] -- and, unless where its glyphs lie
+//! decides its coverage (below), the run's coverage is drawn again on the
+//! plane the route would blur, then compared byte for byte with the coverage
+//! the result was blurred from. Only where the two are the same
 //! is the kept result composited, moved by the whole pixels between them; any
 //! difference blurs afresh. Skia places a glyph's mask by a floor of its
 //! device position (`prepare_for_direct_mask_drawing`,
@@ -17,21 +18,38 @@
 //! part, and a glyph past 256 device pixels is drawn as a path at its exact
 //! place (`SkStrikeSpec::ShouldDrawAsPath`, `SkStrikeSpec.cpp`, lines 101 to
 //! 126). The comparison is what makes a hit exact, not the key.
+//!
+//! Where every glyph of a run is drawn as a mask, the comparison is not
+//! needed: a mask is placed by the floor of its device position and drawn
+//! from the strike's image for that position's quarter-pixel phase, both
+//! read off the same sum (`SkPackedGlyphID::PackIDSkPoint`, `SkGlyph.h`), and
+//! every rounding spec Skia has puts the edges between one floor or phase
+//! and the next on an eighth of a pixel -- see [`PLACEMENT_STEPS`]. So a run
+//! whose glyphs each lie clear of those edges, at the kept place and at this
+//! one, and whose eighths all moved by the same whole pixels as its origin,
+//! blits the same masks in the same order, moved; its coverage is the kept
+//! coverage moved, and [`kept`] composites the kept result without drawing
+//! the run again. A glyph near an edge, a run drawn as paths or sheared, and
+//! a decorated run fall back to the comparison.
 
 #[cfg(test)]
 use std::cell::Cell;
 use std::{
     hash::{Hash, Hasher},
+    iter::zip,
     sync::{Arc, LazyLock},
 };
 
 use parking_lot::Mutex;
-use skia_safe::{Canvas as SkCanvas, Matrix, Paint};
+use skia_safe::{Canvas as SkCanvas, IRect, Matrix, Paint, PaintStyle};
 
 use crate::{
     cache_store::{Budget, Store, StoreKey, Stored},
-    context::chain::{Outcome, coverage::Coverage},
-    node::typography::RunPaint,
+    context::chain::{
+        Outcome,
+        coverage::{Coverage, Placement},
+    },
+    node::typography::{RunPaint, Shear},
 };
 
 /// The bytes of kept runs, across every thread: a quarter of what the page
@@ -61,6 +79,161 @@ const RUN_BUDGET: Budget = Budget {
 /// so a step shared by two placements that cover otherwise costs a refusal,
 /// never a wrong draw.
 const PHASE_STEPS: f32 = 256.0;
+
+/// The steps a device pixel Skia's placement of a glyph's mask turns on.
+/// The mask's whole pixels and its sub-pixel phase are both read off the
+/// position plus half a sample (`SkGlyphPositionRoundingSpec`, `SkGlyph.cpp`
+/// lines 695 to 712): plus a half on an axis without sub-pixel positions,
+/// which then turns at whole pixels, so at a position's halves; and plus an
+/// eighth on one with them, which turns at quarters
+/// (`SkPackedGlyphID::kSubpixelRound`, `SkGlyph.h` line 70), so at its odd
+/// eighths. Either way it turns only on an eighth -- see [`turns_at`] -- so a
+/// glyph's eighths decide its placement whatever the font's sub-pixel flag
+/// and the axis Skia aligns it to.
+const PLACEMENT_STEPS: f64 = 8.0;
+
+/// Whether Skia's placement of a mask can turn at `step`
+/// [`PLACEMENT_STEPS`]ths of a pixel: at an odd eighth or a half -- see
+/// [`PLACEMENT_STEPS`] -- and not at a whole pixel or a quarter, where a
+/// run's baseline commonly lies.
+fn turns_at(step: i64) -> bool {
+    let per_pixel = PLACEMENT_STEPS as i64;
+    let within = step.rem_euclid(per_pixel);
+    let half = within == per_pixel / 2;
+    #[cfg(test)]
+    if RULE.get() == Rule::HalvesOnly {
+        return half;
+    }
+    half || within % 2 == 1
+}
+
+/// How far Skia's f32 sums of a glyph's position can fall from the exact
+/// one, relative to the largest magnitude summed. Skia rounds a position at
+/// most a dozen times on its way to a mask: the transforms concatenated, the
+/// blob's origin pre-translated and the half sample post-translated, the
+/// position mapped, and our own sums of the anchor and the run's origin. Each
+/// rounding is within 2^-24 of the value it rounds, so all of them together
+/// are within 2^-20; this allows four times that.
+const POSITION_SLACK: f64 = 1.0 / (1u32 << 18) as f64;
+
+/// How far `PackIDSkPoint`'s `(x - floor(x)) + 1.0f` can move a phase: one
+/// rounding of a number below two, half its last place (`SkGlyph.h` lines
+/// 157 to 180).
+const PHASE_SLACK: f64 = 1.0 / (1u32 << 23) as f64;
+
+/// The longest a column of a run's text matrix can be on the device for its
+/// glyphs to be drawn as masks: Skia draws them as paths past 256
+/// (`SkStrikeSpec::ShouldDrawAsPath`, `SkStrikeSpec.cpp` lines 117 to 126),
+/// placed at their exact position. A pixel short, for the f32 sum Skia
+/// compares.
+const MASK_SIDE_LIMIT: f64 = 255.0;
+
+/// [`POSITION_SLACK`] and [`PHASE_SLACK`] for a position whose sums reach
+/// `largest`, or none where [`RULE`] says so.
+fn slack(largest: f64) -> f64 {
+    #[cfg(test)]
+    if RULE.get() == Rule::NoSlack {
+        return 0.0;
+    }
+    POSITION_SLACK * largest + PHASE_SLACK
+}
+
+/// Each glyph's position on the device in [`PLACEMENT_STEPS`]ths of a pixel,
+/// floored, for `kept` drawn under `to_picture`, where every glyph lies
+/// further than Skia's sums can err from a step its placement turns at -- see
+/// [`turns_at`] -- and is drawn as a mask; `None` otherwise, for the run to be
+/// compared instead. `offset` is how far, at most, the plane's origin lies from
+/// the device's along each axis: Skia's sums run in the plane's pixels.
+fn eighths(
+    kept: &Kept,
+    to_picture: &Matrix,
+    offset: (u32, u32),
+) -> Option<Arc<[[i64; 2]]>> {
+    let (outer, anchor) = (to_picture, &kept.anchor);
+    if !(outer.is_scale_translate() && anchor.is_scale_translate())
+        || kept.paint.hairline()
+    {
+        return None;
+    }
+    let axis = |m: &Matrix| {
+        [
+            (f64::from(m.scale_x()), f64::from(m.translate_x())),
+            (f64::from(m.scale_y()), f64::from(m.translate_y())),
+        ]
+    };
+    let (outer, anchor) = (axis(outer), axis(anchor));
+    let scale = [outer[0].0 * anchor[0].0, outer[1].0 * anchor[1].0];
+    let shift = [f64::from(offset.0), f64::from(offset.1)];
+    let mut placed = Vec::new();
+    for (font, origin, positions, shear) in kept.run.placed_runs()? {
+        match shear {
+            Shear::None => {}
+            // Drawn as nothing.
+            Shear::Flat => continue,
+            Shear::By(_) => return None,
+        }
+        // Unskewed under a transform that only scales and translates, no
+        // run is drawn from its outlines -- see
+        // `typography::past_freetype_shear` -- and the text matrix's columns
+        // are its two scales.
+        let size = f64::from(font.size());
+        if font.skew_x() != 0.0
+            || (scale[0] * size * f64::from(font.scale_x())).abs()
+                >= MASK_SIDE_LIMIT
+            || (scale[1] * size).abs() >= MASK_SIDE_LIMIT
+        {
+            return None;
+        }
+        #[cfg(test)]
+        if RULE.get() == Rule::OriginOnly {
+            continue;
+        }
+        for position in positions {
+            let parts = [(origin.x, position.x), (origin.y, position.y)];
+            let mut glyph = [0; 2];
+            for (k, step) in glyph.iter_mut().enumerate() {
+                let ((o_scale, o_shift), (a_scale, a_shift)) =
+                    (outer[k], anchor[k]);
+                let (run, at) = (f64::from(parts[k].0), f64::from(parts[k].1));
+                let exact =
+                    o_scale * (a_scale * (run + at) + a_shift) + o_shift;
+                // The largest magnitude any of Skia's sums of this position
+                // can reach, the half sample included.
+                let largest = o_scale.abs()
+                    * (a_scale.abs() * (run.abs() + at.abs()) + a_shift.abs())
+                    + o_shift.abs()
+                    + shift[k]
+                    + 1.0;
+                let steps = exact * PLACEMENT_STEPS;
+                let below = steps.floor() as i64;
+                let fraction = steps - steps.floor();
+                // How near the position lies to a step it turns at, in
+                // steps: only the two steps about it can be within reach.
+                let near = match (turns_at(below), turns_at(below + 1)) {
+                    (true, true) => fraction.min(1.0 - fraction),
+                    (true, false) => fraction,
+                    (false, true) => 1.0 - fraction,
+                    (false, false) => 1.0,
+                };
+                if near < slack(largest) * PLACEMENT_STEPS {
+                    return None;
+                }
+                *step = below;
+            }
+            placed.push(glyph);
+        }
+    }
+    #[cfg(test)]
+    if RULE.get() == Rule::OriginOnly {
+        // The run's anchor alone.
+        let origin = [0, 1].map(|k| {
+            let ((o_scale, o_shift), (_, a_shift)) = (outer[k], anchor[k]);
+            ((o_scale * a_shift + o_shift) * PLACEMENT_STEPS).floor() as i64
+        });
+        return Some([origin].into());
+    }
+    Some(placed.into())
+}
 
 /// What a draw's paint decides of the coverage a run inks: its style, its
 /// stroke, its anti-aliasing and its colour. The colour is kept although
@@ -97,6 +270,13 @@ impl PaintKey {
             cap: paint.stroke_cap() as u8,
             colour: [colour.r, colour.g, colour.b].map(f32::to_bits),
         })
+    }
+
+    /// Whether the paint strokes a hairline, which Skia draws as paths
+    /// wherever it lies (`SkStrikeSpec::ShouldDrawAsPath`).
+    fn hairline(&self) -> bool {
+        self.style != PaintStyle::Fill as u8
+            && f32::from_bits(self.stroke[0]) == 0.0
     }
 }
 
@@ -178,15 +358,17 @@ impl Hash for RunKey {
     }
 }
 
-/// A [`RunKey`] and the device pixels the run's coverage covers, relative
-/// to the whole pixels of its origin -- see
-/// `chain::coverage::Coverage::region`: what a kept result is filed under. A
+/// A [`RunKey`] and the device pixels the run's coverage covers, is read
+/// from and inks, relative to the whole pixels of its origin -- see
+/// `chain::coverage::Placement`: what a kept result is filed under. A
 /// run whose region a clip or the device's edge cuts otherwise is filed apart,
 /// so that a run drawn there and one drawn clear of it each find their own.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Filed {
     key: RunKey,
     region: [i32; 4],
+    read: [i32; 4],
+    inked: [i32; 4],
 }
 
 impl StoreKey for Filed {
@@ -201,6 +383,10 @@ impl StoreKey for Filed {
 pub(crate) struct Placed {
     pub(crate) key: RunKey,
     pub(crate) origin: (i32, i32),
+    /// The run and where it is drawn, for [`eighths`].
+    kept: Kept,
+    /// The transform its picture is played in.
+    to_picture: Matrix,
 }
 
 impl Placed {
@@ -246,17 +432,56 @@ impl Placed {
                     .map(|s| (s.to_xyzd50_hash().0, s.transfer_fn_hash())),
             },
             origin: (whole_x as i32, whole_y as i32),
+            kept: kept.clone(),
+            to_picture: *to_picture,
         })
+    }
+
+    /// What this run's result is filed under when its coverage is placed at
+    /// `at`: the key and the rectangles the coverage is worked over and read
+    /// from, relative to the whole pixels of the run's origin.
+    fn filed(&self, at: &Placement) -> Filed {
+        let (x, y) = self.origin;
+        let relative = |r: IRect| {
+            let r = r.with_offset((-x, -y));
+            [r.left, r.top, r.right, r.bottom]
+        };
+        Filed {
+            key: self.key.clone(),
+            region: relative(at.worked),
+            read: relative(at.region),
+            inked: relative(at.inked),
+        }
+    }
+
+    /// Each glyph's eighths where its coverage is placed at `at` -- see
+    /// [`eighths`].
+    fn eighths(&self, at: &Placement) -> Option<Arc<[[i64; 2]]>> {
+        // The plane starts at `drawn`, or at the region where no plane that
+        // large could be made -- see `Coverage::of`.
+        let farthest = |a: i32, b: i32| a.unsigned_abs().max(b.unsigned_abs());
+        eighths(
+            &self.kept,
+            &self.to_picture,
+            (
+                farthest(at.drawn.left, at.region.left),
+                farthest(at.drawn.top, at.region.top),
+            ),
+        )
     }
 }
 
-/// A kept run's result: what it composited, the coverage that was blurred
-/// to make it, and the whole pixels of the origin it was drawn at.
+/// A kept run's result: what it composited, the coverage of the inked
+/// rectangle that was blurred to make it -- see `Coverage::ink` -- and the
+/// whole pixels of the origin it was drawn at.
 #[derive(Clone)]
 pub(crate) struct Mask {
     pub(crate) outcome: Outcome,
     pub(crate) coverage: Arc<[u8]>,
     pub(crate) origin: (i32, i32),
+    /// Each glyph's eighths where the run was drawn -- see [`eighths`] --
+    /// or `None` where they do not decide its coverage.
+    pub(crate) eighths: Option<Arc<[[i64; 2]]>>,
 }
 
 impl Stored for Mask {
@@ -335,14 +560,63 @@ fn put(key: Filed, mask: Mask) {
     RUNS.lock().put(key, mask);
 }
 
-/// What a run whose coverage is `sharp` composites: the result kept for
-/// `placed` and `sharp`'s region about the run's origin -- see [`Filed`] --
-/// where the coverage it was blurred from is `sharp`'s to the byte, moved by
-/// the whole pixels between the two origins; otherwise `colour` of `sharp`,
-/// kept for the next draw in place of the one refused. A run with nowhere
-/// `placed` is coloured and not kept.
+/// The result kept for `placed` at `at`, moved to where it is drawn now,
+/// where its glyphs' eighths decide its coverage -- see [`eighths`] -- and
+/// every glyph moved by the whole pixels its origin did: composited without
+/// the run's coverage being drawn again. `None` otherwise, for the run to be
+/// drawn and compared -- see [`drawn`].
+///
+/// `redraw` draws the run's coverage. Only a test build calls it, to hold
+/// what this trusts to the comparison it stands in for.
+pub(crate) fn kept(
+    placed: &Placed,
+    at: &Placement,
+    redraw: impl FnOnce() -> Option<Coverage>,
+) -> Option<Outcome> {
+    #[cfg(test)]
+    if !MASK_CACHE.get() {
+        return None;
+    }
+    let mask = get(&placed.filed(at))?;
+    let was = mask.eighths.as_deref()?;
+    let now = placed.eighths(at)?;
+    let (x, y) = placed.origin;
+    let by = (x - mask.origin.0, y - mask.origin.1);
+    let moved = [by.0, by.1].map(|d| i64::from(d) * PLACEMENT_STEPS as i64);
+    let alike = was.len() == now.len()
+        && zip(was, now.iter())
+            .all(|(was, now)| [now[0] - was[0], now[1] - was[1]] == moved);
+    if !alike {
+        return None;
+    }
+    let outcome = mask.outcome.at(by)?;
+    #[cfg(test)]
+    {
+        let same = redraw().is_some_and(|sharp| {
+            let (ink, inked) = sharp.ink();
+            sharp.region() == at.worked
+                && inked == at.inked
+                && *mask.coverage == *ink
+        });
+        count(|masks| {
+            masks.skipped += 1;
+            masks.wrong += usize::from(!same);
+        });
+    }
+    #[cfg(not(test))]
+    let _ = redraw;
+    Some(outcome)
+}
+
+/// What a run whose coverage, placed at `at`, is `sharp` composites: the
+/// result kept for `placed` and `at` -- see [`Filed`] -- where the coverage
+/// it was blurred from is `sharp`'s to the byte, moved by the whole pixels
+/// between the two origins; otherwise `colour` of `sharp`, kept for the next
+/// draw in place of the one refused, with its glyphs' eighths for [`kept`].
+/// A run with nowhere `placed` is coloured and not kept.
 pub(crate) fn drawn(
     placed: Option<Placed>,
+    at: &Placement,
     sharp: Coverage,
     colour: impl FnOnce(Coverage) -> Option<Outcome>,
 ) -> Option<Outcome> {
@@ -354,13 +628,9 @@ pub(crate) fn drawn(
         return colour(sharp);
     };
     let (x, y) = placed.origin;
-    let region = sharp.region().with_offset((-x, -y));
-    let filed = Filed {
-        key: placed.key,
-        region: [region.left, region.top, region.right, region.bottom],
-    };
+    let filed = placed.filed(at);
     if let Some(mask) = get(&filed) {
-        let alike = *mask.coverage == *sharp.bytes();
+        let alike = *mask.coverage == *sharp.ink().0;
         let moved = alike
             .then(|| mask.outcome.at((x - mask.origin.0, y - mask.origin.1)))
             .flatten();
@@ -375,7 +645,7 @@ pub(crate) fn drawn(
     }
     #[cfg(test)]
     count(|masks| masks.misses += 1);
-    let coverage: Arc<[u8]> = sharp.bytes().into();
+    let coverage: Arc<[u8]> = sharp.ink().0.into();
     let outcome = colour(sharp)?;
     put(
         filed,
@@ -383,6 +653,7 @@ pub(crate) fn drawn(
             outcome: outcome.clone(),
             coverage,
             origin: placed.origin,
+            eighths: placed.eighths(at),
         },
     );
     Some(outcome)
@@ -403,15 +674,37 @@ fn held() -> usize {
     OWN.with_borrow(|own| own.as_ref().map_or(0, Store::len))
 }
 
+/// The rule [`kept`] decides by, and the mutants of it the tests must
+/// refuse.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rule {
+    /// As built.
+    Exact,
+    /// No allowance for Skia's own rounding of a position.
+    NoSlack,
+    /// The run's origin alone, not each glyph.
+    OriginOnly,
+    /// The halves an axis without sub-pixel positions turns at, not the
+    /// odd eighths one with them does.
+    HalvesOnly,
+}
+
 /// How the runs played on a thread fared against the cache: drawn from
-/// what it kept; refused, because the coverage kept under the run's key was
-/// not the run's; and blurred afresh, the refused among them.
+/// what it kept after a comparison; refused, because the coverage kept under
+/// the run's key was not the run's; blurred afresh, the refused among them;
+/// and drawn from what it kept without a comparison.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Masks {
     pub(crate) hits: usize,
     pub(crate) refused: usize,
     pub(crate) misses: usize,
+    /// Drawn from the cache by [`kept`], without a comparison.
+    pub(crate) skipped: usize,
+    /// Of those, the ones whose coverage drawn again was not the kept
+    /// coverage: each a wrong draw outside a test.
+    pub(crate) wrong: usize,
 }
 
 #[cfg(test)]
@@ -420,8 +713,18 @@ thread_local! {
     /// can hold the cache to the route it stands in for.
     pub(crate) static MASK_CACHE: Cell<bool> = const { Cell::new(true) };
     /// How the runs played on this thread fared -- see [`Masks`].
-    pub(crate) static MASKS: Cell<Masks> =
-        const { Cell::new(Masks { hits: 0, refused: 0, misses: 0 }) };
+    pub(crate) static MASKS: Cell<Masks> = const {
+        Cell::new(Masks {
+            hits: 0,
+            refused: 0,
+            misses: 0,
+            skipped: 0,
+            wrong: 0,
+        })
+    };
+    /// The rule [`kept`] decides by: [`Rule::Exact`], or a mutant of it a
+    /// test shows the sweep refuses.
+    pub(crate) static RULE: Cell<Rule> = const { Cell::new(Rule::Exact) };
 }
 
 #[cfg(test)]
@@ -436,7 +739,8 @@ mod tests {
     //! whose clip cuts it otherwise is refused.
 
     use super::{
-        MASK_CACHE, MASKS, Masks, OwnRunCache, held, release_cached_runs,
+        MASK_CACHE, MASKS, Masks, OwnRunCache, RULE, Rule, held,
+        release_cached_runs,
     };
     use crate::{
         context::layer::COVERAGE_RUNS,
@@ -600,6 +904,10 @@ mod tests {
         );
         let off = kept.iter().zip(&fresh).filter(|(a, b)| a != b).count();
         assert_eq!(off, 0, "{case}: the cache moved {off} bytes");
+        assert_eq!(
+            masks.wrong, 0,
+            "{case}: a run composited without a comparison covered otherwise"
+        );
         masks
     }
 
@@ -610,14 +918,15 @@ mod tests {
     #[test]
     fn a_run_drawn_again_in_place_is_drawn_from_the_cache() {
         // The first draw of a run is not kept, so it is not counted; the
-        // second keeps its result, and the third and fourth composite it.
+        // second keeps its result, and the third and fourth composite it,
+        // decided by where their glyphs lie without drawing them again.
         let masks = alike("in place", &[RUN; 4], 1);
         assert_eq!(
             masks,
             Masks {
-                hits: 2,
-                refused: 0,
-                misses: 1
+                misses: 1,
+                skipped: 2,
+                ..Masks::default()
             }
         );
     }
@@ -638,9 +947,9 @@ mod tests {
         assert_eq!(
             masks,
             Masks {
-                hits: 3,
-                refused: 0,
-                misses: 1
+                misses: 1,
+                skipped: 3,
+                ..Masks::default()
             }
         );
         let stroked = Draw {
@@ -659,9 +968,9 @@ mod tests {
         assert_eq!(
             masks,
             Masks {
-                hits: 1,
-                refused: 0,
-                misses: 1
+                misses: 1,
+                skipped: 1,
+                ..Masks::default()
             }
         );
     }
@@ -674,9 +983,8 @@ mod tests {
         assert_eq!(
             masks,
             Masks {
-                hits: 0,
-                refused: 0,
-                misses: 3
+                misses: 3,
+                ..Masks::default()
             }
         );
     }
@@ -694,9 +1002,9 @@ mod tests {
         assert_eq!(
             masks,
             Masks {
-                hits: 1,
-                refused: 0,
-                misses: 2
+                misses: 2,
+                skipped: 1,
+                ..Masks::default()
             }
         );
     }
@@ -907,5 +1215,237 @@ mod tests {
             PixelColorSpace::DisplayP3,
         );
         eprintln!("on a Display P3 page: {masks:?}");
+    }
+
+    #[test]
+    fn a_run_of_any_size_lands_the_bytes_drawn_afresh() {
+        // From a size whose masks are a few pixels to sizes past the 256
+        // device pixels Skia draws as paths from, kept and moved by whole
+        // pixels: masks are trusted, paths are compared.
+        for px in ["8", "13", "17.3", "31", "64", "127.5", "200", "254", "260"]
+        {
+            let font: &'static str =
+                Box::leak(format!("{px}px RunMaskOswald").into_boxed_str());
+            let run = Draw { font, ..RUN };
+            let draws = [
+                run,
+                run,
+                Draw {
+                    at: (177.3, 331.6),
+                    ..run
+                },
+                Draw {
+                    at: (21.3, 290.6),
+                    ..run
+                },
+            ];
+            let masks = alike(font, &draws, 1);
+            eprintln!("{font}: {masks:?}");
+            // At 254px the moved draws run past the page's edge and are
+            // filed apart, so only their bytes are held.
+            match px {
+                "254" => {}
+                "260" => assert_eq!(masks.skipped, 0, "{font}: {masks:?}"),
+                _ => assert!(masks.skipped > 0, "{font}: {masks:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_page_of_runs_at_whole_pixels_composites_every_kept_run() {
+        // The scene `text-blur-sans-*` times: fifty "Ag" in sans-serif on a
+        // page of 400 by 300, at whole pixels, cleared and drawn again. By
+        // the third page every run is kept where it is drawn, and each is
+        // composited from what was kept without drawing it -- but under a
+        // blur of 10, past the sigma the coverage route takes, none is.
+        for (px, blur, trusted) in [
+            (40, 1, 50),
+            (40, 3, 50),
+            (40, 10, 0),
+            (20, 3, 50),
+            (80, 3, 50),
+        ] {
+            let _own = OwnRunCache::new();
+            let mut canvas = Canvas::new(400.0, 300.0);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(&format!("{px}px sans-serif")));
+            ctx.set_filter_css(&format!("blur({blur}px)"))
+                .expect("a filter");
+            for page in 0..3 {
+                if page == 2 {
+                    MASKS.set(Masks::default());
+                }
+                let ctx = canvas.context();
+                ctx.clear_rect(0.0, 0.0, 400.0, 300.0);
+                for i in 0..50 {
+                    let (x, y) = ((i % 10) * 38, 40 + (i / 10) * 50);
+                    ctx.fill_text("Ag", x as f32, y as f32, None);
+                }
+                canvas
+                    .to_image_data(None, &ImageDataExport::default())
+                    .expect("pixels");
+            }
+            let masks = MASKS.get();
+            eprintln!("{px}px blur({blur}px), third page: {masks:?}");
+            assert_eq!(masks.wrong, 0, "{px}px blur({blur}px): {masks:?}");
+            assert_eq!(
+                masks.skipped, trusted,
+                "{px}px blur({blur}px): {masks:?}"
+            );
+        }
+    }
+
+    /// A draw on [`wide`]'s page: where, and the rectangle it is cut to.
+    type WideDraw = ((f32, f32), Option<(f32, f32, f32, f32)>);
+
+    /// `draws` of [`RUN`]'s "Ag" on one CPU page 8,400 by 200, under the
+    /// rule `rule`, each cut to `clip` where it names one, with the cache on
+    /// or off: the bytes and how the runs fared. The run is drawn once first
+    /// and covered over, so that every draw counted finds it laid out.
+    fn wide(rule: Rule, cache: bool, draws: &[WideDraw]) -> (Vec<u8>, Masks) {
+        let library = FontLibrary::new();
+        library
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let _own = OwnRunCache::new();
+        MASK_CACHE.set(cache);
+        RULE.set(rule);
+        let mut canvas = Canvas::new(8400.0, 200.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(RUN.font));
+        ctx.set_fill_style_css(RUN.fill).expect("a colour");
+        ctx.set_filter_css("blur(3px)").expect("a filter");
+        ctx.measure_text(RUN.text, None);
+        ctx.fill_text(RUN.text, 4000.0, 100.0, None);
+        MASKS.set(Masks::default());
+        for &((x, y), clip) in draws {
+            ctx.save();
+            if let Some((cx, cy, cw, ch)) = clip {
+                ctx.begin_path();
+                ctx.rect(cx, cy, cw, ch);
+                ctx.clip(FillRule::NonZero);
+            }
+            ctx.fill_text(RUN.text, x, y, None);
+            ctx.restore();
+        }
+        let pixels = canvas
+            .to_image_data(None, &ImageDataExport::default())
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        let masks = MASKS.get();
+        MASK_CACHE.set(true);
+        RULE.set(Rule::Exact);
+        (pixels, masks)
+    }
+
+    /// How many bytes two pages part by.
+    fn parted(a: &[u8], b: &[u8]) -> usize {
+        a.iter().zip(b).filter(|(a, b)| a != b).count()
+    }
+
+    #[test]
+    fn a_glyph_near_where_its_mask_turns_is_compared() {
+        // The run's "g" placed at positions stepping through the edges where
+        // Skia's placement of its mask turns -- an odd eighth of a pixel
+        // where the font is positioned by sub-pixels, a half where it is
+        // not -- once near the page's left and once moved by 8,000 pixels,
+        // where an f32 holds a position to 2^-11 of a pixel and Skia's sum of
+        // the glyph's position rounds across an edge the exact position lies
+        // short of. The rule as built refuses a glyph that near an edge and
+        // compares it; each mutant trusts one it should not, and composites
+        // a result its coverage is not.
+        let library = FontLibrary::new();
+        library
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let mut probe = Canvas::new(10.0, 10.0);
+        let ctx = probe.context();
+        assert!(ctx.set_font_css(RUN.font));
+        // Where "g" lies after "A", kerning and all.
+        let after = ctx.measure_text("Ag", None).width
+            - ctx.measure_text("g", None).width;
+        let step = 2f32.powi(-13);
+        // Every odd eighth and the half, so that the "g" lies near each
+        // while the "A", a fixed distance before it, lies clear of some.
+        let draws: Vec<_> = [0.125f32, 0.375, 0.5, 0.625, 0.875]
+            .into_iter()
+            .flat_map(|edge| {
+                (-96..96).flat_map(move |k| {
+                    let phase = (edge - after.fract() + k as f32 * step)
+                        .rem_euclid(1.0);
+                    [
+                        ((120.0 + phase, 100.0), None),
+                        ((8120.0 + phase, 100.0), None),
+                    ]
+                })
+            })
+            .collect();
+        let (fresh, _) = wide(Rule::Exact, false, &draws);
+        let (exact, masks) = wide(Rule::Exact, true, &draws);
+        eprintln!("as built: {masks:?}");
+        assert_eq!(parted(&exact, &fresh), 0, "the rule moved bytes");
+        assert_eq!(masks.wrong, 0, "the rule trusted a glyph: {masks:?}");
+        assert!(masks.skipped > 0, "nothing was trusted: {masks:?}");
+        assert!(
+            masks.hits + masks.refused > 0,
+            "nothing near an edge was compared: {masks:?}"
+        );
+        for rule in [Rule::NoSlack, Rule::OriginOnly] {
+            let (_, masks) = wide(rule, true, &draws);
+            eprintln!("{rule:?}: {masks:?}");
+            assert!(masks.wrong > 0, "{rule:?} drew nothing wrong: {masks:?}");
+        }
+        // The odd eighths are edges only where the glyphs are positioned by
+        // sub-pixels, which this platform's scaler may decline: a run a
+        // quarter of a pixel along lands other bytes where it is.
+        let (whole, _) = wide(Rule::Exact, false, &[((120.0, 100.0), None)]);
+        let (quarter, _) = wide(Rule::Exact, false, &[((120.25, 100.0), None)]);
+        let subpixel = parted(&whole, &quarter) > 0;
+        let (_, masks) = wide(Rule::HalvesOnly, true, &draws);
+        eprintln!("HalvesOnly, sub-pixel positions {subpixel}: {masks:?}");
+        match subpixel {
+            true => assert!(masks.wrong > 0, "HalvesOnly: {masks:?}"),
+            false => assert_eq!(masks.wrong, 0, "HalvesOnly: {masks:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_cut_anywhere_by_a_clip_lands_the_bytes_drawn_afresh() {
+        // Clips ending at each column and row from well before the run to
+        // well past it, from each side, each between two draws of it uncut:
+        // a cut run is filed apart by what is read of it, and the uncut one
+        // still composites what it kept. No clip tried here reads or inks a
+        // run otherwise while what its blur works on stays the same, so
+        // filing by the rectangles read and inked as well is not shown to be
+        // needed; they are kept because the coverage is read from them.
+        let clips = (0..100).flat_map(|k| {
+            let (x, y) = (100.0 + k as f32, 50.0 + k as f32);
+            [
+                (0.0, 0.0, x, 200.0),
+                (x, 0.0, 400.0, 200.0),
+                (0.0, 0.0, 400.0, y),
+                (0.0, y, 400.0, 200.0),
+            ]
+        });
+        let draws: Vec<_> = clips
+            .flat_map(|clip| {
+                [((120.3, 100.6), None), ((120.3, 100.6), Some(clip))]
+            })
+            .collect();
+        let (fresh, _) = wide(Rule::Exact, false, &draws);
+        let (exact, masks) = wide(Rule::Exact, true, &draws);
+        eprintln!("as built: {masks:?}");
+        assert_eq!(parted(&exact, &fresh), 0, "the rule moved bytes");
+        assert_eq!(masks.wrong, 0, "a cut run composited otherwise: {masks:?}");
+        assert!(masks.skipped > 0, "nothing was trusted: {masks:?}");
     }
 }

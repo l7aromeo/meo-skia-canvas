@@ -824,6 +824,21 @@ impl RunPaint {
             decorate::paint(canvas, spans, &boxes, origin, Layer::Over, pen);
         }
     }
+
+    /// Each run's font, its origin relative to the anchor the run is drawn
+    /// at, its glyphs' positions relative to that origin, and the shear it
+    /// is drawn under: what `context::run_mask` works out where Skia places
+    /// each glyph's mask from. `None` for a decorated run, whose lines are
+    /// drawn where they fall rather than where a glyph's mask is placed.
+    pub(crate) fn placed_runs(
+        &self,
+    ) -> Option<impl Iterator<Item = (&Font, Point, &[Point], &Shear)>> {
+        self.decoration.is_none().then(|| {
+            zip(&self.runs, &self.shears).map(|(run, shear)| {
+                (&run.font, run.origin, run.positions.as_slice(), shear)
+            })
+        })
+    }
 }
 
 /// A run as one draw paints it: kept, or laid out for that draw alone --

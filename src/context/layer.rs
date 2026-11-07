@@ -2176,20 +2176,31 @@ impl Group {
                         false,
                         sigma * replay_scale(canvas),
                     )
-                    && let Some(sharp) = chain::coverage::sharp(
-                        canvas,
-                        *sigma,
-                        content,
-                        chain::coverage::Plane::Alpha,
-                        |plane| {
-                            self.draw_chained_as(plane, target, &back, |plane| {
-                                plane.draw_picture(&run.picture, None, None);
-                            })
-                        },
-                    )
+                    && let Some(at) =
+                        chain::coverage::Placement::of(canvas, *sigma, content)
                 {
-                    #[cfg(test)]
-                    COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
+                    let sharp = || {
+                        chain::coverage::sharp(
+                            canvas,
+                            *sigma,
+                            content,
+                            chain::coverage::Plane::Alpha,
+                            |plane| {
+                                self.draw_chained_as(
+                                    plane,
+                                    target,
+                                    &back,
+                                    |plane| {
+                                        plane.draw_picture(
+                                            &run.picture,
+                                            None,
+                                            None,
+                                        );
+                                    },
+                                )
+                            },
+                        )
+                    };
                     let (rgb, gain) =
                         (run.exact.at(run.alpha).0.rgb, byte_alpha(run.alpha));
                     // A kept run is found by where its picture is played on
@@ -2208,19 +2219,38 @@ impl Group {
                             gain,
                         )
                     });
-                    let outcome = run_mask::drawn(placed, sharp, |sharp| {
-                        chain::coverage::coloured(
-                            canvas,
-                            &sharp.blurred(),
-                            rgb,
-                            gain,
-                        )
-                    });
-                    if let Some(outcome) = outcome {
-                        outcome.composite(canvas, &paint);
+                    // Composited from what was kept without drawing the run
+                    // where its glyphs decide its coverage -- see
+                    // `run_mask::kept` -- but not under a destination, which
+                    // `confine` cuts the plane by where the run lies.
+                    let kept = placed
+                        .as_ref()
+                        .filter(|_| self.within.is_none())
+                        .and_then(|placed| run_mask::kept(placed, &at, sharp));
+                    // `None` where no plane could be made, for the chain to
+                    // draw the run.
+                    let route = match kept {
+                        Some(outcome) => Some(Some(outcome)),
+                        None => sharp().map(|sharp| {
+                            run_mask::drawn(placed, &at, sharp, |sharp| {
+                                chain::coverage::coloured(
+                                    canvas,
+                                    &sharp.blurred(),
+                                    rgb,
+                                    gain,
+                                )
+                            })
+                        }),
+                    };
+                    if let Some(outcome) = route {
+                        #[cfg(test)]
+                        COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
+                        if let Some(outcome) = outcome {
+                            outcome.composite(canvas, &paint);
+                        }
+                        canvas.restore();
+                        return;
                     }
-                    canvas.restore();
-                    return;
                 }
                 // A group a canvas drawn into another brings with it is played
                 // once for each time that canvas is, and its chain is run the
