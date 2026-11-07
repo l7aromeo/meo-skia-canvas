@@ -528,6 +528,10 @@ type InstanceKey = (TypefaceId, Vec<(u32, u32)>);
 /// holds was made with, so a position asked for twice is one typeface
 /// pinned rather than two.
 ///
+/// Kept across changes to the registered fonts, since a key names the face
+/// an instance was made from by its id; an instance goes when that face
+/// leaves the registry, or when the bound evicts it.
+///
 /// Least recently used, by a counter, with the order kept in a second map so
 /// that eviction does not scan.
 #[derive(Default)]
@@ -588,6 +592,22 @@ impl InstanceCache {
             self.bytes -= INSTANCE_BYTES_ESTIMATE;
             INSTANCE_BASES
                 .with(|bases| bases.borrow_mut().remove(&instance.unique_id()));
+        }
+    }
+
+    /// Drops every instance made from the face whose id is `base`: the
+    /// face has left the registry, and nothing can ask for it again.
+    fn forget_base(&mut self, base: TypefaceId) {
+        let stamps: Vec<u64> = self
+            .order
+            .iter()
+            .filter(|(_, key)| key.0 == base)
+            .map(|(stamp, _)| *stamp)
+            .collect();
+        for stamp in stamps {
+            if let Some(key) = self.order.remove(&stamp) {
+                self.forget(&key);
+            }
         }
     }
 
@@ -794,7 +814,9 @@ pub struct FontLibrary {
     made_from: HashMap<TypefaceId, Data>,
     generics_cache: Vec<(Typeface, Option<String>)>,
     collection_cache: CollectionCache,
-    /// The instances the cached collections were built from, kept longer.
+    /// The instances the cached collections were built from, kept longer:
+    /// across changes to the fonts, until their face leaves the registry --
+    /// see [`invalidate`](Self::invalidate).
     instances: InstanceCache,
     resolved_fonts: ResolvedFontCache,
     /// The fonts resolved from a [`Font`] value -- see [`ResolvedFontCache`].
@@ -1765,23 +1787,16 @@ impl FontLibrary {
         bytes: Option<Data>,
     ) {
         let oblique = designed_oblique_angle(&font);
-        if let Some(idx) =
-            self.fonts.iter().position(|(old_font, old_alias)| {
-                let same_family = match alias.is_some() {
-                    true => old_alias == &alias,
-                    false => old_font.family_name() == font.family_name(),
-                };
-                same_family
-                    && old_font.font_style() == font.font_style()
-                    && designed_oblique_angle(old_font) == oblique
-            })
-        {
-            let (old_font, _) = self.fonts.remove(idx);
-            let id = old_font.unique_id();
-            if !self.fonts.iter().any(|(font, _)| font.unique_id() == id) {
-                self.made_from.remove(&id);
-            }
-        }
+        let position = self.fonts.iter().position(|(old_font, old_alias)| {
+            let same_family = match alias.is_some() {
+                true => old_alias == &alias,
+                false => old_font.family_name() == font.family_name(),
+            };
+            same_family
+                && old_font.font_style() == font.font_style()
+                && designed_oblique_angle(old_font) == oblique
+        });
+        let replaced = position.map(|idx| self.fonts.remove(idx).0.unique_id());
 
         // add the new typeface/alias and recreate the FontCollection to include
         // it
@@ -1789,14 +1804,33 @@ impl FontLibrary {
             self.made_from.insert(font.unique_id(), bytes);
         }
         self.fonts.push((font, alias));
+        if let Some(id) = replaced {
+            self.forget_face(id);
+        }
         self.invalidate();
     }
 
     /// Forgets every registered face.
     fn forget_fonts(&mut self) {
-        self.fonts.clear();
-        self.made_from.clear();
+        let ids: Vec<TypefaceId> = self
+            .fonts
+            .drain(..)
+            .map(|(font, _)| font.unique_id())
+            .collect();
+        ids.into_iter().for_each(|id| self.forget_face(id));
         self.invalidate();
+    }
+
+    /// Drops what is kept for the face whose id is `id` -- the bytes it was
+    /// made from and the instances made from it -- unless it is still
+    /// registered, as a face [`face_from_data`](Self::face_from_data) found
+    /// registered is when it replaces itself.
+    fn forget_face(&mut self, id: TypefaceId) {
+        if self.fonts.iter().any(|(font, _)| font.unique_id() == id) {
+            return;
+        }
+        self.made_from.remove(&id);
+        self.instances.forget_base(id);
     }
 
     /// The font `canonical` names, if it has been resolved since the
@@ -2152,6 +2186,15 @@ impl FontLibrary {
     /// again in those faces from what it was measured with. And the runs kept
     /// for drawing, which hold the faces they were laid out in, though no
     /// typesetter can match one laid out before the change.
+    ///
+    /// The instances stay. Each is keyed by the id of the face it was made
+    /// from, which Skia never gives another face, so a change elsewhere
+    /// cannot make one wrong, and [`forget_face`](Self::forget_face) drops a
+    /// face's instances when the face itself leaves. Made again here, every
+    /// registration -- of any font -- gave the text drawn after it a new
+    /// typeface, and the GPU can draw the same glyphs of a new typeface a
+    /// level apart at some edge pixels, so the same text on a fresh canvas
+    /// changed with how many fonts had been registered before it.
     fn invalidate(&mut self) {
         FONT_GENERATION.set(FONT_GENERATION.get().wrapping_add(1));
         self.system_families = None;
@@ -2163,7 +2206,6 @@ impl FontLibrary {
         self.collections = [None, None];
         self.collection_parts = None;
         self.collection_cache.clear();
-        self.instances.clear();
         self.resolved_fonts.clear();
         self.fonts_by_value.clear();
         self.positions = InstancedPositions::default();
@@ -3281,6 +3323,115 @@ mod tests {
             Some(other.max),
             "a named value past its axis is pinned to it"
         );
+    }
+
+    /// A variable face whose only axis is `wght`, reporting a regular style.
+    const OSWALD_FILE: &str =
+        "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+    /// Another whose only axis is `wght`, reporting its thinnest weight.
+    const RALEWAY_FILE: &str =
+        "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf";
+
+    /// A face from the bundled file at `path`.
+    fn bundled(path: &str) -> Typeface {
+        let bytes = std::fs::read(path).expect("a bundled font");
+        FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("the font parses")
+    }
+
+    /// The face `family` is drawn in at `weight`: an instance of a variable
+    /// face, made through the library's [`InstanceCache`].
+    fn drawn_at(lib: &mut FontLibrary, family: &str, weight: i32) -> Typeface {
+        let mut style = TextStyle::new();
+        style
+            .set_font_families(&[family])
+            .set_font_style(FontStyle::new(
+                Weight::from(weight),
+                Width::NORMAL,
+                Slant::Upright,
+            ));
+        let (mut collection, _) = lib.fonts_for_style(&style, &[]);
+        collection
+            .find_typefaces(&[family], style.font_style())
+            .into_iter()
+            .next()
+            .expect("the family has a face")
+    }
+
+    /// Whether the library holds an instance made from the face `base`.
+    fn holds_instances_of(lib: &FontLibrary, base: TypefaceId) -> bool {
+        lib.instances.order.values().any(|key| key.0 == base)
+    }
+
+    /// An instance is the face it was made from at a position, never another
+    /// face at the same position. Oswald and Raleway each vary only `wght`,
+    /// and 700 is within both their ranges, so at 700 they are asked for at
+    /// the same coordinates, and only the
+    /// face in the key tells their instances apart -- whether both are
+    /// registered, or one replaces the other, or the fonts are reset and the
+    /// other registered after.
+    #[test]
+    fn an_instance_is_of_the_face_it_was_asked_for() {
+        const OSWALD: &str = "InstanceOfOswald";
+        const RALEWAY: &str = "InstanceOfRaleway";
+        const SWAPPED: &str = "InstanceSwapped";
+        let oswald = bundled(OSWALD_FILE);
+        let raleway = bundled(RALEWAY_FILE);
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(oswald.clone(), Some(OSWALD.to_string()));
+            lib.register_typeface(raleway.clone(), Some(RALEWAY.to_string()));
+            let in_oswald = drawn_at(lib, OSWALD, 700);
+            let in_raleway = drawn_at(lib, RALEWAY, 700);
+            assert_eq!(in_oswald.family_name(), "Oswald");
+            assert_eq!(in_raleway.family_name(), "Raleway");
+            assert_eq!(base_face(in_oswald.unique_id()), oswald.unique_id());
+            assert_eq!(base_face(in_raleway.unique_id()), raleway.unique_id());
+
+            lib.register_typeface(oswald.clone(), Some(SWAPPED.to_string()));
+            assert_eq!(drawn_at(lib, SWAPPED, 700).family_name(), "Oswald");
+            lib.forget_fonts();
+            lib.register_typeface(raleway.clone(), Some(SWAPPED.to_string()));
+            assert_eq!(drawn_at(lib, SWAPPED, 700).family_name(), "Raleway");
+            lib.forget_fonts();
+        });
+    }
+
+    /// A change to the fonts keeps the instances of every face still
+    /// registered -- the same typeface comes back, so text in it draws as it
+    /// did -- and drops those of a face that left, by replacement or reset.
+    #[test]
+    fn instances_go_with_their_face_and_only_then() {
+        const KEPT: &str = "InstancesKept";
+        const REPLACED: &str = "InstancesReplaced";
+        let raleway = bundled(RALEWAY_FILE);
+        let oswald = bundled(OSWALD_FILE);
+        let monoton = bundled("tests/assets/fonts/Monoton-Regular.woff");
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(raleway.clone(), Some(KEPT.to_string()));
+            lib.register_typeface(oswald.clone(), Some(REPLACED.to_string()));
+            let kept = drawn_at(lib, KEPT, 900).unique_id();
+            drawn_at(lib, REPLACED, 900);
+            assert!(holds_instances_of(lib, oswald.unique_id()));
+
+            // Monoton reports Oswald's style, so it takes Oswald's place.
+            lib.register_typeface(monoton, Some(REPLACED.to_string()));
+            assert!(
+                !holds_instances_of(lib, oswald.unique_id()),
+                "a replaced face's instances go"
+            );
+            assert_eq!(
+                drawn_at(lib, KEPT, 900).unique_id(),
+                kept,
+                "a face still registered keeps its instance"
+            );
+
+            lib.forget_fonts();
+            assert!(
+                !holds_instances_of(lib, raleway.unique_id()),
+                "a reset takes every registered face's instances"
+            );
+        });
     }
 
     #[test]
