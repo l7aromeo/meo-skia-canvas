@@ -1313,6 +1313,31 @@ rather than stroked, and a star of straight edges, did not move at any shift
 tried. Chrome's CPU canvas rasterizes through the same Skia converter, so it is
 inferred to place the same error by its own layers; that was not measured.
 
+**Text under 254 device pixels on a GPU canvas is drawn as the CPU canvas
+draws it, and Chrome's GPU canvas draws it otherwise.** Ganesh draws a glyph run from 162 to 324 device
+pixels as distance fields, whose coverage moves with where in the atlas a
+glyph lands, and so with what the context drew before.
+`containers/skia-text-distance-fields-off.patch` draws a run under 254
+device pixels as a direct mask from the scaler the CPU raster uses instead,
+so such text on the GPU page is the CPU page's byte for byte
+(`text_on_the_gpu_draws_as_the_cpu_draws_it_whatever_came_before`). A run of
+254 device pixels and up is a path, as one above 324 already was: from 254
+to 324 it was a distance field before and is drawn from its outline now,
+which is not the CPU page's either. On issue
+#622's page -- `italic 900 96px` Oswald under `scale(2.4)`, 230 device pixels
+-- Chrome 158's CPU canvas draws our CPU page exactly, one row higher (#142).
+Its GPU canvas draws the same page after every history tried, and that page
+differs from its CPU one in 3,624 pixels' alpha, by up to 168 levels. At
+column 375, rows 251, 253, 254 and 255 of ours and a row higher in Chrome's,
+our GPU and CPU pages and Chrome's CPU page read 255, 189, 122 and 60, Chrome's
+GPU page 248, 209, 152 and 62, and the distance fields this library drew
+before 228, 177, 118 and 38. Which route Chrome's GPU canvas took is not
+established: in that run a fill of `rgb(127.5 127.5 127.5)`, which Chrome's
+GPU raster reads a byte low as 127, read 128, so the run may not have
+rasterized on the GPU at all. A direct mask is the glyph's coverage at the
+device transform, which no sample interpolated from a distance field
+reproduces, so this library keeps it whatever Chrome's GPU canvas does.
+
 **A PDF's blend modes render as the canvas's in poppler, and macOS's
 CoreGraphics renders a few of them otherwise.** A composite operation on an
 sRGB canvas is written into the PDF as the blend mode it is, on a page whose

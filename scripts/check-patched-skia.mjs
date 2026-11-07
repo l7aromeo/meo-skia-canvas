@@ -137,6 +137,12 @@ const ASYNC_TRANSFER_REUSE = {
   ...buildRsPatch("meo_async_transfer_reuse"),
 };
 
+/// containers/skia-text-distance-fields-off.patch, on every platform.
+const TEXT_DISTANCE_FIELDS_OFF = {
+  patch: "containers/skia-text-distance-fields-off.patch",
+  ...buildRsPatch("meo_text_distance_fields_off"),
+};
+
 /// Each file a patch for the platform changes, under Skia's source root, with
 /// what only the patched file contains, and the patch that puts it there.
 /// `just check-skia-patches` refuses a patch in `PATCHES` that is neither
@@ -153,6 +159,7 @@ export const PATCHED = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
+    TEXT_DISTANCE_FIELDS_OFF,
   ],
   linux: [
     ATLAS_SIZE,
@@ -160,6 +167,7 @@ export const PATCHED = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
+    TEXT_DISTANCE_FIELDS_OFF,
   ],
   win32: [
     ATLAS_SIZE,
@@ -171,6 +179,7 @@ export const PATCHED = {
     },
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
+    TEXT_DISTANCE_FIELDS_OFF,
   ],
 };
 

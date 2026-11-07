@@ -2192,9 +2192,11 @@ impl FontLibrary {
     /// cannot make one wrong, and [`forget_face`](Self::forget_face) drops a
     /// face's instances when the face itself leaves. Made again here, every
     /// registration -- of any font -- gave the text drawn after it a new
-    /// typeface, and the GPU can draw the same glyphs of a new typeface a
-    /// level apart at some edge pixels, so the same text on a fresh canvas
-    /// changed with how many fonts had been registered before it.
+    /// typeface, and a Skia without
+    /// `containers/skia-text-distance-fields-off.patch`, as a crate build
+    /// compiles, draws the same large glyphs of a new typeface a level apart
+    /// at some edge pixels, so the same text on a fresh canvas changed with
+    /// how many fonts had been registered before it.
     fn invalidate(&mut self) {
         FONT_GENERATION.set(FONT_GENERATION.get().wrapping_add(1));
         self.system_families = None;
