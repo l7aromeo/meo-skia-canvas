@@ -280,6 +280,53 @@ impl Blurred {
     }
 }
 
+/// Where [`Coverage::of`] places a draw's coverage for a blur on `canvas`,
+/// decided before anything is drawn: by the canvas's transform and clip, the
+/// blur's sigma and what the draw paints, and by nothing about the plane it
+/// is drawn on.
+pub(crate) struct Placement {
+    /// What the blur works on, in layer pixels: [`Self::region`] widened by
+    /// the blur's reach, and the rectangle [`Coverage::region`] reports.
+    pub(crate) worked: IRect,
+    /// The rectangle of the plane whose coverage is read, in layer pixels.
+    pub(crate) region: IRect,
+    /// The plane the draw is made on, in layer pixels: on the CPU it starts
+    /// at the device's origin, as the chain's layer does.
+    pub(crate) drawn: IRect,
+    /// The part of the canvas's transform the draw is made under, on the
+    /// plane.
+    pub(crate) layer: Matrix,
+    /// The part of the transform left to place the blurred result on the
+    /// device.
+    pub(crate) rest: Matrix,
+}
+
+impl Placement {
+    /// The placement of a draw painting within `content`, a rectangle in the
+    /// canvas's local coordinates, blurred by `sigma` on `canvas`. `None` where
+    /// the transform does not split into a layer's part and the rest, or the
+    /// draw lies outside the clip.
+    pub(crate) fn of(
+        canvas: &SkCanvas,
+        sigma: f32,
+        content: Option<Rect>,
+    ) -> Option<Placement> {
+        let base = canvas.local_to_device_as_3x3();
+        let (layer, rest) = split(&base)?;
+        let steps = [Step::Blur(sigma)];
+        let (to_draw, worked) = region(canvas, &steps, content, &layer, &rest)?;
+        let (region, drawn) =
+            placed(canvas, to_draw, rest.is_identity(), false);
+        Some(Placement {
+            worked: IRect::join(&worked, &region),
+            region,
+            drawn,
+            layer,
+            rest,
+        })
+    }
+}
+
 /// A draw's coverage before it is blurred: one byte a pixel of `region`, and
 /// the device sigmas the blur takes along x and y.
 ///
@@ -313,13 +360,13 @@ impl Coverage {
         plane: Plane,
         draw: impl FnOnce(&SkCanvas),
     ) -> Option<Coverage> {
-        let base = canvas.local_to_device_as_3x3();
-        let (layer, rest) = split(&base)?;
-        let steps = [Step::Blur(sigma)];
-        let (to_draw, worked) = region(canvas, &steps, content, &layer, &rest)?;
-        let (region, drawn) =
-            placed(canvas, to_draw, rest.is_identity(), false);
-        let worked = IRect::join(&worked, &region);
+        let Placement {
+            worked,
+            region,
+            drawn,
+            layer,
+            rest,
+        } = Placement::of(canvas, sigma, content)?;
         let surface = |drawn: IRect| {
             let surface = match plane {
                 Plane::Drawn => {
