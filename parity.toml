@@ -304,6 +304,18 @@ why  = """The payload of `FilterOp::DropShadow`. Reachable from npm the same
 status = "deliberate"
 
 [[capability]]
+name = "whether a filter value is none"
+rust = ["Context2D::filter_is_none", "filter::css_filter_is_none"]
+npm  = []
+why  = """The filter-none predicate is crate-only. It says whether a CSS filter
+       value is none, the one value Filter Effects 1 gives no stacking context,
+       for a Rust renderer deciding how to stack an element from a context or
+       from a style string before any canvas exists. A JavaScript caller
+       stacks through the DOM, and `CanvasFilters.filter` echoes the string it
+       was given, as Chrome's canvas does."""
+status = "deliberate"
+
+[[capability]]
 name = "paint state as one object"
 rust = ["Paint"]
 npm  = []
@@ -488,6 +500,20 @@ why  = """The crate's colour primitive: premultiplied, linear-light, and the
        which the binding reads with the parser `RgbaLinear::from_css` uses, so
        the capability on that side is the string vocabulary rather than a
        type."""
+status = "deliberate"
+
+[[capability]]
+name = "a CSS colour read as straight sRGB channels"
+rust = ["Srgba"]
+npm  = []
+why  = """`Srgba` is a CSS colour parsed into straight, unclamped sRGB channels
+       in f64 by `Srgba::from_css`, through the parser
+       `Context2D::set_fill_style_css` uses. npm has no channel reader: a
+       JavaScript caller hands the colour string to the canvas, as a browser's
+       canvas takes it, and gets a colour back only as the string a style
+       getter serialises or as pixels. Crate callers
+       parse colours themselves, for animation and layout that mix colours
+       before any canvas paints them."""
 status = "deliberate"
 
 [[capability]]

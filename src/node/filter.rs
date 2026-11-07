@@ -294,7 +294,8 @@ impl Filter {
         self.css == css && self.specs == specs
     }
 
-    /// Whether this filter would leave a draw untouched.
+    /// Whether this filter is `none`: a chain with no functions. A chain of
+    /// functions that each change nothing, `blur(0px)`, is not.
     pub fn is_none(&self) -> bool {
         self.specs.is_empty()
     }

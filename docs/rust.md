@@ -107,6 +107,8 @@ For building an `RgbaLinear` directly rather than through a paint style:
 - `with_opacity(opacity)` scales every component, alpha included, so the result stays premultiplied.
 - `fading_out()` returns the colour at zero alpha with its hue intact. `with_opacity(0.0)` multiplies the channels away, which is what premultiplication means and is right wherever a colour is painted -- at zero alpha nothing is drawn, so the hue cannot matter. It matters in one place, a gradient stop, because there the colour is interpolated _toward_ rather than painted: multiplied away, a transparent cream is the same four zeros as CSS's `transparent`, which is a transparent _black_, and the gradient fades toward black instead of toward cream.
 
+To read a CSS colour's channels rather than paint with them, `Srgba::from_css(css)` returns straight, gamma-encoded, unclamped sRGB in `f64` -- CSS's `color(srgb r g b / a)`, each channel on `0.0..=1.0` inside sRGB. A colour written in sRGB comes back as written: `#808080` is `128.0 / 255.0` in each channel, `#0000007f`'s alpha is `127.0 / 255.0`, and `color(srgb 1.25 -0.1 0.5 / 0.1)` is exactly those four numbers. Straight alpha keeps the hue of a transparent colour, which premultiplied `RgbaLinear` cannot: `rgba(255, 0, 0, 0)` is red at zero alpha. It refuses what `set_fill_style_css` refuses, with the same `Error::InvalidColor`, and `RgbaLinear::from` converts the result for painting.
+
 ## Colour spaces
 
 `PixelColorSpace` is the one vocabulary, used for the canvas, for readbacks and for exports:
