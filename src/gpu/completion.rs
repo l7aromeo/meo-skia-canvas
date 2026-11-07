@@ -1260,10 +1260,21 @@ mod tests {
     /// it.
     const MIN_CACHED_BUFFER_BYTES: usize = 1 << 12;
 
-    /// A read leaves its transfer buffer in the context's cache, and the next
-    /// read of the same size takes it rather than making another.
+    /// A read leaves its transfer buffer in the context's cache where the
+    /// Skia compiled keeps one, and none where it does not, and the next read
+    /// of the same size leaves the cache as the first did.
+    ///
+    /// Which Skia is a build's choice, not the crate's:
+    /// `containers/skia-async-transfer-reuse.patch` makes the asynchronous
+    /// read's buffer `kDynamic`, which Skia caches, and this repository's
+    /// builds on macOS and Linux carry it. crates.io's Skia, which a crate
+    /// build compiles or downloads, makes it `kStream`, which carries no
+    /// scratch key, and `GrResourceCache` purges a resource with neither key
+    /// the moment the read lets go of it. `cfg(meo_async_transfer_reuse)`,
+    /// from `build.rs`, says which this build compiled, so each is held to
+    /// what it does rather than one being skipped.
     #[test]
-    fn a_read_leaves_its_transfer_buffer_for_the_next() {
+    fn a_read_leaves_its_transfer_buffer_where_skia_keeps_one() {
         let (width, height) = (64.0, 48.0);
         // 2,048 bytes, a size no read here has asked for before.
         let (part_width, part_height) = (32.0, 16.0);
@@ -1275,38 +1286,54 @@ mod tests {
             ..PixelExportOptions::default()
         };
         // A pixel drawn first, so that each read reaches the GPU rather than
-        // pixels already read back.
+        // pixels already read back. Answers how many bytes the read returned.
         let mut read = |width: f32, height: f32| {
             let ctx = canvas.context();
             ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
             ctx.get_image_data_as(0.0, 0.0, width, height, premultiplied)
-                .expect("a read");
+                .expect("a read")
+                .pixels()
+                .len()
         };
         // Whatever else reads of the page leave in the cache is there before
         // the part is read.
         read(width, height);
         read(width, height);
         let (_, purgeable) = settled();
-        read(part_width, part_height);
+        let bytes = read(part_width, part_height);
         let kept = settled();
-        // A read of a new size also leaves a purgeable resource of the read's
-        // own bytes, with or without a transfer buffer kept; the buffer is at
-        // least the smallest Skia bins to.
-        assert!(
-            kept.1 >= purgeable + MIN_CACHED_BUFFER_BYTES,
-            "the read kept no buffer: {purgeable} purgeable bytes, then {}",
-            kept.1
+        // A read of a new size leaves a purgeable resource of its own bytes
+        // with or without a buffer. A buffer kept is the smallest Skia bins
+        // to, which a read of no more bytes than that is binned up to.
+        assert!(bytes <= MIN_CACHED_BUFFER_BYTES, "a {bytes}-byte read");
+        let buffer = match cfg!(meo_async_transfer_reuse) {
+            true => MIN_CACHED_BUFFER_BYTES,
+            false => 0,
+        };
+        assert_eq!(
+            kept.1,
+            purgeable + bytes + buffer,
+            "purgeable bytes before and after a {bytes}-byte read, with \
+             cfg(meo_async_transfer_reuse) {}",
+            cfg!(meo_async_transfer_reuse)
         );
         read(part_width, part_height);
-        assert_eq!(settled(), kept, "the next read made another buffer");
+        assert_eq!(settled(), kept, "the next read changed what is kept");
     }
 
-    /// A read through a transfer buffer an earlier read left holds what its
-    /// own copy wrote, whether the buffer was last used on the same page or
-    /// another, and after a read of another size has taken one from another
-    /// size's bin.
+    /// Each read holds what its own copy wrote, read after read, on two pages
+    /// in turn and at two sizes.
+    ///
+    /// Where the Skia compiled keeps a read's transfer buffer
+    /// (`cfg(meo_async_transfer_reuse)`; see
+    /// `a_read_leaves_its_transfer_buffer_where_skia_keeps_one`), every read
+    /// after the first of its size goes through a buffer an earlier read left:
+    /// last used on the same page or the other, and after a read of the other
+    /// size has taken one from its own bin. That is the case this is for. A
+    /// crate build's Skia makes a fresh buffer for every read, so there it
+    /// holds only that each read is its own, which no reuse can disturb.
     #[test]
-    fn a_reused_transfer_buffer_holds_its_own_read() {
+    fn each_read_holds_its_own_pixels_whichever_buffer_it_lands_in() {
         let (width, height) = (64.0, 48.0);
         // 4,800 bytes, binned to 6,144, where 64x48 is 12,288 in a bin of
         // its own.

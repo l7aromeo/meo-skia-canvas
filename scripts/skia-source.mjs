@@ -109,7 +109,7 @@ const GRAPHITE_BINDINGS = join(
   "rust-skia-graphite-bindings.patch",
 );
 // UPSTREAM: skia-safe 0.156.0 -- https://issues.skia.org/issues/40042671 -- worked around
-// Re-check: cargo test a_read_leaves_its_transfer_buffer_for_the_next with `metal` on macOS, on a tree prepared without this patch; the read keeps no buffer while `SurfaceContext::transferPixels` asks for `kStream_GrAccessPattern`
+// Re-check: cargo test a_read_leaves_its_transfer_buffer_where_skia_keeps_one against crates.io's Skia, as the crates.io publish runs it; it holds that build to keeping no buffer, and fails there once `SurfaceContext::transferPixels` stops asking for `kStream_GrAccessPattern`
 //
 // Every `getImageData` on a GPU page goes through Skia's asynchronous read,
 // whose transfer buffer `SurfaceContext::transferPixels` asks for as
