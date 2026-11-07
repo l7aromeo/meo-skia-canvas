@@ -26,6 +26,15 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # instead, as upstream Skia does.
 set dotenv-command := "node scripts/skia-source.mjs env"
 
+# Every cargo call here that builds skia-bindings goes through this. Where the
+# local cache holds Skia compiled from this worktree's patched tree for the
+# call's features, skia-bindings links it and runs no ninja; otherwise cargo
+# runs as it is and compiles Skia. `just skia-cache-fill` stores a feature
+# set's Skia; scripts/skia-cache.mjs and scripts/skia-binaries.mjs say how an
+# entry is chosen and checked. A call written as plain `cargo` still builds,
+# only without the cache.
+skia_cargo := "node scripts/skia-cache.mjs cargo"
+
 # On Linux, `metal` feature does not compile -- use feature subset.
 
 lib := justfile_directory() / "lib" / "skia.node"
@@ -173,8 +182,18 @@ ensure-binary: ensure-deps
 # names another, as `prepush` does on macOS.
 [doc("Type-check Rust and the shipped TypeScript declarations.")]
 typecheck features=linux_features: ensure-deps
-    cargo check --all-targets --features "{{ features }}"
+    {{ skia_cargo }} check --all-targets --features "{{ features }}"
     bun run typecheck
+
+# Compile Skia once for a feature set and keep it in the local cache, for every
+# worktree's builds with those features to link instead of compiling it --
+# `skia_cargo` above, and scripts/skia-cache.mjs. `args` are cargo's feature
+# and profile flags as a recipe gives them, as in `just skia-cache-fill
+# --no-default-features --features metal`. Stored only once
+# scripts/check-patched-skia.mjs passes the build.
+[doc("Compile Skia for a feature set and store it in the local cache.")]
+skia-cache-fill *args: ensure-deps
+    node scripts/skia-cache.mjs fill {{ args }}
 
 # What the pre-commit hook runs: the checks that are fast enough to sit in
 # front of every commit.
@@ -204,8 +223,8 @@ precommit: ensure-deps check-docs check-cargo-lock check-skia-patches
     cargo +{{ fmt_toolchain }} fmt --all -- --check
     bun run format:check
     bun run lint
-    cargo clippy --all-targets --no-default-features -- -D warnings
-    cargo clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
+    {{ skia_cargo }} clippy --all-targets --no-default-features -- -D warnings
+    {{ skia_cargo }} clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
 
 # Catch a doc comment stacked above another instead of above its own item.
 #
@@ -585,7 +604,7 @@ check-parity *flags: ensure-deps
     # for the whole recipe. The crate's dependencies are already built by the
     # time anything runs this, which is what makes it cheap.
     RUSTDOCFLAGS="-D warnings" \
-      cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
+      {{ skia_cargo }} +{{ fmt_toolchain }} rustdoc --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }},fetch" \
       -- -Z unstable-options --output-format json
     node scripts/extract-rust-surface.mjs target/doc/meo_skia_canvas.json target/parity-rust.json
@@ -641,9 +660,9 @@ install-hooks:
 # than by which language it does it to.
 [doc("Run clippy and ESLint with autofix (modifies the working tree).")]
 lint: ensure-deps
-    cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
-    cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
-    cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
+    {{ skia_cargo }} clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
+    {{ skia_cargo }} clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
+    {{ skia_cargo }} clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
     bun run lint:fix
 
 # Run clippy without fixing (CI-safe).
@@ -663,9 +682,9 @@ lint: ensure-deps
 # what the `clippy` matrix in rust-ci.yml is for.
 [doc("Run clippy and ESLint without fixing. Three clippy passes: no features, this host's, its GPU backend alone.")]
 lint-check: ensure-deps lint-js
-    cargo clippy --all-targets --no-default-features -- -D warnings
-    cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
-    cargo clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
+    {{ skia_cargo }} clippy --all-targets --no-default-features -- -D warnings
+    {{ skia_cargo }} clippy --all-targets --features "{{ host_features }}" -- -D warnings
+    {{ skia_cargo }} clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
 
 # ESLint alone, apart from clippy so that `check-repo` can run it where no Skia
 # is built.
@@ -736,7 +755,7 @@ test-js: ensure-binary
 # suite is the larger of the two.
 [doc("The Rust suite alone. `test` runs this and `test-js` together.")]
 test-rust: ensure-deps
-    node scripts/gpu-events.mjs --run -- cargo test --features "{{ test_features }}"
+    node scripts/gpu-events.mjs --run -- {{ skia_cargo }} test --features "{{ test_features }}"
 
 # Every target, tests included, linted as a release build compiles it.
 #
@@ -750,7 +769,7 @@ test-rust: ensure-deps
 # of `ci` for that reason: CI's `release-tests` job runs it on a prebuilt Skia.
 [doc("Lint every target, tests included, as a release build compiles it.")]
 check-release-tests: ensure-deps
-    cargo clippy --release --features "$(node --input-type=module -e 'import { CARGO_FEATURES } from "./lib/prebuild.mjs"; console.log(CARGO_FEATURES)')" --all-targets -- -D warnings
+    {{ skia_cargo }} clippy --release --features "$(node --input-type=module -e 'import { CARGO_FEATURES } from "./lib/prebuild.mjs"; console.log(CARGO_FEATURES)')" --all-targets -- -D warnings
 
 # Run the JavaScript suite in watch mode.
 test-watch: ensure-binary
@@ -915,7 +934,7 @@ docs: docs-rust docs-js
 
 [doc("Fail on a rustdoc warning -- broken intra-doc links above all.")]
 docs-rust: ensure-deps
-    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features \
+    RUSTDOCFLAGS="-D warnings" {{ skia_cargo }} doc --no-deps --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { "vulkan,window" } }},fetch"
 
 # The declarations are the published contract, so they get the same treatment
@@ -971,7 +990,7 @@ check-dts-surface: ensure-deps ensure-binary
 [doc("Fail if a public Rust signature exposes a skia_safe, neon, ureq or http type.")]
 check-rust-api: ensure-deps
     RUSTDOCFLAGS="-D warnings" \
-      cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
+      {{ skia_cargo }} +{{ fmt_toolchain }} rustdoc --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }},fetch" \
       -- -Z unstable-options --output-format json
     node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json
@@ -998,7 +1017,7 @@ bench-npm *flags: build-release
 # Skia rather than building a second.
 [doc("Run the crate benchmark, release-built.")]
 bench-crate *flags: ensure-deps
-    cargo run --release --example benchmark --features "$(node --input-type=module -e 'import { CARGO_FEATURES } from "./lib/prebuild.mjs"; console.log(CARGO_FEATURES)')" -- {{ flags }}
+    {{ skia_cargo }} run --release --example benchmark --features "$(node --input-type=module -e 'import { CARGO_FEATURES } from "./lib/prebuild.mjs"; console.log(CARGO_FEATURES)')" -- {{ flags }}
 
 # The npm and crate benchmarks list the same case ids in the same order. Each
 # prints its ids with `--list` and times nothing, so this costs a debug build

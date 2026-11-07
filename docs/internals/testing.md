@@ -39,6 +39,11 @@ eval "export $(node scripts/skia-source.mjs env)"
 cargo test --features metal,window,freetype,fetch    # the set `just test-rust` uses on macOS
 ```
 
+`node scripts/skia-cache.mjs cargo test ...` in place of `cargo test` links
+the Skia a build already compiled, where the local cache holds it for those
+features, rather than compiling it -- see
+[packaging.md](packaging.md#compiled-skia-is-cached-for-every-worktree).
+
 A bare `cargo test` also has no GPU: the GPU legs need the platform's feature
 (`metal`, or `vulkan` on Linux), and without it they skip or fall back. Add
 `--no-fail-fast` when the library's own tests are red, or cargo stops at the

@@ -197,3 +197,50 @@ outside a comment, a Skia cache keyed any other way, a release patch step that
 does not run `apply`, a patch `scripts/check-patched-skia.mjs` has no marker
 for and does not name in `UNVERIFIED`, and a patch a platform neither takes
 nor withholds.
+
+## Compiled Skia is cached for every worktree
+
+A build compiles Skia once per feature set -- about 1,730 ninja steps -- and an
+out-dir cannot be copied to another worktree to save it:
+skia-bindings' generated build files reach the source tree by paths relative
+to the out-dir, so a copy at another directory depth regenerates and rebuilds
+everything. So compiled Skia is kept once, in
+`$XDG_CACHE_HOME/meo-skia-canvas/binaries`, and linked from there.
+
+**How a build links it.** With `SKIA_LIBRARY_SEARCH_PATH` set beside
+`SKIA_SOURCE_DIR`, skia-bindings' build script copies Skia's libraries from
+that directory and runs no ninja: it prints `STARTING BIND AGAINST SYSTEM
+SKIA`, generates `bindings.rs` from the patched tree's headers with the
+definitions in `SKIA_BUILD_DEFINES`, and compiles only its own bindings
+sources. An entry holds what that needs: the libraries a build compiled and
+the `skia-defines.txt` it saved beside them. Measured on an M4 Pro, the build
+script took 8 seconds this way, and `just build` 40 seconds from an empty
+target.
+
+**Which entry.** One per tree, target, SDK, profile and skia-bindings feature
+set, the features being what `cargo tree` resolves for a call's flags. The
+tree is `treeName`, so a change of patches misses the cache rather than
+linking a stale entry, and a superseded tree's entries are removed with the
+tree. Every cargo call in the justfile that builds skia-bindings goes through
+`node scripts/skia-cache.mjs cargo` -- `skia_cargo` -- which chooses per call,
+since one recipe can build several feature sets. It says on stderr whether it
+linked an entry or is compiling Skia, and why. `bun run build` reaches it
+through `lib/prebuild.mjs`. A plain `cargo` call, or one with no entry for its
+features, compiles Skia as before. `just skia-cache-fill <cargo flags>` builds
+a feature set from source and stores it. An entry is about 70 MB.
+
+**Not rust-skia's prebuilt binaries.** skia-bindings also downloads archives,
+`file://` URLs included, but only with `SKIA_SOURCE_DIR` unset, keyed by
+rust-skia's commit rather than by these patches, with nothing verifying what
+it unpacks, and with a fall back to compiling crates.io's unpatched Skia when
+the archive is missing.
+
+**What still vouches for the patches.** An entry is stored only from a build
+`scripts/check-patched-skia.mjs` passes, from the worktree's own tree, and it
+keeps that build's log. A build that linked an entry passes the same check
+when every library it linked is, byte for byte, one an entry of the
+worktree's tree holds, and that entry's log passes: patched where it was
+compiled, the same bytes where it was linked. A library changed after it was
+stored, or an entry from another tree, fails. The check holds a build with no
+Ganesh -- the clippy pass with no features -- to the patched files it
+compiles, which are the SVG slant and the face match.
