@@ -1778,7 +1778,7 @@ impl Context2D {
                                         text.kept.clone()?,
                                         Matrix::concat(
                                             &self.state.matrix,
-                                            &Matrix::translate(text.at),
+                                            &text.anchor,
                                         ),
                                         &opaque,
                                     )
@@ -3528,7 +3528,16 @@ impl Context2D {
                     lines: typesetter.names_a_line_colour(),
                     reached: &reached,
                     kept: kept.as_ref().map(|kept| kept.drawn()),
-                    at: origin,
+                    anchor: kept.as_ref().map_or_else(
+                        || Matrix::translate(origin),
+                        |kept| {
+                            drawn_from(
+                                origin,
+                                kept.offset(),
+                                kept.condensation(),
+                            )
+                        },
+                    ),
                     defer: Some(&defer),
                 }),
                 |canvas, paint, pass| {
@@ -4026,13 +4035,37 @@ pub struct TextRun<'a> {
     /// `Typesetter::laid_out` -- which a blurred run's coverage is kept
     /// under: see [`run_mask`].
     pub kept: Option<Arc<RunPaint>>,
-    /// Where the run is drawn, in the canvas's units under its transform.
-    pub at: Point,
+    /// Where the kept run's runs are drawn from, under the canvas's
+    /// transform: the anchor moved by the layout's offset, and squeezed by
+    /// its condensation where it has one -- the transform its glyphs'
+    /// positions are drawn under, which `run_mask` places them by.
+    pub anchor: Matrix,
     /// The kept run's draw in a paint, to be recorded when a target first
     /// plays it, and what it can ink, in the units of the canvas it draws
     /// on -- see `layer::DeferredPicture`. `None`, or answering `None`,
     /// where the run is recorded as it is drawn.
     pub(crate) defer: Option<&'a Defer<'a>>,
+}
+
+/// The transform a run anchored at `origin` is drawn from -- see
+/// [`TextRun::anchor`] -- as `Context2D::draw_text` draws it: at `offset`
+/// from the anchor, and under a squeeze by `condensation` about the anchor
+/// where that is not 1.
+fn drawn_from(origin: Point, offset: Point, condensation: f32) -> Matrix {
+    #[cfg(test)]
+    if run_mask::RULE.get() == run_mask::Rule::AnchorOnly {
+        return Matrix::translate(origin);
+    }
+    match condensation {
+        1.0 => Matrix::translate(origin + offset),
+        scale => Matrix::concat(
+            &Matrix::translate(origin),
+            &Matrix::concat(
+                &Matrix::scale((scale, 1.0)),
+                &Matrix::translate(offset),
+            ),
+        ),
+    }
 }
 
 /// What [`TextRun::defer`] asks: the kept run's draw in the paint it is

@@ -688,6 +688,9 @@ pub(crate) enum Rule {
     /// The halves an axis without sub-pixel positions turns at, not the
     /// odd eighths one with them does.
     HalvesOnly,
+    /// A kept run placed from its anchor alone, not from where its layout
+    /// draws it -- see `context::drawn_from`.
+    AnchorOnly,
 }
 
 /// How the runs played on a thread fared against the cache: drawn from
@@ -745,6 +748,8 @@ mod tests {
         MASK_CACHE, MASKS, Masks, OwnRunCache, RULE, Rule, SHADOWS, held,
         release_cached_runs,
     };
+    use std::cell::Cell;
+
     use crate::{
         canvas::EngineKind,
         context::layer::COVERAGE_RUNS,
@@ -1646,6 +1651,20 @@ mod tests {
     /// A draw on [`wide`]'s page: where, and the rectangle it is cut to.
     type WideDraw = ((f32, f32), Option<(f32, f32, f32, f32)>);
 
+    /// How [`wide`] lays its run out: from the left, centred on where it is
+    /// drawn, and squeezed to four fifths of its width by a `maxWidth`.
+    #[derive(Clone, Copy, Debug)]
+    enum Layout {
+        Left,
+        Centred,
+        Condensed,
+    }
+
+    thread_local! {
+        /// How [`wide`] lays its run out on this thread.
+        static WIDE_LAYOUT: Cell<Layout> = const { Cell::new(Layout::Left) };
+    }
+
     /// `draws` of [`RUN`]'s "Ag" on one CPU page 8,400 by 200, under the
     /// rule `rule`, each cut to `clip` where it names one, with the cache on
     /// or off: the bytes and how the runs fared. The run is drawn once first
@@ -1667,8 +1686,16 @@ mod tests {
         assert!(ctx.set_font_css(RUN.font));
         ctx.set_fill_style_css(RUN.fill).expect("a colour");
         ctx.set_filter_css("blur(3px)").expect("a filter");
-        ctx.measure_text(RUN.text, None);
-        ctx.fill_text(RUN.text, 4000.0, 100.0, None);
+        let width = ctx.measure_text(RUN.text, None).width;
+        let squeeze = match WIDE_LAYOUT.get() {
+            Layout::Left => None,
+            Layout::Centred => {
+                ctx.set_text_align(TextAlign::Center);
+                None
+            }
+            Layout::Condensed => Some(width * 0.8),
+        };
+        ctx.fill_text(RUN.text, 4000.0, 100.0, squeeze);
         MASKS.set(Masks::default());
         for &((x, y), clip) in draws {
             ctx.save();
@@ -1677,7 +1704,7 @@ mod tests {
                 ctx.rect(cx, cy, cw, ch);
                 ctx.clip(FillRule::NonZero);
             }
-            ctx.fill_text(RUN.text, x, y, None);
+            ctx.fill_text(RUN.text, x, y, squeeze);
             ctx.restore();
         }
         let pixels = canvas
@@ -1794,5 +1821,50 @@ mod tests {
         assert_eq!(parted(&exact, &fresh), 0, "the rule moved bytes");
         assert_eq!(masks.wrong, 0, "a cut run composited otherwise: {masks:?}");
         assert!(masks.skipped > 0, "nothing was trusted: {masks:?}");
+    }
+
+    #[test]
+    fn a_run_is_placed_where_its_layout_draws_it() {
+        // The run's anchor at every 1,024th of a pixel down, and down and
+        // across where it is condensed: a glyph is drawn at the anchor moved
+        // by the layout's offset -- its baseline, and where it is centred,
+        // half its width -- and squeezed where the run is condensed, so that
+        // is where its placement turns. Placed from the anchor alone, a glyph
+        // is held clear of the wrong steps, and two placements Skia blits
+        // otherwise are trusted alike. Centred, the run lies so far from its
+        // anchor that Skia's sums of it err past any allowance, and every
+        // draw is compared: a pin of the comparison alone.
+        for layout in [Layout::Left, Layout::Centred, Layout::Condensed] {
+            WIDE_LAYOUT.set(layout);
+            let draws: Vec<WideDraw> = (0..1024)
+                .map(|k| {
+                    let f = k as f32 / 1024.0;
+                    let x = match layout {
+                        Layout::Condensed => 120.0 + f,
+                        _ => 120.0,
+                    };
+                    ((x, 100.0 + f), None)
+                })
+                .collect();
+            let (fresh, _) = wide(Rule::Exact, false, &draws);
+            let (exact, masks) = wide(Rule::Exact, true, &draws);
+            let (_, anchored) = wide(Rule::AnchorOnly, true, &draws);
+            eprintln!(
+                "{layout:?}: as built {masks:?}, AnchorOnly {anchored:?}"
+            );
+            assert_eq!(parted(&exact, &fresh), 0, "{layout:?}: moved bytes");
+            assert_eq!(masks.wrong, 0, "{layout:?}: {masks:?}");
+            match layout {
+                Layout::Centred => {
+                    assert_eq!(masks.skipped, 0, "{layout:?}: {masks:?}");
+                    assert_eq!(anchored.wrong, 0, "{layout:?}: {anchored:?}");
+                }
+                _ => {
+                    assert!(masks.skipped > 0, "{layout:?}: {masks:?}");
+                    assert!(anchored.wrong > 0, "{layout:?}: {anchored:?}");
+                }
+            }
+        }
+        WIDE_LAYOUT.set(Layout::Left);
     }
 }
