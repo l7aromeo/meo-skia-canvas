@@ -53,6 +53,35 @@ stores 8,260 a level off the product. `rgb(200 60 30 / 0.75)` over
 `rgb(40 90 160)` reads blue 63 here, the product 22.5 rounded up over the
 backdrop's 40, and 62 in Chrome 141, which stores 30 at 191 as 22.
 
+**Over earlier content, the backdrop's share is taken at the alpha rounded to
+a byte, as Chrome's is.** The exact composite is `c·a + d·(1 − a)`. A fill
+rounds the product half of it once, and the backdrop's half comes from Skia's
+eight-bit blend at `A`, the alpha rounded to a byte. On the CPU engine
+a fill adds `(d · (256 − A)) >> 8`, the legacy blitter's term, to its product
+rounded once. A drawn image or canvas and a `saveLayer` premultiply
+their bytes by `A` and add `(d · (255 − A) + 127) / 255`, the raster
+pipeline's divide on ARM (`div255` in `SkRasterPipeline_opts.h`; x86 divides
+differently and is not measured here). On the GPU engine, Metal, the blend
+runs in half precision: a fill gives it the product placed on its byte and
+`A`, and an image, a canvas or a layer gives it the colour times the alpha
+unrounded. `#dc2828` at `globalAlpha` 0.99 over white is 220.35, 42.15
+exactly, and white's share at `A` = 252 is 3 where the exact share is 2.55:
+
+|                           | CPU         | GPU         |
+| ------------------------- | ----------- | ----------- |
+| fill                      | 221, 43, 43 | 221, 43, 43 |
+| drawn canvas, `saveLayer` | 220, 43, 43 | 220, 42, 42 |
+| Chrome 158, CPU canvas    | 220, 43, 43 |             |
+
+Each rule above is a byte model that reproduces every pixel of a sweep of
+427,520 on darwin-arm64 -- greys 0 to 255, 334 alphas, backdrops 255, 200,
+128, 37 and 0 -- and so does Chrome's legacy rule for its CPU canvas. Over
+5,592,064 colour, alpha and backdrop triples with the alpha off the byte grid,
+computed from those rules, a CPU fill stores 34.2% a level off the exact
+composite, a CPU image or layer 27.1%, and Chrome's rule 40.0%. On the GPU
+the misses of an image or layer are all within 0.18 of a level of a tie, from
+the half-precision arithmetic: 3.3% of the sweep, against 21.4% for a fill.
+
 Text sets its glyph masks' contrast from the colour it is drawn in, as Skia
 does (`SkMaskGamma`), and on this canvas that colour is the one that stores
 the exact product. Each channel is drawn in the colour nearest the one named
@@ -271,9 +300,12 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   list_ -- `"clear"`, `"destination"` and `"modulate"`. All three are real and
   distinct, the standard's own rule is that an unlisted value is ignored, and
   the declared type separates them so a caller knows which half they are using.
-- _`saveLayer` composites one 8-bit step darker_ than the equivalent
-  `globalAlpha` fill, because Skia rasterises the layer to 8 bits before
-  blending. Exact at 0 and 1.
+- _`saveLayer` and a fill at the same alpha part by up to a level_ over
+  earlier content, in either direction: a layer composites as a drawn image
+  does, not as a fill -- see "Over earlier content" above. Over the sweep
+  there, a layer stores darker than the fill for 15.1% of the CPU's triples
+  and lighter for 21.9%, and on the GPU darker for 13.4% of pixels over a
+  backdrop and lighter for 13.6%. Alike at alphas 0 and 1.
 - _`lh`, `rlh`, the viewport units and the container units read as zero_ in
   `ctx.filter`, `letterSpacing`, `wordSpacing` and a `font` size, so `blur(1vw)`
   is taken and draws no blur at all, and `2vw Oswald` is a 0px font. There is no

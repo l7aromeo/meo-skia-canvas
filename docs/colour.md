@@ -93,9 +93,19 @@ An animation is read the same way, by the same rule. It states its colour in the
 sequence whose container describes it, or whose container says nothing and whose bitstream does, both
 arrive in the right space.
 
-## Eight-bit canvases store the exact product
+## Eight-bit canvases round the product once
 
-On an eight-bit canvas, sRGB's included, a translucent colour is stored as
-the exact product of its colour and its alpha, rounded once, on either
-engine. Chrome's CPU canvas rounds the colour and the alpha to bytes first;
-[browser-differences.md](browser-differences.md) has where the two part.
+On an eight-bit canvas, sRGB's included, a translucent colour drawn over
+nothing is stored as the exact product of its colour and its alpha, rounded
+once, on either engine. Chrome's CPU canvas rounds the colour and the alpha
+to bytes first.
+
+Over earlier content the backdrop's share is taken at the alpha rounded to a
+byte, as Chrome's is, so the stored value can be a level off the exact
+composite `c·a + d·(1 − a)` rounded once. `#dc2828` at `globalAlpha` 0.99 over
+white is 220.35, 42.15 exactly and a fill stores 221, 43, 43: white's share at
+252/255 is 3 where the exact share is 2.55. A drawn image, a canvas and a
+`saveLayer` composite by a rule of their own and part from a fill by up to a
+level. A float `colorType` composites in float and has neither rounding.
+[browser-differences.md](browser-differences.md) has each rule, its error
+over a sweep, and where they part from Chrome.
