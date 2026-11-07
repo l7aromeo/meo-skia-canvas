@@ -395,13 +395,16 @@ jobs:
     runs-on: ubuntu-latest
     # Sized for a run with nothing cached, which every new Skia tree starts
     # with, and which must finish for rust-cache to save at all -- it saves in
-    # its post step, which a cancelled job skips, so a timeout here would leave
-    # every later run as cold. Measured on #594's first run: 15 minutes to the
-    # end of the addon build, 16.6 for the engine's `cargo test`, 11.9 for
-    # `just typecheck` -- `cargo check` runs skia-bindings' build script into an
-    # out-dir of its own, so it compiles Skia a second time -- and about 2 for
-    # the rest, about 47 in all; a warm run skips both Skia compiles.
-    timeout-minutes: 60
+    # its post step, which a cancelled job skips, so a timeout here leaves
+    # every later run as cold. `just typecheck` compiles Skia a second time:
+    # `cargo check` runs skia-bindings' build script into an out-dir of its
+    # own. A warm run skips both Skia compiles. A cold run took 55 minutes on
+    # #635. On #644 the addon build took 19.4, the engine's `cargo test` 20.2,
+    # and `just typecheck` was still running 18 minutes in when a limit of 60
+    # cancelled it, with about 2 minutes of steps still to come: at least 62
+    # in all, the typecheck's own length unknown. 90 leaves 28 minutes over
+    # that sum, for the rest of the typecheck and a slower runner.
+    timeout-minutes: 90
     steps:
       # A debug build of the addon plus every test binary and example, on top
       # of the restored cache, fills the runner's disk: the link fails with
