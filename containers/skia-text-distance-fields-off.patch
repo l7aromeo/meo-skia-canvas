@@ -1,0 +1,23 @@
+--- a/skia-bindings/skia/src/gpu/ganesh/GrRecordingContextPriv.cpp
++++ b/skia-bindings/skia/src/gpu/ganesh/GrRecordingContextPriv.cpp
+@@ -80,8 +80,19 @@
+ sktext::gpu::SubRunControl GrRecordingContextPriv::getSubRunControl(
+         bool useSDFTForSmallText) const {
+ #if !defined(SK_DISABLE_SDF_TEXT)
++    // Distance-field text only on a surface that asks for device-independent
++    // fonts. Elsewhere a glyph that fits the atlas is a direct mask from the
++    // scaler the CPU raster uses, and a larger one a path, so what a draw
++    // paints follows from the draw alone. A distance-field glyph's coverage
++    // moves with where in the atlas it was placed, which follows from what the
++    // context drew before it; and the blob cache keys a distance-field run
++    // without its matrix, so a path blob cached at a larger scale would stand
++    // in for distance fields at a smaller one. Not SK_DISABLE_SDF_TEXT: that
++    // removes distance fields from Graphite as well, and from surfaces that
++    // ask for them.
+     return sktext::gpu::SubRunControl{
+-            this->caps()->shaderCaps()->supportsDistanceFieldText(),
++            this->caps()->shaderCaps()->supportsDistanceFieldText() &&
++                    useSDFTForSmallText,
+             useSDFTForSmallText,
+             !this->caps()->disablePerspectiveSDFText(),
+             this->options().fMinDistanceFieldFontSize,

@@ -1,0 +1,62 @@
+--- a/skia-bindings/skia/src/text/gpu/SubRunContainer.cpp
++++ b/skia-bindings/skia/src/text/gpu/SubRunContainer.cpp
+@@ -777,9 +777,11 @@
+ public:
+     static constexpr int kGlyphInsetting = 0;
+ 
+-    TransformedMaskSubRun(bool isBigEnough, VertexFiller&& vertexFiller, GlyphVector&& glyphVector)
++    TransformedMaskSubRun(bool isBigEnough, VertexFiller&& vertexFiller, GlyphVector&& glyphVector,
++                          std::optional<SkMatrix> madeFor = std::nullopt)
+             : AtlasSubRun{std::move(vertexFiller), std::move(glyphVector)}
+-            , fIsBigEnough{isBigEnough} {}
++            , fIsBigEnough{isBigEnough}
++            , fMadeFor{madeFor} {}
+ 
+     static SubRunOwner Make(SkZip<const SkPackedGlyphID, const SkPoint> accepted,
+                             const SkMatrix& initialPositionMatrix,
+@@ -801,7 +803,8 @@
+         return alloc->makeUnique<TransformedMaskSubRun>(
+                 AtlasSubRun::IsBigEnough(initialPositionMatrix),
+                 std::move(vertexFiller),
+-                std::move(glyphVector));
++                std::move(glyphVector),
++                Untranslated(initialPositionMatrix));
+     }
+ 
+     static SubRunOwner MakeFromBuffer(SkReadBuffer& buffer,
+@@ -829,7 +832,18 @@
+     bool canReuse(const SkPaint& paint, const SkMatrix& positionMatrix) const override {
+         // If we are not scaling the cache entry to be larger, than a cache with smaller glyphs may
+         // be better.
+-        return fIsBigEnough;
++        //
++        // And only at the scale, rotation and skew the masks were rasterized for: a
++        // transformed mask is a bitmap made for its creation matrix, so drawn under
++        // another one it paints differently from the masks a fresh blob would make.
++        // The blob cache keys a run that is not direct without its matrix, so
++        // otherwise a colour bitmap glyph drawn large at one scale would be drawn
++        // from those masks at every other. Translation alone still reuses. The
++        // comparison is exact on purpose: a draw's pixels follow from the draw alone
++        // rather than from what reused them, and any tolerance would let masks made at
++        // a nearby scale stand in again. A sub-run read back from a buffer, as a slug
++        // is, has no matrix to compare and keeps the old rule.
++        return fIsBigEnough && (!fMadeFor || Untranslated(positionMatrix) == *fMadeFor);
+     }
+ 
+     const AtlasSubRun* testingOnly_atlasSubRun() const override { return this; }
+@@ -873,7 +887,15 @@
+     }
+ 
+ private:
++    static SkMatrix Untranslated(SkMatrix matrix) {
++        matrix.setTranslateX(0);
++        matrix.setTranslateY(0);
++        return matrix;
++    }
++
+     const bool fIsBigEnough;
++    // The position matrix the masks were made for, without its translation.
++    const std::optional<SkMatrix> fMadeFor;
+ };  // class TransformedMaskSubRun
+ 
+ // -- SDFTSubRun -----------------------------------------------------------------------------------
