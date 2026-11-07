@@ -179,6 +179,10 @@ thread_local! {
     pub(crate) static COVERAGE_ROUTE: Cell<bool> = const { Cell::new(true) };
     /// How many blurred draws played on this thread took the coverage route.
     pub(crate) static COVERAGE_RUNS: Cell<usize> = const { Cell::new(0) };
+    /// Whether the coverage route draws its plane through the chain's own
+    /// paint, shader and all, so that a test can hold the plain paint it
+    /// draws through -- see [`BlurOp::playback`] -- to it.
+    pub(crate) static SHADED_PLANE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether [`Composite::Chain`]'s `reach` bounds its layer -- see
@@ -3580,13 +3584,34 @@ impl BlurOp {
                 {
                     let gain = chain.gain.alpha_f();
                     let info = canvas.image_info();
+                    // The plane holds coverage alone, so a fill draws it
+                    // opaque without the exact colour's shader: the shader
+                    // returns an alpha of 1 -- see `ExactColour::shader` --
+                    // and `result_chain` sets the paint's to 1, so either
+                    // way a pixel holds its coverage, and Skia builds no
+                    // shader stages to find it. A stroke keeps the shader:
+                    // Skia draws one thinner than a pixel as a hairline with
+                    // its paint's alpha cut to a byte by the width
+                    // (`modifyPaintForHairlines`, `src/core/SkDraw.cpp`),
+                    // which a shaded paint and a plain one round apart --
+                    // a 0.1-wide stroke differed on 178 of 2,304 pages --
+                    // while it never touches a fill (`DrawTreatAsHairline`,
+                    // `src/core/SkDrawProcs.h`).
+                    let mut plane_paint = chain.draw.clone();
+                    if self.paint.style == PaintStyle::Fill {
+                        plane_paint.set_shader(None).set_alpha_f(1.0);
+                    }
+                    #[cfg(test)]
+                    if SHADED_PLANE.get() {
+                        plane_paint = chain.draw.clone();
+                    }
                     for path in self.paths() {
                         let sharp = chain::coverage::sharp(
                             canvas,
                             self.paint.sigma,
                             Some(self.content(&path)),
                             chain::coverage::Plane::Drawn,
-                            |plane| self.draw_into(plane, &path, &chain.draw),
+                            |plane| self.draw_into(plane, &path, &plane_paint),
                         );
                         let Some(sharp) = sharp else {
                             continue;

@@ -1376,15 +1376,21 @@ mod tests {
 
 #[cfg(test)]
 mod inked_tests {
-    //! That the inked rectangle [`super::Placement::of`] gives holds every
-    //! pixel a draw covers: a page drawn reading only it is the page drawn
-    //! reading the whole region, across what decides how far a draw reaches
-    //! past its path.
+    //! That the coverage route's plane holds what the shortcuts it takes
+    //! leave out: the inked rectangle [`super::Placement::of`] gives holds
+    //! every pixel a draw covers, so a page drawn reading only it is the page
+    //! drawn reading the whole region, across what decides how far a draw
+    //! reaches past its path; and a fill's plane drawn without the exact
+    //! colour's shader is the plane drawn with it.
 
     use std::f32::consts::{PI, TAU};
 
     use super::{INKED_IS_REGION, INKED_WITHIN};
-    use crate::{context::layer::COVERAGE_RUNS, prelude::*};
+    use crate::{
+        context::layer::{COVERAGE_RUNS, SHADED_PLANE},
+        pixels::PixelColorSpace,
+        prelude::*,
+    };
 
     /// The family Oswald is registered under here, so that it cannot be
     /// found as a system font of the same name instead.
@@ -1531,23 +1537,46 @@ mod inked_tests {
     const PHASES: [(f32, f32); 4] =
         [(0.0, 0.0), (0.25, 0.5), (0.5, 0.75), (0.75, 0.25)];
 
+    /// How a page is drawn: what it is held to, and its colour and space.
+    #[derive(Clone, Copy)]
+    struct Way {
+        /// The inked rectangle taken as the whole region.
+        whole: bool,
+        /// The coverage plane drawn through the chain's shaded paint.
+        shaded: bool,
+        /// The fill and stroke colour, and the page's colour space.
+        colour: &'static str,
+        space: PixelColorSpace,
+    }
+
+    /// As the route draws: the inked rectangle, the plain paint, on an sRGB
+    /// page.
+    const ROUTE: Way = Way {
+        whole: false,
+        shaded: false,
+        colour: "rgb(200 120 40)",
+        space: PixelColorSpace::Srgb,
+    };
+
     /// `draw` under `frame`, moved by `phase`, blurred by `sigma` on a
-    /// 120x90 eight-bit CPU page at `density`, as premultiplied pixels; the
-    /// inked rectangle taken as the whole region where `whole`.
+    /// 120x90 eight-bit CPU page at `density`, drawn `way`, as premultiplied
+    /// pixels.
     fn page(
         draw: Draw,
         frame: Affine,
         phase: (f32, f32),
         sigma: f32,
         density: u32,
-        whole: bool,
+        way: Way,
     ) -> Vec<u8> {
-        INKED_IS_REGION.with(|w| w.set(whole));
+        INKED_IS_REGION.with(|w| w.set(way.whole));
+        SHADED_PLANE.with(|s| s.set(way.shaded));
         let mut canvas = Canvas::with_options(
             120.0,
             90.0,
             CanvasOptions {
                 gpu: false,
+                color_space: way.space,
                 ..CanvasOptions::default()
             },
         )
@@ -1555,9 +1584,8 @@ mod inked_tests {
         let ctx = canvas.context();
         ctx.set_filter_css(&format!("blur({sigma}px)"))
             .expect("a filter");
-        ctx.set_fill_style_css("rgb(200 120 40)").expect("a colour");
-        ctx.set_stroke_style_css("rgb(30 60 200)")
-            .expect("a colour");
+        ctx.set_fill_style_css(way.colour).expect("a colour");
+        ctx.set_stroke_style_css(way.colour).expect("a colour");
         ctx.translate(phase.0, phase.1);
         ctx.transform(frame);
         draw(ctx);
@@ -1577,6 +1605,7 @@ mod inked_tests {
             .pixels()
             .to_vec();
         INKED_IS_REGION.with(|w| w.set(false));
+        SHADED_PLANE.with(|s| s.set(false));
         pixels
     }
 
@@ -1600,13 +1629,22 @@ mod inked_tests {
                             INKED_WITHIN.with(|n| n.get()),
                         );
                         let ours =
-                            page(draw, frame, phase, sigma, density, false);
+                            page(draw, frame, phase, sigma, density, ROUTE);
                         routed +=
                             usize::from(COVERAGE_RUNS.with(|r| r.get()) > runs);
                         within +=
                             usize::from(INKED_WITHIN.with(|n| n.get()) > inked);
-                        let whole =
-                            page(draw, frame, phase, sigma, density, true);
+                        let whole = page(
+                            draw,
+                            frame,
+                            phase,
+                            sigma,
+                            density,
+                            Way {
+                                whole: true,
+                                ..ROUTE
+                            },
+                        );
                         cases += 1;
                         if ours != whole {
                             differ.push(format!(
@@ -1619,6 +1657,159 @@ mod inked_tests {
             // The control: somewhere its inked rectangle was smaller than
             // its region, or the draw held the rectangle to nothing.
             assert!(within > 0, "{name}: inked across its whole region");
+        }
+        assert!(
+            differ.is_empty(),
+            "{} of {cases} differ: {differ:#?}",
+            differ.len()
+        );
+        assert_eq!(routed, cases, "draws that missed the coverage route");
+    }
+
+    #[test]
+    fn a_fill_drawn_plain_holds_what_the_shaded_paint_covers() {
+        // The route draws a fill's plane without the exact colour's shader.
+        // Each fill, in colours opaque and not, on every eight-bit page
+        // space, under each transform, is the same page drawn through the
+        // chain's shaded paint. A stroke keeps the shader -- see
+        // `BlurOp::playback` -- so it is not swept.
+        let fills: [(&str, Draw); 4] = [
+            DRAWS[0],
+            DRAWS[1],
+            ("filled zigzag", |ctx| {
+                zigzag(ctx);
+                ctx.fill(FillRule::NonZero);
+            }),
+            ("sliver a third of a pixel wide", |ctx| {
+                ctx.begin_path();
+                ctx.rect(30.2, 20.1, 0.33, 50.0);
+                ctx.rect(40.6, 45.3, 60.0, 0.33);
+                ctx.fill(FillRule::NonZero);
+            }),
+        ];
+        let colours = [
+            "rgb(200 120 40)",
+            "rgb(30 60 200 / 0.7)",
+            "black",
+            "rgb(250 20 140 / 0.55)",
+        ];
+        let spaces = [
+            PixelColorSpace::Srgb,
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::Rec2020,
+        ];
+        let mut differ = Vec::new();
+        let (mut cases, mut routed) = (0, 0);
+        for (name, draw) in fills {
+            for (f, frame) in FRAMES.into_iter().enumerate() {
+                for phase in [PHASES[0], PHASES[2]] {
+                    for (sigma, density) in [(0.6, 1), (1.5, 1), (1.5, 2)] {
+                        for colour in colours {
+                            for space in spaces {
+                                let way = Way {
+                                    colour,
+                                    space,
+                                    ..ROUTE
+                                };
+                                let runs = COVERAGE_RUNS.with(|r| r.get());
+                                let plain = page(
+                                    draw, frame, phase, sigma, density, way,
+                                );
+                                routed += usize::from(
+                                    COVERAGE_RUNS.with(|r| r.get()) > runs,
+                                );
+                                let shaded = page(
+                                    draw,
+                                    frame,
+                                    phase,
+                                    sigma,
+                                    density,
+                                    Way {
+                                        shaded: true,
+                                        ..way
+                                    },
+                                );
+                                cases += 1;
+                                if plain != shaded {
+                                    differ.push(format!(
+                                        "{name}, frame {f}, phase {phase:?}, sigma {sigma}, density {density}, {colour}, {space:?}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "{} of {cases} differ: {differ:#?}",
+            differ.len()
+        );
+        // The control: every draw took the route, or the paint it draws its
+        // plane through decided nothing.
+        assert_eq!(routed, cases, "draws that missed the coverage route");
+    }
+
+    #[test]
+    fn a_stroke_draws_its_plane_through_the_shaded_paint() {
+        // A stroke thinner than a pixel is a hairline with its paint's alpha
+        // cut to a byte by its width, which a shaded paint and a plain one
+        // round apart, so the route keeps the shaded paint for every stroke
+        // -- see `BlurOp::playback`. Each stroke here, drawn as the route
+        // draws it, is the page drawn through the shaded paint; were strokes
+        // drawn plain, the 0.1-wide one would differ.
+        let strokes: Vec<(&str, Draw)> = DRAWS
+            .into_iter()
+            // Text takes its own route, which this paint does not reach.
+            .filter(|(name, _)| {
+                !name.contains("text")
+                    && ["stroke", "caps", "mitred"]
+                        .iter()
+                        .any(|k| name.contains(k))
+            })
+            .collect();
+        assert!(
+            strokes.iter().any(|(name, _)| *name == "thin stroke"),
+            "the control: the sweep holds a stroke thinner than a pixel"
+        );
+        let mut differ = Vec::new();
+        let (mut cases, mut routed) = (0, 0);
+        for (name, draw) in strokes {
+            for (f, frame) in FRAMES.into_iter().enumerate() {
+                for phase in [PHASES[0], PHASES[2]] {
+                    for (sigma, density) in [(0.6, 1), (1.5, 1), (1.5, 2)] {
+                        for colour in
+                            ["rgb(200 120 40)", "rgb(30 60 200 / 0.7)"]
+                        {
+                            let way = Way { colour, ..ROUTE };
+                            let runs = COVERAGE_RUNS.with(|r| r.get());
+                            let route =
+                                page(draw, frame, phase, sigma, density, way);
+                            routed += usize::from(
+                                COVERAGE_RUNS.with(|r| r.get()) > runs,
+                            );
+                            let shaded = page(
+                                draw,
+                                frame,
+                                phase,
+                                sigma,
+                                density,
+                                Way {
+                                    shaded: true,
+                                    ..way
+                                },
+                            );
+                            cases += 1;
+                            if route != shaded {
+                                differ.push(format!(
+                                    "{name}, frame {f}, phase {phase:?}, sigma {sigma}, density {density}, {colour}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
         }
         assert!(
             differ.is_empty(),
