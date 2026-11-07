@@ -503,6 +503,16 @@ jobs:
           cargo test \
             --no-default-features \
             --features "node-addon,vulkan,window,freetype"
+      - name: TEMPORARY full text reach sweep on FreeType without the font's box
+        env:
+          TEXT_REACH_SWEEP: full
+          MEO_TEXT_REACH_WITHOUT_FONT_BOX: "1"
+        run: |
+          fc-list : family | sort -u
+          cargo test \
+            --no-default-features \
+            --features "node-addon,vulkan,window,freetype" \
+            --lib -- text_in_a_chain_is_bounded_by_all_it_inks --nocapture
       # `just check-bench-parity`: both benchmarks list the same cases. The
       # crate's side builds its example with `test_features`, whose Skia is
       # this job's -- `fetch` and `window` change no Skia feature -- so it

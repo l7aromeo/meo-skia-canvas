@@ -1091,6 +1091,11 @@ fn keeps_font_box() -> bool {
     if FONT_BOX_FLOOR.get() {
         return true;
     }
+    // TEMPORARY, dropped before merge: the reach sweep's CI steps set this
+    // to play FreeType's and DirectWrite's sweeps without the font's box.
+    if std::env::var_os("MEO_TEXT_REACH_WITHOUT_FONT_BOX").is_some() {
+        return false;
+    }
     !cfg!(target_os = "macos")
 }
 

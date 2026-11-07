@@ -282,6 +282,19 @@ jobs:
           if (-not (Test-Path S:\)) { subst S: "$env:USERPROFILE\.cache" }
           node scripts/check-patched-skia.mjs target/release/build
 
+      - name: TEMPORARY full text reach sweep on DirectWrite without the font's box
+        if: ${{ matrix.arch == 'x64' }}
+        shell: pwsh
+        env:
+          TEXT_REACH_SWEEP: full
+          MEO_TEXT_REACH_WITHOUT_FONT_BOX: "1"
+        run: |
+          if (-not (Test-Path S:\)) { subst S: "$env:USERPROFILE\.cache" }
+          $env:XDG_CACHE_HOME = 'S:\'
+          node scripts/skia-cache.mjs cargo test --release `
+            --features "node-addon,vulkan,window" `
+            --lib -- text_in_a_chain_is_bounded_by_all_it_inks --nocapture
+
       - name: Test the module
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
