@@ -3265,7 +3265,7 @@ impl BlurDraw {
             .filter(|_| !path.is_inverse_fill_type());
         let geometry = match rect {
             Some((rect, _, direction)) => Geometry::Rect(rect, direction),
-            None => Geometry::Path(path.serialize()),
+            None => Geometry::Path(KeptPath::of(path)),
         };
         BlurDraw {
             geometry,
@@ -3320,7 +3320,8 @@ struct BlurPaint {
 /// geometry and the frame it was drawn in -- the transform and the clip --
 /// and the blur's standard deviation in canvas pixels. A page is read from
 /// several threads at once and Skia's `Path` is not `Sync`, so geometry that
-/// is not a rectangle, and the clip, are kept serialized as `Data`, which is.
+/// is not a rectangle is kept behind a lock -- see [`KeptPath`] -- and the
+/// clip serialized as `Data`, which is `Sync`.
 ///
 /// Consecutive rectangles drawn alike join one op, so that a run of them
 /// costs the recording one entry and its playback one frame, one clip and
@@ -3378,12 +3379,12 @@ impl Geometries {
 }
 
 /// What a [`BlurOp`] draws: a rectangle, which nearly every blurred draw is
-/// and which is plain data, or any other path, serialized.
+/// and which is plain data, or any other path, kept parsed.
 #[derive(Clone, Debug)]
 enum Geometry {
     /// A closed rectangle, drawn as the path `Path::rect` makes of it.
     Rect(Rect, PathDirection),
-    Path(Data),
+    Path(KeptPath),
 }
 
 impl Geometry {
@@ -3392,8 +3393,38 @@ impl Geometry {
             Geometry::Rect(rect, direction) => {
                 Some(Path::rect(rect, *direction))
             }
-            Geometry::Path(data) => Path::deserialize(data),
+            Geometry::Path(kept) => Some(kept.path()),
         }
+    }
+}
+
+/// A path a page keeps for every playback of it, shared by the threads that
+/// play it.
+///
+/// Skia's `Path` is `Send` and not `Sync`, so it is held behind a lock, and
+/// each playback takes a copy of its own. A copy is one reference count: in
+/// Skia M156 an `SkPath` is a reference to an immutable `SkPathData` -- its
+/// points, verbs and bounds -- and a fill type (`include/core/SkPath.h`,
+/// `src/core/SkPathData.h`), so nothing is parsed and nothing allocated, where
+/// a path kept serialized is parsed again, and its points copied, on every
+/// draw.
+#[derive(Debug)]
+struct KeptPath(Mutex<Path>);
+
+impl KeptPath {
+    fn of(path: &Path) -> Self {
+        KeptPath(Mutex::new(path.clone()))
+    }
+
+    /// The path, a copy sharing its points with the one kept.
+    fn path(&self) -> Path {
+        self.0.lock().clone()
+    }
+}
+
+impl Clone for KeptPath {
+    fn clone(&self) -> Self {
+        KeptPath(Mutex::new(self.path()))
     }
 }
 
