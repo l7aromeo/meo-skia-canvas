@@ -7046,6 +7046,7 @@ mod text_reach_tests {
     use crate::{
         node::typography::{
             REACH_BOUND, REACH_INSET, REACHED_FAMILIES, ReachBound,
+            forget_laid_out,
         },
         prelude::*,
     };
@@ -7430,9 +7431,17 @@ mod text_reach_tests {
     /// widened by as far as the chain reads, so an inset under that cuts
     /// nothing the chain draws.
     fn parted_from_the_clip(scene: &Scene) -> Vec<(&'static str, u8)> {
+        // Each play lays its runs out and blurs them for itself. Canvases
+        // with equal settings share their kept runs, and a run kept from
+        // the first play would bring into the second what the first left
+        // of it -- its blurred results, and on the GPU the text blobs Skia
+        // cached for it at the larger playbacks -- so the reference has to
+        // be its own.
         KEEPS_TEXT_REACH.set(true);
+        forget_laid_out();
         let confined = played(&mut scene.canvas().expect("a canvas"));
         KEEPS_TEXT_REACH.set(false);
+        forget_laid_out();
         let clipped = played(&mut scene.canvas().expect("a canvas"));
         KEEPS_TEXT_REACH.set(true);
         confined

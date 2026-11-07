@@ -5,8 +5,10 @@ use crate::context::typesetting::BUILDS;
 use crate::{
     cache_map::{CacheMap, CacheSet},
     context::{
-        State, faint::Faint, run_mask::release_cached_runs,
-        typesetting::Typography,
+        State,
+        faint::Faint,
+        run_mask::release_cached_runs,
+        typesetting::{Typography, forget_typographies},
     },
     css::{FontUnits, is_font_relative, parse_length, without_comments},
     font::{
@@ -959,7 +961,9 @@ const LAID_OUT_COUNT: usize = 512;
 /// The typography stands for every setting a run is laid out from, the
 /// `oblique` angle among them, and the fonts registered when it was built
 /// -- see `context::typesetting` -- so a run kept from another font epoch,
-/// or before a setting changed, is one no typesetter can match.
+/// or before a setting changed, is one no typesetter can match. Contexts on
+/// a thread whose settings are equal share one typography, found by those
+/// settings, so a run kept on one canvas is matched on the next.
 struct LaidOutKey {
     typography: Rc<Typography>,
     text: Box<str>,
@@ -1281,13 +1285,16 @@ fn measured_boxes(
 /// Lets every kept run go: called when the registered fonts change, since a
 /// kept run holds the faces it was laid out in, and by the idle release.
 /// The blurred runs kept from them go too -- see `context::run_mask` --
-/// for every thread, since a page holding one can be played on any.
+/// for every thread, since a page holding one can be played on any, and so
+/// do this thread's typographies findable by their settings, which hold
+/// the fonts they were built against -- see `context::typesetting`.
 pub(crate) fn forget_laid_out() {
     let _ = LAID_OUT.try_with(|cache| {
         if let Ok(mut cache) = cache.try_borrow_mut() {
             cache.clear();
         }
     });
+    forget_typographies();
     release_cached_runs();
 }
 
