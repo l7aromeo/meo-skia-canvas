@@ -21,8 +21,9 @@
 //    checkout, which has no crates.io package hash to download against, from
 //    the tree inside it -- "STARTING A FULL BUILD".
 // 2. ninja compiled each file one of this platform's patches changes -- see
-//    `PATCHED`. A build without a GPU backend never compiles them, and has
-//    nothing for this to vouch for.
+//    `PATCHED`. A build with no GPU backend compiles none under Ganesh, and
+//    is held to the others: the SVG slant and the face match -- see
+//    `applicable`.
 // 3. Each file it compiled, resolved against the directory ninja ran in, is
 //    the patched one: it holds what only the patch puts there. A build from
 //    an unpatched tree passes the first two and fails this.
@@ -198,9 +199,27 @@ const ninjaDir = (output) =>
 
 const FROM_SOURCE = ["STARTING OFFLINE BUILD", "STARTING A FULL BUILD"];
 
+/// The gn argument skia-bindings passes for a build with no GPU backend
+/// (`skia_enable_ganesh`, skia-bindings' build_support/skia/config.rs), and
+/// the directory of the sources only Ganesh compiles. Such a build compiles
+/// none of the patched files under it, and is held to the others.
+const NO_GANESH = "skia_enable_ganesh=false";
+const GANESH_SOURCES = "src/gpu/ganesh/";
+
+/**
+ * The entries of `patched` the build that printed `output` compiles: all of
+ * them, but for a build its gn arguments say has no Ganesh, those outside
+ * `GANESH_SOURCES`.
+ */
+export function applicable(patched, output) {
+  return output.includes(NO_GANESH)
+    ? patched.filter(({ file }) => !file.startsWith(GANESH_SOURCES))
+    : patched;
+}
+
 /**
  * Why `output` does not show Skia built with `patched`, or `null` when it
- * does.
+ * does -- each of `patched` the build compiles, see `applicable`.
  */
 export function refusal(output, patched) {
   if (!FROM_SOURCE.some((line) => output.includes(line)))
@@ -208,7 +227,7 @@ export function refusal(output, patched) {
   if (output.includes("DOWNLOAD AND INSTALL"))
     return "skia-bindings tried to download prebuilt Skia";
   const ninja = ninjaDir(output);
-  for (const { file, marker } of patched) {
+  for (const { file, marker } of applicable(patched, output)) {
     const compiled = output.match(compiledLine(file))?.[1];
     if (!compiled) return `ninja did not compile ${file}`;
     if (!ninja) return "the output does not say where ninja ran";
@@ -314,8 +333,42 @@ function cases(root, patched) {
     /compile (\S+)/g,
     (_, path) => `compile ${path.replaceAll("/", "\\")}`,
   );
+  // A build with no Ganesh, which compiles only the patched files outside it.
+  const ganeshless = [
+    "STARTING OFFLINE BUILD",
+    `Skia args: is_debug=false ${NO_GANESH} skia_enable_pdf=true`,
+    `ninja: Entering directory \`${ninja}'`,
+    ...patched
+      .filter(({ file }) => !file.startsWith(GANESH_SOURCES))
+      .map(({ file }, i) => `[${i + 1}/0] compile ${relative(file)}`),
+  ].join("\n");
+  const outsideGanesh = patched.filter(
+    ({ file }) => !file.startsWith(GANESH_SOURCES),
+  );
   return [
     [files, good, true, "an offline build of every patched file"],
+    [files, ganeshless, true, "a build with no Ganesh"],
+    [
+      files,
+      ganeshless.replace(NO_GANESH, "skia_enable_ganesh=true"),
+      patched.length === outsideGanesh.length,
+      "a build with Ganesh that compiled none of its patched files",
+    ],
+    ...outsideGanesh.map(({ file }) => [
+      { ...files, [file]: "unpatched" },
+      ganeshless,
+      false,
+      `a build with no Ganesh of an unpatched ${file}`,
+    ]),
+    ...outsideGanesh.map(({ file }) => [
+      files,
+      ganeshless
+        .split("\n")
+        .filter((line) => !line.endsWith(relative(file)))
+        .join("\n"),
+      false,
+      `a build with no Ganesh that did not compile ${file}`,
+    ]),
     [files, crlf, true, "an offline build with CRLF line ends"],
     [files, backslashed, true, "an offline build naming files with `\\`"],
     ...patched.map(({ file }) => [
