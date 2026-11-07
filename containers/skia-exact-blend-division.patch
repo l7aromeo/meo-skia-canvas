@@ -1,0 +1,45 @@
+--- a/skia-bindings/skia/src/opts/SkRasterPipeline_opts.h
++++ b/skia-bindings/skia/src/opts/SkRasterPipeline_opts.h
+@@ -2471,15 +2471,20 @@
+ BLEND_MODE(difference) { return s + d - two(min(s*da, d*sa)); }
+ BLEND_MODE(exclusion)  { return s + d - two(s*d); }
+ 
++// The blend modes that divide do so exactly, with `/`, not through rcp_fast:
++// an estimate's precision is the instruction's at each SIMD level
++// (_mm256_rcp_ps, _mm512_rcp14_ps, NEON's), so the same draw rounded apart on
++// machines with and without AVX-512. A correctly rounded quotient is the same
++// at every level.
+ BLEND_MODE(colorburn) {
+     return if_then_else(d == da,    d +    s*inv(da),
+            if_then_else(s ==  0, /* s + */ d*inv(sa),
+-                                sa*(da - min(da, (da-d)*sa*rcp_fast(s))) + s*inv(da) + d*inv(sa)));
++                                sa*(da - min(da, (da-d)*sa / s)) + s*inv(da) + d*inv(sa)));
+ }
+ BLEND_MODE(colordodge) {
+     return if_then_else(d ==  0, /* d + */ s*inv(da),
+            if_then_else(s == sa,    s +    d*inv(sa),
+-                                 sa*min(da, (d*sa)*rcp_fast(sa - s)) + s*inv(da) + d*inv(sa)));
++                                 sa*min(da, (d*sa) / (sa - s)) + s*inv(da) + d*inv(sa)));
+ }
+ BLEND_MODE(hardlight) {
+     return s*inv(da) + d*inv(sa)
+@@ -2524,7 +2529,7 @@
+       sat = mx - mn;
+ 
+     // Map min channel to 0, max channel to s, and scale the middle proportionally.
+-    s = if_then_else(sat == 0.0f, 0.0f, s * rcp_fast(sat));
++    s = if_then_else(sat == 0.0f, 0.0f, s / sat);
+     *r = (*r - mn) * s;
+     *g = (*g - mn) * s;
+     *b = (*b - mn) * s;
+@@ -2545,8 +2550,8 @@
+     F   mn        = min(*r, min(*g, *b)),
+         mx        = max(*r, max(*g, *b)),
+         l         = lum(*r, *g, *b),
+-        mn_scale  = (    l) * rcp_fast(l - mn),
+-        mx_scale  = (a - l) * rcp_fast(mx - l);
++        mn_scale  = (    l) / (l - mn),
++        mx_scale  = (a - l) / (mx - l);
+     I32 clip_low  = cond_to_mask(mn < 0 && l != mn),
+         clip_high = cond_to_mask(mx > a && l != mx);
+ 
