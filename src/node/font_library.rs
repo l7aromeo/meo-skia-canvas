@@ -16,7 +16,7 @@ use std::{
 };
 
 use skia_safe::{
-    FontArguments, FontHinting, FontMgr, FourByteTag, Typeface,
+    Data, FontArguments, FontHinting, FontMgr, FourByteTag, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_parameters::variation::Axis,
     font_style::{FontStyle, Slant},
@@ -786,6 +786,12 @@ pub struct FontLibrary {
     /// [`collection_parts`](Self::collection_parts).
     collection_parts: Option<(FontMgr, Option<String>)>,
     fonts: Vec<(Typeface, Option<String>)>,
+    /// The bytes each face in `fonts` registered from data was made from, by
+    /// the face's unique id: where [`face_from_data`](Self::face_from_data)
+    /// finds the face already made from the same bytes. An entry lives
+    /// exactly as long as its face is in `fonts`, and holds no memory of its
+    /// own -- the face keeps the same data alive.
+    made_from: HashMap<TypefaceId, Data>,
     generics_cache: Vec<(Typeface, Option<String>)>,
     collection_cache: CollectionCache,
     /// The instances the cached collections were built from, kept longer.
@@ -957,6 +963,7 @@ impl FontLibrary {
                 fonts: fonts.clone(),
             }),
             fonts,
+            made_from: HashMap::new(),
             collections: [None, None],
             collection_parts: None,
             collection_cache: CollectionCache::default(),
@@ -1687,12 +1694,58 @@ impl FontLibrary {
     /// here as well as with its own provider, so a family registered through
     /// it is visible to `Context2D::set_font` and not only to paragraphs.
     pub fn register_typeface(&mut self, font: Typeface, alias: Option<String>) {
-        self.add_typeface(font, alias);
+        self.add_typeface(font, alias, None);
     }
 
-    /// Adds `font`, replacing a face added before under the same family that
-    /// is the same face by its style: the same reported `font_style()` and
-    /// the same oblique angle by the face's own tables.
+    /// [`register_typeface`](Self::register_typeface) for a face
+    /// [`face_from_data`](Self::face_from_data) made from `bytes`, so that
+    /// registering the same bytes again finds it.
+    pub(crate) fn register_face_from_data(
+        &mut self,
+        font: Typeface,
+        alias: Option<String>,
+        bytes: Data,
+    ) {
+        self.add_typeface(font, alias, Some(bytes));
+    }
+
+    /// The face in `bytes`, for registering under `alias` -- or, without one,
+    /// under the family it declares -- with the data it was made from:
+    /// the face already registered there from exactly these bytes, or a new
+    /// one. `None` where the bytes are not a font this build can parse.
+    ///
+    /// The same bytes make the same face: a face from data is made at
+    /// collection index 0 with no variation arguments, so nothing but the
+    /// bytes decides it, and an instance at other axes is made from the face
+    /// later. Made again, each registration was a face with an id of its
+    /// own, and the GPU drew the same text a level apart in edge pixels
+    /// depending on how many registrations it followed.
+    ///
+    /// Matched by the bytes, compared in full, and the name the face is
+    /// filed under, as [`add_typeface`](Self::add_typeface) matches a family:
+    /// the same bytes under another alias make a face of their own, as
+    /// they always have.
+    pub(crate) fn face_from_data(
+        &self,
+        alias: Option<&str>,
+        bytes: &[u8],
+    ) -> Option<(Typeface, Data)> {
+        let registered = self.fonts.iter().find_map(|(font, filed)| {
+            let made_from = self.made_from.get(&font.unique_id())?;
+            (filed.as_deref() == alias && made_from.as_bytes() == bytes)
+                .then(|| (font.clone(), made_from.clone()))
+        });
+        registered.or_else(|| {
+            let data = font_data(bytes);
+            let font = self.mgr.new_from_data(data.clone(), None)?;
+            Some((font, data))
+        })
+    }
+
+    /// Adds `font`, made from `bytes` where it was made from data, replacing
+    /// a face added before under the same family that is the same face by
+    /// its style: the same reported `font_style()` and the same oblique
+    /// angle by the face's own tables.
     ///
     /// The angle is part of the match because the reported style alone does
     /// not tell an oblique face from an upright one everywhere. DirectWrite
@@ -1701,7 +1754,16 @@ impl FontLibrary {
     /// way, so on those an upright face and the family's oblique one match in
     /// style; matched by style alone, the one added second replaced the
     /// first, and plain text drew whichever was loaded last.
-    fn add_typeface(&mut self, font: Typeface, alias: Option<String>) {
+    ///
+    /// A face [`face_from_data`](Self::face_from_data) found already
+    /// registered replaces itself: it moves to the end of the registration
+    /// order, as a face made again from the same bytes always has.
+    fn add_typeface(
+        &mut self,
+        font: Typeface,
+        alias: Option<String>,
+        bytes: Option<Data>,
+    ) {
         let oblique = designed_oblique_angle(&font);
         if let Some(idx) =
             self.fonts.iter().position(|(old_font, old_alias)| {
@@ -1714,12 +1776,26 @@ impl FontLibrary {
                     && designed_oblique_angle(old_font) == oblique
             })
         {
-            self.fonts.remove(idx);
+            let (old_font, _) = self.fonts.remove(idx);
+            let id = old_font.unique_id();
+            if !self.fonts.iter().any(|(font, _)| font.unique_id() == id) {
+                self.made_from.remove(&id);
+            }
         }
 
         // add the new typeface/alias and recreate the FontCollection to include
         // it
+        if let Some(bytes) = bytes {
+            self.made_from.insert(font.unique_id(), bytes);
+        }
         self.fonts.push((font, alias));
+        self.invalidate();
+    }
+
+    /// Forgets every registered face.
+    fn forget_fonts(&mut self) {
+        self.fonts.clear();
+        self.made_from.clear();
         self.invalidate();
     }
 
@@ -2427,8 +2503,13 @@ pub fn family(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(details.upcast())
 }
 
-/// The typeface in the file at `filename`, or the message `use()` throws.
-fn read_typeface(filename: &str) -> Result<Typeface, String> {
+/// The typeface in the file at `filename`, for filing under `alias`, with
+/// the data it was made from -- see [`FontLibrary::face_from_data`] -- or the
+/// message `use()` throws.
+fn read_typeface(
+    filename: &str,
+    alias: Option<&str>,
+) -> Result<(Typeface, Data), String> {
     let path = Path::new(filename);
     let bytes = fs::read(path)
         .map_err(|why| format!("{}: \"{}\"", why, path.display()))?;
@@ -2455,15 +2536,15 @@ fn read_typeface(filename: &str) -> Result<Typeface, String> {
     }
     .unwrap_or(bytes);
 
-    FontLibrary::with_shared(|lib| {
-        lib.mgr.new_from_data(font_data(&bytes), None)
-    })
-    .ok_or_else(|| format!("Could not decode font data in {}", path.display()))
+    FontLibrary::with_shared(|lib| lib.face_from_data(alias, &bytes))
+        .ok_or_else(|| {
+            format!("Could not decode font data in {}", path.display())
+        })
 }
 
 /// One alias, or none, and the typefaces to file under it, each with the
-/// file it came from or `"<buffer>"`.
-type FaceGroup = (Option<String>, Vec<(String, Typeface)>);
+/// file it came from or `"<buffer>"` and the data it was made from.
+type FaceGroup = (Option<String>, Vec<(String, Typeface, Data)>);
 
 /// Registers every typeface in `groups`, or none of them, and describes
 /// each.
@@ -2480,11 +2561,11 @@ fn register_all<'a>(
     let results = JsArray::new(cx, groups.len());
     for (g, (alias, faces)) in groups.into_iter().enumerate() {
         let details = JsArray::new(cx, faces.len());
-        for (i, (source, font)) in faces.into_iter().enumerate() {
+        for (i, (source, font, bytes)) in faces.into_iter().enumerate() {
             let face = typeface_details(cx, &source, &font, alias.clone())?;
             details.set(cx, i as u32, face)?;
             FontLibrary::with_shared(|lib| {
-                lib.add_typeface(font, alias.clone())
+                lib.add_typeface(font, alias.clone(), Some(bytes))
             });
         }
         results.set(cx, g as u32, details)?;
@@ -2509,8 +2590,8 @@ pub fn addFamily(mut cx: FunctionContext) -> JsResult<JsValue> {
         let files = files.to_vec(&mut cx)?;
         let mut faces = Vec::with_capacity(files.len());
         for filename in strings_in(&mut cx, &files) {
-            match read_typeface(&filename) {
-                Ok(font) => faces.push((filename, font)),
+            match read_typeface(&filename, alias.as_deref()) {
+                Ok((font, bytes)) => faces.push((filename, font, bytes)),
                 Err(why) => return cx.throw_error(why),
             }
         }
@@ -2527,11 +2608,13 @@ pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
     let mut faces = Vec::with_capacity(buffers.len());
     for buf_val in buffers.iter() {
         let buf = buf_val.downcast_or_throw::<JsBuffer, _>(&mut cx)?;
-        let bytes = buf.as_slice(&cx).to_vec();
+        let bytes = buf.as_slice(&cx);
         match FontLibrary::with_shared(|lib| {
-            lib.mgr.new_from_data(font_data(&bytes), None)
+            lib.face_from_data(alias.as_deref(), bytes)
         }) {
-            Some(font) => faces.push(("<buffer>".to_string(), font)),
+            Some((font, bytes)) => {
+                faces.push(("<buffer>".to_string(), font, bytes))
+            }
             None => {
                 return cx
                     .throw_error("Could not decode font data from buffer");
@@ -2556,10 +2639,7 @@ pub fn cachedParagraphs(mut cx: FunctionContext) -> JsResult<JsNumber> {
 }
 
 pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    FontLibrary::with_shared(|lib| {
-        lib.fonts.clear();
-        lib.invalidate();
-    });
+    FontLibrary::with_shared(FontLibrary::forget_fonts);
 
     Ok(cx.undefined())
 }

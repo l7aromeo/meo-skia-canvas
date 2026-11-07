@@ -8,7 +8,7 @@ use std::{
 
 use parking_lot::Mutex;
 use skia_safe::{
-    FontMgr, FontStyle, FourByteTag, Typeface,
+    Data, FontMgr, FontStyle, FourByteTag, Typeface,
     font_arguments::variation_position::Coordinate,
     font_parameters::variation::Axis, font_style::Slant,
     textlayout::TypefaceFontProvider,
@@ -621,8 +621,8 @@ thread_local! {
 /// The designed oblique angles of the faces already asked about, by
 /// `Typeface::unique_id`, as [`designed_oblique_angle`] gives them.
 ///
-/// A face's tables are fixed when it is made, and a face registered again is
-/// made again, with an id of its own, so an entry is never wrong. Reading
+/// A face's tables are fixed when it is made, and Skia never gives two faces
+/// one id, so an entry is never wrong. Reading
 /// them copies `OS/2` and `post` out of the platform, and every layout asks
 /// for each run's face -- `runs_to_restyle` takes the run's style from
 /// [`designed_style`] -- so reading on every ask costs about 0.15
@@ -1068,16 +1068,68 @@ struct FontManagerInner {
     font_mgr: FontMgr,
     /// Registered family names in registration order.
     families: Vec<String>,
-    /// Every registered face with the family it was registered under, in
-    /// registration order: what `provider` is rebuilt from -- see
-    /// [`FontManagerInner::register`].
-    faces: Vec<(Typeface, String)>,
+    /// Every registered face, in registration order: what `provider` is
+    /// rebuilt from -- see [`FontManagerInner::register`].
+    faces: Vec<RegisteredFace>,
     /// How many times `provider` has been replaced, so that an engine
     /// holding an earlier one can tell -- see [`FontRegistry`].
     generation: u64,
 }
 
+/// A face parsed for registering: the face, the data it was made from, and
+/// the file it was read from, if it was.
+type ParsedFace = (Typeface, Data, Option<PathBuf>);
+
+/// A face a [`FontLibrary`] holds.
+struct RegisteredFace {
+    face: Typeface,
+    /// The family it was registered under.
+    family: String,
+    /// The bytes it was made from: what
+    /// [`FontManagerInner::face_from_data`] finds it by. The face keeps the
+    /// same data alive, so this costs no memory of its own.
+    bytes: Data,
+}
+
+impl RegisteredFace {
+    /// Whether this face was made from exactly `bytes` and filed under
+    /// `alias`, or, without one, under the family the face declares -- where
+    /// a face from those bytes registered under `alias` would be filed.
+    fn is_from(&self, alias: Option<&str>, bytes: &[u8]) -> bool {
+        self.bytes.as_bytes() == bytes
+            && match alias {
+                Some(alias) => self.family == alias,
+                None => self.family == self.face.family_name(),
+            }
+    }
+}
+
 impl FontManagerInner {
+    /// The face in `bytes`, for registering under `alias` or, without one,
+    /// under the family it declares, with the data it was made from: the face
+    /// already registered there from exactly these bytes, or a new one, or
+    /// `None` where the bytes are not a font this build can parse.
+    ///
+    /// The same bytes make the same face -- see the shared registry's
+    /// `FontLibrary::face_from_data` in `node::font_library`, which the
+    /// JavaScript `FontLibrary.use()` goes through -- so registering a font
+    /// again, as a program that registers its fonts per render does, keeps
+    /// the face it already has rather than holding one more each time.
+    fn face_from_data(
+        &self,
+        alias: Option<&str>,
+        bytes: &[u8],
+    ) -> Option<(Typeface, Data)> {
+        if let Some(registered) =
+            self.faces.iter().find(|face| face.is_from(alias, bytes))
+        {
+            return Some((registered.face.clone(), registered.bytes.clone()));
+        }
+        let data = quarantine::font_data(bytes);
+        let face = self.font_mgr.new_from_data(data.clone(), None)?;
+        Some((face, data))
+    }
+
     /// Adds `face` under `family` and builds `provider` again from every
     /// face, in the order the shared library registers them -- see
     /// `FontLibrary::in_registration_order` in `node::font_library` -- and
@@ -1090,21 +1142,41 @@ impl FontManagerInner {
     /// of any two it scores alike, so a face that hides its lean, loaded
     /// before the upright face it ties with, would otherwise answer plain
     /// text.
-    fn register(&mut self, face: Typeface, family: &str) {
-        self.faces.push((face, family.to_string()));
+    ///
+    /// A face [`face_from_data`](Self::face_from_data) found already
+    /// registered under `family` is not added again, and leaves `provider`
+    /// as it is: a second copy of it would sit behind the first in every
+    /// tie, so it could never change which face answers.
+    fn register(&mut self, face: Typeface, family: &str, bytes: Data) {
+        let id = face.unique_id();
+        if self
+            .faces
+            .iter()
+            .any(|known| known.family == family && known.face.unique_id() == id)
+        {
+            return;
+        }
+        self.faces.push(RegisteredFace {
+            face,
+            family: family.to_string(),
+            bytes,
+        });
         let mut provider = TypefaceFontProvider::new();
         let (upright, leaning): (Vec<_>, Vec<_>) = self
             .faces
             .iter()
-            .partition(|(face, _)| !hides_its_lean(face));
-        for (face, family) in upright.into_iter().chain(leaning) {
-            provider.register_typeface(face.clone(), Some(family.as_str()));
+            .partition(|known| !hides_its_lean(&known.face));
+        for known in upright.into_iter().chain(leaning) {
+            provider.register_typeface(
+                known.face.clone(),
+                Some(known.family.as_str()),
+            );
         }
-        for (face, family) in &self.faces {
-            if designed_oblique_angle(face).is_some() {
+        for known in &self.faces {
+            if designed_oblique_angle(&known.face).is_some() {
                 provider.register_typeface(
-                    face.clone(),
-                    Some(oblique_alias(family).as_str()),
+                    known.face.clone(),
+                    Some(oblique_alias(&known.family).as_str()),
                 );
             }
         }
@@ -1186,6 +1258,12 @@ impl FontLibrary {
     /// Multiple typefaces can share a family alias; layout will pick one
     /// matching weight/slant.
     ///
+    /// Bytes this library already registered under `family` are not made
+    /// into a face again: the call keeps the face it has, so a program that
+    /// registers its fonts on every render holds one face for them rather
+    /// than one more a render. The same bytes under another family make a
+    /// face of their own.
+    ///
     /// Registration order does not matter to a
     /// [`TextEngine`](crate::text::TextEngine): one built before this call
     /// still sees the font, and still instances it at the axes a
@@ -1215,17 +1293,20 @@ impl FontLibrary {
         bytes: &[u8],
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock();
-        let typeface = inner
-            .font_mgr
-            .new_from_data(quarantine::font_data(bytes), None)
+        let (typeface, data) = inner
+            .face_from_data(Some(family), bytes)
             .ok_or_else(|| Error::FontRegister {
                 reason: format!(
                     "could not parse typeface for family {family:?}"
                 ),
             })?;
-        inner.register(typeface.clone(), family);
+        inner.register(typeface.clone(), family, data.clone());
         SharedFontRegistry::with_shared(|library| {
-            library.register_typeface(typeface, Some(family.to_string()));
+            library.register_face_from_data(
+                typeface,
+                Some(family.to_string()),
+                data,
+            );
         });
         if !inner.families.iter().any(|f| f == family) {
             inner.families.push(family.to_string());
@@ -1264,7 +1345,7 @@ impl FontLibrary {
         alias: Option<&str>,
         paths: impl IntoIterator<Item = P>,
     ) -> Result<Vec<FontFace>, Error> {
-        let parsed = self.read_paths(paths)?;
+        let parsed = self.read_paths(alias, paths)?;
         Ok(self.file_all(parsed, alias))
     }
 
@@ -1305,7 +1386,7 @@ impl FontLibrary {
     ) -> Result<Vec<Vec<FontFace>>, Error> {
         let parsed = groups
             .into_iter()
-            .map(|(alias, paths)| Ok((alias, self.read_paths(paths)?)))
+            .map(|(alias, paths)| Ok((alias, self.read_paths(alias, paths)?)))
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(parsed
             .into_iter()
@@ -1313,12 +1394,13 @@ impl FontLibrary {
             .collect())
     }
 
-    /// The typeface in each file, with the file it came from, or the first
-    /// file's failure.
+    /// The typeface in each file, for filing under `alias`, with the file it
+    /// came from, or the first file's failure.
     fn read_paths<P: AsRef<Path>>(
         &self,
+        alias: Option<&str>,
         paths: impl IntoIterator<Item = P>,
-    ) -> Result<Vec<(Typeface, Option<PathBuf>)>, Error> {
+    ) -> Result<Vec<ParsedFace>, Error> {
         paths
             .into_iter()
             .map(|path| {
@@ -1330,9 +1412,9 @@ impl FontLibrary {
                             path.display()
                         ),
                     })?;
-                let typeface =
-                    self.parse(&bytes, &path.display().to_string())?;
-                Ok((typeface, Some(path.to_path_buf())))
+                let (typeface, data) =
+                    self.parse(alias, &bytes, &path.display().to_string())?;
+                Ok((typeface, data, Some(path.to_path_buf())))
             })
             .collect()
     }
@@ -1340,12 +1422,14 @@ impl FontLibrary {
     /// Registers every parsed face under `alias` or its own family name.
     fn file_all(
         &self,
-        faces: Vec<(Typeface, Option<PathBuf>)>,
+        faces: Vec<ParsedFace>,
         alias: Option<&str>,
     ) -> Vec<FontFace> {
         faces
             .into_iter()
-            .map(|(typeface, file)| self.file(typeface, alias, file))
+            .map(|(typeface, data, file)| {
+                self.file(typeface, data, alias, file)
+            })
             .collect()
     }
 
@@ -1364,8 +1448,8 @@ impl FontLibrary {
         alias: Option<&str>,
         bytes: &[u8],
     ) -> Result<FontFace, Error> {
-        let typeface = self.parse(bytes, "the data given")?;
-        Ok(self.file(typeface, alias, None))
+        let (typeface, data) = self.parse(alias, bytes, "the data given")?;
+        Ok(self.file(typeface, data, alias, None))
     }
 
     /// Registers the font in each of `faces`, all filed under `alias` or,
@@ -1391,30 +1475,40 @@ impl FontLibrary {
             .into_iter()
             .enumerate()
             .map(|(i, bytes)| {
-                let typeface =
-                    self.parse(bytes, &format!("the data at index {i}"))?;
-                Ok((typeface, None))
+                let (typeface, data) = self.parse(
+                    alias,
+                    bytes,
+                    &format!("the data at index {i}"),
+                )?;
+                Ok((typeface, data, None))
             })
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(self.file_all(parsed, alias))
     }
 
-    /// The typeface in `bytes`, or an error naming `source`.
-    fn parse(&self, bytes: &[u8], source: &str) -> Result<Typeface, Error> {
+    /// The typeface in `bytes`, for filing under `alias`, with the data it
+    /// was made from -- see [`FontManagerInner::face_from_data`] -- or an
+    /// error naming `source`.
+    fn parse(
+        &self,
+        alias: Option<&str>,
+        bytes: &[u8],
+        source: &str,
+    ) -> Result<(Typeface, Data), Error> {
         self.inner
             .lock()
-            .font_mgr
-            .new_from_data(quarantine::font_data(bytes), None)
+            .face_from_data(alias, bytes)
             .ok_or_else(|| Error::FontRegister {
                 reason: format!("could not parse a typeface in {source}"),
             })
     }
 
-    /// Registers `typeface` under `alias` or its own family name, in both
-    /// registries, and describes it.
+    /// Registers `typeface`, made from `data`, under `alias` or its own
+    /// family name, in both registries, and describes it.
     fn file(
         &self,
         typeface: Typeface,
+        data: Data,
         alias: Option<&str>,
         file: Option<PathBuf>,
     ) -> FontFace {
@@ -1429,9 +1523,13 @@ impl FontLibrary {
             file,
         };
         let mut inner = self.inner.lock();
-        inner.register(typeface.clone(), &family);
+        inner.register(typeface.clone(), &family, data.clone());
         SharedFontRegistry::with_shared(|library| {
-            library.register_typeface(typeface, Some(family.clone()));
+            library.register_face_from_data(
+                typeface,
+                Some(family.clone()),
+                data,
+            );
         });
         if !inner.families.contains(&family) {
             inner.families.push(family);
@@ -1545,10 +1643,17 @@ mod tests {
 
     use super::{
         DesignedObliques, FontAxisTag, FontLibrary, KNOWN_AXES, KnownAxes,
-        TypoShares, designed_oblique_angle, optical_size,
-        quarantine::font_data, read_designed_oblique_angle,
+        SharedFontRegistry, Typeface, TypoShares, designed_oblique_angle,
+        optical_size, quarantine::font_data, read_designed_oblique_angle,
         read_typo_ascent_share, typo_variation, variation_axes,
     };
+
+    /// A static face, which reports a regular weight, width and slant.
+    const MONOTON: &str = "tests/assets/fonts/Monoton-Regular.woff";
+    /// A variable face whose default instance reports the same style as
+    /// [`MONOTON`].
+    const OSWALD: &str =
+        "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
 
     fn face(path: &str) -> skia_safe::Typeface {
         let bytes = fs::read(path).expect(path);
@@ -2045,5 +2150,116 @@ mod tests {
             read_designed_oblique_angle(&after),
         );
         assert!(designed_oblique_angle(&after).is_some());
+    }
+
+    /// The family [`registering_the_same_bytes_again_keeps_the_face`]
+    /// files Monoton under.
+    const AGAIN: &str = "Registered Again";
+
+    /// The face `family` resolves to in the registry `ctx.font` reads.
+    fn shared_face(family: &str) -> Option<Typeface> {
+        SharedFontRegistry::with_shared(|library| {
+            library
+                .face_collection()
+                .find_typefaces(&[family], FontStyle::normal())
+                .into_iter()
+                .next()
+        })
+    }
+
+    /// Registering bytes a family already holds keeps the face made from
+    /// them, through every way of registering bytes: one face however many
+    /// times, the provider not rebuilt, and the same face in the registry
+    /// `ctx.font` reads. Made again each time, the library held one face
+    /// more a registration and never let any go.
+    #[test]
+    fn registering_the_same_bytes_again_keeps_the_face() {
+        let bytes = fs::read(MONOTON).expect("Monoton");
+        let library = FontLibrary::new();
+        library
+            .register_font_from_data(AGAIN, &bytes)
+            .expect("Monoton registers");
+        let first = shared_face(AGAIN).expect("the family has a face");
+        assert_eq!(first.family_name(), "Monoton", "the registered face");
+        let generation = library.registry().generation();
+
+        for _ in 0..3 {
+            library
+                .register_font_from_data(AGAIN, &bytes)
+                .expect("registers again");
+            library
+                .use_data(Some(AGAIN), &bytes)
+                .expect("registers again");
+            library
+                .use_paths(Some(AGAIN), [MONOTON])
+                .expect("registers again");
+        }
+
+        assert_eq!(library.inner.lock().faces.len(), 1, "one face");
+        assert_eq!(
+            library.registry().generation(),
+            generation,
+            "the provider stands as it was"
+        );
+        assert_eq!(
+            shared_face(AGAIN).map(|face| face.unique_id()),
+            Some(first.unique_id()),
+            "ctx.font draws the face registered first"
+        );
+    }
+
+    /// Registering the same bytes again answers a tie as registering them
+    /// the first time did. Monoton and Oswald both report a regular weight,
+    /// width and slant under one family: paragraphs draw the first
+    /// registered of the two, as Skia's matcher keeps the first of a tie and
+    /// the library's provider holds both, and `ctx.font` the last, as the
+    /// shared registry replaces a face of the same style. So registering
+    /// Monoton again after Oswald makes `ctx.font` draw Monoton, and leaves
+    /// paragraphs drawing Monoton rather than moving it behind Oswald.
+    #[test]
+    fn registering_the_same_bytes_again_moves_no_face_in_a_tie() {
+        const TIE: &str = "Registered Again In A Tie";
+        let monoton = fs::read(MONOTON).expect("Monoton");
+        let oswald = fs::read(OSWALD).expect("Oswald");
+        let library = FontLibrary::new();
+        let in_paragraphs = |library: &FontLibrary| {
+            library
+                .registry()
+                .provider()
+                .1
+                .match_family_style(TIE, FontStyle::normal())
+                .expect("the family has a face")
+                .family_name()
+        };
+        let in_canvas = || {
+            shared_face(TIE)
+                .expect("the family has a face")
+                .family_name()
+        };
+        library
+            .register_font_from_data(TIE, &monoton)
+            .expect("Monoton");
+        library
+            .register_font_from_data(TIE, &oswald)
+            .expect("Oswald");
+        assert_eq!(
+            [in_paragraphs(&library), in_canvas()],
+            ["Monoton", "Oswald"]
+        );
+
+        library
+            .register_font_from_data(TIE, &monoton)
+            .expect("again");
+        assert_eq!(
+            [in_paragraphs(&library), in_canvas()],
+            ["Monoton", "Monoton"]
+        );
+        library
+            .register_font_from_data(TIE, &oswald)
+            .expect("again");
+        assert_eq!(
+            [in_paragraphs(&library), in_canvas()],
+            ["Monoton", "Oswald"]
+        );
     }
 }
