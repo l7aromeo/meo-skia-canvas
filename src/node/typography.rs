@@ -544,14 +544,11 @@ impl LaidOut {
         Arc::clone(&self.drawn)
     }
 
-    /// The runs' blobs for `paint`: the ones kept for it, or built now and
-    /// kept, letting the paint built for least recently go past
-    /// [`BLOB_PAINTS`]. `None` where the blobs are already borrowed, for the
-    /// caller to build its own.
-    fn kept_blobs(
-        &self,
-        paint: &Paint,
-    ) -> Option<RefMut<'_, [Option<TextBlob>]>> {
+    /// The runs' blobs for `paint` and what they can ink: the ones kept for
+    /// it, or built now and kept, letting the paint built for least recently
+    /// go past [`BLOB_PAINTS`]. `None` where the blobs are already borrowed,
+    /// for the caller to build its own.
+    fn kept_blobs(&self, paint: &Paint) -> Option<RefMut<'_, PaintedBlobs>> {
         let mut kept = self.blobs.try_borrow_mut().ok()?;
         let at = match kept.iter().position(|painted| painted.matches(paint)) {
             Some(at) => at,
@@ -562,11 +559,12 @@ impl LaidOut {
                 kept.push(PaintedBlobs {
                     paint: paint.clone(),
                     blobs: self.drawn.built_blobs(),
+                    inks: Vec::new(),
                 });
                 kept.len() - 1
             }
         };
-        Some(RefMut::map(kept, |kept| kept[at].blobs.as_mut_slice()))
+        Some(RefMut::map(kept, |kept| &mut kept[at]))
     }
 
     /// Where to paint the run, relative to the anchor -- see
@@ -595,14 +593,21 @@ impl LaidOut {
         faint: Faint,
         reach: bool,
     ) -> Option<Rect> {
-        let built;
-        let kept = self.kept_blobs(paint);
-        let blobs: &[Option<TextBlob>] = match &kept {
-            Some(kept) => kept,
-            None => {
-                built = self.drawn.built_blobs();
-                &built
-            }
+        let Some(mut kept) = self.kept_blobs(paint) else {
+            let blobs = self.drawn.built_blobs();
+            self.drawn.paint_from(
+                canvas,
+                origin,
+                paint,
+                global_alpha,
+                faint,
+                &blobs,
+            );
+            return reach
+                .then(|| {
+                    self.drawn.reach(origin, &faint.drawable(paint), &blobs)
+                })
+                .flatten();
         };
         self.drawn.paint_from(
             canvas,
@@ -610,11 +615,28 @@ impl LaidOut {
             paint,
             global_alpha,
             faint,
-            blobs,
+            &kept.blobs,
         );
+        if !reach {
+            return None;
+        }
+        // What the run can ink is kept beside the blobs it is read from,
+        // for the paint they were built in -- `inks` reads its stroke, its
+        // path effect and its mask filter -- made faint as `faint` makes it.
+        if let Some((_, inks)) = kept
+            .inks
+            .iter()
+            .find(|(seen, _)| *seen == faint)
+            .filter(|_| keeps_inks())
+        {
+            return inks.as_ref().map(|inks| self.drawn.place(origin, inks));
+        }
+        let inks = self.drawn.inks(&faint.drawable(paint), &kept.blobs);
+        let reach = inks.as_ref().map(|inks| self.drawn.place(origin, inks));
+        if keeps_inks() {
+            kept.inks.push((faint, inks));
+        }
         reach
-            .then(|| self.drawn.reach(origin, &faint.drawable(paint), blobs))
-            .flatten()
     }
 }
 
@@ -692,41 +714,46 @@ impl RunPaint {
     /// What painting the run with its anchor at `origin` in `paint` from
     /// `blobs` can ink, in the units it is painted in, at the scale it is
     /// recorded at -- see `layer::hinted_reach` for what a playback at
-    /// another scale adds. Each glyph's box as [`glyph_boxes`] gives it --
-    /// its outline's box widened as far as `paint`'s stroke can reach, or
-    /// for a glyph with no outline, a bitmap or colour emoji, the box
-    /// `Font::get_bounds` reports -- joined with each run's blob's bounds,
-    /// which for a positioned run are the box the font declares around
-    /// every glyph. A font's declared box need not hold its ink, so it is
-    /// not taken alone; it stays as a floor under a glyph whose box is
-    /// empty and inks. A sheared run's boxes go through its shear, as
-    /// [`sheared_bounds`] takes them.
-    ///
-    /// `None` for a decorated run, whose lines this does not bound, and for
-    /// a paint with a path effect or a mask filter, which can ink past every
-    /// glyph's box.
+    /// another scale adds: [`Self::inks`] placed at `origin` by
+    /// [`Self::place`]. `None` where [`Self::inks`] answers nothing.
     fn reach(
         &self,
         origin: Point,
         paint: &Paint,
         blobs: &[Option<TextBlob>],
     ) -> Option<Rect> {
+        Some(self.place(origin, &self.inks(paint, blobs)?))
+    }
+
+    /// What each run can ink in `paint` from `blobs`, before the run is
+    /// placed: each glyph's box as [`glyph_boxes`] gives it -- its outline's
+    /// box widened as far as `paint`'s stroke can reach, or for a glyph with
+    /// no outline, a bitmap or colour emoji, the box `Font::get_bounds`
+    /// reports -- at its position and through the run's shear, as
+    /// [`sheared_bounds`] takes them, and the run's blob's bounds, which for
+    /// a positioned run are the box the font declares around every glyph. A
+    /// font's declared box need not hold its ink, so it is not taken alone;
+    /// it stays as a floor under a glyph whose box is empty and inks.
+    ///
+    /// Each glyph's box is kept rather than a run's union of them, so that
+    /// [`Self::place`] sums each with the anchor as the boxes were summed
+    /// before they were kept: a box narrower than its sum's last place
+    /// collapses there, and a union would keep it.
+    ///
+    /// `None` for a decorated run, whose lines this does not bound, and for
+    /// a paint with a path effect or a mask filter, which can ink past every
+    /// glyph's box.
+    fn inks(&self, paint: &Paint, blobs: &[Option<TextBlob>]) -> Option<Inks> {
         if self.decoration.is_some()
             || paint.path_effect().is_some()
             || paint.mask_filter().is_some()
         {
             return None;
         }
-        #[cfg(test)]
-        REACHED_FAMILIES.with_borrow_mut(Vec::clear);
-        let runs = zip(zip(&self.runs, &self.shears), blobs);
-        let reach =
-            runs.fold(Rect::new_empty(), |mut all, ((run, shear), blob)| {
+        let runs = zip(zip(&self.runs, &self.shears), blobs)
+            .map(|((run, shear), blob)| {
                 // A run sheared flat has no blob, and inks nothing.
-                let Some(blob) = blob else {
-                    return all;
-                };
-                let at = origin + run.origin;
+                let blob = blob.as_ref()?;
                 let mut boxes = vec![Rect::new_empty(); run.glyphs.len()];
                 #[cfg(not(test))]
                 glyph_boxes(
@@ -738,27 +765,51 @@ impl RunPaint {
                 );
                 #[cfg(test)]
                 measured_boxes(&run.font, &run.glyphs, paint, &mut boxes);
+                let glyphs = zip(boxes, &run.positions)
+                    .filter(|(glyph, _)| !glyph.is_empty())
+                    .map(|(glyph, &position)| {
+                        let placed = glyph.with_offset(position);
+                        match shear {
+                            Shear::By(shear) => shear.map_rect(placed).0,
+                            Shear::None | Shear::Flat => placed,
+                        }
+                    })
+                    .collect();
+                Some(RunInks {
+                    glyphs,
+                    blob: *blob.bounds(),
+                })
+            })
+            .collect();
+        Some(Inks { runs })
+    }
+
+    /// `inks`, the run's -- see [`Self::inks`] -- placed with its anchor at
+    /// `origin`.
+    fn place(&self, origin: Point, inks: &Inks) -> Rect {
+        #[cfg(test)]
+        REACHED_FAMILIES.with_borrow_mut(Vec::clear);
+        let reach = zip(&self.runs, &inks.runs).fold(
+            Rect::new_empty(),
+            |mut all, (run, inks)| {
+                let Some(inks) = inks else {
+                    return all;
+                };
                 #[cfg(test)]
                 REACHED_FAMILIES.with_borrow_mut(|families| {
                     families.push(run.font.typeface().family_name());
                 });
-                for (glyph, &position) in zip(boxes, &run.positions) {
-                    if glyph.is_empty() {
-                        continue;
-                    }
-                    let placed = glyph.with_offset(position);
-                    let placed = match shear {
-                        Shear::By(shear) => shear.map_rect(placed).0,
-                        Shear::None | Shear::Flat => placed,
-                    };
-                    all.join(placed.with_offset(at));
+                let at = origin + run.origin;
+                for glyph in &inks.glyphs {
+                    all.join(glyph.with_offset(at));
                 }
-                all.join(blob.bounds().with_offset(at));
+                all.join(inks.blob.with_offset(at));
                 all
-            });
+            },
+        );
         #[cfg(test)]
         let reach = reach.with_inset((REACH_INSET.get(), REACH_INSET.get()));
-        Some(reach)
+        reach
     }
 
     /// Paints the run with its anchor at `origin` in `paint`, a named line
@@ -923,6 +974,10 @@ struct PaintedBlobs {
     /// cannot be freed and given to another.
     paint: Paint,
     blobs: Vec<Option<TextBlob>>,
+    /// What the run can ink in the paint, made faint as each [`Faint`]
+    /// makes it, worked out the first time a draw asks: reading every
+    /// glyph's outline each draw was a tenth of a page of blurred text.
+    inks: Vec<(Faint, Option<Inks>)>,
 }
 
 impl PaintedBlobs {
@@ -930,8 +985,30 @@ impl PaintedBlobs {
     /// they were built for, every field of it the same -- colour and alpha
     /// by value, the shader and other effects by identity.
     fn matches(&self, paint: &Paint) -> bool {
+        #[cfg(test)]
+        if MATCH_IGNORES_STROKE.get() {
+            let mut kept = self.paint.clone();
+            kept.set_stroke_width(paint.stroke_width());
+            return kept == *paint;
+        }
         self.paint == *paint
     }
+}
+
+/// What a run can ink before it is placed -- see [`RunPaint::inks`]: for
+/// each glyph run, `None` where it has no blob.
+#[derive(Clone, Debug)]
+struct Inks {
+    runs: Vec<Option<RunInks>>,
+}
+
+/// What one glyph run can ink before it is placed: each glyph's box that is
+/// not empty, at its position and through the run's shear, and the blob's
+/// bounds.
+#[derive(Clone, Debug)]
+struct RunInks {
+    glyphs: Vec<Rect>,
+    blob: Rect,
 }
 
 /// How many paints a kept run keeps blobs for: a shadowed run is drawn in
@@ -954,10 +1031,17 @@ const LAID_OUT_BASE_BYTES: usize = 13 * 1024;
 /// read off it -- see [`LAID_OUT_BASE_BYTES`].
 const LAID_OUT_GLYPH_BYTES: usize = 324;
 
-/// The estimated cost of keeping a run of `glyphs` glyphs.
+/// The estimated cost of keeping a run of `glyphs` glyphs: the measured
+/// cost, and at most a box a glyph for each paint whose blobs are kept and
+/// each [`Faint`] they are drawn under -- see `PaintedBlobs::inks` -- which
+/// the measurement was made without.
 fn laid_out_bytes(glyphs: usize) -> usize {
-    LAID_OUT_BASE_BYTES + glyphs * LAID_OUT_GLYPH_BYTES
+    let inks = BLOB_PAINTS * FAINTS * size_of::<Rect>();
+    LAID_OUT_BASE_BYTES + glyphs * (LAID_OUT_GLYPH_BYTES + inks)
 }
+
+/// How many ways a paint can be made faint -- see [`Faint`].
+const FAINTS: usize = 2;
 
 /// The most the kept runs are estimated to hold together, past which the
 /// least recently drawn go.
@@ -1262,6 +1346,11 @@ thread_local! {
     /// draws its answer in on this thread: a mutant, a reach that cuts ink,
     /// for the checks on it to refuse.
     pub(crate) static REACH_INSET: Cell<f32> = const { Cell::new(0.0) };
+    /// A mutant of `PaintedBlobs::matches` that finds blobs, and what they
+    /// can ink, kept for a paint of another stroke width: a test of the
+    /// inks kept beside them must fail under it.
+    pub(crate) static MATCH_IGNORES_STROKE: Cell<bool> =
+        const { Cell::new(false) };
 }
 
 /// The mutants of [`glyph_boxes`] the reach sweep must refuse, so that a
@@ -1276,6 +1365,17 @@ pub(crate) enum ReachBound {
     /// Widened by half the stroke whatever the join: the mitred scenes
     /// must fail.
     StrokedHalfWidth,
+}
+
+/// Whether a kept run keeps what it can ink -- see `PaintedBlobs::inks`:
+/// always, but in a test whose [`REACH_BOUND`] measures the boxes another
+/// way, which an answer kept from before the switch would hide.
+fn keeps_inks() -> bool {
+    #[cfg(test)]
+    if REACH_BOUND.get() != ReachBound::Stroked {
+        return false;
+    }
+    true
 }
 
 /// [`glyph_boxes`], or the mutant [`REACH_BOUND`] names in its place.

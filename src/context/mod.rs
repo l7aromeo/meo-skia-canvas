@@ -7045,8 +7045,8 @@ mod text_reach_tests {
     use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
     use crate::{
         node::typography::{
-            REACH_BOUND, REACH_INSET, REACHED_FAMILIES, ReachBound,
-            forget_laid_out,
+            MATCH_IGNORES_STROKE, REACH_BOUND, REACH_INSET, REACHED_FAMILIES,
+            ReachBound, forget_laid_out,
         },
         prelude::*,
     };
@@ -7754,6 +7754,50 @@ mod text_reach_tests {
             vec![("cpu drawn at 0.5", 1.0)],
             "a pixel past with no margin"
         );
+    }
+
+    /// The reach of each of `scenes`, drawn in turn on fresh canvases that
+    /// share the runs they lay out -- see `Typesetting::typography` -- once
+    /// each pass: the first pass lays each run out afresh, the second keeps
+    /// it, and the third draws it from what the second kept. Bits, so that
+    /// equal means the same answer.
+    fn reaches_over_passes(scenes: &[Scene]) -> [Vec<Option<[u32; 4]>>; 3] {
+        let bits =
+            |r: Rect| [r.left, r.top, r.right, r.bottom].map(f32::to_bits);
+        forget_laid_out();
+        [0, 1, 2].map(|_| {
+            scenes
+                .iter()
+                .map(|scene| reached(scene).map(bits))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn a_kept_runs_reach_is_the_reach_worked_out_afresh() {
+        // A kept run keeps what it can ink beside the blobs of each paint
+        // it is drawn in -- see `PaintedBlobs::inks` -- and places it at
+        // each draw's anchor. Over the scenes a test run plays, and the same
+        // run stroked at two widths in turn, the kept answer is the one
+        // worked out afresh, bit for bit; a run found by the blobs of
+        // another width answers that width's reach, and is caught.
+        let mut scenes: Vec<Scene> = sweep(false)
+            .into_iter()
+            .filter(|scene| resolves(scene.font))
+            .collect();
+        scenes.extend(
+            [Some(1.0), Some(12.0), Some(1.0)]
+                .map(|stroke| Scene { stroke, ..BASE }),
+        );
+        let [fresh, kept, again] = reaches_over_passes(&scenes);
+        assert!(fresh.iter().filter(|r| r.is_some()).count() > 10);
+        assert_eq!(fresh, kept, "the second pass, which keeps the runs");
+        assert_eq!(fresh, again, "the third, drawn from what was kept");
+        let strokes = &scenes[scenes.len() - 3..];
+        MATCH_IGNORES_STROKE.set(true);
+        let [fresh, _, again] = reaches_over_passes(strokes);
+        MATCH_IGNORES_STROKE.set(false);
+        assert_ne!(fresh, again, "kept for another width, and not caught");
     }
 
     /// What a run of text in a filter chain reports it can ink holds all it
