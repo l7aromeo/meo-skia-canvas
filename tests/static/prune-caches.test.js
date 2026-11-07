@@ -168,3 +168,202 @@ describe("pruning caches a superseded Skia tree left", () => {
     );
   });
 });
+
+// The repository's caches, open pull requests, branches and latest successful
+// containers.yml run on main, as the API returned them on 2026-11-07: 85
+// entries, 10,205 MiB, over the 10 GB the repository is allowed.
+const today = () =>
+  JSON.parse(
+    readFileSync(
+      join(
+        __dirname,
+        "..",
+        "assets",
+        "workflow-runs",
+        "caches-2026-11-07.json",
+      ),
+      "utf8",
+    ),
+  );
+const TODAY = "2026-11-07T23:59:59Z";
+const mib = (entries) =>
+  Math.round(entries.reduce((sum, e) => sum + e.size_in_bytes, 0) / 2 ** 20);
+const live = (recorded) => ({
+  openPulls: new Set(recorded.openPulls),
+  branches: new Set(recorded.branches),
+});
+const entry = (fields) => ({
+  id: 1,
+  key: "k",
+  ref: "refs/heads/main",
+  size_in_bytes: 1,
+  created_at: "2026-11-01T00:00:00Z",
+  last_accessed_at: "2026-11-01T00:00:00Z",
+  ...fields,
+});
+
+describe("pruning entries nothing will restore", () => {
+  test("a closed pull request's and a deleted branch's entries go", async () => {
+    const { deadRefs } = await load();
+    const recorded = today();
+    const dead = deadRefs(recorded.actions_caches, live(recorded), TODAY);
+    assert.deepEqual([...new Set(dead.map((e) => e.ref))].sort(), [
+      "refs/heads/fix/kept-churn",
+      "refs/pull/608/merge",
+    ]);
+    assert.equal(dead.length, 12);
+    assert.equal(mib(dead), 923);
+  });
+
+  test("an open pull request's, a live branch's, a tag's and main's stay", async () => {
+    const { deadRefs } = await load();
+    const refs = {
+      openPulls: new Set([629]),
+      branches: new Set(["main", "fix/live"]),
+    };
+    const kept = [
+      entry({ ref: "refs/pull/629/merge" }),
+      entry({ ref: "refs/heads/fix/live" }),
+      entry({ ref: "refs/tags/npm-v7.0.0" }),
+      entry({ ref: "refs/heads/main" }),
+      // Created after the run started: a newer run's, not this one's to judge.
+      entry({ ref: "refs/pull/1/merge", created_at: "2026-11-08T00:00:00Z" }),
+    ];
+    assert.deepEqual(deadRefs(kept, refs, TODAY), []);
+    const gone = [
+      entry({ ref: "refs/pull/628/merge" }),
+      entry({ ref: "refs/heads/fix/gone" }),
+    ];
+    assert.equal(deadRefs(gone, refs, TODAY).length, 2);
+  });
+
+  test("refuses to judge refs against a listing without main", async () => {
+    // A listing that failed or came back empty would read every branch dead.
+    const { deadRefs } = await load();
+    const caches = [entry({ ref: "refs/heads/fix/live" })];
+    for (const branches of [new Set(), new Set(["fix/live"]), undefined]) {
+      assert.throws(
+        () => deadRefs(caches, { openPulls: new Set(), branches }, TODAY),
+        /does not hold main/,
+      );
+    }
+    assert.throws(
+      () => deadRefs(caches, { branches: new Set(["main"]) }, TODAY),
+      /no list of open pull requests/,
+    );
+  });
+
+  test("buildx blobs the latest containers build left untouched go", async () => {
+    const { orphanBlobs } = await load();
+    const recorded = today();
+    const orphans = orphanBlobs(
+      recorded.actions_caches,
+      recorded.lastBuild,
+      TODAY,
+    );
+    assert.equal(orphans.length, 17);
+    assert.equal(mib(orphans), 832);
+    assert.ok(orphans.every((e) => e.ref === "refs/heads/main"));
+  });
+
+  test("a blob that build read or wrote, or a later one's, stays", async () => {
+    const { orphanBlobs } = await load();
+    const built = "2026-11-06T18:01:08Z";
+    const blob = (fields) =>
+      entry({ key: "buildkit-blob-1-sha256:00", ...fields });
+    const kept = [
+      blob({ last_accessed_at: built }),
+      blob({
+        created_at: "2026-11-06T18:12:00Z",
+        last_accessed_at: "2026-11-06T18:12:00Z",
+      }),
+      blob({ ref: "refs/pull/1/merge" }),
+      entry({ key: "docker.io--tonistiigi--binfmt-latest-linux-x64" }),
+      entry({ key: "v0-rust-docs-docs-Linux-x64-01b81e85-d028a097" }),
+    ];
+    assert.deepEqual(orphanBlobs(kept, built, TODAY), []);
+    const gone = [blob({}), entry({ key: "index-buildkit-1-f921bd05#1" })];
+    assert.equal(orphanBlobs(gone, built, TODAY).length, 2);
+    assert.throws(() => orphanBlobs(gone, undefined, TODAY), /no successful/);
+  });
+
+  test("an older Rust cache of a job goes, its newest stays", async () => {
+    const { supersededRust } = await load();
+    const rust = (lock, created_at, ref = "refs/heads/main") =>
+      entry({
+        key: `v0-rust-msrv-1.90-msrv-Linux-x64-b75ed0f5-${lock}`,
+        created_at,
+        ref,
+      });
+    const old = rust("00000000", "2026-11-01T00:00:00Z");
+    const now = rust("d028a097", "2026-11-05T00:00:00Z");
+    const other = entry({
+      key: "v0-rust-docs-docs-Linux-x64-01b81e85-00000000",
+    });
+    assert.deepEqual(supersededRust([old, now, other], TODAY), [old]);
+    // A toolchain change supersedes as a lockfile change does.
+    const toolchain = entry({
+      key: "v0-rust-msrv-1.90-msrv-Linux-x64-ffffffff-d028a097",
+      created_at: "2026-11-06T00:00:00Z",
+    });
+    assert.deepEqual(
+      supersededRust([old, now, toolchain], TODAY)
+        .map((e) => e.key)
+        .sort(),
+      [now.key, old.key].sort(),
+    );
+    // Another ref's, or one created since the run started, is not judged.
+    assert.deepEqual(
+      supersededRust(
+        [rust("00000000", "2026-11-01T00:00:00Z", "refs/pull/1/merge"), now],
+        TODAY,
+      ),
+      [],
+    );
+    assert.deepEqual(
+      supersededRust(
+        [rust("00000000", "2026-11-01T00:00:00Z"), now],
+        "2026-11-01T00:00:00Z",
+      ),
+      [],
+    );
+    // Today's cache holds one Rust entry a job.
+    assert.deepEqual(supersededRust(today().actions_caches, TODAY), []);
+  });
+
+  test("no rule removes an entry on main that its latest runs touched", async () => {
+    const { stale, deadRefs, orphanBlobs, supersededRust } = await load();
+    const recorded = today();
+    const caches = recorded.actions_caches;
+    const current = Object.fromEntries(
+      caches
+        .filter(
+          (e) => e.ref === "refs/heads/main" && /^skia-source-/.test(e.key),
+        )
+        .map((e) => [e.key.split("-")[2], e.key]),
+    );
+    const removed = [
+      ...stale(caches, current, TODAY),
+      ...deadRefs(caches, live(recorded), TODAY),
+      ...orphanBlobs(caches, recorded.lastBuild, TODAY),
+      ...supersededRust(caches, TODAY),
+    ];
+    // Every entry on main a run read or wrote since the latest containers
+    // build started -- that build's blobs, rust-ci's and the source trees.
+    const touched = caches.filter(
+      (e) =>
+        e.ref === "refs/heads/main" &&
+        Date.parse(e.last_accessed_at) >= Date.parse(recorded.lastBuild),
+    );
+    assert.ok(touched.length > 40, `${touched.length} touched`);
+    const gone = new Set(removed.map((e) => e.id));
+    assert.deepEqual(
+      touched.filter((e) => gone.has(e.id)).map((e) => e.key),
+      [],
+    );
+    assert.equal(
+      mib([...new Map(removed.map((e) => [e.id, e])).values()]),
+      1755,
+    );
+  });
+});
