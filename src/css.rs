@@ -1011,6 +1011,26 @@ pub(crate) fn parse_filter_named(
     Ok(ops)
 }
 
+/// A CSS `filter` value as [`Context2D::set_filter_css`] takes it:
+/// [`parse_filter_named`], then each operation held to what the typed
+/// [`Context2D::set_filter`] accepts. The one reader for that setter and for
+/// [`css_filter_is_none`], so the two refuse the same strings with the same
+/// errors.
+///
+/// [`Context2D::set_filter_css`]: crate::context2d::Context2D::set_filter_css
+/// [`Context2D::set_filter`]: crate::context2d::Context2D::set_filter
+/// [`css_filter_is_none`]: crate::filter::css_filter_is_none
+pub(crate) fn read_filter(
+    text: &str,
+    units: &FontUnits,
+) -> Result<Vec<(FilterOp, Option<NamedColour>)>, Error> {
+    let parsed = parse_filter_named(text, units)?;
+    for (op, _) in &parsed {
+        op.validate()?;
+    }
+    Ok(parsed)
+}
+
 /// What `brightness()`, `contrast()`, `grayscale()`, `invert()`, `opacity()`,
 /// `saturate()` and `sepia()` take when their argument is left out: Filter
 /// Effects 1 gives each a default of 1, which for `brightness`, `contrast`,

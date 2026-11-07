@@ -51,7 +51,7 @@ use crate::{
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
         is_ident_code_point, is_math, parse_angle, parse_decoration,
-        parse_filter_named, split_number, without_comments, would_start_ident,
+        read_filter, split_number, without_comments, would_start_ident,
         written_zero,
     },
     error::Error,
@@ -1047,13 +1047,16 @@ const MAX_FONT_PX: f32 = 10_000.0;
 
 /// What a canvas font shorthand's relative lengths resolve against: its
 /// parent, which a canvas has none of, so the default font -- 10px, set in
-/// the standard family, `serif` -- with a 16px root in the same family.
+/// the standard family, `serif` -- with a 16px root in the same family. A
+/// filter string read with no context,
+/// [`css_filter_is_none`](crate::filter::css_filter_is_none)'s, resolves
+/// against the same.
 ///
 /// Chrome 152 reads `1ex Oswald` as 4.4873px and `2ch Oswald` as 10px: the
 /// x-height and the zero of 10px Times, its standard font, and not of the
 /// family being named. `lh`, `rlh`, the viewport units and the container
 /// units read as zero, as they do in Chrome's worker canvas.
-fn parent_units() -> FontUnits<'static> {
+pub(crate) fn parent_units() -> FontUnits<'static> {
     FontUnits::new(CANVAS_DEFAULT_FONT_PX, initial_root_face)
         .with_root(FontUnits::new(ROOT_FONT_PX, initial_root_face))
 }
@@ -1873,10 +1876,7 @@ impl Context2D {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn set_filter_css(&mut self, css: &str) -> Result<(), Error> {
-        let parsed = parse_filter_named(css, &self.inner.state.filter_units())?;
-        for (op, _) in &parsed {
-            op.validate()?;
-        }
+        let parsed = read_filter(css, &self.inner.state.filter_units())?;
         let specs: Vec<_> = parsed
             .into_iter()
             .map(|(op, named)| op.to_spec_named(named))
@@ -1905,6 +1905,38 @@ impl Context2D {
     /// `rgba(255,0,0,1)`. The two spellings describe the same filter.
     pub fn filter(&self) -> String {
         self.inner.state.filter.to_string()
+    }
+
+    /// Whether the filter chain is `none`: `"none"` set through
+    /// [`set_filter_css`](Self::set_filter_css) in any case, with CSS
+    /// whitespace or comments around it, an empty slice set through
+    /// [`set_filter`](Self::set_filter), or no filter set at all.
+    ///
+    /// This asks what the value is, not what it does to a draw. A chain of
+    /// functions that change nothing -- `blur(0px)`, `brightness(1)` -- is
+    /// not `none`: Filter Effects 1 gives every value but `none` a stacking
+    /// context, and Chrome makes one for each of those.
+    /// [`filter`](Self::filter) echoes the text it was given, `"  NONE "`
+    /// included, so comparing that string is not the test; this is.
+    /// [`css_filter_is_none`](crate::filter::css_filter_is_none) answers the
+    /// same for a string, with no context.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(64.0, 64.0);
+    /// let ctx = canvas.context();
+    /// ctx.set_filter_css("/* off */ NONE")?;
+    /// assert!(ctx.filter_is_none());
+    ///
+    /// ctx.set_filter_css("blur(0px)")?;
+    /// assert!(!ctx.filter_is_none());
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    pub fn filter_is_none(&self) -> bool {
+        self.inner.state.filter.is_none()
     }
 
     /// Sets the font subsequent text draws with.

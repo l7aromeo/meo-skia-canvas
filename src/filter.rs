@@ -15,8 +15,8 @@ use crate::{
         rgba_linear_to_skia_color, rgba_linear_to_srgb_coefficients,
         rgba_linear_to_unpremul_color4f,
     },
-    context2d::affine_to_matrix,
-    css::NamedColour,
+    context2d::{affine_to_matrix, parent_units},
+    css::{NamedColour, read_filter},
     error::Error,
     geometry::{Affine, Rect},
     node::filter::FilterSpec,
@@ -1752,6 +1752,42 @@ impl FilterOp {
             (spec, _) => spec,
         }
     }
+}
+
+/// Whether a CSS `filter` value is `none`: `none` in any case, with CSS
+/// whitespace or comments around it.
+///
+/// This asks what the value is, not what it does to a draw. A chain of
+/// functions that change nothing -- `blur(0px)`, `brightness(1)` -- is not
+/// `none`: Filter Effects 1 gives every value but `none` a stacking context,
+/// and Chrome makes one for each of those and none for `/* off */ NONE`. For
+/// a caller deciding how to stack a styled element before any canvas exists;
+/// [`Context2D::filter_is_none`] answers the same for a context's current
+/// chain.
+///
+/// # Errors
+///
+/// Whatever [`Context2D::set_filter_css`] refuses, with the same error: the
+/// two read the string with one function. A blank string is refused, as it
+/// is there. Font-relative lengths resolve against the canvas's default
+/// font, 10px, rather than a context's; that changes what a length
+/// measures, which neither the answer nor the refusal depends on.
+///
+/// # Examples
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// assert!(css_filter_is_none(" /* off */ NONE ")?);
+/// assert!(!css_filter_is_none("blur(0px)")?);
+/// assert!(css_filter_is_none("").is_err());
+/// # Ok::<(), meo_skia_canvas::error::Error>(())
+/// ```
+///
+/// [`Context2D::filter_is_none`]: crate::context2d::Context2D::filter_is_none
+/// [`Context2D::set_filter_css`]: crate::context2d::Context2D::set_filter_css
+pub fn css_filter_is_none(css: &str) -> Result<bool, Error> {
+    Ok(read_filter(css, &parent_units())?.is_empty())
 }
 
 /// Every expectation here was read out of `lib/classes/color_matrix.js` by
