@@ -24,7 +24,7 @@ drawing ported between the two surfaces reads the same on both.</p>
 </div></section>
 <div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">CanvasOptions</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#colorspace">colorSpace</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorSpace.html" class="tsd-signature-type tsd-kind-type-alias">ColorSpace</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#colortype">colorType</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorType.html" class="tsd-signature-type tsd-kind-type-alias">ColorType</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#gpu">gpu</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textcontrast">textContrast</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textgamma">textGamma</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L1522">lib/index.d.ts:1522</a></li></ul></aside>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L1667">lib/index.d.ts:1667</a></li></ul></aside>
 <section class="tsd-panel-group tsd-index-group">
 <section class="tsd-panel tsd-index-panel">
 <details class="tsd-index-content tsd-accordion" open><summary class="tsd-accordion-summary tsd-index-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
@@ -50,7 +50,7 @@ outside its gamut is clipped as it is drawn. Exports and readbacks
 default to it and convert out of it when asked for another.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L1586">lib/index.d.ts:1586</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L1738">lib/index.d.ts:1738</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="colortype"><code class="tsd-tag">Optional</code><span>color<wbr/>Type</span><a href="#colortype" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">colorType</span><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorType.html" class="tsd-signature-type tsd-kind-type-alias">ColorType</a></div>
@@ -60,30 +60,31 @@ default to it and convert out of it when asked for another.</p>
 the page composites in, so blending keeps the fractions eight bits round
 away: sixty layers at 0.6% alpha land on 0.30308 (<code>RGBAF32</code>) and 0.30298
 (<code>RGBAF16</code>) against an arithmetic answer of 0.30308, where eight bits
-compound their rounding into 0.23922. It costs twice the memory for
-<code>RGBAF16</code> and four times for <code>RGBAF32</code>. The time cost depends on what is
-drawn rather than on the pixel width: 120 translucent layers are
-<em>faster</em> in float (0.74x and 0.77x, since an eight-bit surface converts
-through its transfer function on every layer and a float one does not),
-while 120 opaque fills cost 1.29x in <code>RGBAF16</code> and 7.58x in <code>RGBAF32</code>.
-Every other format composites at eight bits and converts on the way out
--- an opaque or narrower one would lose more inside the page than it
-saves.</p>
+compound their rounding into 0.23922 on the CPU and 0.36078 on the GPU. It
+costs twice the memory for <code>RGBAF16</code> and four times for <code>RGBAF32</code>. The
+time cost depends on what is drawn rather than on the pixel width: 120
+translucent layers are <em>faster</em> in float (0.74x and 0.77x, since an
+eight-bit surface converts through its transfer function on every layer
+and a float one does not), while 120 opaque fills cost 1.29x in <code>RGBAF16</code>
+and 7.58x in <code>RGBAF32</code>. Every other format composites at eight bits and
+converts on the way out -- an opaque or narrower one would lose more
+inside the page than it saves.</p>
 <p>On a <code>toBuffer</code> or <code>getImageData</code> call it means only the layout of the
 buffer you receive; the page keeps the format its canvas was built with.</p>
 <p>A float canvas renders on the raster backend, whatever <code>gpu</code> says, and
-<code>canvas.engine</code> reports which one took it. No GPU can currently deliver
-the precision: Skia's Metal and Vulkan backends implement no 32-bit float
-surface at all, and while both provide <code>RGBAF16</code>, a GPU quantises the
-paint colour to eight bits before compositing -- the same sixty layers
-land on 0.235 there, further from 0.303 than the eight-bit answer of
-0.361. Asking for float and being handed eight bits would be the worse
-trade, so the canvas changes engine instead.</p>
+<code>canvas.engine</code> reports which one took it. The GPU engine cannot deliver
+the precision: it runs on Skia's Ganesh backend, whose Metal and Vulkan
+backends implement no 32-bit float surface at all, and while both provide
+<code>RGBAF16</code>, on Metal Ganesh rounds each draw's source colour to eight bits
+before blending it -- the same sixty layers land on 0.37695 there, further
+from 0.30308 than the eight-bit answer of either engine. Asking for float
+and being handed eight bits would be the worse trade, so the canvas
+changes engine instead.</p>
 <p>This is probed at runtime rather than assumed, so a Skia that grows the
 support keeps such canvases on the GPU with no change here.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L1577">lib/index.d.ts:1577</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L1729">lib/index.d.ts:1729</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="gpu"><code class="tsd-tag">Optional</code><span>gpu</span><a href="#gpu" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">gpu</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span></div>
@@ -95,30 +96,35 @@ machine whose driver declined, and on a float canvas, which no GPU can
 composite. <a href="../classes/index.Canvas.html#engine" class="tsd-kind-property">Canvas.engine</a> says which of those it was.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L1597">lib/index.d.ts:1597</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L1749">lib/index.d.ts:1749</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="textcontrast"><code class="tsd-tag">Optional</code><span>text<wbr/>Contrast</span><a href="#textcontrast" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">textContrast</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
-<div class="tsd-comment tsd-typography"><p>How much the rasterizer thickens small text, from <code>0</code> to <code>1</code> (defaults
-to <code>0</code>).</p>
+<div class="tsd-comment tsd-typography"><p>How much the rasterizer thickens small text, from <code>0</code> to <code>1</code>.</p>
 <p>Glyph stems below a pixel wide antialias to something lighter than the
-same shape at a larger size, and this compensates. The default is no
-compensation.</p>
+same shape at a larger size, and this compensates. Defaults to the value
+Chrome's text is drawn with on the platform: <code>0</code> on macOS, <code>1</code> on
+Windows and <code>0.2</code> elsewhere.</p>
+<p>On macOS it changes nothing while <a href="index.CanvasRenderingContext2D.html#fonthinting" class="tsd-kind-property">CanvasRenderingContext2D.fontHinting</a>
+is on, as it is by default: Skia sets hinted glyphs' contrast to <code>0</code> there,
+leaving their weight to CoreGraphics' own dilation of them. It reaches
+unhinted text only.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L1531">lib/index.d.ts:1531</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L1681">lib/index.d.ts:1681</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="textgamma"><code class="tsd-tag">Optional</code><span>text<wbr/>Gamma</span><a href="#textgamma" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">textGamma</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
-<div class="tsd-comment tsd-typography"><p>The gamma the rasterizer corrects glyph coverage against (defaults to
-<code>1.4</code>).</p>
+<div class="tsd-comment tsd-typography"><p>The gamma the rasterizer corrects glyph coverage against, <code>0</code> meaning
+the sRGB curve.</p>
 <p>Works with <a href="#textcontrast" class="tsd-kind-property">CanvasOptions.textContrast</a>: coverage is a linear
 quantity and the display is not, so blending glyph edges without
 accounting for that renders light text on dark thinner than dark on
-light. The default is Skia's own tuned value.</p>
+light. Defaults to the value Chrome's text is drawn with on the
+platform: <code>0</code> on macOS and Windows and <code>1.2</code> elsewhere.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L1542">lib/index.d.ts:1542</a></li></ul></aside></section></section></details></div>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L1693">lib/index.d.ts:1693</a></li></ul></aside></section></section></details></div>
 <div class="col-sidebar">
 <div class="page-menu">
 <div class="tsd-navigation settings">

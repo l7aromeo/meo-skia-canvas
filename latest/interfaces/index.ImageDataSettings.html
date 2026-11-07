@@ -14,9 +14,9 @@
 <section class="tsd-panel tsd-comment">
 <div class="tsd-comment tsd-typography"><p>How to interpret the bytes of a pixel buffer being read in.</p>
 </div></section>
-<div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">ImageDataSettings</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#colorspace">colorSpace</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorSpace.html" class="tsd-signature-type tsd-kind-type-alias">ColorSpace</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#colortype">colorType</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorType.html" class="tsd-signature-type tsd-kind-type-alias">ColorType</a><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div><aside class="tsd-sources">
+<div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">ImageDataSettings</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#alphatype">alphaType</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;premultiplied&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;unpremultiplied&quot;</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#colorspace">colorSpace</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorSpace.html" class="tsd-signature-type tsd-kind-type-alias">ColorSpace</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#colortype">colorType</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorType.html" class="tsd-signature-type tsd-kind-type-alias">ColorType</a><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L400">lib/index.d.ts:400</a></li></ul></aside>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L468">lib/index.d.ts:468</a></li></ul></aside>
 <section class="tsd-panel-group tsd-index-group">
 <section class="tsd-panel tsd-index-panel">
 <details class="tsd-index-content tsd-accordion" open><summary class="tsd-accordion-summary tsd-index-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
@@ -24,12 +24,27 @@
 <div class="tsd-accordion-details">
 <section class="tsd-index-section">
 <h3 class="tsd-index-heading tsd-anchor-link" id="properties">Properties<a href="#properties" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
-<div class="tsd-index-list"><a href="#colorspace" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Space?</span></a>
+<div class="tsd-index-list"><a href="#alphatype" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>alpha<wbr/>Type?</span></a>
+<a href="#colorspace" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Space?</span></a>
 <a href="#colortype" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Type?</span></a>
 </div></section></div></details></section></section>
 <details class="tsd-panel-group tsd-member-group tsd-accordion" open><summary class="tsd-accordion-summary" data-key="section-Properties"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
 <h2 class="tsd-anchor-link" id="properties-1">Properties<a href="#properties-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h2></summary>
 <section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="alphatype"><code class="tsd-tag">Optional</code><span>alpha<wbr/>Type</span><a href="#alphatype" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">alphaType</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;premultiplied&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;unpremultiplied&quot;</span></div>
+<div class="tsd-comment tsd-typography"><p>Whether <code>data</code> holds colour as it is or already scaled by alpha,
+defaulting to <code>&quot;unpremultiplied&quot;</code>, the standard's only kind.</p>
+<p>Recorded as <a href="../classes/index.ImageData.html#alphatype" class="tsd-kind-property">ImageData.alphaType</a> and honoured on the way back in,
+so a buffer read with <code>getImageData(..., {alphaType: &quot;premultiplied&quot;})</code>
+goes through <code>putImageData</code>, <code>drawImage</code> and <code>createPattern</code> as the
+colour it was rather than as a darker one. Any other name throws a
+<code>TypeError</code>.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L500">lib/index.d.ts:500</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="colorspace"><code class="tsd-tag">Optional</code><span>color<wbr/>Space</span><a href="#colorspace" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">colorSpace</span><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorSpace.html" class="tsd-signature-type tsd-kind-type-alias">ColorSpace</a></div>
@@ -40,7 +55,7 @@ draw. The space is metadata about the buffer, not a conversion: nothing
 is resampled to match it.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L409">lib/index.d.ts:409</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L477">lib/index.d.ts:477</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="colortype"><code class="tsd-tag">Optional</code><span>color<wbr/>Type</span><a href="#colortype" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">colorType</span><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorType.html" class="tsd-signature-type tsd-kind-type-alias">ColorType</a></div>
@@ -51,7 +66,7 @@ dimensions at that format, or the call throws.</p>
 <p>🧪 Not in the HTML Canvas standard.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L419">lib/index.d.ts:419</a></li></ul></aside></section></section></details></div>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L487">lib/index.d.ts:487</a></li></ul></aside></section></section></details></div>
 <div class="col-sidebar">
 <div class="page-menu">
 <div class="tsd-navigation settings">
@@ -67,7 +82,7 @@ dimensions at that format, or the call throws.</p>
 <h3>On This Page</h3></summary>
 <div class="tsd-accordion-details">
 <details open class="tsd-accordion tsd-page-navigation-section"><summary class="tsd-accordion-summary" data-key="section-Properties"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>Properties</summary>
-<div><a href="#colorspace"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Space</span></a><a href="#colortype"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Type</span></a></div></details></div></details></div>
+<div><a href="#alphatype"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>alpha<wbr/>Type</span></a><a href="#colorspace"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Space</span></a><a href="#colortype"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Type</span></a></div></details></div></details></div>
 <div class="site-menu">
 <nav id="tsd-sidebar-links" class="tsd-navigation"><a href="https://l7aromeo.github.io/meo-skia-canvas/" class="tsd-nav-link">Home</a><a href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs" class="tsd-nav-link">Guides</a><a href="https://docs.rs/meo-skia-canvas" class="tsd-nav-link">Rust API</a></nav>
 <nav class="tsd-navigation"><a href="../modules.html">meo-skia-canvas</a>

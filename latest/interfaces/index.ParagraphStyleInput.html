@@ -12,11 +12,19 @@
 <li><a href="" aria-current="page">ParagraphStyleInput</a></li></ul>
 <h1>Interface ParagraphStyleInput</h1></div>
 <section class="tsd-panel tsd-comment">
-<div class="tsd-comment tsd-typography"><p>🧪 Not in the HTML Canvas standard.</p>
+<div class="tsd-comment tsd-typography"><p>Each option is converted as WebIDL converts a value to its type, as the
+Canvas API's own attributes are: a number by <code>ToNumber</code>, so <code>&quot;12&quot;</code> is 12;
+a string by <code>ToString</code>; a boolean by <code>ToBoolean</code>; an object of options or
+a list as a dictionary or a sequence. A value whose conversion fails --
+a number that converts to NaN or an infinity, a list that is not
+iterable, a Symbol -- is a <code>TypeError</code> naming the option, and an option
+left out or <code>undefined</code> takes its default, as a string option given
+<code>null</code> does.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
 </div></section>
-<div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">ParagraphStyleInput</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#ellipsis">ellipsis</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#maxlines">maxLines</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#strutstyle">strutStyle</a><span class="tsd-signature-symbol">?:</span> <a href="index.StrutStyleInput.html" class="tsd-signature-type tsd-kind-interface">StrutStyleInput</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textalign">textAlign</a><span class="tsd-signature-symbol">?:</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;center&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;end&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;start&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;left&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;right&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;justify&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">&amp;</span> <span class="tsd-signature-symbol">{}</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textdirection">textDirection</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;ltr&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;rtl&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">&amp;</span> <span class="tsd-signature-symbol">{}</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textheightbehavior">textHeightBehavior</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textstyle">textStyle</a><span class="tsd-signature-symbol">?:</span> <a href="index.TextStyleInput.html" class="tsd-signature-type tsd-kind-interface">TextStyleInput</a><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div><aside class="tsd-sources">
+<div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">ParagraphStyleInput</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#ellipsis">ellipsis</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">null</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#maxlines">maxLines</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#strutstyle">strutStyle</a><span class="tsd-signature-symbol">?:</span> <a href="index.StrutStyleInput.html" class="tsd-signature-type tsd-kind-interface">StrutStyleInput</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textalign">textAlign</a><span class="tsd-signature-symbol">?:</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;center&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;end&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;start&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;left&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;right&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;justify&quot;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">null</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textdirection">textDirection</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;ltr&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;rtl&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">null</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textheightbehavior">textHeightBehavior</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.TextHeightBehavior.html" class="tsd-signature-type tsd-kind-type-alias">TextHeightBehavior</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textstyle">textStyle</a><span class="tsd-signature-symbol">?:</span> <a href="index.TextStyleInput.html" class="tsd-signature-type tsd-kind-interface">TextStyleInput</a><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5303">lib/index.d.ts:5303</a></li></ul></aside>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5655">lib/index.d.ts:5655</a></li></ul></aside>
 <section class="tsd-panel-group tsd-index-group">
 <section class="tsd-panel tsd-index-panel">
 <details class="tsd-index-content tsd-accordion" open><summary class="tsd-accordion-summary tsd-index-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
@@ -37,51 +45,51 @@
 <section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="ellipsis"><code class="tsd-tag">Optional</code><span>ellipsis</span><a href="#ellipsis" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
-<div class="tsd-signature"><span class="tsd-kind-property">ellipsis</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span></div>
+<div class="tsd-signature"><span class="tsd-kind-property">ellipsis</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">null</span></div>
 <div class="tsd-comment tsd-typography"><p>String appended to the last line when <code>maxLines</code> truncated the text.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5322">lib/index.d.ts:5322</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5671">lib/index.d.ts:5671</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="maxlines"><code class="tsd-tag">Optional</code><span>max<wbr/>Lines</span><a href="#maxlines" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">maxLines</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
 <div class="tsd-comment tsd-typography"><p>Cap on the number of lines. Anything past it is dropped, which
-<a href="../classes/index.Paragraph.html#didexceedmaxlines" class="tsd-kind-method">Paragraph.didExceedMaxLines</a> then reports.</p>
+<a href="../classes/index.Paragraph.html#didexceedmaxlines" class="tsd-kind-method">Paragraph.didExceedMaxLines</a> then reports. A whole number from
+<code>1</code>; another is a <code>RangeError</code>.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5320">lib/index.d.ts:5320</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5669">lib/index.d.ts:5669</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="strutstyle"><code class="tsd-tag">Optional</code><span>strut<wbr/>Style</span><a href="#strutstyle" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">strutStyle</span><span class="tsd-signature-symbol">?:</span> <a href="index.StrutStyleInput.html" class="tsd-signature-type tsd-kind-interface">StrutStyleInput</a></div>
 <div class="tsd-comment tsd-typography"><p>Fixed line box for deterministic leading.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5329">lib/index.d.ts:5329</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5678">lib/index.d.ts:5678</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="textalign"><code class="tsd-tag">Optional</code><span>text<wbr/>Align</span><a href="#textalign" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
-<div class="tsd-signature"><span class="tsd-kind-property">textAlign</span><span class="tsd-signature-symbol">?:</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;center&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;end&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;start&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;left&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;right&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;justify&quot;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">&amp;</span> <span class="tsd-signature-symbol">{}</span></div>
-<div class="tsd-comment tsd-typography"><p>Matched case-insensitively. An unrecognised value is ignored and the
-default alignment stands, so a typo fails silently.</p>
+<div class="tsd-signature"><span class="tsd-kind-property">textAlign</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;center&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;end&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;start&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;left&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;right&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;justify&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">null</span></div>
+<div class="tsd-comment tsd-typography"><p>Matched exactly, as <code>ctx.textAlign</code> is. Another value is a <code>TypeError</code>.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5308">lib/index.d.ts:5308</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5657">lib/index.d.ts:5657</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="textdirection"><code class="tsd-tag">Optional</code><span>text<wbr/>Direction</span><a href="#textdirection" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
-<div class="tsd-signature"><span class="tsd-kind-property">textDirection</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;ltr&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;rtl&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">&amp;</span> <span class="tsd-signature-symbol">{}</span></div>
-<div class="tsd-comment tsd-typography"><p>Base direction for the paragraph. Matched case-insensitively; an
-unrecognised value is ignored.</p>
+<div class="tsd-signature"><span class="tsd-kind-property">textDirection</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;ltr&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;rtl&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">null</span></div>
+<div class="tsd-comment tsd-typography"><p>Base direction for the paragraph, matched exactly. Another value is a
+<code>TypeError</code>.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5315">lib/index.d.ts:5315</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5663">lib/index.d.ts:5663</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="textheightbehavior"><code class="tsd-tag">Optional</code><span>text<wbr/>Height<wbr/>Behavior</span><a href="#textheightbehavior" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
-<div class="tsd-signature"><span class="tsd-kind-property">textHeightBehavior</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
-<div class="tsd-comment tsd-typography"><p>First/last-line leading trim: <code>0</code> All, <code>1</code> DisableFirstAscent,
-<code>2</code> DisableLastDescent, <code>3</code> DisableAll. Mirrors CanvasKit's
-<code>TextHeightBehavior</code>.</p>
+<div class="tsd-signature"><span class="tsd-kind-property">textHeightBehavior</span><span class="tsd-signature-symbol">?:</span> <a href="../types/index.TextHeightBehavior.html" class="tsd-signature-type tsd-kind-type-alias">TextHeightBehavior</a></div>
+<div class="tsd-comment tsd-typography"><p>First/last-line leading trim, one of the four <a href="../types/index.TextHeightBehavior.html" class="tsd-kind-type-alias">TextHeightBehavior</a>
+values. Any other number -- <code>1.5</code>, <code>NaN</code>, an infinity, <code>4</code> -- is a
+<code>RangeError</code>.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5335">lib/index.d.ts:5335</a></li></ul></aside></section>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5684">lib/index.d.ts:5684</a></li></ul></aside></section>
 <section class="tsd-panel tsd-member">
 <h3 class="tsd-anchor-link" id="textstyle"><code class="tsd-tag">Optional</code><span>text<wbr/>Style</span><a href="#textstyle" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
 <div class="tsd-signature"><span class="tsd-kind-property">textStyle</span><span class="tsd-signature-symbol">?:</span> <a href="index.TextStyleInput.html" class="tsd-signature-type tsd-kind-interface">TextStyleInput</a></div>
@@ -89,7 +97,7 @@ unrecognised value is ignored.</p>
 Font variations are read from here and nowhere else.</p>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5327">lib/index.d.ts:5327</a></li></ul></aside></section></section></details></div>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5676">lib/index.d.ts:5676</a></li></ul></aside></section></section></details></div>
 <div class="col-sidebar">
 <div class="page-menu">
 <div class="tsd-navigation settings">

@@ -18,15 +18,41 @@
 <div class="tsd-description">
 <div class="tsd-comment tsd-typography"><p>Decodes an image from a path, a URL, a <code>data:</code> URL or a buffer.</p>
 <p>The source decides how it is read: an <code>http:</code> or <code>https:</code> string is
-fetched, where <code>options</code> are the <code>fetch</code> request options; a <code>data:</code> URL is
-decoded in place; anything else that is a string is read from disk as a
-path. The promise rejects if the bytes are not an image this build can
-decode.</p>
+requested, with <code>options</code> as the request options; a <code>data:</code> URL is decoded
+in place; anything else that is a string is read from disk as a path. The
+promise rejects if the bytes are not an image this build can decode.</p>
+<p>The request is made with Node's <code>http</code> and <code>https</code> modules rather than
+<code>fetch</code>, so only these members of <code>RequestInit</code> act as they do there:</p>
+<ul>
+<li><code>headers</code> takes any form <code>fetch</code> does -- a record, an array of
+<code>[name, value]</code> pairs or a <code>Headers</code> -- and a <code>User-Agent</code> among them
+replaces the default one. Anything else rejects with a <code>TypeError</code> before
+a request is made; a falsy value means no headers.</li>
+<li><code>redirect</code> is <code>&quot;follow&quot;</code> by default, up to 20 redirects as in <code>fetch</code>;
+a twenty-first rejects with a <code>TypeError</code>. <code>&quot;error&quot;</code> rejects at a
+redirect, and <code>&quot;manual&quot;</code> rejects naming where it leads, since a redirect
+has no image to resolve with; both reject with a <code>TypeError</code>, as
+<code>fetch</code> does for <code>&quot;error&quot;</code>, and neither requests the redirect's target.
+Any other value rejects with a <code>TypeError</code> before a request is made.</li>
+<li><code>integrity</code> is checked against the bytes about to be decoded, whatever the
+source: a response's whole body, a <code>data:</code> URL, a file, a <code>Buffer</code>, or a
+sharp image's input. A sharp image made from a file path or created blank
+has no input bytes in hand, and with <code>integrity</code> set it rejects with a
+<code>TypeError</code>; make it from a <code>Buffer</code> instead. A mismatch rejects with a
+<code>TypeError</code> too. As in <code>fetch</code>, only the strongest of <code>sha256</code>, <code>sha384</code>
+and <code>sha512</code> given is checked, any of its hashes may match, and metadata
+naming none of the three checks nothing. Unlike Chrome, <code>SHA512-...</code> in
+upper case still counts, and a known algorithm with no hash refuses rather
+than being skipped.</li>
+<li><code>method</code> and <code>signal</code> are used, and so is a <code>body</code> that is a string, a
+<code>Buffer</code> or a <code>Uint8Array</code>.</li>
+</ul>
+<p>The rest -- <code>referrer</code>, <code>referrerPolicy</code>, <code>cache</code>, <code>credentials</code>, <code>mode</code>,
+<code>keepalive</code>, <code>priority</code> and <code>window</code> -- have no effect.</p>
 <p><code>currentColor</code> sets what an SVG source's <code>currentColor</code> resolves to, and
 setting it here is the cheap way: the document is recorded once with the
 colour already applied, where assigning
-<a href="../classes/index.Image.html#currentcolor" class="tsd-kind-accessor">Image.currentColor</a> afterwards records it again. Everything else in
-<code>options</code> is passed to <code>fetch</code>.</p>
+<a href="../classes/index.Image.html#currentcolor" class="tsd-kind-accessor">Image.currentColor</a> afterwards records it again.</p>
 <p>🧪 <code>loadImage</code> is not in the HTML Canvas standard -- a browser assigns to
 <code>img.src</code> and waits for its <code>load</code> event -- but <a href="../classes/index.Image.html" class="tsd-kind-class">Image</a> is, and the
 result can be drawn with <code>drawImage</code> exactly as one would be there.</p>
@@ -38,23 +64,35 @@ result can be drawn with <code>drawImage</code> exactly as one would be there.</
 <li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">options</span>: <span class="tsd-signature-type">RequestInit</span> <span class="tsd-signature-symbol">&amp;</span> <span class="tsd-signature-symbol">{</span> <span class="tsd-kind-property">currentColor</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">}</span></span></li></ul></div>
 <h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">Promise</span><span class="tsd-signature-symbol">&lt;</span><a href="../classes/index.Image.html" class="tsd-signature-type tsd-kind-class">Image</a><span class="tsd-signature-symbol">&gt;</span></h4><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L238">lib/index.d.ts:238</a></li></ul></aside></div></li>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L265">lib/index.d.ts:265</a></li></ul></aside></div></li>
 <li class="">
-<div class="tsd-signature tsd-anchor-link" id="loadimage-1"><span class="tsd-kind-call-signature">loadImage</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">src</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">Buffer</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Sharp</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">Promise</span><span class="tsd-signature-symbol">&lt;</span><a href="../classes/index.Image.html" class="tsd-signature-type tsd-kind-class">Image</a><span class="tsd-signature-symbol">&gt;</span><a href="#loadimage-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-signature tsd-anchor-link" id="loadimage-1"><span class="tsd-kind-call-signature">loadImage</span><span class="tsd-signature-symbol">(</span><br/>    <span class="tsd-kind-parameter">src</span><span class="tsd-signature-symbol">:</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">ArrayBuffer</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">SharedArrayBuffer</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">DataView</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Int8Array</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Uint8Array</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Uint8ClampedArray</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Buffer</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>        <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Sharp</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">options</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">Pick</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">RequestInit</span><span class="tsd-signature-symbol">,</span> <span class="tsd-signature-type">&quot;integrity&quot;</span><span class="tsd-signature-symbol">&gt;</span> <span class="tsd-signature-symbol">&amp;</span> <span class="tsd-signature-symbol">{</span> <span class="tsd-kind-property">currentColor</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">}</span><span class="tsd-signature-symbol">,</span><br/><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">Promise</span><span class="tsd-signature-symbol">&lt;</span><a href="../classes/index.Image.html" class="tsd-signature-type tsd-kind-class">Image</a><span class="tsd-signature-symbol">&gt;</span><a href="#loadimage-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
 <div class="tsd-description">
 <div class="tsd-comment tsd-typography"><p>Decodes an image already in memory.</p>
-<p>A <code>Buffer</code> is decoded from its own bytes. A Sharp image is converted to raw
-RGBA first -- with an alpha channel added if it has none -- so a pipeline
-can hand its output straight over without encoding to an intermediate
-format.</p>
+<p>Bytes are decoded as they are: a <code>Buffer</code>, any other typed array whose
+elements are single bytes, a <code>DataView</code>, or the <code>ArrayBuffer</code> or
+<code>SharedArrayBuffer</code> behind them, each read in place rather than copied. A
+typed array of wider elements, such as a <code>Uint16Array</code>, could mean its
+elements or its memory, and rejects with a <code>TypeError</code>; pass a <code>Uint8Array</code>
+over its memory instead. A Sharp image is converted to raw RGBA first --
+with an alpha channel added if it has none -- so a pipeline can hand its
+output straight over without encoding to an intermediate format, and one
+created blank loads too.</p>
+<p>Two options act on an image already in memory. <code>integrity</code> is checked
+against the bytes before they are decoded, as it is for a URL, and for a
+Sharp image against the input it decodes; one made from a file path or
+created blank has no input bytes in hand and rejects with a <code>TypeError</code>.
+<code>currentColor</code> sets what an SVG's <code>currentColor</code> resolves to. The other
+request options have nothing to act on here.</p>
 </div>
 <div class="tsd-parameters">
 <h4 class="tsd-parameters-title">Parameters</h4>
 <ul class="tsd-parameter-list">
-<li><span><span class="tsd-kind-parameter">src</span>: <span class="tsd-signature-type">Buffer</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Sharp</span></span></li></ul></div>
+<li><span><span class="tsd-kind-parameter">src</span>: <br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">ArrayBuffer</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">SharedArrayBuffer</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">DataView</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Int8Array</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Uint8Array</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Uint8ClampedArray</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Buffer</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">ArrayBufferLike</span><span class="tsd-signature-symbol">&gt;</span><br/>    <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">Sharp</span></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">options</span>: <span class="tsd-signature-type">Pick</span><span class="tsd-signature-symbol">&lt;</span><span class="tsd-signature-type">RequestInit</span><span class="tsd-signature-symbol">,</span> <span class="tsd-signature-type">&quot;integrity&quot;</span><span class="tsd-signature-symbol">&gt;</span> <span class="tsd-signature-symbol">&amp;</span> <span class="tsd-signature-symbol">{</span> <span class="tsd-kind-property">currentColor</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">}</span></span></li></ul></div>
 <h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">Promise</span><span class="tsd-signature-symbol">&lt;</span><a href="../classes/index.Image.html" class="tsd-signature-type tsd-kind-class">Image</a><span class="tsd-signature-symbol">&gt;</span></h4><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L252">lib/index.d.ts:252</a></li></ul></aside></div></li></ul></section></div>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L291">lib/index.d.ts:291</a></li></ul></aside></div></li></ul></section></div>
 <div class="col-sidebar">
 <div class="page-menu">
 <div class="tsd-navigation settings">

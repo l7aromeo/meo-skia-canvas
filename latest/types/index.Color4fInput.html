@@ -14,16 +14,16 @@
 <div class="tsd-signature"><span class="tsd-kind-type-alias">Color4fInput</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">string</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-symbol">[</span><span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">]</span></div>
 <div class="tsd-comment tsd-typography"><p>Color input shared across the paint, gradient-stop, and text APIs.</p>
 <ul>
-<li>A <strong>CSS string</strong> (<code>&quot;#ff8800&quot;</code>, <code>&quot;rgb(...)&quot;</code>, named colors): interpreted
-as sRGB-gamma; alpha taken from the CSS string when present (e.g.
-<code>&quot;#ff8800ff&quot;</code> or <code>&quot;rgba(...)&quot;</code>).</li>
-<li>A <code>[r, g, b, a]</code> <strong>array</strong> of premultiplied, <strong>linear-light</strong>
-sRGB-primaries floats (CanvasKit's <code>Paint.setColor4f</code> convention).
-Skia converts the linear value to the destination surface's working
-color space at paint time, so HDR (<code>&gt;1.0</code>) and out-of-gamut values
-survive the round trip. Use this form when you have already done a
-perceptual-uniform conversion (e.g. OkLCH -&gt; linear sRGB) and want
-to avoid the alpha-dropping <code>oklchToSrgbHex</code>-style shortcut.</li>
+<li>A <strong>CSS string</strong> (<code>&quot;#ff8800&quot;</code>, <code>&quot;oklch(70% 0.2 140)&quot;</code>,
+<code>&quot;color(display-p3 1 0 0)&quot;</code>, named colors), in the space it names.</li>
+<li>A <code>[r, g, b, a]</code> <strong>array</strong> of gamma-encoded <strong>sRGB</strong> components from
+<code>0</code> to <code>1</code> with straight (not premultiplied) alpha: <code>[r, g, b, a]</code> is
+<code>color(srgb r g b / a)</code>, CanvasKit's <code>Color4f</code> convention. It is the
+same color on every canvas, whatever space the canvas was built in. A
+component below zero or above one reaches a color outside sRGB, as it
+does in <code>color(srgb ...)</code>, which a wider canvas shows and a narrower
+one clips. For a color in another space, write the string:
+<code>color(display-p3 1 0 0)</code>, <code>color(srgb-linear 0.2 0.5 0.8)</code>.</li>
 </ul>
 <p>Accepted by:</p>
 <ul>
@@ -34,7 +34,7 @@ to avoid the alpha-dropping <code>oklchToSrgbHex</code>-style shortcut.</li>
 </ul>
 </div><aside class="tsd-sources">
 <ul>
-<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/5014ce77e407c4a95ba4144767384347ed3effa5/lib/index.d.ts#L5100">lib/index.d.ts:5100</a></li></ul></aside></div>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/a42e76e8c5f93d5081fa7b9392bc61f731306df6/lib/index.d.ts#L5363">lib/index.d.ts:5363</a></li></ul></aside></div>
 <div class="col-sidebar">
 <div class="page-menu">
 <div class="tsd-navigation settings">
