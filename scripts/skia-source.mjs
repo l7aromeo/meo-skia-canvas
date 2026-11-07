@@ -204,6 +204,46 @@ const FONT_MATCH_SLANT_FIRST = join(
   "skia-font-match-slant-first.patch",
 );
 
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test text_on_the_gpu_draws_as_the_cpu_draws_it_whatever_came_before against crates.io's Skia, as the crates.io publish runs it; it holds that build to GPU text that differs from the CPU's, and fails there once Ganesh stops drawing canvas text as distance fields
+//
+// Ganesh draws a glyph run whose device size is from 162 to 324 pixels as
+// distance fields (`SubRunControl` in src/text/gpu/SubRunControl.cpp), and a
+// distance-field glyph's coverage moves by a level or two with where in the
+// atlas it was placed, which follows from what the context drew before:
+// the same `fillText` exported after other text read differently from one
+// exported first, on its own thread or another's. The blob cache also keys
+// such a run without its matrix (`TextBlob::Key::Make`), so a path blob
+// cached at a larger scale stood in for a later draw at a smaller one, up
+// to 200 levels off. The patch turns distance fields off unless a surface
+// asks for device-independent fonts, which none of this crate's do: below 254
+// device pixels a glyph is a direct mask from the scaler the CPU raster
+// uses, the same bytes as the CPU page, and at 254 or more a path, as a run
+// above 324 already was.
+const TEXT_DISTANCE_FIELDS_OFF = join(
+  "containers",
+  "skia-text-distance-fields-off.patch",
+);
+
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw against crates.io's Skia on macOS, where Apple Color Emoji is; it holds that build to emoji drawn from the earlier scale's masks, and fails there once a transformed mask is reused only at the matrix it was made for
+//
+// A glyph with no outline -- a colour bitmap such as an emoji -- at 254
+// device pixels or more is drawn from a transformed mask, a bitmap made for
+// one matrix, and `TransformedMaskSubRun::canReuse`
+// (src/text/gpu/SubRunContainer.cpp) let a cached blob of them be drawn at
+// any other scale. With the blob cache keying such a run without its matrix,
+// emoji drawn large at one scale were drawn from those masks at every other,
+// up to 117 levels off a fresh draw. The patch reuses the masks only at the
+// scale, rotation and skew they were made for, compared exactly; translation
+// alone still reuses, and a blob only rebuilds when that matrix changes. Not
+// covered: a sub-run read back from a buffer, as a slug is, has no matrix to
+// compare and keeps the old rule. This crate makes no slugs.
+const TRANSFORMED_MASK_REUSE = join(
+  "containers",
+  "skia-transformed-mask-reuse.patch",
+);
+
 export const PATCHES = {
   darwin: [
     METAL_UNTIMED_COMPILE,
@@ -213,6 +253,8 @@ export const PATCHES = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
+    TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -235,6 +277,8 @@ export const PATCHES = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
+    TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
@@ -246,6 +290,8 @@ export const PATCHES = {
     DWRITE_OBLIQUE,
     SVG_SYNTHETIC_SLANT,
     FONT_MATCH_SLANT_FIRST,
+    TEXT_DISTANCE_FIELDS_OFF,
+    TRANSFORMED_MASK_REUSE,
   ],
 };
 
