@@ -451,6 +451,19 @@ describe("prebuild download beside a platform package", () => {
     assert.match(output, /ECONNREFUSED/);
   });
 
+  // `download` says why before it throws, since `--or-compile` may yet recover, and the CLI's
+  // exit path prints whatever an action threw: the reason has to reach the terminal once, not
+  // twice. A retry's line names its retry, so what is counted is the final reason alone.
+  test("says why a download failed once", () => {
+    shadow(false);
+    const { status, output } = install();
+    assert.notStrictEqual(status, 0, output);
+    const reasons = output
+      .split("\n")
+      .filter((line) => /ECONNREFUSED/.test(line) && !/retrying/.test(line));
+    assert.strictEqual(reasons.length, 1, output);
+  });
+
   // A source checkout asks for `lib/skia.node` itself: CI pins its suite to the binary this
   // downloads, and so does `npm test`, both with the platform packages installed.
   test("downloads in a source checkout even beside a platform package", () => {
@@ -459,5 +472,149 @@ describe("prebuild download beside a platform package", () => {
     const { status, output } = install();
     assert.notStrictEqual(status, 0, output);
     assert.match(output, /ECONNREFUSED/);
+  });
+});
+
+// `snapshot` records the sha256 of every asset on this version's release, and `publish-npm` stops
+// on it. It looked the release up in a listing of every release, which `exec` holds to 1 MiB of
+// output and which passed that at npm-v7.0.0 -- 1,141,154 bytes -- so the release stopped with
+// ERR_CHILD_PROCESS_STDIO_MAXBUFFER, and the CLI's exit path printed nothing at all (#617).
+// `gh` and `npm` are stand-ins on PATH here: what `snapshot` asks of `gh`, and what it hands
+// `npm pkg set`, is the whole of what is checked, and nothing reaches the network.
+describe("prebuild snapshot", () => {
+  const { spawnSync } = require("child_process");
+  const sandbox = join(
+    __dirname,
+    "../../.test-sandbox",
+    `${process.pid}-snapshot`,
+  );
+  const bin = join(sandbox, "bin");
+  const npmArgs = join(sandbox, "npm-args");
+  const releaseId = 4242;
+  const skip =
+    process.platform === "win32" ? "the stand-ins are shell scripts" : false;
+  let tag;
+  let assets;
+  let path;
+
+  // Answers what `snapshot` asks of `gh api`. A listing of every release is answered with more
+  // than the 1 MiB `exec` allows, as GitHub's is; `GH_FAIL` makes every call fail as `gh` does.
+  const gh = () => `#!/usr/bin/env node
+const args = process.argv.slice(2).join(" ");
+if (process.env.GH_FAIL) {
+  process.stderr.write("HTTP 404: Not Found (https://api.github.com/" + args + ")\\n");
+  process.exit(1);
+}
+const write = (value) => process.stdout.write(JSON.stringify(value));
+if (args.includes("--paginate")) {
+  const filler = "x".repeat(4096);
+  const releases = Array.from({ length: 300 }, (_, i) => ({ id: i, tag_name: "npm-v0.0." + i, body: filler }));
+  releases.push({ id: ${releaseId}, tag_name: ${JSON.stringify("TAG")} });
+  write(releases);
+} else if (args.endsWith("/releases/tags/" + ${JSON.stringify("TAG")})) {
+  write({ id: ${releaseId}, tag_name: ${JSON.stringify("TAG")} });
+} else if (args.endsWith("/releases/${releaseId}/assets")) {
+  write(${JSON.stringify("ASSETS")});
+} else {
+  process.stderr.write("unexpected gh call: " + args + "\\n");
+  process.exit(1);
+}
+`;
+
+  before(() => {
+    mkdirSync(bin, { recursive: true });
+    cpSync(join(__dirname, "../../lib"), join(sandbox, "lib"), {
+      recursive: true,
+    });
+    cpSync(
+      join(__dirname, "../../package.json"),
+      join(sandbox, "package.json"),
+    );
+    tag = `npm-v${JSON.parse(readFileSync(join(sandbox, "package.json"))).version}`;
+    // One asset for each target and each Lambda archive, as `snapshot` counts them.
+    const names = [
+      ...Object.keys(require(join(sandbox, "lib/targets.json"))).map(
+        (triplet) => `${triplet}.gz`,
+      ),
+      "aws-lambda-x64.zip",
+      "aws-lambda-arm64.zip",
+    ];
+    assets = names.map((name) => ({ name, digest: sha256(name) }));
+    writeFileSync(
+      join(bin, "gh"),
+      gh()
+        .replaceAll(JSON.stringify("TAG"), JSON.stringify(tag))
+        .replace(JSON.stringify("ASSETS"), JSON.stringify(assets)),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(bin, "npm"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${npmArgs}"\n`,
+      { mode: 0o755 },
+    );
+    path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+  });
+
+  after(() => {
+    process.env.PATH = path;
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  beforeEach(() => rmSync(npmArgs, { force: true }));
+
+  // The CLI, as `publish-npm` runs it, with the stand-ins first on PATH.
+  const run = (action, env = {}) => {
+    const done = spawnSync(
+      process.execPath,
+      [join(sandbox, "lib/prebuild.mjs"), action],
+      {
+        cwd: sandbox,
+        env: { ...process.env, ...env },
+        encoding: "utf8",
+      },
+    );
+    return { status: done.status, output: `${done.stdout}${done.stderr}` };
+  };
+
+  test(
+    "records its release's digests however long the list of releases",
+    { skip },
+    async () => {
+      // In this process rather than through the CLI, so that the failure, if any, arrives as
+      // the error it is rather than as an exit status.
+      const { snapshot } = await import(
+        `file://${join(sandbox, "lib/prebuild.mjs")}`
+      );
+      const cwd = process.cwd();
+      process.chdir(sandbox);
+      try {
+        await snapshot();
+      } finally {
+        process.chdir(cwd);
+      }
+      const [key, value] = readFileSync(npmArgs, "utf8").split("\n");
+      assert.strictEqual(key, "pkg");
+      assert.match(value, /^set$/);
+      const args = readFileSync(npmArgs, "utf8").trim().split("\n");
+      const manifest = JSON.parse(args[2].replace(/^prebuild=/, ""));
+      assert.deepStrictEqual(
+        manifest,
+        Object.fromEntries(assets.map(({ name, digest }) => [name, digest])),
+      );
+    },
+  );
+
+  // A failure anywhere in an action reaches the terminal: the exit path printed nothing, so a
+  // release stopped at `snapshot` with exit status 1 and no reason.
+  test("says why an action failed", { skip }, () => {
+    const snapshot = run("snapshot", { GH_FAIL: "1" });
+    assert.strictEqual(snapshot.status, 1, snapshot.output);
+    assert.match(snapshot.output, /HTTP 404: Not Found/);
+
+    // `compile` refuses without a Cargo.toml, as in the published package.
+    const compile = run("compile");
+    assert.strictEqual(compile.status, 1, compile.output);
+    assert.match(compile.output, /Cannot compile from npm version/);
   });
 });
