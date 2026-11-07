@@ -359,13 +359,18 @@ impl ChainInput {
 }
 
 /// What the coverage route's coloured result is filed under: the digest of
-/// the coverage it blurred, the size of the region it covers, the device
+/// the coverage it blurred, which is its inked rectangle's, the size of the
+/// region it covers and where in it the inked rectangle lies, the device
 /// sigmas of its blur, and the colour, alpha and page it was coloured for.
 /// Not where the region lies: a result found is moved there by whole pixels.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct CoverageKey {
     input: u64,
     size: (i32, i32),
+    /// The inked rectangle within the region, left, top, width and height:
+    /// the input is its bytes alone, so the same bytes elsewhere in the
+    /// region are another coverage.
+    inked: [i32; 4],
     sigma: [u32; 2],
     rgb: [u32; 3],
     gain: u32,
@@ -424,12 +429,19 @@ impl CoverageInput {
         if !coverage.rest().is_identity() {
             return None;
         }
-        let input = coverage.bytes().to_vec();
+        let (ink, inked) = coverage.ink();
+        let input = ink.to_vec();
         let (region, sigma) = (coverage.region(), coverage.sigma());
         Some(Self {
             key: CoverageKey {
                 input: digest(&input),
                 size: (region.width(), region.height()),
+                inked: [
+                    inked.left - region.left,
+                    inked.top - region.top,
+                    inked.width(),
+                    inked.height(),
+                ],
                 sigma: [sigma.0, sigma.1].map(f32::to_bits),
                 rgb: rgb.map(f32::to_bits),
                 gain: gain.to_bits(),
