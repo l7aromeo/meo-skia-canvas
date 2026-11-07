@@ -21,9 +21,10 @@
 //    checkout, which has no crates.io package hash to download against, from
 //    the tree inside it -- "STARTING A FULL BUILD".
 // 2. ninja compiled each file one of this platform's patches changes -- see
-//    `PATCHED`. A build with no GPU backend compiles none under Ganesh, and
-//    is held to the others: the SVG slant and the face match -- see
-//    `applicable`.
+//    `PATCHED`, where the build compiles it at all. A build without Ganesh
+//    compiles none of the files under it, and one with no GPU backend none of
+//    Skia's GPU sources, Ganesh's or shared: such a build is held to the
+//    others, the SVG slant and the face match -- see `applicable`.
 // 3. Each file it compiled, resolved against the directory ninja ran in, is
 //    the patched one: it holds what only the patch puts there. A build from
 //    an unpatched tree passes the first two and fails this.
@@ -231,22 +232,45 @@ const ninjaDir = (output) =>
 
 const FROM_SOURCE = ["STARTING OFFLINE BUILD", "STARTING A FULL BUILD"];
 
-/// The gn argument skia-bindings passes for a build with no GPU backend
-/// (`skia_enable_ganesh`, skia-bindings' build_support/skia/config.rs), and
-/// the directory of the sources only Ganesh compiles. Such a build compiles
-/// none of the patched files under it, and is held to the others.
+/// The gn arguments skia-bindings passes for a build without Ganesh and for
+/// one with Graphite (`skia_enable_ganesh`, `skia_enable_graphite`,
+/// skia-bindings' build_support/skia/config.rs). Ganesh is on unless the
+/// first says otherwise; Graphite is off unless the second says it is on.
 const NO_GANESH = "skia_enable_ganesh=false";
+const GRAPHITE = "skia_enable_graphite=true";
+
+/// The directories of the sources only Ganesh, only Graphite, and either GPU
+/// backend compile. Skia's `skia_shared_gpu_sources` (`gn/gpu.gni`), which
+/// `BUILD.gn` enables for `skia_enable_ganesh || skia_enable_graphite`, all lie
+/// under the last two, beside the backends' own directories.
 const GANESH_SOURCES = "src/gpu/ganesh/";
+const GRAPHITE_SOURCES = "src/gpu/graphite/";
+const GPU_SOURCES = ["src/gpu/", "src/text/gpu/"];
 
 /**
- * The entries of `patched` the build that printed `output` compiles: all of
- * them, but for a build its gn arguments say has no Ganesh, those outside
- * `GANESH_SOURCES`.
+ * The backend Skia compiles `file` under: `ganesh`, `graphite`, `gpu` for
+ * either, or `null` for every build.
+ */
+export function backendFor(file) {
+  if (file.startsWith(GANESH_SOURCES)) return "ganesh";
+  if (file.startsWith(GRAPHITE_SOURCES)) return "graphite";
+  if (GPU_SOURCES.some((dir) => file.startsWith(dir))) return "gpu";
+  return null;
+}
+
+/**
+ * The entries of `patched` the build that printed `output` compiles: those
+ * whose backend, see `backendFor`, its gn arguments enable. A build with no
+ * GPU backend is held to the patched files outside the GPU sources.
  */
 export function applicable(patched, output) {
-  return output.includes(NO_GANESH)
-    ? patched.filter(({ file }) => !file.startsWith(GANESH_SOURCES))
-    : patched;
+  const ganesh = !output.includes(NO_GANESH);
+  const graphite = output.includes(GRAPHITE);
+  const enabled = { ganesh, graphite, gpu: ganesh || graphite };
+  return patched.filter(({ file }) => {
+    const backend = backendFor(file);
+    return backend === null || enabled[backend];
+  });
 }
 
 /**
@@ -375,6 +399,27 @@ function check(buildDir) {
   );
 }
 
+/// Which backend Skia compiles each patched file under: `ganesh`, `graphite`,
+/// `gpu` for either, or `null` for every build. From Skia's own build --
+/// `gn/gpu.gni` lists `src/text/gpu/SubRunContainer.cpp` in
+/// `skia_shared_gpu_sources`, which `BUILD.gn` enables for
+/// `skia_enable_ganesh || skia_enable_graphite` -- and from a build of tree
+/// skia-0.156.0-f27f9d929c65 with neither, which compiled `SkSVGText.cpp`
+/// and `SkFontMgr.cpp` and nothing under `src/gpu/` or `src/text/gpu/`.
+/// Written out rather than derived from `backendFor`, so the self-test holds
+/// that rule to Skia's build rather than to itself; a new patch needs a row.
+const COMPILED_WITH = {
+  "src/gpu/ganesh/mtl/GrMtlUtil.mm": "ganesh",
+  "src/gpu/ganesh/ops/AtlasPathRenderer.cpp": "ganesh",
+  "src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp": "ganesh",
+  "src/gpu/ganesh/SurfaceContext.cpp": "ganesh",
+  "src/gpu/ganesh/GrRecordingContextPriv.cpp": "ganesh",
+  "src/text/gpu/SubRunContainer.cpp": "gpu",
+  "modules/svg/src/SkSVGText.cpp": null,
+  "src/core/SkFontMgr.cpp": null,
+  "src/ports/SkTypeface_win_dw.cpp": null,
+};
+
 /** The self-test's cases for one platform's `patched` list, under `root`. */
 function cases(root, patched) {
   const ninja = join(root, "out", "skia");
@@ -400,41 +445,63 @@ function cases(root, patched) {
     /compile (\S+)/g,
     (_, path) => `compile ${path.replaceAll("/", "\\")}`,
   );
-  // A build with no Ganesh, which compiles only the patched files outside it.
-  const ganeshless = [
-    "STARTING OFFLINE BUILD",
-    `Skia args: is_debug=false ${NO_GANESH} skia_enable_pdf=true`,
-    `ninja: Entering directory \`${ninja}'`,
-    ...patched
-      .filter(({ file }) => !file.startsWith(GANESH_SOURCES))
-      .map(({ file }, i) => `[${i + 1}/0] compile ${relative(file)}`),
-  ].join("\n");
-  const outsideGanesh = patched.filter(
-    ({ file }) => !file.startsWith(GANESH_SOURCES),
-  );
+  // A build whose gn arguments are `args`, which compiles the patched files
+  // `COMPILED_WITH` says a build with those backends compiles.
+  const built = (args, backends) => {
+    const compiled = patched.filter(({ file }) => {
+      const backend = COMPILED_WITH[file];
+      return backend === null || backends.includes(backend);
+    });
+    const text = [
+      "STARTING OFFLINE BUILD",
+      `Skia args: is_debug=false ${args} skia_enable_pdf=true`,
+      `ninja: Entering directory \`${ninja}'`,
+      ...compiled.map(
+        ({ file }, i) => `[${i + 1}/0] compile ${relative(file)}`,
+      ),
+    ].join("\n");
+    return { compiled, text };
+  };
+  const without = (text, file) =>
+    text
+      .split("\n")
+      .filter((line) => !line.endsWith(relative(file)))
+      .join("\n");
+  const graphite = built(`${NO_GANESH} ${GRAPHITE}`, ["graphite", "gpu"]);
+  const gpuless = built(`${NO_GANESH} skia_enable_graphite=false`, []);
   return [
     [files, good, true, "an offline build of every patched file"],
-    [files, ganeshless, true, "a build with no Ganesh"],
+    [files, graphite.text, true, "a build with Graphite and no Ganesh"],
     [
       files,
-      ganeshless.replace(NO_GANESH, "skia_enable_ganesh=true"),
-      patched.length === outsideGanesh.length,
-      "a build with Ganesh that compiled none of its patched files",
+      graphite.text.replace(NO_GANESH, "skia_enable_ganesh=true"),
+      patched.length === graphite.compiled.length,
+      "a build with Ganesh that compiled none of its Ganesh files",
     ],
-    ...outsideGanesh.map(({ file }) => [
+    ...graphite.compiled.map(({ file }) => [
       { ...files, [file]: "unpatched" },
-      ganeshless,
+      graphite.text,
       false,
-      `a build with no Ganesh of an unpatched ${file}`,
+      `a build with Graphite and no Ganesh of an unpatched ${file}`,
     ]),
-    ...outsideGanesh.map(({ file }) => [
+    ...graphite.compiled.map(({ file }) => [
       files,
-      ganeshless
-        .split("\n")
-        .filter((line) => !line.endsWith(relative(file)))
-        .join("\n"),
+      without(graphite.text, file),
       false,
-      `a build with no Ganesh that did not compile ${file}`,
+      `a build with Graphite and no Ganesh that did not compile ${file}`,
+    ]),
+    [files, gpuless.text, true, "a build with no GPU backend"],
+    ...gpuless.compiled.map(({ file }) => [
+      { ...files, [file]: "unpatched" },
+      gpuless.text,
+      false,
+      `a build with no GPU backend of an unpatched ${file}`,
+    ]),
+    ...gpuless.compiled.map(({ file }) => [
+      files,
+      without(gpuless.text, file),
+      false,
+      `a build with no GPU backend that did not compile ${file}`,
     ]),
     [files, crlf, true, "an offline build with CRLF line ends"],
     [files, backslashed, true, "an offline build naming files with `\\`"],
@@ -722,6 +789,19 @@ function selfTest() {
       console.error(`check-patched-skia self-test: build.rs has no ${cfg}`);
       process.exit(1);
     }
+  // The directory rule against Skia's build, file by file: a patched file
+  // with no row, or one the rule places otherwise, fails.
+  for (const file of new Set(
+    Object.values(PATCHED).flatMap((list) => list.map(({ file }) => file)),
+  )) {
+    if (!(file in COMPILED_WITH) || backendFor(file) !== COMPILED_WITH[file]) {
+      console.error(
+        `check-patched-skia self-test: ${file} is compiled with ${file in COMPILED_WITH ? COMPILED_WITH[file] : "a backend COMPILED_WITH does not record"}, and backendFor says ${backendFor(file)}`,
+      );
+      process.exit(1);
+    }
+    count += 1;
+  }
   try {
     for (const [platform, patched] of Object.entries(PATCHED)) {
       for (const [files, text, accepted, what] of cases(root, patched)) {
