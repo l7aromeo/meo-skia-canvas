@@ -4,6 +4,10 @@ name: Publish platform packages to NPM
 # target, so a package manager can select the right one from `os`/`cpu`/`libc` instead of running
 # an install script to download it.
 #
+# The release is still a draft when this runs: `just publish-npm` publishes it only once these
+# packages and the pins to them are in place, so that a failure here leaves nothing about the
+# release public (#620).
+#
 # Must run before "Publish to NPM": the main package pins these by exact version, and publishing it
 # first would briefly point at versions that do not exist yet.
 run-name: >-
@@ -48,9 +52,41 @@ jobs:
           targets=$(node scripts/platform-package.mjs matrix)
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
+  # A draft's assets are invisible to a read-only token, so they are fetched here, in a job that
+  # needs write to download and not to write, as build.yml's `verify-lambda-layer` does. Kept
+  # apart from the publish jobs so that those, which install dependencies and hold the npm
+  # identity, never hold write access to the repository. Each binary is checked against the hash
+  # package.json records for it when its package is built, not here.
+  assets:
+    name: Fetch the release's binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download the binaries off the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=npm-v$(node -p "require('./package.json').version")
+          gh release download "$TAG" -R l7aromeo/meo-skia-canvas -p '*.gz' -D "$RUNNER_TEMP/release"
+          ls -l "$RUNNER_TEMP/release"
+
+      # Kept for a week rather than a day: a target whose job fails is recovered by re-running
+      # that job alone, which reads this run's artifact, and the whole workflow cannot be re-run
+      # once any target has published.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-binaries
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: ${{ matrix.target }}
-    needs: targets
+    needs: [targets, assets]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: Production
@@ -85,10 +121,15 @@ jobs:
       - name: Use an npm that supports OIDC
         run: npm install -g npm@latest
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-binaries
+          path: ${{ runner.temp }}/release
+
       - name: Stage ${{ matrix.target }}
         run: |
           bun install --frozen-lockfile --ignore-scripts
-          node scripts/platform-package.mjs build "${{ matrix.target }}" "$RUNNER_TEMP/staging"
+          node scripts/platform-package.mjs build "${{ matrix.target }}" "$RUNNER_TEMP/staging" "$RUNNER_TEMP/release"
 
       # Same reasoning as the main package: npm tags every publish `latest` unless told
       # otherwise, so a prerelease would become the default resolution for these too.
@@ -112,7 +153,7 @@ jobs:
         working-directory: ${{ runner.temp }}/staging/meo-skia-canvas-${{ matrix.target }}
         run: npm publish --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
 
-      # The staging step above already fetched the binary and checked it against the recorded
+      # The staging step above already expanded the binary and checked it against the recorded
       # hash, so this confirms the package the target would publish is well-formed. It contacts
       # no registry, so it cannot tell you the version is already taken.
       - name: Dry run only — ${{ matrix.target }} not published

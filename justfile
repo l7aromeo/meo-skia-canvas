@@ -1198,20 +1198,29 @@ release-npm *bump="patch":
     echo "Watch it:      gh run watch ${RUN} -R ${REPO}"
     echo "When it ends:  just publish-npm"
 
-# Publish the whole eight-package set, in the only order that works.
+# Publish the whole eight-package set, in the only order that works, and make the
+# release public only once nothing before the main package can still fail.
 #
 # The main package pins each platform package by exact version, so publishing it
-# first would point at versions that do not exist. And the platform packages are
-# built from the release assets, so those have to be reachable before either. The
-# order is therefore forced:
+# first would point at versions that do not exist. The platform packages are built
+# from the release assets, checked against the hashes the snapshot records. And a
+# published release is what ci.yml takes to mean this version's binaries are out:
+# from then on every pull request's test legs fetch them and check them against
+# package.json, and fail when they cannot. So the release stays a draft until the
+# hashes, the platform packages and the pins are all in place, and a failure in any
+# of them leaves it a draft (#620). The order is therefore:
 #
-#   undraft            assets are not downloadable while the release is a draft,
-#                      which also keeps CI's rendering suite from running
 #   snapshot           sha256 of every asset into package.json, committed, so the
-#                      published package can verify what it downloads
-#   platform packages  all 7, and they must all land before the next step
+#                      published package can verify what it downloads -- read off
+#                      the draft, which `gh` sees with push access
+#   platform packages  all 7, built from the draft's assets, which their workflow
+#                      fetches with a token that sees drafts; all must land before
+#                      the next step
 #   sync-targets       optionalDependencies pinned to this version, committed
-#   main package       last, so its pins resolve
+#   undraft            notes set from the changelog and the release published, so
+#                      the assets become downloadable to everyone
+#   main package       last, so its pins resolve and the binaries its install
+#                      falls back to downloading are public
 #
 # Every stage is skipped when already done, so a failed run can be re-run rather
 # than unpicked. All `gh` calls pass `-R` explicitly so the recipe does not depend
@@ -1225,7 +1234,7 @@ release-npm *bump="patch":
 #
 # What it cannot reach is the verification each stage does after acting, because
 # there is nothing to verify until something has been done: `snapshot`'s entry
-# count, and the `MISSING_FROM_LOCK` check over the lockfile stage 4 writes -- the
+# count, and the `MISSING_FROM_LOCK` check over the lockfile stage 3 writes -- the
 # backstop that exists because 4.1.0 and 4.2.0-rc.2 both shipped a short one. So a
 # clean dry run says the release is startable, not that it will succeed.
 [doc("npm step 2: publish all 8 packages, in the only order that works.")]
@@ -1270,10 +1279,10 @@ publish-npm dry="false":
     fi
 
     # The guard is about *unrelated* work, not about cleanliness. `package.json` and
-    # `bun.lock` are the two files this recipe writes and commits itself, at stages 2
-    # and 4, so a tree dirty only in those is not somebody's half-finished edit -- it
+    # `bun.lock` are the two files this recipe writes and commits itself, at stages 1
+    # and 3, so a tree dirty only in those is not somebody's half-finished edit -- it
     # is this recipe's own output from a run that died before its commit. Refusing it
-    # is what makes stage 4 unable to resume: `sync-targets` and `bun install` write
+    # is what makes stage 3 unable to resume: `sync-targets` and `bun install` write
     # both files, `MISSING_FROM_LOCK` runs between the write and the commit, and an
     # interruption anywhere in there leaves a tree that every re-run then bounces off.
     # npm's validation queue held a platform package on 5.8.0 and put the release in
@@ -1286,13 +1295,13 @@ publish-npm dry="false":
     # unstaged write is ` M`, a write a dying run had already staged is `M `, and both
     # at once is `MM`. Matching any two characters instead would take `UU`, `AA`, `DD`,
     # `D ` and `??` for this recipe's output -- so a `package.json` left in conflict by
-    # a merge would read as a resumable state, and stage 4's `git add package.json`
+    # a merge would read as a resumable state, and stage 3's `git add package.json`
     # would commit the conflict markers under a release message.
     #
-    # Consequence worth knowing when resuming: stage 2 decides whether to commit by
+    # Consequence worth knowing when resuming: stage 1 decides whether to commit by
     # asking whether `package.json` is dirty, and cannot tell a pending `sync-targets`
-    # write from a fresh snapshot. Resuming with stage 4's output already on disk
-    # therefore commits it under stage 2's message. The content is right and the final
+    # write from a fresh snapshot. Resuming with stage 3's output already on disk
+    # therefore commits it under stage 1's message. The content is right and the final
     # state is right; the message names the wrong stage.
     DIRTY=$(git status --porcelain)
     if [[ -n "$DIRTY" ]]; then
@@ -1385,14 +1394,14 @@ publish-npm dry="false":
     echo "  version:   ${VERSION}"
     echo "  release:   ${TAG} (${HAVE}/${EXPECTED} binaries, draft=${DRAFT})"
     echo ""
-    echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG-npm.md" || echo "no, prerelease keeps generated notes")"
-    echo "  would undraft:          $([[ "$DRAFT" == "true" ]] && echo yes || echo "no, already published")"
     echo "  would snapshot hashes:  yes"
     echo "  would publish platform: $(
         if [[ "$PLATFORM_HAVE" -eq 0 ]]; then echo "yes, ${EXPECTED} packages"
         elif [[ -z "$PLATFORM_MISSING" ]]; then echo "no, all ${EXPECTED} already at ${VERSION}"
         else echo "STOP — ${PLATFORM_HAVE}/${EXPECTED} published, missing: ${PLATFORM_MISSING}"
         fi)"
+    echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG-npm.md" || echo "no, prerelease keeps generated notes")"
+    echo "  would undraft:          $([[ "$DRAFT" == "true" ]] && echo yes || echo "no, already published")"
     echo "  would publish main:     $([[ -z "$MAIN_DONE" ]] && echo yes || echo "no, already at ${VERSION}")"
     echo ""
 
@@ -1410,27 +1419,10 @@ publish-npm dry="false":
     read -rp "Publish ${TAG}? [y/N] " confirm
     [[ "$confirm" == "y" ]] || { echo "Aborted."; exit 1; }
 
-    # 1. Undraft, so the assets become downloadable, and set the notes from the changelog.
-    #
-    #    `just release-npm` creates the release with --generate-notes, which produces a bare
-    #    compare link. The entry written before the tag is the actual release note, and
-    #    copying it across by hand was a manual step on the one path that cannot be undone
-    #    -- it was missed on 4.1.0 and again on 4.1.1. Prereleases keep the generated notes;
-    #    `release` does not require a changelog entry for them, so there may be none.
-    if [[ -s "$NOTES" ]]; then
-        gh release edit "${TAG}" -R "${REPO}" --notes-file "$NOTES" >/dev/null
-        echo "==> release notes set from CHANGELOG-npm.md ($(wc -l < "$NOTES" | tr -d ' ') lines)"
-    fi
-
-    if [[ "$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')" == "true" ]]; then
-        gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false --silent
-        echo "==> release ${TAG} undrafted"
-    else
-        echo "==> release ${TAG} already published"
-    fi
-
-    # 2. Record the asset hashes. Must be committed before anything is published:
-    #    the tarball on npm is what verifies the binary a user downloads.
+    # 1. Record the asset hashes, read off the release while it is still a draft. Must be
+    #    committed before anything is published: the tarball on npm is what verifies the binary a
+    #    user downloads, and the platform packages are checked against these hashes as they are
+    #    built.
     bun run snapshot
     if [[ -n "$(git status --porcelain package.json)" ]]; then
         git add package.json
@@ -1441,7 +1433,7 @@ publish-npm dry="false":
         echo "==> hashes already current"
     fi
 
-    # 3. The 7 platform packages. Waited on, not fired and forgotten — step 4 pins
+    # 2. The 7 platform packages. Waited on, not fired and forgotten — step 3 pins
     #    exact versions and would pin ones that do not exist yet.
     #
     #    A partial set stops the release rather than resuming it. Re-dispatching
@@ -1472,7 +1464,7 @@ publish-npm dry="false":
         gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 20 >/dev/null
     fi
 
-    # 4. Point the main package at them.
+    # 3. Point the main package at them.
     #
     # `--lockfile-only` is load-bearing. This step exists to write a lockfile, not to populate
     # node_modules, and the distinction is what broke the 4.1.0 release: a full install fetches the
@@ -1564,10 +1556,10 @@ publish-npm dry="false":
     done
 
     # A release commit here can carry the wrong message, and this is where someone
-    # debugging one is reading. Stage 2 decides whether to commit by asking whether
+    # debugging one is reading. Stage 1 decides whether to commit by asking whether
     # `package.json` is dirty, and cannot tell a pending `sync-targets` write from a
     # fresh snapshot -- so a run resumed with this stage's output already on disk has
-    # it committed under stage 2's message instead. Content and final state are right;
+    # it committed under stage 1's message instead. Content and final state are right;
     # only the message names the wrong stage. See the entry guard for why resuming over
     # these two files is allowed at all.
     if [[ -n "$(git status --porcelain)" ]]; then
@@ -1579,13 +1571,36 @@ publish-npm dry="false":
         echo "==> optionalDependencies already pinned"
     fi
 
+    # 4. Set the notes from the changelog and undraft, so the assets become downloadable to
+    #    everyone. Last before the main package, and after everything that can fail before it:
+    #    a published release is what ci.yml takes to mean this version's binaries are out, so a
+    #    release made public and then stopped fails every pull request's test legs until it
+    #    finishes (#620).
+    #
+    #    `just release-npm` creates the release with --generate-notes, which produces a bare
+    #    compare link. The entry written before the tag is the actual release note, and
+    #    copying it across by hand was a manual step on the one path that cannot be undone
+    #    -- it was missed on 4.1.0 and again on 4.1.1. Prereleases keep the generated notes;
+    #    `release` does not require a changelog entry for them, so there may be none.
+    if [[ -s "$NOTES" ]]; then
+        gh release edit "${TAG}" -R "${REPO}" --notes-file "$NOTES" >/dev/null
+        echo "==> release notes set from CHANGELOG-npm.md ($(wc -l < "$NOTES" | tr -d ' ') lines)"
+    fi
+
+    if [[ "$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')" == "true" ]]; then
+        gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false --silent
+        echo "==> release ${TAG} undrafted"
+    else
+        echo "==> release ${TAG} already published"
+    fi
+
     # 5. Main package last.
     #
     # Guarded on the same `MAIN_DONE` the dry run prints, rather than on a fresh
     # `npm view`, so the rehearsal and the run cannot reach different answers --
     # which is the whole of what was wrong here. Nothing between that query and
     # this line publishes the main package, so there is no staleness to prefer a
-    # re-query for; stage 3 leans on `PLATFORM_MISSING` the same way.
+    # re-query for; stage 2 leans on `PLATFORM_MISSING` the same way.
     #
     # Skipping matters because `npm publish` over an existing version is a hard
     # 403, so an unguarded dispatch turns a re-run of a finished release into a

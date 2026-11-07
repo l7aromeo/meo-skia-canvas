@@ -27,9 +27,9 @@ on:
   # exists for the best part of an hour before anyone can install what it
   # names. Triggering on the tag put a version in `latest/` that `npm install`
   # would not yet give you, which is the confusion this whole arrangement is
-  # meant to prevent, only narrower. `just publish-npm` undrafts the release as
-  # its first step, so this now fires minutes ahead of the package rather than
-  # an hour.
+  # meant to prevent, only narrower. `just publish-npm` undrafts the release
+  # just before it publishes the main package, so this fires minutes ahead of
+  # the package rather than an hour.
   #
   # The cost, stated because it is real: a release that is tagged and then
   # abandoned before `publish-npm` gets no documentation at all, where the tag
