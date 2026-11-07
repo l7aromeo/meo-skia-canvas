@@ -1296,6 +1296,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_coverage_copy_shared_with_the_runs_pixels_draws_as_its_own() {
+        // A run whose coverage copy is drawn in the paint its pixels are
+        // recorded in takes their picture -- see `files_through_chain`.
+        // Shared or recorded on its own, every page lands the same bytes,
+        // and the opaque colours share it while a translucent one, whose
+        // copy is drawn opaque, does not.
+        use crate::context::{
+            SHARED_COVERAGE_PICTURES, SHARES_COVERAGE_PICTURE,
+        };
+        let cases: [(&str, &str, PixelColorSpace, bool); 4] = [
+            ("black", "black", PixelColorSpace::Srgb, true),
+            ("a colour", "rgb(200, 80, 30)", PixelColorSpace::Srgb, true),
+            (
+                "translucent",
+                "rgba(200, 80, 30, 0.6)",
+                PixelColorSpace::Srgb,
+                false,
+            ),
+            (
+                "on Display P3",
+                "rgb(30, 160, 220)",
+                PixelColorSpace::DisplayP3,
+                true,
+            ),
+        ];
+        for (case, fill, space, shares) in cases {
+            let draws = [Draw { fill, ..RUN }; 3];
+            let mut pages = [true, false].map(|share| {
+                SHARES_COVERAGE_PICTURE.set(share);
+                SHARED_COVERAGE_PICTURES.set(0);
+                let _own = OwnRunCache::new();
+                let (pixels, runs, _) = page(&draws, 1, space, true);
+                SHARES_COVERAGE_PICTURE.set(true);
+                (pixels, runs, SHARED_COVERAGE_PICTURES.get())
+            });
+            let [(shared, runs, count), (own, own_runs, own_count)] =
+                &mut pages;
+            assert_eq!((*runs, *own_runs), (3, 3), "{case}: the route");
+            assert_eq!(*own_count, 0, "{case}: shared while told not to");
+            let off = shared
+                .iter()
+                .zip(own.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(off, 0, "{case}: sharing moved {off} bytes");
+            assert_eq!(*count > 0, shares, "{case}: shared {count}");
+        }
+    }
+
     /// A draw on [`wide`]'s page: where, and the rectangle it is cut to.
     type WideDraw = ((f32, f32), Option<(f32, f32, f32, f32)>);
 

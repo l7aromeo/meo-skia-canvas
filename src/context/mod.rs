@@ -1626,11 +1626,15 @@ impl Context2D {
         // run over the page's every pixel took 1.7 ms a 40px word under a
         // drop shadow. Where either recording does not say, the layer keeps
         // what the entries reach.
-        let record = |paint: &Paint| {
+        let recorded = |paint: &Paint| {
             let mut paint = paint.clone();
             paint
                 .set_image_filter(None)
                 .set_blend_mode(BlendMode::SrcOver);
+            paint
+        };
+        let record = |paint: &Paint| {
+            let paint = recorded(paint);
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
@@ -1643,12 +1647,41 @@ impl Context2D {
                 .finish_recording_as_picture(None)
                 .map(|p| (p, reach))
         };
+        let dual = self.recorder.borrow().dual();
+        // The paint the run's pixels are recorded in.
+        let pixels_paint = match dual {
+            false => paint,
+            true => exact.unwrap_or(paint),
+        };
+        let (entry, reach) = match dual {
+            false => record(paint)
+                .map(|(picture, reach)| (Layer::Picture(picture), reach)),
+            true => record(exact.unwrap_or(paint)).zip(record(paint)).map(
+                |((pixels, pixels_reach), (document, document_reach))| {
+                    let reach =
+                        pixels_reach.zip(document_reach).map(|(mut a, b)| {
+                            a.join(b);
+                            a
+                        });
+                    (Layer::Targeted(Arc::new((pixels, document))), reach)
+                },
+            ),
+        }
+        .unzip();
+        let reach = reach.flatten();
         // A run of text in one flat colour that the coverage route could
-        // play is recorded once more, in its colour opaque, through the paint
-        // its pixels are drawn in -- see `layer::CoverageRun` -- before the
-        // run itself, so that what the run reaches is the run's. A run naming
+        // play is drawn once more, in its colour opaque, through the paint
+        // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
+        // the paint the run's pixels were just recorded in, as it is for an
+        // opaque colour placed on the page's bytes, the same calls would
+        // record the same picture, and the run's own is taken. A run naming
         // a line colour of its own is drawn in two colours, and keeps the
         // chain.
+        let pixels = match &entry {
+            Some(Layer::Picture(picture)) => Some(picture),
+            Some(Layer::Targeted(pictures)) => Some(&pictures.0),
+            _ => None,
+        };
         let coverage = match exact {
             Some(exact)
                 if reached.is_some()
@@ -1666,7 +1699,21 @@ impl Context2D {
                     .and_then(|colour| {
                         let mut opaque = exact.clone();
                         opaque.set_alpha_f(1.0);
-                        record(&opaque).map(|(picture, _)| {
+                        #[cfg(test)]
+                        let pixels =
+                            pixels.filter(|_| SHARES_COVERAGE_PICTURE.get());
+                        let picture = match pixels.filter(|_| {
+                            recorded(&opaque) == recorded(pixels_paint)
+                        }) {
+                            Some(picture) => {
+                                #[cfg(test)]
+                                SHARED_COVERAGE_PICTURES
+                                    .set(SHARED_COVERAGE_PICTURES.get() + 1);
+                                Some(picture.clone())
+                            }
+                            None => record(&opaque).map(|(picture, _)| picture),
+                        };
+                        picture.map(|picture| {
                             Arc::new(CoverageRun {
                                 picture,
                                 exact: colour,
@@ -1687,22 +1734,6 @@ impl Context2D {
             }
             _ => None,
         };
-        let (entry, reach) = match self.recorder.borrow().dual() {
-            false => record(paint)
-                .map(|(picture, reach)| (Layer::Picture(picture), reach)),
-            true => record(exact.unwrap_or(paint)).zip(record(paint)).map(
-                |((pixels, pixels_reach), (document, document_reach))| {
-                    let reach =
-                        pixels_reach.zip(document_reach).map(|(mut a, b)| {
-                            a.join(b);
-                            a
-                        });
-                    (Layer::Targeted(Arc::new((pixels, document))), reach)
-                },
-            ),
-        }
-        .unzip();
-        let reach = reach.flatten();
         let mut through = Paint::default();
         through
             .set_blend_mode(self.state.global_composite_operation)
@@ -4083,6 +4114,15 @@ thread_local! {
     /// The last reach a run of text drawn on this thread answered, in the
     /// units of the canvas it was drawn on -- see [`Context2D::draw_text`].
     static TEXT_REACHED: Cell<Option<Rect>> = const { Cell::new(None) };
+    /// Whether a run's coverage copy may be the picture of its pixels where
+    /// the two are drawn in one paint, so that a test can hold the shared
+    /// picture to one recorded on its own.
+    pub(crate) static SHARES_COVERAGE_PICTURE: Cell<bool> =
+        const { Cell::new(true) };
+    /// How many runs on this thread took the picture of their pixels as
+    /// their coverage copy.
+    pub(crate) static SHARED_COVERAGE_PICTURES: Cell<usize> =
+        const { Cell::new(0) };
 }
 
 #[cfg(test)]

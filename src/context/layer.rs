@@ -1652,9 +1652,11 @@ pub enum Composite {
     },
 }
 
-/// A run of text in one flat colour under a sole `blur()`, recorded a second
-/// time in that colour opaque, so that on a page the coverage route plays on
-/// its blur is made from its coverage alone -- see [`chain::coverage`].
+/// A run of text in one flat colour under a sole `blur()`, drawn in that
+/// colour opaque -- recorded a second time, or the picture of its pixels
+/// where that is the paint they are drawn in -- so that on a page the
+/// coverage route plays on its blur is made from its coverage alone -- see
+/// [`chain::coverage`].
 ///
 /// Opaque because Skia pre-blends a glyph's mask by the paint's colour and
 /// never by its alpha: `SkScalerContextRec::setLuminanceColor` keeps only
@@ -1668,7 +1670,7 @@ pub enum Composite {
 /// -- is covered as the run is.
 #[derive(Debug)]
 pub struct CoverageRun {
-    /// The run, drawn opaque.
+    /// The run, drawn opaque: its own picture, or the one of its pixels.
     pub picture: Picture,
     /// The run's colour, held exactly in the page's space.
     pub exact: ExactColour,
