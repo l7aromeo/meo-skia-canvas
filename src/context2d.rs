@@ -39,8 +39,9 @@ use skia_safe::{
 use crate::{
     canvas::{Canvas, CanvasOptions},
     color::{
-        RgbaLinear, linear_srgb_color_space, rgba_css,
-        rgba_linear_to_unpremul_color4f, unpremul_color4f_to_rgba_linear,
+        RgbaLinear, css_declaration_or_refusal, linear_srgb_color_space,
+        rgba_css, rgba_linear_to_unpremul_color4f,
+        unpremul_color4f_to_rgba_linear,
     },
     context::{
         Context2D as Inner, Dye, initial_root_face,
@@ -67,7 +68,7 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
-        utils::{color4f_to_rgba_linear, color4f_to_srgb, css_declaration},
+        utils::{color4f_to_rgba_linear, color4f_to_srgb},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
@@ -3547,10 +3548,7 @@ impl Context2D {
     ///
     /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
     pub fn set_shadow_color_css(&mut self, css: &str) -> Result<(), Error> {
-        let (color, space, declared) =
-            css_declaration(css).ok_or_else(|| Error::InvalidColor {
-                reason: format!("{css:?}"),
-            })?;
+        let (color, space, declared) = css_declaration_or_refusal(css)?;
         self.inner.state.shadow_color = (color, space);
         self.inner.state.shadow_declared = Some(declared);
         Ok(())
@@ -4611,10 +4609,7 @@ fn css_spacing(css: &str) -> Result<Spacing, Error> {
 /// space, which is what lets `color(display-p3 ...)` reach a P3 canvas without
 /// a detour through sRGB.
 fn css_dye(css: &str) -> Result<Dye, Error> {
-    let (color, space, declared) =
-        css_declaration(css).ok_or_else(|| Error::InvalidColor {
-            reason: format!("{css:?}"),
-        })?;
+    let (color, space, declared) = css_declaration_or_refusal(css)?;
     Ok(Dye::Color(color, Some(space), Some(declared)))
 }
 

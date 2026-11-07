@@ -2055,7 +2055,7 @@ fn from_polar([l, chroma, hue]: [f64; 3]) -> [f64; 3] {
 
 /// A colour's declared channels as extended sRGB, in `f64`, a channel
 /// declared `none` read as zero.
-fn declared_srgb(declared: &Declared) -> [f64; 3] {
+pub fn declared_srgb(declared: &Declared) -> [f64; 3] {
     let channels = declared.channels.map(|c| c.unwrap_or(0.0));
     match declared.form {
         Form::Legacy => channels.map(|c| c / RGB_CHANNEL_SCALE),

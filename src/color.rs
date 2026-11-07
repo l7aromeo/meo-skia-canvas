@@ -2,7 +2,10 @@ use skia_safe::{Color as SkColor, Color4f, ColorSpace as SkColorSpace};
 
 use crate::{
     error::Error,
-    node::utils::{css_to_color4f, gamut_map_srgb},
+    node::utils::{
+        Declaration, css_declaration, css_to_color4f, declared_srgb,
+        gamut_map_srgb,
+    },
 };
 
 /// The space every [`RgbaLinear`] is in: linear-light sRGB, the tag a
@@ -401,6 +404,10 @@ impl RgbaLinear {
     /// [`Affine::from_css`](crate::geometry::Affine::from_css): "that is not
     /// a color" is the whole of what there is to say.
     ///
+    /// Premultiplied, a colour at zero alpha has no hue left, and `f32`
+    /// rounds what was written: [`Srgba::from_css`] reads the same strings
+    /// as straight sRGB in `f64`, the hue kept and the numbers as written.
+    ///
     /// # Examples
     ///
     /// ```
@@ -485,6 +492,125 @@ impl RgbaLinear {
             b: self.b * clamped,
             a: self.a * clamped,
         }
+    }
+}
+
+/// A CSS colour as every `_css` colour setter and [`Srgba::from_css`] read
+/// it, or the one refusal they all give for a string that is not a colour.
+pub(crate) fn css_declaration_or_refusal(
+    css: &str,
+) -> Result<(Color4f, SkColorSpace, Declaration), Error> {
+    css_declaration(css).ok_or_else(|| Error::InvalidColor {
+        reason: format!("{css:?}"),
+    })
+}
+
+/// A colour as straight-alpha sRGB in `f64`: CSS's `color(srgb r g b / a)`.
+///
+/// The channels are gamma-encoded, as the numbers a CSS colour is written
+/// in are, and **straight**: `r`, `g` and `b` are the colour itself, not
+/// multiplied by `a`. A colour at zero alpha keeps its hue, so
+/// `rgba(255, 0, 0, 0)` is red at an alpha of zero rather than the four
+/// zeros [`RgbaLinear`] makes of it -- which is what a caller interpolating
+/// toward a transparent colour needs, and what CSS mixes in.
+///
+/// On `color(srgb)`'s scale: a colour written in sRGB inside its gamut has
+/// every channel in `0.0..=1.0`, so `#808080` is `128.0 / 255.0` in each, and
+/// multiplying by 255 gives back the byte exactly, for every byte.
+/// **Unclamped**: a colour outside sRGB keeps its hue as channels below zero or
+/// above one, so `color(display-p3 1 0 0)` is red above one with green and blue
+/// below zero. A canvas narrower than the colour clamps or gamut-maps it where
+/// it is painted, not here.
+///
+/// [`RgbaLinear`] is the premultiplied, linear-light form the drawing calls
+/// take, and `RgbaLinear::from` converts to it.
+///
+/// # Examples
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// let grey = Srgba::from_css("#808080")?;
+/// assert_eq!(grey.r * 255.0, 128.0);
+///
+/// let clear_red = Srgba::from_css("rgba(255, 0, 0, 0)")?;
+/// assert_eq!([clear_red.r, clear_red.a], [1.0, 0.0]);
+/// # Ok::<(), meo_skia_canvas::error::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Srgba {
+    /// Red, gamma-encoded; `0.0..=1.0` inside sRGB.
+    pub r: f64,
+    /// Green, gamma-encoded; `0.0..=1.0` inside sRGB.
+    pub g: f64,
+    /// Blue, gamma-encoded; `0.0..=1.0` inside sRGB.
+    pub b: f64,
+    /// Alpha, `0.0` transparent to `1.0` opaque.
+    pub a: f64,
+}
+
+impl Srgba {
+    /// Parses a CSS colour: any notation
+    /// [`Context2D::set_fill_style_css`] accepts, by the same parser, as
+    /// [`RgbaLinear::from_css`] lists them.
+    ///
+    /// A colour written in sRGB comes back as it was written. A hex byte, or
+    /// an `rgb()` channel written as a whole number, is that number over 255
+    /// -- `#0000007f`'s alpha is
+    /// `127.0 / 255.0`, the `f64` JavaScript gives, not the `f32` that would
+    /// read as 0.49803921580314636 -- and a `color(srgb)` channel or a
+    /// decimal alpha is the `f64` its text reads as, so
+    /// `color(srgb 1.25 -0.1 0.5 / 0.1)` is exactly 1.25, -0.1, 0.5 and 0.1.
+    /// An alpha outside `0.0..=1.0` is clamped into it, as CSS clamps it,
+    /// and the channels are kept: `color(srgb 1 0 0 / -1)` is red at zero.
+    ///
+    /// A colour written any other way -- `hsl()`, `hwb()`, `lab()`, `lch()`,
+    /// `oklab()`, `oklch()`, or `color()` in a space other than `srgb` -- is
+    /// converted by CSS Color 4's matrices in `f64` from the
+    /// channels as written. A fill paints the same string from channels
+    /// held at `f32`, so the two can differ by about one part in ten
+    /// million, and this is the closer of them to the colour the string
+    /// names.
+    ///
+    /// At the gamut's edge a converted colour can sit a few units in the
+    /// last place outside `0.0..=1.0`, where CSS Color 4's own arithmetic
+    /// puts it: `oklab(1 0 0)` is red 1.0000000000000004, the value the
+    /// specification's sample code computes from its published matrices.
+    /// Nothing snaps it back, since snapping would move a colour genuinely
+    /// outside too; a colour written in sRGB is exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidColor`] for anything
+    /// [`Context2D::set_fill_style_css`] refuses, with the same message: one
+    /// function refuses for both. Where [`RgbaLinear::from_css`] answers
+    /// `None`, this answers that error.
+    ///
+    /// [`Context2D::set_fill_style_css`]: crate::context2d::Context2D::set_fill_style_css
+    pub fn from_css(css: &str) -> Result<Self, Error> {
+        let (_, _, declaration) = css_declaration_or_refusal(css)?;
+        let declared = declaration.declared();
+        let [r, g, b] = declared_srgb(declared);
+        // `none` reads as zero where a colour is converted or painted, as
+        // CSS Color 4 section 4.4 says it behaves, and the clamp is the one
+        // `declared_color` applies, so this and a fill read one alpha.
+        let a = declared.alpha.unwrap_or(0.0).clamp(0.0, 1.0);
+        Ok(Self { r, g, b, a })
+    }
+}
+
+impl From<Srgba> for RgbaLinear {
+    /// Linearises and premultiplies, rounding to `f32` once, as
+    /// [`RgbaLinear::from_srgb`] does. At zero alpha that leaves no hue;
+    /// [`RgbaLinear::fading_out`] keeps one where a colour is interpolated
+    /// toward.
+    fn from(color: Srgba) -> Self {
+        Self::from_srgb(
+            color.r as f32,
+            color.g as f32,
+            color.b as f32,
+            color.a as f32,
+        )
     }
 }
 
