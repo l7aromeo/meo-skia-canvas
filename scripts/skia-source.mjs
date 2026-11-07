@@ -321,7 +321,11 @@ function lockedVersion(root = ROOT) {
   return found[1];
 }
 
-function cacheRoot() {
+/**
+ * Where prepared trees are kept, and the compiled Skia built from them under
+ * `binaries` -- see scripts/skia-cache.mjs.
+ */
+export function cacheRoot() {
   const base = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
   return join(base, "meo-skia-canvas");
 }
@@ -671,8 +675,9 @@ export function treesToKeep(root = ROOT, cache = cacheRoot()) {
 }
 
 /**
- * Removes every tree under `cache` that `inUse` does not name, and the partial
- * preparation of each. Nothing is removed when `inUse` is null: a tree left
+ * Removes every tree under `cache` that `inUse` does not name, the partial
+ * preparation of each, and the Skia compiled from each under `binaries` -- see
+ * scripts/skia-cache.mjs. Nothing is removed when `inUse` is null: a tree left
  * behind costs disk, one removed from under a worktree costs it a fresh tree.
  */
 export function removeSuperseded(cache, inUse) {
@@ -687,6 +692,13 @@ export function removeSuperseded(cache, inUse) {
     if (name.startsWith("skia-") && !inUse.has(name.replace(/\.partial$/, "")))
       rmSync(join(cache, name), { recursive: true, force: true });
   }
+  // The compiled Skia of a removed tree goes with it: nothing builds from
+  // that tree again.
+  const binaries = join(cache, "binaries");
+  if (existsSync(binaries))
+    for (const name of readdirSync(binaries))
+      if (!inUse.has(name))
+        rmSync(join(binaries, name), { recursive: true, force: true });
 }
 
 /**

@@ -31,6 +31,13 @@
 // The self-test also holds each marker to its patch: it must be in what the
 // patch writes and nowhere in what it replaces or keeps, or an unpatched file
 // would pass the third check.
+//
+// A build that linked compiled Skia from the local cache instead --
+// "STARTING BIND AGAINST SYSTEM SKIA", see scripts/skia-binaries.mjs -- ran no
+// ninja, so it has nothing of its own to read. It passes when every library
+// it linked is, byte for byte, one an entry of this worktree's tree holds, and
+// that entry's stored seed build passes the three checks above: patched where
+// it was compiled, the same bytes where they were linked. See `bindRefusal`.
 import {
   existsSync,
   mkdirSync,
@@ -42,6 +49,13 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  cachedLibraries,
+  digest,
+  entriesFor,
+  seedLog,
+} from "./skia-binaries.mjs";
+import { cacheRoot, treeName } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -241,6 +255,34 @@ export function refusal(output, patched) {
   return null;
 }
 
+/// What skia-bindings prints when it links libraries from
+/// `SKIA_LIBRARY_SEARCH_PATH` rather than building them (build.rs).
+const LINKED = "STARTING BIND AGAINST SYSTEM SKIA";
+
+/**
+ * Why the build in `buildDir`, which linked cached Skia, does not show Skia
+ * built with `patched`, or `null` when it does: the libraries in its
+ * `out/skia` are each, byte for byte, one an entry of `tree` under `cache`
+ * holds, and the entry's seed build passes `refusal`. An entry of another
+ * tree, or a library changed after it was stored, matches nothing.
+ */
+export function bindRefusal(buildDir, patched, { cache, tree }) {
+  const skia = join(buildDir, "out", "skia");
+  const linked = existsSync(skia) ? cachedLibraries(skia) : [];
+  if (!linked.includes("libskia.a"))
+    return "it linked cached Skia, and its out-dir holds no libskia.a";
+  const digests = Object.fromEntries(
+    linked.map((name) => [name, digest(join(skia, name))]),
+  );
+  const entry = entriesFor(tree, cache).find(([, manifest]) =>
+    linked.every((name) => manifest.libraries[name] === digests[name]),
+  );
+  if (!entry)
+    return `it linked cached Skia that no entry of ${tree} holds, byte for byte`;
+  const why = refusal(seedLog(entry[0]), patched);
+  return why ? `the cache entry it linked, ${entry[0]}: ${why}` : null;
+}
+
 /// Where a patch file names Skia's sources: rust-skia's checkout keeps them
 /// under `skia-bindings/skia`.
 const SKIA_IN_RUST_SKIA = "skia-bindings/skia/";
@@ -298,13 +340,20 @@ function check(buildDir) {
     );
     process.exit(1);
   }
+  const where = { cache: cacheRoot(), tree: treeName() };
   const problems = outputs
-    .map((path) => [path, refusal(buildLog(dirname(path)), patched)])
+    .map((path) => {
+      const log = buildLog(dirname(path));
+      const why = log.includes(LINKED)
+        ? bindRefusal(dirname(path), patched, where)
+        : refusal(log, patched);
+      return [path, why];
+    })
     .filter(([, why]) => why);
   for (const [path, why] of problems) console.error(`${path}: ${why}`);
   if (problems.length) process.exit(1);
   console.log(
-    `check-patched-skia: ${outputs.length} skia-bindings build(s) compiled the patched Skia source`,
+    `check-patched-skia: ${outputs.length} skia-bindings build(s) compiled the patched Skia source, or linked it from the cache`,
   );
 }
 
@@ -452,6 +501,76 @@ function cases(root, patched) {
       "only make's directory line",
     ],
   ];
+}
+
+/**
+ * The self-test's cases for a build that linked cached Skia, under `root`: an
+ * entry stored from a patched build, and builds that link it or something
+ * else. Returns how many ran.
+ */
+function bindCases(root) {
+  const patched = PATCHED[process.platform] ?? Object.values(PATCHED)[0];
+  const [files, good] = cases(root, patched)[0];
+  const write = (path, text) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  };
+  const cache = join(root, "cache");
+  const tree = "skia-0.0.0-tree";
+  const entry = join(cache, "binaries", tree, "target", "sdk", "dev", "f");
+  const libraries = { "libskia.a": "skia", "libsvg.a": "svg" };
+  for (const [name, text] of Object.entries(libraries))
+    write(join(entry, name), text);
+  write(join(entry, "seed-output"), good);
+  write(
+    join(entry, "manifest.json"),
+    JSON.stringify({
+      version: 1,
+      libraries: Object.fromEntries(
+        Object.keys(libraries).map((name) => [name, digest(join(entry, name))]),
+      ),
+    }),
+  );
+  const build = join(root, "linked");
+  const linked = (changes = {}) => {
+    rmSync(build, { recursive: true, force: true });
+    const all = { ...libraries, "libskia-bindings.a": "its own", ...changes };
+    for (const [name, text] of Object.entries(all))
+      if (text !== null) write(join(build, "out", "skia", name), text);
+    write(join(build, "output"), "STARTING BIND AGAINST SYSTEM SKIA");
+  };
+  const setFiles = (overrides = {}) => {
+    for (const [file, contents] of Object.entries({ ...files, ...overrides }))
+      write(join(root, "skia", file), contents);
+  };
+  const [first] = patched;
+  let count = 0;
+  for (const [changes, overrides, against, accepted, what] of [
+    [{}, {}, tree, true, "the libraries of an entry from a patched build"],
+    [{ "libskia.a": "skiA" }, {}, tree, false, "a library changed by a byte"],
+    [{}, {}, "skia-0.0.0-other", false, "an entry of another tree"],
+    [
+      {},
+      { [first.file]: "unpatched" },
+      tree,
+      false,
+      "an entry whose seed build compiled an unpatched file",
+    ],
+    [{ "libskia.a": null }, {}, tree, false, "no libskia.a"],
+    [{ "libextra.a": "x" }, {}, tree, false, "a library no entry holds"],
+  ]) {
+    setFiles(overrides);
+    linked(changes);
+    const why = bindRefusal(build, patched, { cache, tree: against });
+    if ((why === null) !== accepted) {
+      console.error(
+        `check-patched-skia self-test: linking ${what} was ${accepted ? `refused: ${why}` : "accepted"}`,
+      );
+      process.exit(1);
+    }
+    count += 1;
+  }
+  return count;
 }
 
 function selfTest() {
@@ -634,6 +753,7 @@ function selfTest() {
         count += 1;
       }
     }
+    count += bindCases(root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
