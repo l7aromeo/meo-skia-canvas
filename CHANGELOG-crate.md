@@ -17,6 +17,40 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
+## 📦 ⟩ [v0.17.1] (crate) ⟩ Unreleased
+
+**A patch release, and nothing that worked changes.** It adds two readers,
+five fixes and one change. `Srgba::from_css` reads a CSS colour as
+straight, unclamped sRGB in `f64`, keeping a transparent colour's hue and the
+numbers as written, and `filter_is_none` and `css_filter_is_none` say whether a
+filter is `none`. Registering bytes a `FontLibrary` already holds keeps the face
+it has, and text drawn on the GPU no longer changes at its glyphs' edges with
+the fonts registered before it. Three of the fixes reach only a build from this
+repository, which compiles the Skia patches crates.io's Skia does not carry: GPU
+text draws the same whatever an earlier export, another thread or a larger or
+smaller draw of it drew first, and below 254 device pixels as the CPU does;
+and on the CPU, `ColorDodge`, `ColorBurn` and the four non-separable blend
+modes draw the same bytes on every x86-64 machine, with or without AVX-512. Text
+also costs less to draw on a fresh `Canvas` when another canvas on the thread
+has drawn it in the same settings.
+
+### Fixed
+
+- **`ColorDodge`, `ColorBurn`, `Hue`, `Saturation`, `Color` and `Luminosity` draw the same bytes on every machine on the CPU, x86-64 with and without AVX-512 alike, in a build from this repository.** ([#644](https://github.com/l7aromeo/meo-skia-canvas/pull/644), [#642](https://github.com/l7aromeo/meo-skia-canvas/issues/642))
+- **GPU text draws the same whatever an earlier export or another thread drew first, and below 254 device pixels draws as the CPU does, in a build from this repository.** ([#635](https://github.com/l7aromeo/meo-skia-canvas/pull/635), [#622](https://github.com/l7aromeo/meo-skia-canvas/issues/622))
+- **GPU text drawn after a larger or smaller draw of it draws as a fresh draw does, colour emoji included, in a build from this repository.** ([#635](https://github.com/l7aromeo/meo-skia-canvas/pull/635), [#634](https://github.com/l7aromeo/meo-skia-canvas/issues/634))
+- **Registering bytes a `FontLibrary` already holds under the same family keeps the face it has, rather than adding one it never lets go.** ([#629](https://github.com/l7aromeo/meo-skia-canvas/pull/629), [#612](https://github.com/l7aromeo/meo-skia-canvas/issues/612))
+- **Text drawn on the GPU no longer changes at its glyphs' edges with the fonts registered before it.** ([#629](https://github.com/l7aromeo/meo-skia-canvas/pull/629), [#611](https://github.com/l7aromeo/meo-skia-canvas/issues/611))
+
+### Added
+
+- **`Srgba::from_css` reads a CSS colour as straight, unclamped sRGB in `f64`, keeping a transparent colour's hue and the numbers as written.** ([#627](https://github.com/l7aromeo/meo-skia-canvas/pull/627), [#619](https://github.com/l7aromeo/meo-skia-canvas/issues/619))
+- **`Context2D::filter_is_none` and `css_filter_is_none` say whether a filter is `none`, in any case and with whitespace or comments, which `blur(0px)` is not.** ([#627](https://github.com/l7aromeo/meo-skia-canvas/pull/627), [#624](https://github.com/l7aromeo/meo-skia-canvas/issues/624))
+
+### Changed
+
+- **Text costs less to draw on a fresh `Canvas` when another canvas on the thread has drawn it in the same settings: a page drawn into a new canvas each time draws its strings from what the last one kept, rather than laying each out twice.** ([#640](https://github.com/l7aromeo/meo-skia-canvas/pull/640), [#623](https://github.com/l7aromeo/meo-skia-canvas/issues/623))
+
 ## 📦 ⟩ [v0.17.0] (crate) ⟩ November 7, 2026
 
 **A breaking release. Thirty-one changes can break working code, each under

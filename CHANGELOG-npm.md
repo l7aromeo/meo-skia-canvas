@@ -9,6 +9,28 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
+## 📦 ⟩ [v7.0.1] (npm) ⟩ Unreleased
+
+**A patch release: nothing that worked changes.** Text drawn on the GPU now
+draws the same whatever came before it -- the fonts registered, an earlier
+export, GPU text another thread draws, or a larger or smaller draw of the same
+string -- and below 254 device pixels it draws as the CPU does. Text also costs
+less to draw on a fresh canvas when another canvas on the thread has drawn it in
+the same settings. On the CPU, `color-dodge`, `color-burn` and the four
+non-separable blend modes draw the same bytes on every x86-64 machine, with or
+without AVX-512. Four fixes and one change; the sections below have each.
+
+### Fixed
+
+- **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and `luminosity` draw the same bytes on every machine on the CPU, x86-64 with and without AVX-512 alike.** ([#644](https://github.com/l7aromeo/meo-skia-canvas/pull/644), [#642](https://github.com/l7aromeo/meo-skia-canvas/issues/642))
+- **GPU text draws the same whatever an earlier export or another thread drew first, and below 254 device pixels draws as the CPU does.** ([#635](https://github.com/l7aromeo/meo-skia-canvas/pull/635), [#622](https://github.com/l7aromeo/meo-skia-canvas/issues/622))
+- **GPU text drawn after a larger or smaller draw of it draws as a fresh draw does, colour emoji included.** ([#635](https://github.com/l7aromeo/meo-skia-canvas/pull/635), [#634](https://github.com/l7aromeo/meo-skia-canvas/issues/634))
+- **Text drawn on the GPU no longer changes at its glyphs' edges with the fonts registered before it.** ([#629](https://github.com/l7aromeo/meo-skia-canvas/pull/629), [#611](https://github.com/l7aromeo/meo-skia-canvas/issues/611))
+
+### Changed
+
+- **Text costs less to draw on a fresh canvas when another canvas on the thread has drawn it in the same settings: a page drawn into a new canvas each time draws its strings from what the last one kept, rather than laying each out twice.** ([#640](https://github.com/l7aromeo/meo-skia-canvas/pull/640), [#623](https://github.com/l7aromeo/meo-skia-canvas/issues/623))
+
 ## 📦 ⟩ [v7.0.0] (npm) ⟩ November 7, 2026
 
 **A major release. Request headers given as an array of pairs went out under the
