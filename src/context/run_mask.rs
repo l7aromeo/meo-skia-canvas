@@ -5,8 +5,10 @@
 //!
 //! What a run covers depends on where it lies, so a kept result is never
 //! trusted on its key alone. The key finds the result a run drawn at the same
-//! sub-pixel phase left -- see [`RunKey`] -- and, unless where its glyphs lie
-//! decides its coverage (below), the run's coverage is drawn again on the
+//! sub-pixel phase left -- or, where its glyphs' placement decides its
+//! coverage, in the same placement classes -- see [`RunKey`] -- and, unless
+//! where its glyphs lie decides its coverage (below), the run's coverage is
+//! drawn again on the
 //! plane the route would blur, then compared byte for byte with the coverage
 //! the result was blurred from. Only where the two are the same
 //! is the kept result composited, moved by the whole pixels between them; any
@@ -26,17 +28,18 @@
 //! every rounding spec Skia has puts the edges between one floor or phase
 //! and the next on an eighth of a pixel -- see [`PLACEMENT_STEPS`]. So a run
 //! whose glyphs each lie clear of those edges, at the kept place and at this
-//! one, and whose eighths all moved by the same whole pixels as its origin,
-//! blits the same masks in the same order, moved; its coverage is the kept
-//! coverage moved, and [`kept`] composites the kept result without drawing
-//! the run again. A glyph near an edge, a run drawn as paths or sheared, and
-//! a decorated run fall back to the comparison.
+//! one, and each in the placement class -- the span between two edges --
+//! it lay in, moved by the same whole pixels as its origin, blits the same
+//! masks in the same order, moved, at whatever fraction of a pixel within
+//! those classes it is drawn; its coverage is the kept coverage moved, and
+//! [`kept`] composites the kept result without drawing the run again. A
+//! glyph near an edge, a run drawn as paths or sheared, and a decorated run
+//! fall back to the comparison.
 
 #[cfg(test)]
 use std::cell::Cell;
 use std::{
     hash::{Hash, Hasher},
-    iter::zip,
     sync::{Arc, LazyLock},
 };
 
@@ -71,8 +74,8 @@ const RUN_BUDGET: Budget = Budget {
     low_water: RUN_CACHE_BYTES * 3 / 4,
 };
 
-/// How finely [`RunKey`] tells sub-pixel phases apart, in steps a pixel: far
-/// finer than the quarter of a pixel Skia places a glyph's mask by, and far
+/// How finely [`Phase::Fine`] tells sub-pixel phases apart, in steps a pixel:
+/// far finer than the quarter of a pixel Skia places a glyph's mask by, and far
 /// coarser than the float error of a position, which moves the same
 /// fraction's bits with its whole part -- 120.3 and 177.3 part in their last
 /// bits as floats. A run is found by its step and then held to its coverage,
@@ -105,6 +108,48 @@ fn turns_at(step: i64) -> bool {
         return half;
     }
     half || within % 2 == 1
+}
+
+/// How many steps a pixel Skia's placement of a mask turns at -- see
+/// [`turns_at`]: five, at a pixel's odd eighths and its half.
+fn turns_per_pixel() -> i64 {
+    (1..=PLACEMENT_STEPS as i64)
+        .filter(|&step| turns_at(step))
+        .count() as i64
+}
+
+/// The placement class of a position `step` [`PLACEMENT_STEPS`]ths of a
+/// pixel past the device's origin, floored: how many steps Skia's placement
+/// turns at -- see [`turns_at`] -- lie between the origin and it. Every
+/// position from one turning step to the next is placed alike, so two glyphs
+/// in one class, each clear of the steps about it, are blitted alike; one
+/// moved by whole pixels moves by [`turns_per_pixel`] classes a pixel.
+fn class(step: i64) -> i64 {
+    let per_pixel = PLACEMENT_STEPS as i64;
+    let (pixel, within) =
+        (step.div_euclid(per_pixel), step.rem_euclid(per_pixel));
+    pixel * turns_per_pixel()
+        + (1..=within).filter(|&step| turns_at(step)).count() as i64
+}
+
+/// Each glyph's placement class -- see [`class`] -- less the classes of
+/// `origin`, the whole pixels of the run's origin: alike for two placements
+/// of a run exactly where each glyph's moved by the whole pixels its origin
+/// did and lies in the class it lay in.
+fn classes(eighths: &[[i64; 2]], origin: (i32, i32)) -> Arc<[[i64; 2]]> {
+    let per_pixel = turns_per_pixel();
+    let origin = [origin.0, origin.1].map(|whole| i64::from(whole) * per_pixel);
+    eighths
+        .iter()
+        .map(|glyph| {
+            let [x, y] = [0, 1].map(|k| class(glyph[k]) - origin[k]);
+            #[cfg(test)]
+            if RULE.get() == Rule::AcrossOnly {
+                return [x, 0];
+            }
+            [x, y]
+        })
+        .collect()
 }
 
 /// How far Skia's f32 sums of a glyph's position can fall from the exact
@@ -309,18 +354,18 @@ impl Kept {
 }
 
 /// What a kept run's result is filed under: the run and its paint, the part
-/// of the device transform that is not a translation, the sub-pixel phase of
-/// the run's origin on the device to a [`PHASE_STEPS`]th of a pixel, the blur,
-/// the colour and alpha it was composited in, and the colour type and space of
+/// of the device transform that is not a translation, where its glyphs lie
+/// within the whole pixels of its origin -- see [`Phase`] -- the blur, the
+/// colour and alpha it was composited in, and the colour type and space of
 /// the page. Not the whole pixels the origin lies at: a run drawn elsewhere
-/// finds the result, and the comparison in [`drawn`] decides whether it may
-/// be used. Filed with the run's region -- see [`Filed`].
+/// finds the result, and [`kept`] or the comparison in [`drawn`] decides
+/// whether it may be used. Filed with the run's region -- see [`Filed`].
 #[derive(Clone, Debug)]
 pub(crate) struct RunKey {
     run: Arc<RunPaint>,
     paint: PaintKey,
     linear: [u32; 4],
-    phase: [u16; 2],
+    phase: Phase,
     sigma: u32,
     rgb: [u32; 3],
     gain: u32,
@@ -356,6 +401,21 @@ impl Hash for RunKey {
         self.color_type.hash(state);
         self.space.hash(state);
     }
+}
+
+/// Where a kept run's glyphs lie within the whole pixels of its origin, as
+/// its key tells placements apart.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Phase {
+    /// Each glyph's placement class relative to the origin -- see
+    /// [`classes`] -- where its eighths decide its coverage: a run drawn at
+    /// any fraction in the same classes is blitted alike, so one result
+    /// serves every such fraction.
+    Classes(Arc<[[i64; 2]]>),
+    /// The sub-pixel phase of the run's origin on the device to a
+    /// [`PHASE_STEPS`]th of a pixel, where its eighths do not decide it: the
+    /// comparison in [`drawn`] decides.
+    Fine([u16; 2]),
 }
 
 /// A [`RunKey`] and the device pixels the run's coverage covers, is read
@@ -421,8 +481,11 @@ impl Placed {
                     device.scale_y(),
                 ]
                 .map(f32::to_bits),
-                phase: [x - whole_x, y - whole_y]
-                    .map(|fraction| (fraction * PHASE_STEPS).round() as u16),
+                phase: Phase::Fine(
+                    [x - whole_x, y - whole_y].map(|fraction| {
+                        (fraction * PHASE_STEPS).round() as u16
+                    }),
+                ),
                 sigma: sigma.to_bits(),
                 rgb: rgb.map(f32::to_bits),
                 gain: gain.to_bits(),
@@ -438,20 +501,28 @@ impl Placed {
     }
 
     /// What this run's result is filed under when its coverage is placed at
-    /// `at`: the key and the rectangles the coverage is worked over and read
-    /// from, relative to the whole pixels of the run's origin.
-    fn filed(&self, at: &Placement) -> Filed {
+    /// `at` -- the key, its phase the glyphs' classes where their eighths
+    /// decide the run's coverage, and the rectangles the coverage is worked
+    /// over, read from and inks, relative to the whole pixels of the run's
+    /// origin -- and those eighths -- see [`eighths`].
+    fn filed(&self, at: &Placement) -> (Filed, Option<Arc<[[i64; 2]]>>) {
         let (x, y) = self.origin;
         let relative = |r: IRect| {
             let r = r.with_offset((-x, -y));
             [r.left, r.top, r.right, r.bottom]
         };
-        Filed {
-            key: self.key.clone(),
+        let eighths = self.eighths(at);
+        let mut key = self.key.clone();
+        if let Some(eighths) = &eighths {
+            key.phase = Phase::Classes(classes(eighths, self.origin));
+        }
+        let filed = Filed {
+            key,
             region: relative(at.worked),
             read: relative(at.region),
             inked: relative(at.inked),
-        }
+        };
+        (filed, eighths)
     }
 
     /// Each glyph's eighths where its coverage is placed at `at` -- see
@@ -548,6 +619,8 @@ fn get(key: &Filed) -> Option<Mask> {
 /// Files `mask` under `key`.
 fn put(key: Filed, mask: Mask) {
     #[cfg(test)]
+    FILINGS.with_borrow_mut(|filings| filings.push(key.clone()));
+    #[cfg(test)]
     let Some((key, mask)) = OWN.with_borrow_mut(|own| match own {
         Some(store) => {
             store.put(key, mask);
@@ -562,8 +635,9 @@ fn put(key: Filed, mask: Mask) {
 
 /// The result kept for `placed` at `at`, moved to where it is drawn now,
 /// where its glyphs' eighths decide its coverage -- see [`eighths`] -- and
-/// every glyph moved by the whole pixels its origin did: composited without
-/// the run's coverage being drawn again. `None` otherwise, for the run to be
+/// every glyph moved by the whole pixels its origin did and lies in the
+/// placement class it lay in -- see [`classes`]: composited without the
+/// run's coverage being drawn again. `None` otherwise, for the run to be
 /// drawn and compared -- see [`drawn`].
 ///
 /// `redraw` draws the run's coverage. Only a test build calls it, to hold
@@ -578,18 +652,19 @@ pub(crate) fn kept(
     if !MASK_CACHE.get() {
         return None;
     }
-    let mask = get(&placed.filed(at))?;
+    let (filed, now) = placed.filed(at);
+    let now = now?;
+    #[cfg(test)]
+    CLASSED.set(CLASSED.get() + 1);
+    let mask = get(&filed)?;
     let was = mask.eighths.as_deref()?;
-    let now = placed.eighths(at)?;
-    let (x, y) = placed.origin;
-    let by = (x - mask.origin.0, y - mask.origin.1);
-    let moved = [by.0, by.1].map(|d| i64::from(d) * PLACEMENT_STEPS as i64);
-    let alike = was.len() == now.len()
-        && zip(was, now.iter())
-            .all(|(was, now)| [now[0] - was[0], now[1] - was[1]] == moved);
-    if !alike {
+    // The key holds the classes, so a result found under it lay in them;
+    // asked again of what it kept, so that nothing rests on the key alone.
+    if *classes(was, mask.origin) != *classes(&now, placed.origin) {
         return None;
     }
+    let (x, y) = placed.origin;
+    let by = (x - mask.origin.0, y - mask.origin.1);
     let outcome = mask.outcome.at(by)?;
     #[cfg(test)]
     if SHADOWS.get() {
@@ -628,7 +703,7 @@ pub(crate) fn drawn(
         return colour(sharp);
     };
     let (x, y) = placed.origin;
-    let filed = placed.filed(at);
+    let (filed, eighths) = placed.filed(at);
     if let Some(mask) = get(&filed) {
         let alike = *mask.coverage == *sharp.ink().0;
         let moved = alike
@@ -653,7 +728,7 @@ pub(crate) fn drawn(
             outcome: outcome.clone(),
             coverage,
             origin: placed.origin,
-            eighths: placed.eighths(at),
+            eighths,
         },
     );
     Some(outcome)
@@ -688,6 +763,8 @@ pub(crate) enum Rule {
     /// The halves an axis without sub-pixel positions turns at, not the
     /// odd eighths one with them does.
     HalvesOnly,
+    /// The placement classes across, not those down -- see [`classes`].
+    AcrossOnly,
     /// A kept run placed from its anchor alone, not from where its layout
     /// draws it -- see `context::drawn_from`.
     AnchorOnly,
@@ -731,6 +808,12 @@ thread_local! {
     /// Whether [`kept`] draws again each run it trusts, to compare it: off,
     /// a test sees what a build outside tests leaves undrawn.
     pub(crate) static SHADOWS: Cell<bool> = const { Cell::new(true) };
+    /// How many runs [`kept`] was asked of whose glyphs' placement decides
+    /// their coverage -- see [`eighths`] -- on this thread.
+    static CLASSED: Cell<usize> = const { Cell::new(0) };
+    /// What each result filed on this thread was filed under, in order.
+    static FILINGS: std::cell::RefCell<Vec<Filed>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -745,8 +828,8 @@ mod tests {
     //! whose clip cuts it otherwise is refused.
 
     use super::{
-        MASK_CACHE, MASKS, Masks, OwnRunCache, RULE, Rule, SHADOWS, held,
-        release_cached_runs,
+        CLASSED, FILINGS, MASK_CACHE, MASKS, Masks, OwnRunCache, Phase, RULE,
+        Rule, SHADOWS, held, release_cached_runs,
     };
     use std::cell::Cell;
 
@@ -986,7 +1069,8 @@ mod tests {
 
     #[test]
     fn a_run_moved_by_a_fraction_is_blurred_afresh() {
-        // Another sub-pixel phase is another key: nothing is found.
+        // Moved by a fraction into other placement classes -- see
+        // `classes` -- the run finds nothing.
         let draws = [RUN, RUN, at(120.8, 90.6), at(120.3, 90.85)];
         let masks = alike("moved by a fraction", &draws, 1);
         assert_eq!(
@@ -1821,6 +1905,178 @@ mod tests {
         assert_eq!(parted(&exact, &fresh), 0, "the rule moved bytes");
         assert_eq!(masks.wrong, 0, "a cut run composited otherwise: {masks:?}");
         assert!(masks.skipped > 0, "nothing was trusted: {masks:?}");
+    }
+
+    #[test]
+    fn a_run_at_any_fraction_within_its_classes_is_drawn_from_the_cache() {
+        // The run at the middle of every 32nd of a pixel across and every
+        // 16th down, near the page's left and 8,000 pixels in, so that the
+        // glyphs lie off the steps as often as on them: each glyph's placement
+        // class -- the span between two steps where Skia's placement of its
+        // mask turns -- not its fraction, decides whether a result is found,
+        // and every result found without drawing lands the bytes drawn afresh.
+        // Laid out from the left, centred and condensed, so that the
+        // layout's offset and its squeeze each move where a glyph is drawn
+        // from its anchor. Each mutant files two placements Skia blits
+        // otherwise together: classes down ignored, classes of half a pixel
+        // where glyphs are positioned by quarters, and glyphs placed from the
+        // anchor without the layout's offset and squeeze. No allowance for
+        // Skia's rounding is the edge sweep's mutant -- see
+        // `a_glyph_near_where_its_mask_turns_is_compared`.
+        let once: Vec<WideDraw> = (0..32)
+            .flat_map(|i| {
+                (0..16).flat_map(move |j| {
+                    let (x, y) =
+                        ((i as f32 + 0.5) / 32.0, (j as f32 + 0.5) / 16.0);
+                    [
+                        ((120.0 + x, 100.0 + y), None),
+                        ((8120.0 + x, 100.0 + y), None),
+                    ]
+                })
+            })
+            .collect();
+        // Twice over, so that the second time every placement has been seen.
+        let draws = [once.as_slice(), once.as_slice()].concat();
+        let (whole, _) = wide(Rule::Exact, false, &[((120.0, 100.0), None)]);
+        let (quarter, _) = wide(Rule::Exact, false, &[((120.25, 100.0), None)]);
+        let subpixel = parted(&whole, &quarter) > 0;
+        for layout in [Layout::Left, Layout::Centred, Layout::Condensed] {
+            WIDE_LAYOUT.set(layout);
+            let (fresh, _) = wide(Rule::Exact, false, &draws);
+            CLASSED.set(0);
+            let (exact, masks) = wide(Rule::Exact, true, &draws);
+            let classed = CLASSED.get();
+            eprintln!(
+                "{layout:?}, as built: {masks:?}, {classed} classed of {} draws",
+                draws.len()
+            );
+            assert_eq!(parted(&exact, &fresh), 0, "{layout:?}: moved bytes");
+            assert_eq!(masks.wrong, 0, "{layout:?}: {masks:?}");
+            // A centred run is laid out some 42,000 pixels from where it is
+            // drawn and moved back by its offset, so Skia's f32 sums of its
+            // glyphs' positions err by far more than an allowance can rest
+            // on: every one is compared instead.
+            match layout {
+                Layout::Centred => assert_eq!(classed, 0, "{layout:?}"),
+                _ => assert!(classed > 0, "{layout:?}: nothing classed"),
+            }
+            assert!(
+                2 * masks.skipped >= classed,
+                "{layout:?}: a classed draw seen before was drawn: {masks:?}"
+            );
+            for rule in [Rule::AcrossOnly, Rule::HalvesOnly, Rule::AnchorOnly] {
+                let (_, masks) = wide(rule, true, &draws);
+                eprintln!("{layout:?}, {rule:?}: {masks:?}");
+                match (rule, subpixel) {
+                    (Rule::HalvesOnly, false) => {
+                        assert_eq!(masks.wrong, 0, "{layout:?}, {rule:?}")
+                    }
+                    // Nothing centred is classed, under any rule, for a
+                    // mutant to file together: centred, the grid is a pin of
+                    // the comparison alone.
+                    _ if matches!(layout, Layout::Centred) => {
+                        assert_eq!(masks.wrong, 0, "{layout:?}, {rule:?}")
+                    }
+                    _ => assert!(
+                        masks.wrong > 0,
+                        "{layout:?}, {rule:?} drew nothing wrong: {masks:?}"
+                    ),
+                }
+            }
+        }
+        WIDE_LAYOUT.set(Layout::Left);
+    }
+
+    #[test]
+    fn text_moved_by_a_fraction_each_draw_finds_its_classes() {
+        // The timed rows' moved page: fifty "Ag" on 400x300, each moved by a
+        // fraction no draw before it was, twelve pages over, then the same
+        // twelve pages again. Every page lands the bytes drawn afresh. What
+        // the coverage is worked over, read from and inks moves by a pixel
+        // with the fraction within a class, so a class is filed once for
+        // each of those it is drawn with; the second time over, every run
+        // whose glyphs lie clear of a turning step finds what it kept and is
+        // composited without being drawn.
+        let library = FontLibrary::new();
+        library
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        const PAGES: u32 = 12;
+        let pages = |cache: bool| {
+            let _own = OwnRunCache::new();
+            MASK_CACHE.set(cache);
+            FILINGS.with_borrow_mut(Vec::clear);
+            let mut canvas = Canvas::new(400.0, 300.0);
+            canvas.set_gpu(false);
+            {
+                let ctx = canvas.context();
+                assert!(ctx.set_font_css(RUN.font));
+                ctx.set_fill_style_css(RUN.fill).expect("a colour");
+                ctx.set_filter_css("blur(3px)").expect("a filter");
+            }
+            let mut drawn = Vec::new();
+            for pass in 0..2 {
+                MASKS.set(Masks::default());
+                CLASSED.set(0);
+                for page in 0..PAGES {
+                    let ctx = canvas.context();
+                    ctx.clear_rect(0.0, 0.0, 400.0, 300.0);
+                    for i in 0..50u32 {
+                        let n = page * 50 + i + 1;
+                        let f =
+                            (f64::from(n) * 0.618_033_988_749_894_9).fract();
+                        let x = (i % 10) as f32 * 38.0 + f as f32;
+                        let y = 40.0 + (i / 10) as f32 * 50.0;
+                        ctx.fill_text(RUN.text, x, y, None);
+                    }
+                    let pixels = canvas
+                        .to_image_data(None, &ImageDataExport::default())
+                        .expect("pixels")
+                        .pixels()
+                        .to_vec();
+                    drawn.push(pixels);
+                }
+                if pass == 0 {
+                    eprintln!(
+                        "first: {:?}, {} classed",
+                        MASKS.get(),
+                        CLASSED.get()
+                    );
+                }
+            }
+            let filings = FILINGS.with_borrow_mut(std::mem::take);
+            MASK_CACHE.set(true);
+            (drawn, MASKS.get(), CLASSED.get(), filings)
+        };
+        let (fresh, ..) = pages(false);
+        let (cached, again, classed, filings) = pages(true);
+        for (k, (fresh, cached)) in fresh.iter().zip(&cached).enumerate() {
+            assert_eq!(parted(fresh, cached), 0, "page {k} moved bytes");
+        }
+        let mut per_class = std::collections::HashMap::new();
+        for filed in &filings {
+            if let Phase::Classes(classes) = &filed.key.phase {
+                *per_class.entry(classes.clone()).or_insert(0usize) += 1;
+            }
+        }
+        let most = per_class.values().max().copied().unwrap_or(0);
+        eprintln!(
+            "again: {again:?}, {classed} classed; {} filings under {} classes, \
+             at most {most} for one, {} under a fine phase",
+            per_class.values().sum::<usize>(),
+            per_class.len(),
+            filings.len() - per_class.values().sum::<usize>()
+        );
+        assert_eq!(again.wrong, 0, "{again:?}");
+        assert!(classed > 0, "no run's placement decided it");
+        assert_eq!(
+            (again.skipped, again.misses),
+            (classed, 0),
+            "a run seen before was drawn again: {again:?}"
+        );
     }
 
     #[test]
