@@ -228,7 +228,7 @@ export function targetArgs(target, host, cargoArgs) {
 
 /**
  * The skia-bindings build in cargo's JSON `messages`: the directory its build
- * script ran in, and the features cargo built it with. Throws where cargo
+ * script ran in, and the features cargo built its library with. Throws where cargo
  * built none, or more than one, since then there is no single build to pack.
  */
 export function bindingsBuildOf(messages) {
@@ -236,8 +236,13 @@ export function bindingsBuildOf(messages) {
   const scripts = messages.filter(
     (m) => m.reason === "build-script-executed" && isBindings(m),
   );
+  // The library, not the build script, which cargo reports as an artifact
+  // of the same package with kind `custom-build`.
   const libraries = messages.filter(
-    (m) => m.reason === "compiler-artifact" && isBindings(m),
+    (m) =>
+      m.reason === "compiler-artifact" &&
+      isBindings(m) &&
+      (m.target?.kind ?? []).includes("lib"),
   );
   if (scripts.length !== 1 || libraries.length !== 1)
     throw new Error(
@@ -510,8 +515,15 @@ function cases(scratch) {
   };
   const ran = (id, dir) =>
     message("build-script-executed", id, { out_dir: `${dir}/out` });
+  // A library's artifact, and the build script's own: cargo reports the
+  // compiled build script as a `compiler-artifact` of the package too.
   const built = (id, features) =>
-    message("compiler-artifact", id, { features });
+    message("compiler-artifact", id, { features, target: { kind: ["lib"] } });
+  const scriptBuilt = (id, features) =>
+    message("compiler-artifact", id, {
+      features,
+      target: { kind: ["custom-build"] },
+    });
   // A resolver in the shape cargo answers: the base set, plus what each
   // crate feature turns on.
   const resolveLike = (target, features) => [
@@ -620,6 +632,7 @@ function cases(scratch) {
       true,
       bindingsIs(
         [
+          scriptBuilt(registryId, ["pdf", "svg"]),
           ran(registryId, "/t/release/build/skia-bindings-1"),
           ran("registry+https://x#other@1.0.0", "/t/release/build/other-1"),
           built(registryId, ["pdf", "svg"]),
