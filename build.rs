@@ -3,12 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The brotli decoder sources Skia's build list leaves out since M156,
-/// relative to Skia's `third_party/externals/brotli`: `prefix.c` defines the
-/// command table `kCmdLut`, and `static_init.c` defines
-/// `BrotliDecoderEnsureStaticInit`, both of which `decode.c` calls for.
-const BROTLI_MISSING_SOURCES: [&str; 2] =
-    ["c/dec/prefix.c", "c/dec/static_init.c"];
+#[path = "build/brotli.rs"]
+mod brotli;
+
+use brotli::{Inputs, Plan, VENDORED_BROTLI, VENDORED_FILES, left_out, plan};
+
+/// Where `vendor/brotli` is, under this crate's root.
+const VENDOR_BROTLI: &str = "vendor/brotli";
 
 fn main() {
     // On Linux, compile the BDF stub to satisfy fontconfig's
@@ -105,8 +106,8 @@ const SKIA_PATCHES: [SkiaPatch; 7] = [
 ///
 /// This repository's own builds compile the patched source. A crate build
 /// compiles crates.io's, or links rust-skia's prebuilt archive, which is built
-/// from the same unpatched source and leaves no source for [`skia_source`] to
-/// name, so it gets none of them. Only tests read the cfgs: the crate draws
+/// from the same unpatched source; it names no tree for [`skia_tree`] to
+/// return, and gets none of them. Only tests read the cfgs: the crate draws
 /// and reads through Skia the same way on both, and what differs is what
 /// Skia does underneath.
 fn skia_patches() {
@@ -114,7 +115,7 @@ fn skia_patches() {
         println!("cargo:rustc-check-cfg=cfg({})", patch.cfg);
     }
     println!("cargo:rerun-if-env-changed=SKIA_SOURCE_DIR");
-    let Ok(skia) = skia_source() else {
+    let Some(skia) = skia_tree() else {
         return;
     };
     for patch in &SKIA_PATCHES {
@@ -154,130 +155,113 @@ fn graphite_bindings() {
 }
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
-// Re-check: link a Linux build from an unpatched Skia tree with
-// this function returning at once; it fails on undefined `kCmdLut` and
+// Re-check: link a Linux build from crates.io's Skia with this function
+// returning at once; it fails on undefined `kCmdLut` and
 // `BrotliDecoderEnsureStaticInit`
 //
-// Skia M156 rolls brotli to cfa184a, which moves the decoder's command table,
-// `kCmdLut`, into a new `c/dec/prefix.c` and its static initialisation into a
-// new `c/dec/static_init.c`, and Skia's `third_party/brotli/BUILD.gn` lists
-// neither, so `decode.c`'s references to both are left undefined. Only
-// `freetype-woff2` links brotli, and Cargo.toml turns it on for Linux alone,
-// so the link fails there, for every build of skia-bindings from source.
-//
-// The files are compiled here from the brotli source the Skia build used,
-// never from a copy of our own, and only those that build's `BUILD.gn` leaves
-// out: a patched tree -- this repository's own builds, through
-// `containers/skia-brotli-sources.patch` -- or an upstream fix compiles them
-// inside Skia, and a second definition would fail the link the other way.
+/// Compiles the brotli decoder sources Skia's build leaves out, from
+/// `vendor/brotli`: see `build/brotli.rs` for why they are missing and why
+/// they come from this crate rather than the Skia tree skia-bindings syncs.
+///
+/// Where the build names a Skia tree, `vendor/brotli` is held to the brotli
+/// in it first, on every target, so that every build of this repository
+/// checks the vendored copy against the source it stands in for. Only the
+/// sources that tree's `BUILD.gn` leaves out are compiled: a patched tree --
+/// this repository's own builds, through `containers/skia-brotli-sources.patch`
+/// -- or an upstream fix compiles them inside Skia, and a second definition
+/// would fail the link the other way.
 fn brotli_command_table() {
     println!("cargo:rerun-if-env-changed=SKIA_SOURCE_DIR");
-    println!("cargo:rerun-if-env-changed=CARGO_HOME");
     println!("cargo:rerun-if-env-changed=DOCS_RS");
+    let tree = skia_tree();
+    let tree_text = tree.as_ref().map(|tree| tree.to_string_lossy());
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    // docs.rs builds against skia-bindings' stub: no Skia is compiled or
-    // linked, so there is no decoder to complete and no source to find.
-    if target_os != "linux" || env::var_os("DOCS_RS").is_some() {
+    let docs_rs = env::var_os("DOCS_RS").is_some();
+    if let Some(tree) = &tree
+        && !docs_rs
+    {
+        hold_vendored_brotli_to(tree);
+    }
+    let sources = match plan(&Inputs {
+        target_os: &target_os,
+        docs_rs,
+        tree: tree_text.as_deref(),
+    }) {
+        Plan::Nothing => return,
+        Plan::Vendored => brotli::MISSING_SOURCES.to_vec(),
+        Plan::Tree(tree) => {
+            let build_gn = Path::new(tree).join("third_party/brotli/BUILD.gn");
+            println!("cargo:rerun-if-changed={}", build_gn.display());
+            let gn = fs::read_to_string(&build_gn).unwrap_or_else(|error| {
+                panic!(
+                    "meo-skia-canvas: cannot read {} ({error}), which says which brotli \
+                     sources the Skia tree this build names compiles",
+                    build_gn.display()
+                )
+            });
+            left_out(&gn)
+        }
+    };
+    if sources.is_empty() {
         return;
     }
-    let skia = skia_source().unwrap_or_else(|reason| {
-        panic!(
-            "meo-skia-canvas: cannot find the Skia source skia-bindings built from ({reason}). \
-             On Linux this build compiles brotli's decoder sources from \
-             that source, which Skia's own build leaves out. Set SKIA_SOURCE_DIR to the \
-             skia-bindings package's `skia` directory to name it."
-        )
-    });
-    let build_gn = skia.join("third_party/brotli/BUILD.gn");
-    println!("cargo:rerun-if-changed={}", build_gn.display());
-    let gn = fs::read_to_string(&build_gn).unwrap_or_default();
-    let brotli = skia.join("third_party/externals/brotli");
-    let missing: Vec<PathBuf> = BROTLI_MISSING_SOURCES
-        .iter()
-        .filter(|source| !gn.contains(&format!("externals/brotli/{source}")))
-        .map(|source| brotli.join(source))
-        .filter(|source| source.is_file())
-        .collect();
-    if missing.is_empty() {
-        return;
+    let vendor = crate_root().join(VENDOR_BROTLI);
+    for file in VENDORED_FILES {
+        println!("cargo:rerun-if-changed={}", vendor.join(file).display());
     }
     cc::Build::new()
-        .files(&missing)
-        .include(brotli.join("c/include"))
+        .files(sources.iter().map(|source| vendor.join(source)))
+        .include(vendor.join("c/include"))
         // Nothing in this crate refers to them, so a linker that reads
         // archives in order would otherwise leave them out before Skia asks.
         .link_lib_modifier("+whole-archive")
         .compile("brotli_command_table");
 }
 
-/// The Skia source tree the skia-bindings in this build compiled, or why it
-/// cannot be named.
-///
-/// `SKIA_SOURCE_DIR` when it is set, as skia-bindings itself reads it.
-/// Otherwise the skia-bindings this build links: `links = "skia"` allows one
-/// in a build graph, and the build's own Cargo.lock says which version -- the
-/// first that names it above `OUT_DIR`, where a workspace's target directory
-/// is by default, or else above this crate's manifest, which is the
-/// workspace itself when this repository is built. A full build from crates.io
-/// fetches Skia and syncs its DEPS into that package's own `skia` directory;
-/// a checkout named by a `[patch]` path in this crate's Cargo.toml builds its
-/// own. Anything else is refused rather than guessed at: a wrong tree would
-/// compile a table that does not match the decoder it is linked with.
-fn skia_source() -> Result<PathBuf, String> {
-    if let Some(dir) = env::var_os("SKIA_SOURCE_DIR") {
-        return Ok(PathBuf::from(dir));
+/// Refuses a build whose `vendor/brotli` differs from the brotli in `tree`,
+/// the Skia source it names: the command table has to match the decoder
+/// Skia compiled. A tree with no brotli synced has nothing to compare.
+fn hold_vendored_brotli_to(tree: &Path) {
+    let synced = tree.join("third_party/externals/brotli");
+    if !synced.is_dir() {
+        return;
     }
-    let manifest_dir = PathBuf::from(
-        env::var_os("CARGO_MANIFEST_DIR").ok_or("no CARGO_MANIFEST_DIR")?,
-    );
-    if let Some(checkout) = patched_skia_bindings(&manifest_dir) {
-        return Ok(checkout.join("skia"));
-    }
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("no OUT_DIR")?);
-    let version = out_dir
-        .ancestors()
-        .chain(manifest_dir.ancestors())
-        .filter_map(|dir| fs::read_to_string(dir.join("Cargo.lock")).ok())
-        .find_map(|lock| locked_skia_bindings(&lock))
-        .ok_or(
-            "no Cargo.lock above OUT_DIR or the manifest names skia-bindings",
-        )?;
-    let cargo_home = env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME").map(|home| Path::new(&home).join(".cargo"))
+    let vendor = crate_root().join(VENDOR_BROTLI);
+    let differ: Vec<&str> = VENDORED_FILES
+        .into_iter()
+        .filter(|file| {
+            fs::read(vendor.join(file)).ok() != fs::read(synced.join(file)).ok()
         })
-        .ok_or("neither CARGO_HOME nor HOME is set")?;
-    let package = format!("skia-bindings-{version}");
-    let trees: Vec<PathBuf> = fs::read_dir(cargo_home.join("registry/src"))
-        .map_err(|error| format!("cannot list the registry: {error}"))?
-        .flatten()
-        .map(|registry| registry.path().join(&package).join("skia"))
-        .filter(|skia| skia.join("third_party/externals/brotli").is_dir())
         .collect();
-    match trees.as_slice() {
-        [tree] => Ok(tree.clone()),
-        [] => Err(format!("no registry copy of {package} holds a synced Skia")),
-        _ => Err(format!(
-            "{} registry copies of {package} hold a synced Skia",
-            trees.len()
-        )),
+    if !differ.is_empty() {
+        panic!(
+            "meo-skia-canvas: {VENDOR_BROTLI} is brotli at {VENDORED_BROTLI}, and {} differs from \
+             it in {}. Copy those files from that brotli into {VENDOR_BROTLI} and set \
+             `VENDORED_BROTLI` in build/brotli.rs to the commit Skia's DEPS pins.",
+            synced.display(),
+            differ.join(", ")
+        );
     }
 }
 
-/// The skia-bindings version a Cargo.lock resolves, when it names one.
-fn locked_skia_bindings(lock: &str) -> Option<String> {
-    let mut lines = lock.lines();
-    while let Some(line) = lines.next() {
-        if line == "name = \"skia-bindings\"" {
-            let version = lines
-                .next()?
-                .strip_prefix("version = \"")?
-                .strip_suffix('"')?;
-            return Some(version.to_owned());
-        }
+/// This crate's root.
+fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The Skia source tree the skia-bindings in this build compiled, where the
+/// build names one: `SKIA_SOURCE_DIR` when it is set and not empty, as
+/// skia-bindings itself reads it, or else the `skia` directory of a rust-skia
+/// checkout this crate's Cargo.toml patches skia-bindings to. A build from
+/// crates.io names neither, and its tree is not looked for: it lives in the
+/// cargo registry's extraction of skia-bindings, which a restored build cache
+/// can leave without it.
+fn skia_tree() -> Option<PathBuf> {
+    let source_dir = env::var("SKIA_SOURCE_DIR").ok();
+    if let Some(dir) = brotli::source_dir(source_dir.as_deref()) {
+        return Some(PathBuf::from(dir));
     }
-    None
+    patched_skia_bindings(&crate_root()).map(|checkout| checkout.join("skia"))
 }
 
 /// The rust-skia `skia-bindings` directory this crate's Cargo.toml patches
