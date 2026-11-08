@@ -263,6 +263,12 @@ const EXACT_BLEND_DIVISION = join(
   "containers",
   "skia-exact-blend-division.patch",
 );
+// Not a fix: one function, `meo_skia_canvas_needs_its_patched_skia_see_SKIA_BINARIES_URL`,
+// in a file every build compiles. A crate build that names this repository's
+// archives in SKIA_BINARIES_URL calls it (`cfg(meo_skia_marker)`), so one that
+// fell back to crates.io's Skia fails to link instead of drawing with stock
+// Skia, and says in the symbol's name what to check.
+const PATCH_MARKER = join("containers", "skia-patch-marker.patch");
 
 export const PATCHES = {
   darwin: [
@@ -276,6 +282,7 @@ export const PATCHES = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    PATCH_MARKER,
     // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
     // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
     //
@@ -301,6 +308,7 @@ export const PATCHES = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    PATCH_MARKER,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
   // nothing links brotli, and a `freetype` build here takes build.rs's own
@@ -315,6 +323,7 @@ export const PATCHES = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    PATCH_MARKER,
   ],
 };
 

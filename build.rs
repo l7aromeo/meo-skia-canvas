@@ -42,7 +42,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 6] = [
+const SKIA_PATCHES: [SkiaPatch; 7] = [
     // `containers/skia-atlas-size.patch`: Ganesh's path atlas capped at 512 by
     // 512, where an atlas row of 512 or more can move a path's coverage.
     SkiaPatch {
@@ -89,6 +89,14 @@ const SKIA_PATCHES: [SkiaPatch; 6] = [
         cfg: "meo_exact_blend_division",
         file: "src/opts/SkRasterPipeline_opts.h",
         marker: "(d*sa) / (sa - s)",
+    },
+    // `containers/skia-patch-marker.patch`: no fix, one function only this
+    // repository's patched Skia defines, which the archives built from it
+    // carry for a crate build to link against.
+    SkiaPatch {
+        cfg: "meo_skia_marker",
+        file: "src/core/SkGraphics.cpp",
+        marker: "meo_skia_canvas_needs_its_patched_skia_see_SKIA_BINARIES_URL",
     },
 ];
 

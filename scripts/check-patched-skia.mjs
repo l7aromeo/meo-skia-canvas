@@ -159,6 +159,12 @@ const EXACT_BLEND_DIVISION = {
   unit: "src/core/SkOpts.cpp",
 };
 
+/// containers/skia-patch-marker.patch, on every platform.
+const PATCH_MARKER = {
+  patch: "containers/skia-patch-marker.patch",
+  ...buildRsPatch("meo_skia_marker"),
+};
+
 /// Each file a patch for the platform changes, under Skia's source root, with
 /// what only the patched file contains, and the patch that puts it there.
 /// `just check-skia-patches` refuses a patch in `PATCHES` that is neither
@@ -178,6 +184,7 @@ export const PATCHED = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    PATCH_MARKER,
   ],
   linux: [
     ATLAS_SIZE,
@@ -188,6 +195,7 @@ export const PATCHED = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    PATCH_MARKER,
   ],
   win32: [
     ATLAS_SIZE,
@@ -202,6 +210,7 @@ export const PATCHED = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    PATCH_MARKER,
   ],
 };
 
@@ -445,6 +454,7 @@ const COMPILED_WITH = {
   "src/ports/SkTypeface_win_dw.cpp": null,
   "src/core/SkOpts.cpp": null,
   "src/opts/SkRasterPipeline_opts.h": null,
+  "src/core/SkGraphics.cpp": null,
 };
 
 /** The self-test's cases for one platform's `patched` list, under `root`. */
