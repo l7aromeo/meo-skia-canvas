@@ -291,6 +291,13 @@ jobs:
         run: |
           if (-not (Test-Path S:\)) { subst S: "$env:USERPROFILE\.cache" }
           $env:XDG_CACHE_HOME = 'S:\'
+          # The patched tree `just` names through its dotenv-command, which a
+          # step outside `just` sets itself.
+          foreach ($line in (node scripts/skia-source.mjs env)) {
+            $name, $value = $line -split '=', 2
+            Set-Item "env:$name" $value
+          }
+          if (-not $env:SKIA_SOURCE_DIR) { throw "skia-source.mjs named no tree" }
           node scripts/skia-cache.mjs cargo test --release `
             --features "node-addon,vulkan,window" `
             --lib -- text_in_a_chain_is_bounded_by_all_it_inks --nocapture
