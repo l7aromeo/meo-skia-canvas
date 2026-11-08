@@ -20,9 +20,8 @@ on:
       - "scripts/skia-pack.mjs"
   workflow_dispatch:
     inputs:
-      # Off, a run builds and packs every archive and keeps them as this
-      # run's artifacts: for checking a change to this workflow or to
-      # skia-pack on a branch.
+      # Off, a run builds and packs every archive and uploads none: for
+      # checking a change to this workflow or to skia-pack on a branch.
       publish:
         description: "Upload the archives to their release"
         required: false
@@ -44,9 +43,9 @@ jobs:
   # What to build: every archive skia-pack plans for this checkout, one build
   # each, with the key cargo predicts, split by platform for the three build
   # jobs. With `publish` on, an archive the release already holds is marked
-  # `held` and its cell builds nothing: archives are never replaced (see
-  # `publish`), so a re-run after a partial one fills in only what is
-  # missing.
+  # `held` and its cell builds nothing: archives are never replaced
+  # (`skia-pack upload`), so a re-run after a partial one fills in only what
+  # is missing.
   plan:
     runs-on: ubuntu-latest
     # Creates the release when `publish` is on and there is none.
@@ -167,6 +166,9 @@ jobs:
         cell: ${{ fromJSON(needs.plan.outputs.darwin) }}
     name: mac ${{ matrix.cell.features || 'base' }}
     runs-on: macos-15
+    # Uploads its archive to the release when `publish` is on.
+    permissions:
+      contents: write
     timeout-minutes: 120
     steps:
       - name: Checkout repository
@@ -222,13 +224,18 @@ jobs:
           node scripts/skia-pack.mjs build --expect "$KEY" "$RUNNER_TEMP/archives" "$TARGET" \
             ${FEATURES:+--features "$FEATURES"}
 
-      - name: Keep the archive
-        if: ${{ !matrix.cell.held }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.cell.key }}
-          path: ${{ runner.temp }}/archives
-          if-no-files-found: error
+      # Each cell uploads its own archive, through `skia-pack upload`, which
+      # never replaces a held one (see `complete`). Not an artifact handed to
+      # a later job: the arm64 Alpine container runs no JavaScript action,
+      # `upload-artifact` included, and one path for every cell is the one
+      # that works in all of them.
+      - name: Upload the archive
+        if: ${{ !matrix.cell.held && inputs.publish }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KEY: ${{ matrix.cell.key }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: node scripts/skia-pack.mjs upload "$RUNNER_TEMP/archives/skia-binaries-$KEY.tar.gz" "$TAG"
 
   windows:
     needs: plan
@@ -238,6 +245,9 @@ jobs:
         cell: ${{ fromJSON(needs.plan.outputs.win32) }}
     name: windows ${{ matrix.cell.target }} ${{ matrix.cell.features || 'base' }}${{ matrix.cell.crtStatic && ' static' || '' }}
     runs-on: ${{ startsWith(matrix.cell.target, 'x86_64') && 'windows-latest' || 'windows-11-arm' }}
+    # Uploads its archive to the release when `publish` is on.
+    permissions:
+      contents: write
     timeout-minutes: 120
     steps:
       - name: Enable long paths
@@ -322,13 +332,16 @@ jobs:
           node scripts/skia-pack.mjs build --expect $env:KEY "$env:RUNNER_TEMP\archives" $env:TARGET @features
           if ($LASTEXITCODE -ne 0) { throw "skia-pack build failed" }
 
-      - name: Keep the archive
-        if: ${{ !matrix.cell.held }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.cell.key }}
-          path: ${{ runner.temp }}/archives
-          if-no-files-found: error
+      - name: Upload the archive
+        if: ${{ !matrix.cell.held && inputs.publish }}
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KEY: ${{ matrix.cell.key }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          node scripts/skia-pack.mjs upload "$env:RUNNER_TEMP\archives\skia-binaries-$env:KEY.tar.gz" $env:TAG
+          if ($LASTEXITCODE -ne 0) { throw "skia-pack upload failed" }
 
   linux:
     needs: plan
@@ -339,8 +352,10 @@ jobs:
     name: linux ${{ matrix.cell.target }} ${{ matrix.cell.features || 'base' }}${{ matrix.cell.crtStatic && ' static' || '' }}
     runs-on: ${{ startsWith(matrix.cell.target, 'x86_64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 120
+    # Uploads its archive to the release when `publish` is on; `packages`
+    # pulls the build container from ghcr.
     permissions:
-      contents: read
+      contents: write
       packages: read
     # The steps below are bash -- a here-string, arrays, `pipefail` -- and a
     # step in a container job runs under `sh` unless it names a shell. Both
@@ -470,27 +485,21 @@ jobs:
           node scripts/skia-pack.mjs build --expect "$KEY" "$RUNNER_TEMP/archives" "$TARGET" \
             "${args[@]}" ${FEATURES:+--features "$FEATURES"}
 
-      - name: Keep the archive
-        if: ${{ !matrix.cell.held }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.cell.key }}
-          path: ${{ runner.temp }}/archives
-          if-no-files-found: error
+      - name: Upload the archive
+        if: ${{ !matrix.cell.held && inputs.publish }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KEY: ${{ matrix.cell.key }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: node skia-canvas/scripts/skia-pack.mjs upload "$RUNNER_TEMP/archives/skia-binaries-$KEY.tar.gz" "$TAG"
 
-  # Uploads what the cells built, never replacing an asset: the archives are
-  # downloaded by URL with no hash a consumer could check, so an asset
-  # replaced after a crate release would change what an existing build
-  # links with nothing to show for it. A name the release already holds is
-  # refused unless the bytes are the same, which -- a Skia build not being
-  # byte-reproducible -- means this job re-run after a partial upload. Then
-  # `published` holds the release to the whole plan.
-  publish:
+  # Holds the release to the whole plan once every cell has uploaded:
+  # `skia-pack published` refuses one that lacks an archive, which a cell
+  # whose upload failed would leave.
+  complete:
     needs: [plan, mac, windows, linux]
     if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -507,36 +516,6 @@ jobs:
 
       - name: Fetch dependencies
         run: cargo fetch
-
-      - name: Collect the archives
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          path: ${{ runner.temp }}/archives
-          merge-multiple: true
-
-      - name: Upload the archives
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          for archive in "$RUNNER_TEMP"/archives/skia-binaries-*.tar.gz; do
-            name=$(basename "$archive")
-            local_sum=$(sha256sum "$archive" | cut -d' ' -f1)
-            held=$(gh api "repos/$REPO/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$name\") | .digest")
-            if [ -n "$held" ]; then
-              if [ "$held" = "sha256:$local_sum" ]; then
-                echo "$name: already held, same bytes"
-                continue
-              fi
-              echo "::error::$TAG already holds $name with $held; this run built sha256:$local_sum. Archives are never replaced."
-              exit 1
-            fi
-            gh release upload "$TAG" "$archive" --repo "$REPO"
-            echo "$name: uploaded"
-          done
 
       - name: The release holds every planned archive
         env:

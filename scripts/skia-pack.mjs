@@ -17,6 +17,9 @@
 //   node scripts/skia-pack.mjs published
 //       refuse unless the release skia-binaries.txt names holds every planned
 //       archive
+//   node scripts/skia-pack.mjs upload <archive> <release tag>
+//       upload an archive to the release, never replacing one it holds:
+//       a held name with the same bytes is left as it is, with others refused
 //   node scripts/skia-pack.mjs origin
 //       print the skia-bindings version Cargo.lock names and the rust-skia
 //       commit its crates.io package was made from, space-separated
@@ -321,6 +324,21 @@ export function planCells(commit, resolve) {
   );
 }
 
+/**
+ * What uploading an archive whose bytes hash to `digest`, `sha256:<hex>`,
+ * does to a release that holds `held` under its name -- the asset's own
+ * `digest`, or `undefined` for none: `"upload"`, `"held"` for the same
+ * bytes, which a re-run after a partial upload meets, or the refusal.
+ * Archives are never replaced: the URL a consumer sets carries no hash
+ * their build could check, so a replaced archive would change what an
+ * existing build links with nothing to show for it.
+ */
+export function uploadDecision(name, digest, held) {
+  if (held === undefined) return "upload";
+  if (held === digest) return "held";
+  return `skia-pack: the release already holds ${name} as ${held}; this build is ${digest}, and archives are never replaced`;
+}
+
 /** The archive file names `cells` plan that `held` does not include. */
 export function missingArchives(cells, held) {
   return cells
@@ -577,6 +595,30 @@ function cases(scratch) {
         } catch (e) {
           if (e.message.includes("resolved no skia-bindings features")) throw e;
         }
+      },
+    ],
+    [
+      "an archive the release does not hold is uploaded",
+      true,
+      () => {
+        if (uploadDecision("a.tar.gz", "sha256:aa", undefined) !== "upload")
+          throw new Error("not uploaded");
+      },
+    ],
+    [
+      "an archive the release holds with the same bytes is left as it is",
+      true,
+      () => {
+        if (uploadDecision("a.tar.gz", "sha256:aa", "sha256:aa") !== "held")
+          throw new Error("not held");
+      },
+    ],
+    [
+      "an archive the release holds with other bytes is refused",
+      false,
+      () => {
+        const why = uploadDecision("a.tar.gz", "sha256:aa", "sha256:bb");
+        if (why.includes("never replaced")) throw new Error(why);
       },
     ],
     [
@@ -924,6 +966,52 @@ function releaseAssets(tag, repository) {
 }
 
 /**
+ * Uploads `archive` to the release `tag` of `repository` (`owner/name`)
+ * through GitHub's REST API with `token`, as `uploadDecision` allows.
+ * Plain `fetch` rather than `gh` or an action: it runs in every cell,
+ * the arm64 Alpine container included, where no JavaScript action does.
+ */
+async function uploadArchive(archive, tag, repository, token) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const found = await fetch(
+    `https://api.github.com/repos/${repository}/releases/tags/${tag}`,
+    { headers },
+  );
+  if (!found.ok)
+    throw new Error(
+      `skia-pack: no release ${tag} in ${repository}: ${found.status}`,
+    );
+  const release = await found.json();
+  const name = archive.split(/[\\/]/).at(-1);
+  const bytes = readFileSync(archive);
+  const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  const decision = uploadDecision(
+    name,
+    digest,
+    release.assets.find((asset) => asset.name === name)?.digest,
+  );
+  if (decision === "held") return `${name}: already held, same bytes`;
+  if (decision !== "upload") throw new Error(decision);
+  const sent = await fetch(
+    `https://uploads.github.com/repos/${repository}/releases/${release.id}/assets?name=${encodeURIComponent(name)}`,
+    {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/gzip" },
+      body: bytes,
+    },
+  );
+  if (!sent.ok)
+    throw new Error(
+      `skia-pack: uploading ${name} to ${tag} failed: ${sent.status} ${await sent.text()}`,
+    );
+  return `${name}: uploaded, ${digest}`;
+}
+
+/**
  * This tree's `planCells`, keyed by the commit crates.io's skia-bindings was
  * packaged from, its features as cargo resolves them for each target.
  */
@@ -1018,6 +1106,15 @@ if (main) {
         crtStatic === "static",
       );
       console.log(`skia-pack: packed ${archive}`);
+    } else if (command === "upload") {
+      const [archive, tag] = args;
+      const repository = process.env.GITHUB_REPOSITORY;
+      const token = process.env.GITHUB_TOKEN;
+      if (!archive || !tag || !repository || !token)
+        throw new Error(
+          "usage: GITHUB_REPOSITORY=<owner/name> GITHUB_TOKEN=<token> node scripts/skia-pack.mjs upload <archive> <release tag>",
+        );
+      console.log(await uploadArchive(archive, tag, repository, token));
     } else if (command === "origin") {
       const { version, commit } = packagedSkiaBindings();
       console.log(`${version} ${commit}`);
@@ -1101,7 +1198,7 @@ if (main) {
       console.log(`skia-pack: packed ${archive}`);
     } else {
       console.error(
-        "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static] | build [--expect <key>] <out-dir> <target> [cargo args] | plan | published | origin | manifest [--check] | --self-test",
+        "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static] | build [--expect <key>] <out-dir> <target> [cargo args] | plan | published | upload <archive> <release tag> | origin | manifest [--check] | --self-test",
       );
       process.exit(2);
     }

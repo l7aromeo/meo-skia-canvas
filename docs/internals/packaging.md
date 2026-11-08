@@ -315,9 +315,11 @@ compiles the crate in release for its target -- macOS and Windows from
 `skia-source prepare`'s tree, Linux in build.yml's containers from a
 rust-skia checkout at the packaged commit, through `just use-local-skia` --
 and `skia-pack build --expect` packs it, refusing an archive under any key
-but the planned one. `publish` uploads what was built, refusing a name the
-release holds with other bytes, and `skia-pack published` holds the release
-to the plan.
+but the planned one. With `publish` on, each cell then uploads its archive
+with `skia-pack upload`, which leaves a name the release holds with the same
+bytes and refuses one with other bytes -- a step of the cell's own, since the
+arm64 Alpine container runs no JavaScript action to hand an artifact on --
+and `complete` holds the release to the plan with `skia-pack published`.
 
 **Build scripts and the C runtime.** Every cell builds for its host without
 `--target`, as build.yml does, so the images' RUSTFLAGS reach skia-bindings'
