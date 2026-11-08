@@ -446,8 +446,9 @@ jobs:
 
       # skia-bindings and skia-safe from the patched checkout, as build.yml's
       # Linux build takes them: `use-local-skia` patches Cargo.toml to the
-      # checkout, which build.rs reads to find the Skia source its brotli
-      # step compiles from on a `freetype` build.
+      # checkout, which build.rs reads to hold vendor/brotli to the brotli
+      # in it and to see that its build list compiles the sources stock
+      # Skia's leaves out.
       #
       # Built with the image's RUSTFLAGS -- its linker, and `-crt-static` on
       # musl, as the npm build is -- and no `--target`, so they reach

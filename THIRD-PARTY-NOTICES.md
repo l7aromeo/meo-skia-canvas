@@ -76,6 +76,26 @@ This project uses it under the FreeType Licence, which requires the following cr
 > Portions of this software are copyright © The FreeType Project (www.freetype.org).
 > All rights reserved.
 
+## Brotli
+
+Compiled into the **Linux** binaries and the crate's Linux builds, where FreeType decodes WOFF2
+faces with brotli's decoder (`freetype-woff2`). Pinned by Skia's `DEPS` at `brotli@cfa184a`. The
+crate carries two of its decoder sources and the headers they include in `vendor/brotli`, because
+Skia's build leaves them out (see `build/brotli.rs`).
+
+Brotli is under the MIT licence.
+
+> Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+> associated documentation files (the "Software"), to deal in the Software without restriction,
+> including without limitation the rights to use, copy, modify, merge, publish, distribute,
+> sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or
+> substantial portions of the Software.
+
 ## zlib
 
 Linked into the Linux binaries via Chromium's zlib fork, under the zlib licence.

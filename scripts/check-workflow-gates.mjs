@@ -52,6 +52,7 @@ const MUST_COVER = {
       "they compile into the Rust build, set what its lints refuse, pin what it builds against, patch the Skia it builds, state what links, or are what the changelog check reads",
     specs: [
       ":(glob)**/*.rs",
+      ":(glob)vendor/brotli/**",
       "Cargo.toml",
       "Cargo.lock",
       "rustfmt.toml",
