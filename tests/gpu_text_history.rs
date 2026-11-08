@@ -23,8 +23,13 @@
 //! A crate build's Skia carries neither, and
 //! `cfg(meo_text_distance_fields_off)` and `cfg(meo_transformed_mask_reuse)`,
 //! from `build.rs`, say which this build compiled. Where a patch is missing,
-//! each test holds the build to the defect instead, so the day crates.io's Skia
-//! stops showing it, the test says so.
+//! the cross-scale tests hold the build to the defect instead, so the day
+//! crates.io's Skia stops showing it, the test says so: the blob cache's keying
+//! is Skia's own logic, the same on every GPU. Whether a distance-field glyph's
+//! coverage moves with its place in the atlas depends on how the GPU samples
+//! it -- it was measured on Apple's Metal, and Mesa's software Vulkan drew
+//! every history alike -- so without the patch the history test holds only that
+//! each history draws the same page every time.
 
 use meo_skia_canvas::{
     export::{EncodeOptions, ImageFormat},
@@ -181,26 +186,32 @@ fn text_on_the_gpu_draws_as_the_cpu_draws_it_whatever_came_before() {
         println!("PAGE {:016x} {}", fnv(&gpu), gpu == cpu);
         return;
     }
+    // The page after `history`, drawn in a process of its own: its hash, and
+    // whether it is the CPU page.
+    let page = |history: &str| {
+        let child = std::process::Command::new(
+            std::env::current_exe().expect("a test binary has a path"),
+        )
+        .args(["--exact", TEST, "--test-threads=1", "--nocapture"])
+        .env(HISTORY, history)
+        .output()
+        .expect("the test binary runs");
+        assert!(child.status.success(), "the child for {history} failed");
+        let out = String::from_utf8_lossy(&child.stdout);
+        let line = out
+            .lines()
+            // The harness prints the test's name on the same line.
+            .find_map(|line| Some(line.split_once("PAGE ")?.1))
+            .unwrap_or_else(|| panic!("no page from {history}: {out}"));
+        let (hash, as_cpu) =
+            line.split_once(' ').expect("a hash and a verdict");
+        (hash.to_string(), as_cpu == "true")
+    };
     let pages: Vec<(&str, String, bool)> = HISTORIES
         .iter()
         .map(|&history| {
-            let child = std::process::Command::new(
-                std::env::current_exe().expect("a test binary has a path"),
-            )
-            .args(["--exact", TEST, "--test-threads=1", "--nocapture"])
-            .env(HISTORY, history)
-            .output()
-            .expect("the test binary runs");
-            assert!(child.status.success(), "the child for {history} failed");
-            let out = String::from_utf8_lossy(&child.stdout);
-            let line = out
-                .lines()
-                // The harness prints the test's name on the same line.
-                .find_map(|line| Some(line.split_once("PAGE ")?.1))
-                .unwrap_or_else(|| panic!("no page from {history}: {out}"));
-            let (hash, as_cpu) =
-                line.split_once(' ').expect("a hash and a verdict");
-            (history, hash.to_string(), as_cpu == "true")
+            let (hash, as_cpu) = page(history);
+            (history, hash, as_cpu)
         })
         .collect();
     let apart: Vec<&str> = pages
@@ -211,11 +222,17 @@ fn text_on_the_gpu_draws_as_the_cpu_draws_it_whatever_came_before() {
     if cfg!(meo_text_distance_fields_off) {
         assert!(apart.is_empty(), "GPU text apart from the CPU's: {apart:?}");
     } else {
-        let first = &pages[0].1;
+        // Without the patch, a page may differ from one history to another or
+        // not, as the GPU samples a distance field; what holds on every GPU is
+        // that the same history draws the same page.
+        let unsteady: Vec<&str> = pages
+            .iter()
+            .filter(|(history, hash, _)| page(history).0 != *hash)
+            .map(|(history, _, _)| *history)
+            .collect();
         assert!(
-            pages.iter().any(|(_, hash, _)| hash != first),
-            "crates.io's Skia drew the page alike after every history: \
-             {pages:?}; where it places a glyph no longer moves its pixels"
+            unsteady.is_empty(),
+            "a history drew another page the second time: {unsteady:?}"
         );
     }
 }
