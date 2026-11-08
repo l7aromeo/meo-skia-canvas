@@ -9,7 +9,7 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
-## 📦 ⟩ [v7.0.1] (npm) ⟩ Unreleased
+## 📦 ⟩ [v7.0.1] (npm) ⟩ November 8, 2026
 
 **A patch release: nothing that worked changes.** Text drawn on the GPU now
 draws the same whatever came before it -- the fonts registered, an earlier
@@ -5746,6 +5746,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 **Initial public release** 🎉
 
+[v7.0.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v7.0.0...npm-v7.0.1
 [v7.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.2...npm-v7.0.0
 [v6.0.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.1...npm-v6.0.2
 [v6.0.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.0...npm-v6.0.1

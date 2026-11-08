@@ -17,7 +17,7 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
-## 📦 ⟩ [v0.17.1] (crate) ⟩ Unreleased
+## 📦 ⟩ [v0.17.1] (crate) ⟩ November 8, 2026
 
 **A patch release, and nothing that worked changes.** It adds two readers,
 five fixes and one change. `Srgba::from_css` reads a CSS colour as
@@ -4894,6 +4894,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
   clamp during compositing; pin `RenderEngine::Cpu` for bit-exact HDR
   round-trips.
 
+[v0.17.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.17.0...rust-v0.17.1
 [v0.17.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.3...rust-v0.17.0
 [v0.16.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.2...rust-v0.16.3
 [v0.16.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.1...rust-v0.16.2
