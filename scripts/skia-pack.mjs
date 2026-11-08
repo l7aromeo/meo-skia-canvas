@@ -151,17 +151,62 @@ export function libraryFile(target, name) {
 }
 
 /**
- * The files the archive of a build carries, in `out/skia`: the static
- * libraries its `output` links, `bindings.rs`, and `icudtl.dat` on Windows
- * with `textlayout`.
+ * The libraries a skia-bindings build makes for `features`, in the order it
+ * links them: binaries_config.rs `from_features` and `built_libraries`. A
+ * download unpacks each of them and fails on one missing, so the archive
+ * holds this list exactly.
  */
-export function archiveFiles(output, target, features) {
-  const libraries = [
-    ...output.matchAll(/^cargo:rustc-link-lib=static=(\S+)$/gm),
-  ].map((m) => libraryFile(target, m[1]));
+export function builtLibraries(features) {
+  const has = (feature) => features.includes(feature);
+  return [
+    ...(has("textlayout")
+      ? ["skparagraph", "skshaper", "skunicode_core", "skunicode_icu"]
+      : []),
+    ...(has("svg") ? ["svg", "skresources"] : []),
+    ...(has("skottie")
+      ? [
+          "skottie",
+          "sksg",
+          "jsonreader",
+          ...(has("svg") ? [] : ["skresources"]),
+        ]
+      : []),
+    "skia",
+    "skia-bindings",
+  ];
+}
+
+/**
+ * The files the archive of a build carries, in `out/skia`: the libraries
+ * `builtLibraries` names, `bindings.rs`, and `icudtl.dat` on Windows with
+ * `textlayout`. The build's `output` has to link the same libraries, so an
+ * archive cannot be packed for features other than the build's. skia-bindings
+ * names a library it built as `rustc-link-lib=static=<name>`, except on
+ * Windows, where `static=` breaks the link and it writes
+ * `rustc-link-lib=<name>`, the form it gives system libraries too (cargo.rs
+ * `add_static_link_lib`). So a bare name is one it built where `has(file)`
+ * finds its library file in `out/skia`, and a system library otherwise.
+ */
+export function archiveFiles(output, target, features, has) {
+  const expected = builtLibraries(features);
+  const linked = [
+    ...output.matchAll(/^cargo:rustc-link-lib=(static=)?([^\s=]+)$/gm),
+  ]
+    .filter((m) => m[1] || has(libraryFile(target, m[2])))
+    .map((m) => m[2]);
+  const unlinked = expected.filter((name) => !linked.includes(name));
+  const unexpected = linked.filter((name) => !expected.includes(name));
+  if (unlinked.length || unexpected.length)
+    throw new Error(
+      `skia-pack: the build links ${linked.join(", ") || "no Skia library"}, where [${features}] builds ${expected.join(", ")}`,
+    );
   const extra =
     isWindows(target) && features.includes("textlayout") ? [ICUDTL_DAT] : [];
-  return [...libraries, "bindings.rs", ...extra];
+  return [
+    ...expected.map((name) => libraryFile(target, name)),
+    "bindings.rs",
+    ...extra,
+  ];
 }
 
 /**
@@ -175,7 +220,9 @@ export function pack(buildDir, outDir, how, vouch) {
   const why = vouch(output);
   if (why) throw new Error(`skia-pack: ${buildDir} is not packed: ${why}`);
   const skia = join(buildDir, "out", "skia");
-  const files = archiveFiles(output, how.target, how.features);
+  const files = archiveFiles(output, how.target, how.features, (file) =>
+    existsSync(join(skia, file)),
+  );
   const missing = files.filter((file) => !existsSync(join(skia, file)));
   if (missing.length)
     throw new Error(`skia-pack: ${skia} holds no ${missing.join(", ")}`);
@@ -413,24 +460,50 @@ function cases(scratch) {
   // linking `libs`, with `files` present in `out/skia`.
   // `layout` "nightly" writes the log where nightly cargo's build directory
   // keeps it, `run/stdout`, rather than stable's `output`.
+  // On Windows skia-bindings names the libraries it built with a bare
+  // `rustc-link-lib=`, as it does the system ones (cargo.rs
+  // `add_static_link_lib`); elsewhere with `static=`.
   const build = (name, libs, files, layout = "stable") => {
     const dir = join(scratch, name);
     mkdirSync(join(dir, "out", "skia"), { recursive: true });
     if (layout === "nightly") mkdirSync(join(dir, "run"));
+    const windowsForm = files.some((file) => file.endsWith(".lib"));
     writeFileSync(
       join(dir, layout === "nightly" ? "run/stdout" : "output"),
       [
         "STARTING OFFLINE BUILD",
-        ...libs.map((lib) => `cargo:rustc-link-lib=static=${lib}`),
-        "cargo:rustc-link-lib=c++",
+        ...libs.map(
+          (lib) => `cargo:rustc-link-lib=${windowsForm ? "" : "static="}${lib}`,
+        ),
+        ...(windowsForm
+          ? ["cargo:rustc-link-lib=user32", "cargo:rustc-link-lib=opengl32"]
+          : ["cargo:rustc-link-lib=c++"]),
       ].join("\n"),
     );
     for (const file of files)
       writeFileSync(join(dir, "out", "skia", file), file);
     return dir;
   };
-  const libs = ["skparagraph", "svg", "skia", "skia-bindings"];
+  // What a build with `base`'s features links, in its order: the macOS
+  // archive of skia-binaries-0.156.0-3f566dd7198c holds these.
+  const libs = [
+    "skparagraph",
+    "skshaper",
+    "skunicode_core",
+    "skunicode_icu",
+    "svg",
+    "skresources",
+    "skia",
+    "skia-bindings",
+  ];
   const unixFiles = [...libs.map((l) => `lib${l}.a`), "bindings.rs"];
+  const windowsFiles = [
+    ...libs.map((l) => `${l}.lib`),
+    "bindings.rs",
+    ICUDTL_DAT,
+  ];
+  // A refusal case expects the archive an acceptance would make, so that
+  // only `pack` refusing, and not a listing that differs, fails it.
   const how = (target, features = base) => ({
     commit,
     target,
@@ -811,7 +884,12 @@ function cases(scratch) {
     [
       "a build check-patched-skia refuses",
       false,
-      packs(build("unpatched", libs, unixFiles), linux, () => "unpatched", []),
+      packs(
+        build("unpatched", libs, unixFiles),
+        linux,
+        () => "unpatched",
+        unixFiles,
+      ),
     ],
     [
       "a build missing a library it links",
@@ -824,7 +902,7 @@ function cases(scratch) {
         ),
         linux,
         () => null,
-        [],
+        unixFiles,
       ),
     ],
     [
@@ -834,8 +912,80 @@ function cases(scratch) {
         build("noicu", libs, [...libs.map((l) => `${l}.lib`), "bindings.rs"]),
         windows,
         () => null,
-        [],
+        windowsFiles,
       ),
+    ],
+    [
+      "a Windows build whose output links none of its libraries",
+      false,
+      packs(
+        build(
+          "winnone",
+          [],
+          [...libs.map((l) => `${l}.lib`), "bindings.rs", ICUDTL_DAT],
+        ),
+        windows,
+        () => null,
+        windowsFiles,
+      ),
+    ],
+    [
+      "a build whose output leaves out a library its features build",
+      false,
+      packs(
+        build(
+          "unlinked",
+          libs.filter((l) => l !== "skresources"),
+          unixFiles,
+        ),
+        linux,
+        () => null,
+        unixFiles,
+      ),
+    ],
+    [
+      "a build linking a library its features do not build",
+      false,
+      packs(
+        build("extra", [...libs, "sksg"], [...unixFiles, "libsksg.a"]),
+        linux,
+        () => null,
+        unixFiles,
+      ),
+    ],
+    [
+      "a Windows build linking a library its features do not build",
+      false,
+      packs(
+        build(
+          "winextra",
+          [...libs, "sksg"],
+          [
+            ...[...libs, "sksg"].map((l) => `${l}.lib`),
+            "bindings.rs",
+            ICUDTL_DAT,
+          ],
+        ),
+        windows,
+        () => null,
+        windowsFiles,
+      ),
+    ],
+    [
+      "skottie builds skresources once, with or without svg",
+      true,
+      () => {
+        const got = [
+          builtLibraries(["skottie"]).join(),
+          builtLibraries(["svg", "skottie"]).join(),
+        ];
+        const want = [
+          "skottie,sksg,jsonreader,skresources,skia,skia-bindings",
+          "svg,skresources,skottie,sksg,jsonreader,skia,skia-bindings",
+        ];
+        if (JSON.stringify(got) !== JSON.stringify(want))
+          throw new Error(`${got.join(" / ")}`);
+      },
     ],
   ];
 }
