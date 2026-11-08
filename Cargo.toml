@@ -73,7 +73,11 @@ default = []
 # table that Node.js consults when dlopen'ing the resulting cdylib.
 node-addon = []
 
-freetype = ["skia-safe/embed-freetype", "skia-safe/freetype-woff2"]
+# Does nothing, on every target: Linux builds always embed FreeType (the
+# target table below), and macOS and Windows draw text through the system's
+# font stack, where skia-bindings drops FreeType's features. Kept so that a
+# manifest naming it still builds.
+freetype = []
 metal = [
     "skia-safe/ganesh",
     "skia-safe/metal",
@@ -109,8 +113,8 @@ fetch = ["dep:ureq"]
 #
 # Verified under `DOCS_RS=1`, which is what makes skia-bindings use the
 # stub: this set documents clean with zero warnings and `gui/index.html`
-# present. `freetype` is deliberately not here -- it changes font loading,
-# not the documented surface. `fetch` is, because `Image::from_url`,
+# present. `freetype` is not here: it does nothing. `fetch` is, because
+# `Image::from_url`,
 # `LoadOptions` and the rest exist only behind it.
 no-default-features = true
 features = ["vulkan", "window", "fetch"]
@@ -317,6 +321,18 @@ rustfft = "6.4.1"
 # compiled and linked everywhere, and the nightly `unused_crate_dependencies`
 # lint reports it on every other platform -- correctly, which is how these were
 # found.
+
+# Linux draws text through the FreeType Skia embeds, never the system's: the
+# npm package's Linux binaries embed it, so the same face draws the same in
+# both. skia-bindings then builds against no system FreeType; the system's
+# fontconfig, which it still links, may load one beside it, and
+# `src/bdf_stub.c` answers the BDF calls fontconfig makes that Skia's
+# FreeType leaves out. `freetype-woff2` decodes
+# WOFF2 faces there, through the brotli build.rs completes. The archives
+# skia-binaries.txt names are keyed by these features, so they are part of
+# what a crate build downloads.
+[target.'cfg(target_os = "linux")'.dependencies]
+skia-safe = { version = "0.156.0", features = ["embed-freetype", "freetype-woff2"] }
 
 # `font_library` subsets WOFF and WOFF2 faces here because Windows has no
 # system API that reads them; the other platforms hand the bytes to the OS.

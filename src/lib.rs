@@ -202,8 +202,8 @@
 //! - `vulkan` -- enable the Vulkan backend (Linux / Windows).
 //! - `metal` -- enable the Metal backend (macOS).
 //! - `window` -- enable the [`winit`]-backed GUI window/event loop.
-//! - `freetype` -- bundle FreeType + WOFF2 support for font registration on
-//!   Linux containers / minimal images.
+//! - `freetype` -- does nothing. Linux builds always embed FreeType and its
+//!   WOFF2 support; macOS and Windows use the system's font stack.
 //! - `node-addon` -- register the `#[neon::main]` entry point so the resulting
 //!   cdylib loads as a Node.js addon. Pure-Rust consumers should leave this
 //!   off.
@@ -215,7 +215,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! meo-skia-canvas = { git = "https://github.com/l7aromeo/meo-skia-canvas", default-features = false, features = ["vulkan", "freetype"] }
+//! meo-skia-canvas = { git = "https://github.com/l7aromeo/meo-skia-canvas", default-features = false, features = ["vulkan"] }
 //! ```
 //!
 //! [Skia]: https://skia.org

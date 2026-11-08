@@ -64,7 +64,7 @@ Requires Rust 1.90 or newer, and CMake 3.9 or newer for the AV1 codec the crate 
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan"] }
 ```
 
 ```rust

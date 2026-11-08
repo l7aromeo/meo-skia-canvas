@@ -272,14 +272,14 @@ export const HOSTED = {
 };
 
 /// The crate's feature sets each platform's archives are built for: every
-/// combination of the features that change skia-bindings' build there.
-/// `metal` on macOS; `vulkan` and `freetype` on Linux; `vulkan` on Windows,
-/// which builds no FreeType (`usesFreetype`). The crate's other features
-/// reach no skia-bindings feature, and a consumer's `freetype` on macOS or
-/// Windows keys the archive without it.
+/// combination of the features that change skia-bindings' build there --
+/// `metal` on macOS, `vulkan` on Linux and Windows. The crate's other
+/// features reach no skia-bindings feature: `freetype` is empty, and Linux
+/// builds embed FreeType whatever is set (Cargo.toml), which `cargo tree`
+/// resolves into every Linux key.
 export const CRATE_FEATURE_SETS = {
   darwin: [[], ["metal"]],
-  linux: [[], ["vulkan"], ["freetype"], ["vulkan", "freetype"]],
+  linux: [[], ["vulkan"]],
   win32: [[], ["vulkan"]],
 };
 
@@ -530,21 +530,19 @@ function cases(scratch) {
     ...base,
     ...(features.includes("metal") ? ["ganesh", "metal"] : []),
     ...(features.includes("vulkan") ? ["ganesh", "vulkan"] : []),
-    ...(features.includes("freetype")
-      ? ["embed-freetype", "freetype-woff2"]
-      : []),
+    ...(target.includes("-linux-") ? ["embed-freetype", "freetype-woff2"] : []),
   ];
   const planIs = () => {
     const cells = planCells(commit, resolveLike);
     const keys = new Set(cells.map((cell) => cell.key));
-    if (cells.length !== 34) throw new Error(`${cells.length} cells`);
+    if (cells.length !== 22) throw new Error(`${cells.length} cells`);
     if (keys.size !== cells.length) throw new Error("two cells share a key");
     for (const [target] of Object.values(HOSTED))
       if (!cells.some((cell) => cell.target === target))
         throw new Error(`no cell for ${target}`);
     for (const name of [
-      "ce6727ef251518df37bc-x86_64-unknown-linux-musl-jpegd-jpege-pdf-svg-textlayout-webpd-webpe-static",
-      "ce6727ef251518df37bc-x86_64-unknown-linux-musl-jpegd-jpege-pdf-svg-textlayout-webpd-webpe",
+      "ce6727ef251518df37bc-x86_64-unknown-linux-musl-ftembed-ftwoff2-jpegd-jpege-pdf-svg-textlayout-webpd-webpe-static",
+      "ce6727ef251518df37bc-x86_64-unknown-linux-musl-ftembed-ftwoff2-jpegd-jpege-pdf-svg-textlayout-webpd-webpe",
       "ce6727ef251518df37bc-aarch64-pc-windows-msvc-ganesh-jpegd-jpege-pdf-svg-textlayout-vulkan-webpd-webpe-static",
       "ce6727ef251518df37bc-aarch64-apple-darwin-ganesh-jpegd-jpege-metal-pdf-svg-textlayout-webpd-webpe",
       "ce6727ef251518df37bc-aarch64-unknown-linux-gnu-ftembed-ftwoff2-ganesh-jpegd-jpege-pdf-svg-textlayout-vulkan-webpd-webpe",
@@ -562,7 +560,7 @@ function cases(scratch) {
   };
   return [
     [
-      "34 archives: every hosted target, feature set and consumer C runtime",
+      "22 archives: every hosted target, feature set and consumer C runtime",
       true,
       planIs,
     ],
