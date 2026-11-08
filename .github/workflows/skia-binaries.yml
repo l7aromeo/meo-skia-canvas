@@ -335,6 +335,12 @@ jobs:
     permissions:
       contents: read
       packages: read
+    # The steps below are bash -- a here-string, arrays, `pipefail` -- and a
+    # step in a container job runs under `sh` unless it names a shell. Both
+    # images carry bash.
+    defaults:
+      run:
+        shell: bash
     # build.yml's build containers, by the digests `plan` read from it.
     container:
       image: >-
