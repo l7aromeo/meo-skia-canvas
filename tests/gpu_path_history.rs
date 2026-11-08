@@ -143,15 +143,19 @@ fn turned_text_after_a_larger_draw_of_it_draws_alike_where_skia_is_patched() {
 /// prepared, which carries `containers/skia-triangulation-tolerance.patch` on
 /// every platform, and name it in `SKIA_SOURCE_DIR`: such a build from an
 /// unpatched tree fails here by name rather than only by the pixels above. A
-/// build that names no tree compiles crates.io's Skia, which does not carry
-/// it, and `build.rs` must say so, or the tests above would hold it to pixels
-/// it cannot draw.
+/// build that took the patched archives names no tree, and `build.rs` sets
+/// `MEO_SKIA_TREE` for it instead. A build that does neither compiles
+/// crates.io's Skia, which does not carry the patch, and `build.rs` must say
+/// so, or the tests above would hold it to pixels it cannot draw.
 #[test]
 fn a_build_carries_the_triangulation_patch_where_it_names_a_patched_tree() {
+    let patched = option_env!("SKIA_SOURCE_DIR").is_some()
+        || option_env!("MEO_SKIA_TREE").is_some();
     assert_eq!(
         cfg!(meo_triangulation_tolerance),
-        option_env!("SKIA_SOURCE_DIR").is_some(),
-        "cfg(meo_triangulation_tolerance) against SKIA_SOURCE_DIR {:?}",
+        patched,
+        "cfg(meo_triangulation_tolerance) against SKIA_SOURCE_DIR {:?} and MEO_SKIA_TREE {:?}",
         option_env!("SKIA_SOURCE_DIR"),
+        option_env!("MEO_SKIA_TREE"),
     );
 }

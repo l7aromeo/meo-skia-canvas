@@ -357,19 +357,23 @@ fn colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw() {
 
 /// This repository's builds compile the tree `scripts/skia-source.mjs`
 /// prepared, which carries both patches on every platform, and name it in
-/// `SKIA_SOURCE_DIR`; a build that names no tree compiles crates.io's Skia,
-/// which carries neither, and `build.rs` must say so, or the tests above
-/// would hold it to pixels it cannot draw.
+/// `SKIA_SOURCE_DIR`. A build that took the patched archives names no tree,
+/// and `build.rs` sets `MEO_SKIA_TREE` for it instead. A build that does
+/// neither compiles crates.io's Skia, which carries neither patch, and
+/// `build.rs` must say so, or the tests above would hold it to pixels it
+/// cannot draw.
 #[test]
 fn a_build_carries_the_text_patches_where_it_names_a_patched_tree() {
-    let patched = option_env!("SKIA_SOURCE_DIR").is_some();
+    let patched = option_env!("SKIA_SOURCE_DIR").is_some()
+        || option_env!("MEO_SKIA_TREE").is_some();
     assert_eq!(
         (
             cfg!(meo_text_distance_fields_off),
             cfg!(meo_transformed_mask_reuse)
         ),
         (patched, patched),
-        "the text patches' cfgs against SKIA_SOURCE_DIR {:?}",
+        "the text patches' cfgs against SKIA_SOURCE_DIR {:?} and MEO_SKIA_TREE {:?}",
         option_env!("SKIA_SOURCE_DIR"),
+        option_env!("MEO_SKIA_TREE"),
     );
 }
