@@ -67,6 +67,22 @@ Requires Rust 1.90 or newer, and CMake 3.9 or newer for the AV1 codec the crate 
 meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan"] }
 ```
 
+To draw what the npm package draws, with this repository's patched Skia rather than crates.io's, add
+`patched-skia` and name its archives -- [docs/rust.md](docs/rust.md#drawing-what-the-npm-package-draws)
+says what that changes:
+
+```toml
+# Cargo.toml
+[dependencies]
+meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan", "patched-skia"] }
+```
+
+```toml
+# .cargo/config.toml
+[env]
+SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-3f566dd7198c/skia-binaries-{key}.tar.gz"
+```
+
 ```rust
 use meo_skia_canvas::prelude::*;
 

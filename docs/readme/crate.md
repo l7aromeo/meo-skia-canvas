@@ -31,6 +31,21 @@ configure time.
 meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan"] }
 ```
 
+To draw what the npm package draws, with this repository's patched Skia rather than crates.io's, add
+`patched-skia` and name its archives:
+
+```toml
+# Cargo.toml
+[dependencies]
+meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan", "patched-skia"] }
+```
+
+```toml
+# .cargo/config.toml
+[env]
+SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-3f566dd7198c/skia-binaries-{key}.tar.gz"
+```
+
 ```rust,no_run
 use meo_skia_canvas::prelude::*;
 
@@ -68,14 +83,15 @@ Reference: [`docs/rust.md`](https://github.com/l7aromeo/meo-skia-canvas/blob/mai
 
 ## Cargo features
 
-| Feature      | Notes                                                                                    |
-| ------------ | ---------------------------------------------------------------------------------------- |
-| `vulkan`     | Vulkan backend (Linux / Windows).                                                        |
-| `metal`      | Metal backend (macOS).                                                                   |
-| `window`     | `winit`-backed event loop.                                                               |
-| `freetype`   | Does nothing. Linux builds always embed FreeType and its WOFF2 support.                  |
-| `fetch`      | `Image::from_url` and `ImageData::from_url`, over `http` and `https`.                    |
-| `node-addon` | Register the `#[neon::main]` Node addon entry point. Pure-Rust consumers leave this off. |
+| Feature        | Notes                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------------ |
+| `vulkan`       | Vulkan backend (Linux / Windows).                                                                |
+| `metal`        | Metal backend (macOS).                                                                           |
+| `window`       | `winit`-backed event loop.                                                                       |
+| `freetype`     | Does nothing. Linux builds always embed FreeType and its WOFF2 support.                          |
+| `fetch`        | `Image::from_url` and `ImageData::from_url`, over `http` and `https`.                            |
+| `patched-skia` | This repository's patched Skia, from the archives `SKIA_BINARIES_URL` names; refused without it. |
+| `node-addon`   | Register the `#[neon::main]` Node addon entry point. Pure-Rust consumers leave this off.         |
 
 The default feature set is empty; opt in to the backend you need.
 

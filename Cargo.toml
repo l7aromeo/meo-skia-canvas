@@ -38,7 +38,9 @@ include = [
     "/Cargo.toml",
     "/build.rs",
     "/build/brotli.rs",
+    "/build/skia_mode.rs",
     "/vendor/brotli/**",
+    "/skia-binaries.txt",
     "/LICENSE",
     "/docs/readme/crate.md",
     # One changelog, and it holds this channel's entries. The repository keeps
@@ -98,6 +100,16 @@ window = ["dep:winit", "dep:spin_sleep"]
 # it brings an HTTP client and TLS, which a caller drawing from bytes does not
 # need, and the npm addon keeps its own loader and does not enable it.
 fetch = ["dep:ureq"]
+
+# This repository's patched Skia, from the archives `SKIA_BINARIES_URL` names
+# -- see `skia-binaries.txt` and docs/rust.md. Set it with that URL in
+# `.cargo/config.toml` and a crate build draws what the npm package draws;
+# build.rs refuses it without that URL, printing the line to add. It turns on
+# skia-bindings' `no-compile`, so a download that fails is a build error at
+# once, where without the feature skia-bindings would fall back to building
+# crates.io's Skia from source -- tens of minutes -- before the link fails on
+# the patched Skia's marker.
+patched-skia = ["skia-bindings/no-compile"]
 
 [package.metadata.docs.rs]
 # The documented surface is the crate-root modules re-exported through

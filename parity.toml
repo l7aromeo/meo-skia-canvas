@@ -1867,6 +1867,18 @@ why  = """A crate-side call asking Skia to release what its caches are holding.
 status = "deliberate"
 
 [[capability]]
+name = "which patched Skia a build links"
+rust = ["patched_skia::skia_patches"]
+npm  = []
+why  = """Crate-only, with the `patched-skia` feature that goes with it. A crate
+        build links this repository's patched Skia only when it turns that
+        feature on and names the archives in `SKIA_BINARIES_URL`, and otherwise
+        links crates.io's, so a Rust caller chooses it and can ask which tree it
+        got. The npm package always ships a binary built from the patched tree,
+        so there is nothing for a JavaScript caller to choose or ask."""
+status = "deliberate"
+
+[[capability]]
 name = "npm's decomposition of the drawing context"
 rust = []
 npm  = ["CanvasCompositing",

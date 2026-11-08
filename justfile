@@ -297,10 +297,13 @@ check-skia-patches: ensure-deps
     node scripts/check-skia-patches.mjs --self-test
     node scripts/check-skia-patches.mjs
 
-[doc("Hold the crate's patched-Skia archives to skia-bindings' key and layout, and skia-binaries.txt to PATCHES.")]
+[doc("Hold the crate's patched-Skia archives to skia-bindings' key and layout, skia-binaries.txt to PATCHES, and build.rs's choice of Skia to its cases.")]
 check-skia-pack: ensure-deps
     node scripts/skia-pack.mjs --self-test
     node scripts/skia-pack.mjs manifest --check
+    mkdir -p target
+    rustc --edition 2024 --test build/skia_mode.rs -o target/check-skia-mode
+    ./target/check-skia-mode --quiet
 
 [doc("Hold build.rs's choice of brotli sources to its cases, and vendor/brotli to the files it names.")]
 check-build-brotli:
@@ -1697,7 +1700,8 @@ release-crate bump="patch" wait="false":
     # A crate release goes out with the archives of its patches published,
     # by .github/workflows/skia-binaries.yml, since a crate build that names
     # skia-binaries.txt's URL downloads from that release and a missing
-    # archive there is a 404. This refuses until all of them are there.
+    # archive there is a 404, which under `patched-skia` is a build error.
+    # This refuses until all of them are there.
     node scripts/skia-pack.mjs published
 
     if ! cargo set-version --help &>/dev/null; then

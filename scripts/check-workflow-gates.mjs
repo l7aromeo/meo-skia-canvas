@@ -49,12 +49,13 @@ const DIR = ".github/workflows";
 const MUST_COVER = {
   "rust-ci.txt": {
     reason:
-      "they compile into the Rust build, set what its lints refuse, pin what it builds against, patch the Skia it builds, state what links, or are what the changelog check reads",
+      "they compile into the Rust build, set what its lints refuse, pin what it builds against, patch the Skia it builds, name the archives it downloads, state what links, or are what the changelog check reads",
     specs: [
       ":(glob)**/*.rs",
       ":(glob)vendor/brotli/**",
       "Cargo.toml",
       "Cargo.lock",
+      "skia-binaries.txt",
       "rustfmt.toml",
       "clippy.toml",
       "THIRD-PARTY-NOTICES.md",

@@ -29,6 +29,7 @@ Cargo.lock
 # it compiles into the crate's Linux builds.
 :(glob)build/**
 :(glob)vendor/brotli/**
+skia-binaries.txt
 # The `licenses` job checks the counts this file states against the graph
 # `Cargo.lock` resolves, so an edit to either has to run it.
 THIRD-PARTY-NOTICES.md

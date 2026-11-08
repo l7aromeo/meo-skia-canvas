@@ -279,6 +279,7 @@ pub mod paint;
 /// Vector paths.
 pub mod path;
 
+pub mod patched_skia;
 pub mod pattern;
 /// Pixel layouts for reading surfaces back and writing them.
 pub mod pixels;
@@ -304,8 +305,8 @@ pub mod texture;
 #[doc(inline)]
 pub use crate::{
     canvas::*, color::*, context2d::*, error::*, export::*, filter::*, font::*,
-    geometry::*, image::*, integrity::*, load::*, paint::*, path::*,
-    pattern::*, pixels::*, shader::*, text::*, texture::*,
+    geometry::*, image::*, integrity::*, load::*, paint::*, patched_skia::*,
+    path::*, pattern::*, pixels::*, shader::*, text::*, texture::*,
 };
 
 /// Glob-importable re-export of the whole public API:
@@ -452,7 +453,10 @@ use std::sync::Once;
 // the CPU lacks; the rounding is Skia's to change.
 pub(crate) fn start_skia() {
     static STARTED: Once = Once::new();
-    STARTED.call_once(graphics::init);
+    STARTED.call_once(|| {
+        patched_skia::link_marker();
+        graphics::init();
+    });
 }
 
 #[cfg(feature = "node-addon")]

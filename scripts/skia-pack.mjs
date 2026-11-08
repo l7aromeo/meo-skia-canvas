@@ -454,6 +454,29 @@ export function manifestText(release, repository, treeFor, cfgsFor) {
   ].join("\n");
 }
 
+/**
+ * The `SKIA_BINARIES_URL = "..."` lines in `text` that name anything but
+ * `url`, or `null` where it has none, which for a doc that shows the line is
+ * as wrong as a stale one.
+ */
+export function staleDocLines(text, url) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("SKIA_BINARIES_URL = "));
+  if (!lines.length) return null;
+  return lines.filter((line) => line !== `SKIA_BINARIES_URL = "${url}"`);
+}
+
+/// The docs that show a consumer the `SKIA_BINARIES_URL` line, which
+/// `manifest --check` holds to the manifest's URL so a patch change cannot
+/// leave them naming the last tree.
+const DOCS_WITH_THE_LINE = [
+  "README.md",
+  "docs/readme/crate.md",
+  "docs/rust.md",
+];
+
 /** The self-test's cases, each `[what, accepted, run]`. */
 function cases(scratch) {
   const commit = "ce6727ef251518df37bcfdde4865b71f7e3a4352";
@@ -573,6 +596,13 @@ function cases(scratch) {
   };
   const linux = "x86_64-unknown-linux-gnu";
   const windows = "x86_64-pc-windows-msvc";
+  const docUrl =
+    "https://h/releases/download/skia-binaries-0.156.0-aaa/skia-binaries-{key}.tar.gz";
+  const docsAre = (text, expected) => () => {
+    const got = staleDocLines(text, docUrl);
+    if (JSON.stringify(got) !== JSON.stringify(expected))
+      throw new Error(`stale lines ${JSON.stringify(got)}`);
+  };
   const trees = {
     darwin: "skia-0.156.0-918bd4ffa80d",
     linux: "skia-0.156.0-732ea61409ba",
@@ -824,6 +854,19 @@ function cases(scratch) {
       manifestIs,
     ],
     ["the release moves with any one platform's tree", true, releaseMoves],
+    [
+      "a doc whose line names the manifest's URL",
+      true,
+      docsAre(`[env]\nSKIA_BINARIES_URL = "${docUrl}"\n`, []),
+    ],
+    [
+      "a doc whose line names another tree",
+      true,
+      docsAre(`SKIA_BINARIES_URL = "${docUrl.replace("aaa", "bbb")}"\n`, [
+        `SKIA_BINARIES_URL = "${docUrl.replace("aaa", "bbb")}"`,
+      ]),
+    ],
+    ["a doc with no line at all", true, docsAre("nothing here\n", null)],
     [
       "the base set's key on Linux",
       true,
@@ -1318,7 +1361,19 @@ if (main) {
           );
           process.exit(1);
         }
-        console.log(`skia-pack: ${MANIFEST} matches PATCHES and build.rs`);
+        const url = text.match(/^url (\S+)$/m)[1];
+        const docs = DOCS_WITH_THE_LINE.map((doc) => [
+          doc,
+          staleDocLines(readFileSync(join(ROOT, doc), "utf8"), url),
+        ]).filter(([, stale]) => stale === null || stale.length);
+        for (const [doc, stale] of docs)
+          console.error(
+            `skia-pack: ${doc} ${stale === null ? "shows no SKIA_BINARIES_URL line" : `names another URL: ${stale.join(" ")}`}; it should be\n  SKIA_BINARIES_URL = "${url}"`,
+          );
+        if (docs.length) process.exit(1);
+        console.log(
+          `skia-pack: ${MANIFEST} matches PATCHES and build.rs, and ${DOCS_WITH_THE_LINE.length} docs show its URL`,
+        );
       } else {
         writeFileSync(path, text);
         console.log(`skia-pack: wrote ${MANIFEST}`);
