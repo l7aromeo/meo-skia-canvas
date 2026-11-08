@@ -50,6 +50,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildScriptLogs } from "./check-patched-skia.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -167,7 +168,7 @@ export function archiveFiles(output, target, features) {
  * the archive's path.
  */
 export function pack(buildDir, outDir, how, vouch) {
-  const output = readFileSync(join(buildDir, "output"), "utf8");
+  const output = readFileSync(buildScriptLogs(buildDir).output, "utf8");
   const why = vouch(output);
   if (why) throw new Error(`skia-pack: ${buildDir} is not packed: ${why}`);
   const skia = join(buildDir, "out", "skia");
@@ -392,11 +393,14 @@ function cases(scratch) {
     };
   // A build dir in the shape a skia-bindings build leaves, its `output`
   // linking `libs`, with `files` present in `out/skia`.
-  const build = (name, libs, files) => {
+  // `layout` "nightly" writes the log where nightly cargo's build directory
+  // keeps it, `run/stdout`, rather than stable's `output`.
+  const build = (name, libs, files, layout = "stable") => {
     const dir = join(scratch, name);
     mkdirSync(join(dir, "out", "skia"), { recursive: true });
+    if (layout === "nightly") mkdirSync(join(dir, "run"));
     writeFileSync(
-      join(dir, "output"),
+      join(dir, layout === "nightly" ? "run/stdout" : "output"),
       [
         "STARTING OFFLINE BUILD",
         ...libs.map((lib) => `cargo:rustc-link-lib=static=${lib}`),
@@ -737,6 +741,16 @@ function cases(scratch) {
       "a Linux build packs its linked libraries and bindings.rs",
       true,
       packs(build("linux", libs, unixFiles), linux, () => null, unixFiles),
+    ],
+    [
+      "a build in nightly cargo's directory layout packs the same",
+      true,
+      packs(
+        build("nightly", libs, unixFiles, "nightly"),
+        "x86_64-unknown-linux-musl",
+        () => null,
+        unixFiles,
+      ),
     ],
     [
       "a Windows build packs .lib files and icudtl.dat",

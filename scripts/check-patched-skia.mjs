@@ -387,15 +387,27 @@ export function markerRefusal(patchText, file, marker) {
 }
 
 /**
- * What skia-bindings' build script printed in `dir`, both streams: cargo
- * keeps its stdout as `output` and its stderr as `stderr`. Both ninjas print
- * what they compiled on stdout, but samurai prints the directory it ran in on
- * stderr.
+ * Where a build script's run left its stdout and stderr in `dir`, the
+ * directory above its `out`: `output` and `stderr` in stable cargo's build
+ * directory, `run/stdout` and `run/stderr` in the one nightly cargo lays
+ * out, `<package>/<hash>/` -- which builds the static musl archives.
+ */
+export function buildScriptLogs(dir) {
+  const run = join(dir, "run");
+  return existsSync(join(run, "stdout")) && !existsSync(join(dir, "output"))
+    ? { output: join(run, "stdout"), stderr: join(run, "stderr") }
+    : { output: join(dir, "output"), stderr: join(dir, "stderr") };
+}
+
+/**
+ * What skia-bindings' build script printed in `dir`, both streams, from the
+ * files `buildScriptLogs` names. Both ninjas print what they compiled on
+ * stdout, but samurai prints the directory it ran in on stderr.
  */
 export function buildLog(dir) {
-  const stderr = join(dir, "stderr");
+  const { output, stderr } = buildScriptLogs(dir);
   return [
-    readFileSync(join(dir, "output"), "utf8"),
+    readFileSync(output, "utf8"),
     existsSync(stderr) ? readFileSync(stderr, "utf8") : "",
   ].join("\n");
 }
