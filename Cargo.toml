@@ -37,6 +37,8 @@ include = [
     "/src/bdf_stub.c",
     "/Cargo.toml",
     "/build.rs",
+    "/build/brotli.rs",
+    "/vendor/brotli/**",
     "/LICENSE",
     "/docs/readme/crate.md",
     # One changelog, and it holds this channel's entries. The repository keeps
@@ -287,15 +289,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # 0.97.2 is the first release whose tarball ships `bindings_docs.rs`, so
 # it's the floor that lets docs.rs build (rust-skia/rust-skia#1286).
-skia-safe = { version = "0.156.0", features = ["textlayout", "webp", "svg"] }
-# Here only for build-script ordering; nothing in the crate uses its API.
-# Cargo runs a build script after those of its direct dependencies that
-# declare `links`, and build.rs compiles brotli sources out of the Skia tree
-# skia-bindings' own build script fetches. It must stay the version skia-safe
-# pins (`=` its own), with no features of its own: `links = "skia"` allows one
-# skia-bindings in a build, and tests/static/skia-bindings-pin.test.js fails
-# when the two differ.
-skia-bindings = { version = "0.156.0", default-features = false }
+#
+# Exactly this version, and the one below with it: build.rs compiles brotli
+# sources from `vendor/brotli` beside the Skia this skia-bindings builds, and
+# they are the brotli that Skia's DEPS pins (`VENDORED_BROTLI` in
+# build/brotli.rs). Another release could pin other brotli, whose decoder the
+# vendored command table would not match.
+skia-safe = { version = "=0.156.0", features = ["textlayout", "webp", "svg"] }
+# Here for build-script ordering; nothing in the crate uses its API. Cargo
+# runs a build script after those of its direct dependencies that declare
+# `links`, and `graphite_bindings` in build.rs reads what skia-bindings' own
+# build script prints. It must stay the version skia-safe pins (`=` its own),
+# with no features of its own: `links = "skia"` allows one skia-bindings in a
+# build, and tests/static/skia-bindings-pin.test.js fails when the two differ.
+skia-bindings = { version = "=0.156.0", default-features = false }
 spin_sleep = { version = "1", optional = true }
 vulkano = { version = "0.35", optional = true }
 
@@ -332,7 +339,7 @@ rustfft = "6.4.1"
 # skia-binaries.txt names are keyed by these features, so they are part of
 # what a crate build downloads.
 [target.'cfg(target_os = "linux")'.dependencies]
-skia-safe = { version = "0.156.0", features = ["embed-freetype", "freetype-woff2"] }
+skia-safe = { version = "=0.156.0", features = ["embed-freetype", "freetype-woff2"] }
 
 # `font_library` subsets WOFF and WOFF2 faces here because Windows has no
 # system API that reads them; the other platforms hand the bytes to the OS.

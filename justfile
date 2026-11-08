@@ -144,7 +144,7 @@ prepush: fmt-check (check-docs "origin/main") check-repo (typecheck prepush_type
 # no workflow at all. The rest of `prepush` runs in rust-ci.yml, where the Skia
 # they compile against is built.
 [doc("The checks in prepush that build no Skia, which ci.yml's repo job runs.")]
-check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack lint-js
+check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack check-build-brotli lint-js
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -301,6 +301,12 @@ check-skia-patches: ensure-deps
 check-skia-pack: ensure-deps
     node scripts/skia-pack.mjs --self-test
     node scripts/skia-pack.mjs manifest --check
+
+[doc("Hold build.rs's choice of brotli sources to its cases, and vendor/brotli to the files it names.")]
+check-build-brotli:
+    mkdir -p target
+    rustc --edition 2024 --test build/brotli.rs -o target/check-build-brotli
+    ./target/check-build-brotli --quiet
 
 # Every job in a gated workflow is named by that workflow's aggregate.
 #

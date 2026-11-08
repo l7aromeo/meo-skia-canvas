@@ -353,9 +353,10 @@ jobs:
         run: |
           .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config python3
-      # The patched Skia tree the skia-source job saved: on Linux it carries
-      # the brotli sources Skia's build list leaves out, which a `freetype`
-      # link needs. It also keeps any `just` recipe here from fetching one.
+      # The patched Skia tree the skia-source job saved: on Linux its build
+      # list carries the brotli sources stock Skia's leaves out, so build.rs
+      # compiles none of its own. It also keeps any `just` recipe here from
+      # fetching one.
       - id: skia
         uses: ./.github/actions/skia-source
       # poppler's `pdftoppm`, which `tests/pdf_blend.rs` renders the PDF's
@@ -445,9 +446,10 @@ jobs:
       # there are in the script, which crates-io-publish.yml runs too.
       - name: Install a headless display and a software GPU (apt)
         run: .github/scripts/install-software-gpu.sh
-      # The patched Skia tree the skia-source job saved: on Linux it carries
-      # the brotli sources Skia's build list leaves out, which a `freetype`
-      # link needs. It also keeps any `just` recipe here from fetching one.
+      # The patched Skia tree the skia-source job saved: on Linux its build
+      # list carries the brotli sources stock Skia's leaves out, so build.rs
+      # compiles none of its own. It also keeps any `just` recipe here from
+      # fetching one.
       - id: skia
         uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -608,9 +610,10 @@ jobs:
           .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
             python3 libvulkan-dev
-      # The patched Skia tree the skia-source job saved: on Linux it carries
-      # the brotli sources Skia's build list leaves out, which a `freetype`
-      # link needs. It also keeps any `just` recipe here from fetching one.
+      # The patched Skia tree the skia-source job saved: on Linux its build
+      # list carries the brotli sources stock Skia's leaves out, so build.rs
+      # compiles none of its own. It also keeps any `just` recipe here from
+      # fetching one.
       - id: skia
         uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -814,9 +817,10 @@ jobs:
           .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
             python3 libvulkan-dev
-      # The patched Skia tree the skia-source job saved: on Linux it carries
-      # the brotli sources Skia's build list leaves out, which a `freetype`
-      # link needs. It also keeps any `just` recipe here from fetching one.
+      # The patched Skia tree the skia-source job saved: on Linux its build
+      # list carries the brotli sources stock Skia's leaves out, so build.rs
+      # compiles none of its own. It also keeps any `just` recipe here from
+      # fetching one.
       - id: skia
         uses: ./.github/actions/skia-source
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
