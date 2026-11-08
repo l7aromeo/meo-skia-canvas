@@ -277,12 +277,17 @@ features are skia-bindings' own, sorted, those it drops for a target left
 out -- FreeType's on Apple and Windows -- and `-static` follows the C
 runtime the consumer's target links.
 
-**The archive.** `skia-binaries/`, holding the static libraries the build's
-`output` links, `bindings.rs`, `icudtl.dat` on Windows with `textlayout`, and
-`tag.txt` and `key.txt`, as skia-bindings' own export writes them. `skia-pack
-pack` makes one from a build directory, and only from a build
-`scripts/check-patched-skia.mjs` passes: compiled from the platform's patched
-files, with no download in its log.
+**The archive.** `skia-binaries/`, holding the static libraries
+skia-bindings builds for the key's features -- a download unpacks every one
+and fails on one missing -- `bindings.rs`, `icudtl.dat` on Windows with
+`textlayout`, and `tag.txt` and `key.txt`, as skia-bindings' own export
+writes them. `skia-pack pack` makes one from a build directory, and only from
+a build `scripts/check-patched-skia.mjs` passes, compiled from the platform's
+patched files with no download in its log, whose `output` links those
+libraries as skia-bindings prints them: one run of consecutive lines, in its
+order, `static=` before each name except on Windows. The lines around that run
+name what the target links from the system -- expat twice on a musl
+build -- which a download links again where it is used, so none is packed.
 
 **Which archives.** `skia-pack plan` lists them: for each target in
 `lib/targets.json`, each combination of the crate features that change
