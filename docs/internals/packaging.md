@@ -346,9 +346,19 @@ Those four cells use the justfile's pinned nightly, with the image's flags
 as `host.rustflags` and `+crt-static` in RUSTFLAGS, which then reach the
 target alone.
 
+**The consumer's build.** rust-ci.yml's `crate consumer` job builds the
+crate as crates.io's users do, skia-bindings from the registry and
+`SKIA_SOURCE_DIR` unset: patched on Linux, macOS and Windows with the docs'
+line in a `.cargo/config.toml`, and stock on macOS, setting nothing, where
+rust-skia hosts the default feature set's archive. `skia-pack consumer`
+refuses a build that compiled Skia instead of downloading it, or whose patch
+cfgs are not the ones its Skia carries.
+
 **The order of a patch change.** A pull request that changes a patch
 changes a tree and so the release, so it regenerates `skia-binaries.txt` and
-the docs' line. Dispatching skia-binaries.yml with `publish` on makes the
-archives: they are named by the patches' digest, so the same patches on any
-branch name the same release. `just release-crate` refuses until `skia-pack
-published` passes, since the published crate carries the URL.
+the docs' line, and its `crate consumer` patched legs fail on `published`
+until the new release is complete. Dispatching skia-binaries.yml with
+`publish` on makes the archives: they are named by the patches' digest, so
+the same patches on any branch name the same release. `just release-crate`
+refuses until `skia-pack published` passes, since the published crate
+carries the URL.
