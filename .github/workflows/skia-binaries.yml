@@ -309,6 +309,13 @@ jobs:
           New-Item -ItemType Directory -Force "$env:USERPROFILE\.cache" | Out-Null
           subst S: "$env:USERPROFILE\.cache"
           $env:XDG_CACHE_HOME = 'S:\'
+          # Git's own tools first, as in the bash `just` runs build.yml's
+          # `prepare` from: the image's PATH reaches Strawberry Perl's
+          # `patch` 2.5.9 before Git's, and it asserts ("Expression: hunk")
+          # on the first of PATCHES.
+          $gitTools = Join-Path (Split-Path (Split-Path (Get-Command git).Source)) 'usr\bin'
+          if (-not (Test-Path (Join-Path $gitTools 'patch.exe'))) { throw "no patch.exe in $gitTools" }
+          $env:PATH = "$gitTools;$env:PATH"
           $env:SKIA_SOURCE_DIR = node scripts/skia-source.mjs prepare
           if ($LASTEXITCODE -ne 0) { throw "skia-source prepare failed" }
           $features = if ($env:FEATURES) { @('--features', $env:FEATURES) } else { @() }
