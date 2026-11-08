@@ -660,6 +660,23 @@ jobs:
       # deliberately absent: the MSRV applies to the library a consumer builds,
       # not to this repo's dev-dependencies.
       - run: cargo check --no-default-features --features "vulkan,window,fetch"
+      # A build cache restored over a freshly extracted cargo registry, which
+      # rust-cache restores on any exact hit: skia-bindings' build script does
+      # not run again, so the Skia tree it synced into its registry extraction
+      # is gone, and this crate's build script has to build without it. This
+      # job builds crates.io's Skia, as a consumer does, so it is the job to
+      # make that state every run. If skia-bindings compiles again, the state
+      # was not reached and the step proves nothing, so that fails too.
+      - name: Build again over skia-bindings' extraction without its Skia
+        run: |
+          set -euo pipefail
+          rm -rf "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/skia-bindings-*/skia
+          touch build.rs
+          cargo check --no-default-features --features "vulkan,window,fetch" 2>&1 | tee "$RUNNER_TEMP/again.log"
+          if grep -q "Compiling skia-bindings" "$RUNNER_TEMP/again.log"; then
+            echo "::error::skia-bindings compiled again, so this build had its Skia tree"
+            exit 1
+          fi
 
   # The README and the crate docs both promise that no public signature hands
   # you a `skia_safe` or `neon` type, and nothing checked it. The promise was
