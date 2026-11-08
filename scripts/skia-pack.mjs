@@ -180,26 +180,32 @@ export function builtLibraries(features) {
 /**
  * The files the archive of a build carries, in `out/skia`: the libraries
  * `builtLibraries` names, `bindings.rs`, and `icudtl.dat` on Windows with
- * `textlayout`. The build's `output` has to link the same libraries, so an
- * archive cannot be packed for features other than the build's. skia-bindings
- * names a library it built as `rustc-link-lib=static=<name>`, except on
- * Windows, where `static=` breaks the link and it writes
- * `rustc-link-lib=<name>`, the form it gives system libraries too (cargo.rs
- * `add_static_link_lib`). So a bare name is one it built where `has(file)`
- * finds its library file in `out/skia`, and a system library otherwise.
+ * `textlayout`.
+ *
+ * The build's `output` has to link those libraries, so that an archive cannot
+ * be packed for features other than the build's, and it does so the way
+ * skia-bindings prints them: one run of consecutive lines in that order
+ * (binaries_config.rs `commit_to_cargo`), each `rustc-link-lib=static=<name>`,
+ * or on Windows, where `static=` breaks the link, `rustc-link-lib=<name>`
+ * (cargo.rs `add_static_link_lib`). Every other line names a library the
+ * target links from the system, before the run or after it -- a musl
+ * build's fontconfig brings expat both from pkg-config's probe and from
+ * `link_libraries` -- and a download links those again on the consumer's
+ * machine, so none of them is packed.
  */
-export function archiveFiles(output, target, features, has) {
+export function archiveFiles(output, target, features) {
   const expected = builtLibraries(features);
-  const linked = [
-    ...output.matchAll(/^cargo:rustc-link-lib=(static=)?([^\s=]+)$/gm),
-  ]
-    .filter((m) => m[1] || has(libraryFile(target, m[2])))
-    .map((m) => m[2]);
-  const unlinked = expected.filter((name) => !linked.includes(name));
-  const unexpected = linked.filter((name) => !expected.includes(name));
-  if (unlinked.length || unexpected.length)
+  const form = isWindows(target) ? "" : "static=";
+  const lines = [...output.matchAll(/^cargo:rustc-link-lib=(.+)$/gm)].map(
+    (m) => m[1],
+  );
+  const run = expected.map((name) => `${form}${name}`);
+  const at = lines.findIndex((_, start) =>
+    run.every((line, i) => lines[start + i] === line),
+  );
+  if (at < 0)
     throw new Error(
-      `skia-pack: the build links ${linked.join(", ") || "no Skia library"}, where [${features}] builds ${expected.join(", ")}`,
+      `skia-pack: the build's output does not link ${run.join(", ")} in one run, as skia-bindings prints the libraries it builds for [${features}]; it links ${lines.join(", ") || "nothing"}`,
     );
   const extra =
     isWindows(target) && features.includes("textlayout") ? [ICUDTL_DAT] : [];
@@ -222,9 +228,7 @@ export function pack(buildDir, outDir, how, vouch) {
   const why = vouch(output);
   if (why) throw new Error(`skia-pack: ${buildDir} is not packed: ${why}`);
   const skia = join(buildDir, "out", "skia");
-  const files = archiveFiles(output, how.target, how.features, (file) =>
-    existsSync(join(skia, file)),
-  );
+  const files = archiveFiles(output, how.target, how.features);
   const missing = files.filter((file) => !existsSync(join(skia, file)));
   if (missing.length)
     throw new Error(`skia-pack: ${skia} holds no ${missing.join(", ")}`);
@@ -479,21 +483,29 @@ function cases(scratch) {
   // On Windows skia-bindings names the libraries it built with a bare
   // `rustc-link-lib=`, as it does the system ones (cargo.rs
   // `add_static_link_lib`); elsewhere with `static=`.
-  const build = (name, libs, files, layout = "stable") => {
+  // `before` and `after` are link lines around the built libraries' run,
+  // as a target's system libraries are; `form` overrides the run's prefix.
+  const build = (
+    name,
+    libs,
+    files,
+    { layout = "stable", before = [], after, form } = {},
+  ) => {
     const dir = join(scratch, name);
     mkdirSync(join(dir, "out", "skia"), { recursive: true });
     if (layout === "nightly") mkdirSync(join(dir, "run"));
     const windowsForm = files.some((file) => file.endsWith(".lib"));
+    const prefix = form ?? (windowsForm ? "" : "static=");
     writeFileSync(
       join(dir, layout === "nightly" ? "run/stdout" : "output"),
       [
         "STARTING OFFLINE BUILD",
-        ...libs.map(
-          (lib) => `cargo:rustc-link-lib=${windowsForm ? "" : "static="}${lib}`,
-        ),
-        ...(windowsForm
-          ? ["cargo:rustc-link-lib=user32", "cargo:rustc-link-lib=opengl32"]
-          : ["cargo:rustc-link-lib=c++"]),
+        ...before,
+        ...libs.map((lib) => `cargo:rustc-link-lib=${prefix}${lib}`),
+        ...(after ??
+          (windowsForm
+            ? ["cargo:rustc-link-lib=user32", "cargo:rustc-link-lib=opengl32"]
+            : ["cargo:rustc-link-lib=c++"])),
       ].join("\n"),
     );
     for (const file of files)
@@ -885,7 +897,7 @@ function cases(scratch) {
       "a build in nightly cargo's directory layout packs the same",
       true,
       packs(
-        build("nightly", libs, unixFiles, "nightly"),
+        build("nightly", libs, unixFiles, { layout: "nightly" }),
         "x86_64-unknown-linux-musl",
         () => null,
         unixFiles,
@@ -968,28 +980,73 @@ function cases(scratch) {
       ),
     ],
     [
-      "a build linking a library its features do not build",
+      // Run 42517456551's musl cells: fontconfig's pkg-config probe
+      // names expat before the built libraries, and
+      // `link_libraries` again after them, and Skia's own build leaves a
+      // libexpat.a in out/skia.
+      "a musl build linking expat around its run packs without it",
+      true,
+      packs(
+        build("musl", libs, [...unixFiles, "libexpat.a"], {
+          before: ["cargo:rustc-link-lib=static=expat"],
+          after: [
+            "cargo:rustc-link-lib=stdc++",
+            "cargo:rustc-link-lib=static=fontconfig",
+            "cargo:rustc-link-lib=static=expat",
+          ],
+        }),
+        "x86_64-unknown-linux-musl",
+        () => null,
+        unixFiles,
+      ),
+    ],
+    [
+      "a build linking a library its features do not build inside its run",
       false,
       packs(
-        build("extra", [...libs, "sksg"], [...unixFiles, "libsksg.a"]),
+        build(
+          "extra",
+          [...libs.slice(0, 5), "sksg", ...libs.slice(5)],
+          [...unixFiles, "libsksg.a"],
+        ),
         linux,
         () => null,
         unixFiles,
       ),
     ],
     [
-      "a Windows build linking a library its features do not build",
+      "a Windows build linking a library its features do not build inside its run",
       false,
       packs(
         build(
           "winextra",
-          [...libs, "sksg"],
+          [...libs.slice(0, 5), "sksg", ...libs.slice(5)],
           [
             ...[...libs, "sksg"].map((l) => `${l}.lib`),
             "bindings.rs",
             ICUDTL_DAT,
           ],
         ),
+        windows,
+        () => null,
+        windowsFiles,
+      ),
+    ],
+    [
+      "a Linux build naming its libraries without static=",
+      false,
+      packs(
+        build("bare", libs, unixFiles, { form: "" }),
+        linux,
+        () => null,
+        unixFiles,
+      ),
+    ],
+    [
+      "a Windows build naming its libraries with static=",
+      false,
+      packs(
+        build("winstatic", libs, windowsFiles, { form: "static=" }),
         windows,
         () => null,
         windowsFiles,
