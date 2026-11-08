@@ -1688,6 +1688,12 @@ release-crate bump="patch" wait="false":
     # before anything is bumped.
     just check-parity --require-filed
 
+    # A crate release goes out with the archives of its patches published,
+    # by .github/workflows/skia-binaries.yml, since a crate build that names
+    # skia-binaries.txt's URL downloads from that release and a missing
+    # archive there is a 404. This refuses until all of them are there.
+    node scripts/skia-pack.mjs published
+
     if ! cargo set-version --help &>/dev/null; then
         echo "Error: needs cargo-edit — cargo install cargo-edit"
         exit 1

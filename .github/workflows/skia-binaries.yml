@@ -1,0 +1,531 @@
+name: Skia binaries
+# Compiles this repository's patched Skia once per archive a crate build can
+# ask for, packs each in the layout skia-bindings downloads, and -- with
+# `publish` on -- uploads them to the release skia-binaries.txt's URL names.
+# A crate build that sets that URL draws what the npm package draws; one
+# that cannot download its archive gets crates.io's Skia instead, or with
+# `patched-skia` a build error. So `just release-crate` refuses until every
+# archive is there (`skia-pack published`), and docs/internals/packaging.md
+# says in what order a patch change, this workflow and a crate release run.
+#
+# Thirty-four Skia compiles is the price of a run, so it runs on a dispatch,
+# and on a pull request only when this file or skia-pack changes: what else
+# it compiles from -- the patches, the tree, the build script -- is what
+# build.yml already builds on every pull request touching it. Only a dispatch
+# with `publish` on uploads: on a pull request `inputs` is empty.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/skia-binaries.yml"
+      - "scripts/skia-pack.mjs"
+  workflow_dispatch:
+    inputs:
+      # Off, a run builds and packs every archive and keeps them as this
+      # run's artifacts: for checking a change to this workflow or to
+      # skia-pack on a branch.
+      publish:
+        description: "Upload the archives to their release"
+        required: false
+        default: false
+        type: boolean
+
+# Queued, never cancelled, except on a pull request. Two publishing runs
+# would race to upload the same names, and a cancelled upload leaves a
+# release that `published` has to be re-run against; a pull request's run
+# uploads nothing, so a newer push to it cancels the older.
+concurrency:
+  group: skia-binaries-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # What to build: every archive skia-pack plans for this checkout, one build
+  # each, with the key cargo predicts, split by platform for the three build
+  # jobs. With `publish` on, an archive the release already holds is marked
+  # `held` and its cell builds nothing: archives are never replaced (see
+  # `publish`), so a re-run after a partial one fills in only what is
+  # missing.
+  plan:
+    runs-on: ubuntu-latest
+    # Creates the release when `publish` is on and there is none.
+    permissions:
+      contents: write
+    outputs:
+      darwin: ${{ steps.plan.outputs.darwin }}
+      linux: ${{ steps.plan.outputs.linux }}
+      win32: ${{ steps.plan.outputs.win32 }}
+      tag: ${{ steps.plan.outputs.tag }}
+      glibc: ${{ steps.pins.outputs.glibc }}
+      musl: ${{ steps.pins.outputs.musl }}
+      rustup: ${{ steps.pins.outputs.rustup }}
+      just: ${{ steps.pins.outputs.just }}
+      nightly: ${{ steps.pins.outputs.nightly }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Use Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+
+      - name: Use Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      # The registry copy of skia-bindings names the rust-skia commit every key
+      # starts with, and `plan` resolves features with `cargo tree --offline`.
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      # An archive whose cfgs the manifest does not list would be linked with
+      # the wrong ones; `manifest --check` refuses a skia-binaries.txt that
+      # PATCHES and build.rs no longer give.
+      - name: Check skia-binaries.txt
+        run: node scripts/skia-pack.mjs manifest --check
+
+      # The Linux build containers, the rustup installer and `just`, as
+      # build.yml pins them -- read from it rather than copied, so that
+      # container-pins.yml's check of build.yml covers these builds too, and
+      # a bump there moves both -- and the nightly the justfile pins, which
+      # the static musl builds need (see the `linux` job).
+      - name: Read build.yml's pins
+        id: pins
+        run: |
+          set -euo pipefail
+          WORKFLOW=.github/workflows/build.yml
+          pin() {
+            local found
+            found=$(grep -oE "$1 *'sha256:[0-9a-f]{64}'" "$WORKFLOW" | grep -oE 'sha256:[0-9a-f]{64}' || true)
+            if [ "$(printf '%s\n' "$found" | grep -c .)" != 1 ]; then
+              echo "::error::Expected one $1 digest in $WORKFLOW, found: ${found:-none}" >&2
+              exit 1
+            fi
+            printf '%s' "$found"
+          }
+          glibc=$(pin '&&')
+          musl=$(pin '\|\|')
+          rustup=$(grep -oE 'RUSTUP_VERSION: *"[0-9]+\.[0-9]+\.[0-9]+"' "$WORKFLOW" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          just=$(grep -oE 'install.sh.*--tag [0-9]+\.[0-9]+\.[0-9]+|--tag [0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+$')
+          nightly=$(sed -n 's/^fmt_toolchain := "\(nightly-[0-9-]*\)"$/\1/p' justfile)
+          for pin in "$rustup" "$just" "$nightly"; do
+            if [ -z "$pin" ] || [ "$(printf '%s\n' "$pin" | grep -c .)" != 1 ]; then
+              echo "::error::Expected one each of RUSTUP_VERSION and just's --tag in $WORKFLOW and fmt_toolchain in the justfile; read rustup '$rustup', just '$just', nightly '$nightly'" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "glibc=$glibc"
+            echo "musl=$musl"
+            echo "rustup=$rustup"
+            echo "just=$just"
+            echo "nightly=$nightly"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Plan the archives
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ inputs.publish }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node scripts/skia-pack.mjs plan > "$RUNNER_TEMP/cells.json"
+          TAG=$(sed -n 's/^release //p' skia-binaries.txt)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          : > "$RUNNER_TEMP/held.txt"
+          if [ "$PUBLISH" = true ]; then
+            if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+              gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/held.txt"
+            else
+              # A prerelease, never `latest`: it is a store for the crate's
+              # downloads, not a release of this project, and the npm and
+              # crate releases keep the latest marker.
+              gh release create "$TAG" --repo "$REPO" --target "$SHA" \
+                --prerelease --latest=false --title "$TAG" \
+                --notes "Patched Skia for crate builds that set SKIA_BINARIES_URL to this release, as skia-binaries.txt names it. Built by skia-binaries.yml; see docs/internals/packaging.md."
+            fi
+          fi
+          # Held: the archive is already in the release.
+          jq -c --rawfile held "$RUNNER_TEMP/held.txt" \
+            '($held | split("\n")) as $names | map(. + {held: ("skia-binaries-" + .key + ".tar.gz" | IN($names[]))})' \
+            "$RUNNER_TEMP/cells.json" > "$RUNNER_TEMP/planned.json"
+          for platform in darwin linux win32; do
+            echo "$platform=$(jq -c --arg p "$platform" 'map(select(.platform == $p))' "$RUNNER_TEMP/planned.json")"
+          done >> "$GITHUB_OUTPUT"
+          jq -r '"\(length) archives, \(map(select(.held)) | length) held"' "$RUNNER_TEMP/planned.json"
+
+  mac:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJSON(needs.plan.outputs.darwin) }}
+    name: mac ${{ matrix.cell.features || 'base' }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.cell.held }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Use Node.js
+        if: ${{ !matrix.cell.held }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+
+      - name: Use Rust
+        if: ${{ !matrix.cell.held }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - name: Use Ninja
+        if: ${{ !matrix.cell.held }}
+        run: brew install ninja
+
+      # build.yml's cache of the patched tree, by the same key.
+      - name: Name the Skia source's cache key
+        if: ${{ !matrix.cell.held }}
+        id: skia-key
+        run: |
+          key=$(node scripts/skia-source.mjs cache-key)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Skia source
+        if: ${{ !matrix.cell.held }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: ${{ steps.skia-key.outputs.key }}
+
+      # Compiled from the patched tree `skia-source prepare` makes, in release,
+      # and packed only once check-patched-skia finds every macOS patch in what
+      # ninja compiled and no download in the log. `--expect` refuses an
+      # archive whose key is not the one `plan` predicted.
+      - name: Build and pack
+        if: ${{ !matrix.cell.held }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: 10.14
+          KEY: ${{ matrix.cell.key }}
+          TARGET: ${{ matrix.cell.target }}
+          FEATURES: ${{ matrix.cell.features }}
+        run: |
+          set -euo pipefail
+          SKIA_SOURCE_DIR=$(node scripts/skia-source.mjs prepare)
+          export SKIA_SOURCE_DIR
+          node scripts/skia-pack.mjs build --expect "$KEY" "$RUNNER_TEMP/archives" "$TARGET" \
+            ${FEATURES:+--features "$FEATURES"}
+
+      - name: Keep the archive
+        if: ${{ !matrix.cell.held }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.cell.key }}
+          path: ${{ runner.temp }}/archives
+          if-no-files-found: error
+
+  windows:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJSON(needs.plan.outputs.win32) }}
+    name: windows ${{ matrix.cell.target }} ${{ matrix.cell.features || 'base' }}${{ matrix.cell.crtStatic && ' static' || '' }}
+    runs-on: ${{ startsWith(matrix.cell.target, 'x86_64') && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 120
+    steps:
+      - name: Enable long paths
+        if: ${{ !matrix.cell.held }}
+        run: git config --system core.longpaths true
+
+      - name: Checkout repository
+        if: ${{ !matrix.cell.held }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Use Node.js
+        if: ${{ !matrix.cell.held }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+
+      - name: Use Rust
+        if: ${{ !matrix.cell.held }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - name: Install Ninja
+        if: ${{ !matrix.cell.held }}
+        run: choco install ninja
+
+      # clang-cl and libclang, as build.yml's Windows job gives skia-bindings.
+      - name: Use LLVM
+        if: ${{ !matrix.cell.held }}
+        shell: bash
+        run: |
+          if [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
+            "/c/Program Files/LLVM/bin/clang-cl.exe" --version | head -1
+          else
+            choco install llvm --no-progress
+          fi
+
+      - name: Name the Skia source's cache key
+        if: ${{ !matrix.cell.held }}
+        id: skia-key
+        shell: bash
+        run: |
+          key=$(node scripts/skia-source.mjs cache-key)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Skia source
+        if: ${{ !matrix.cell.held }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/meo-skia-canvas
+          key: ${{ steps.skia-key.outputs.key }}
+
+      # The tree through a drive letter of its own, for the path-length reason
+      # build.yml's Windows build step gives; check-patched-skia reads the
+      # compiled files by the `S:` paths ninja named, inside the same step.
+      # A static build asks for the static C runtime, which skia-bindings
+      # compiles Skia against (`/MT`) and keys `-static`; `skia-pack build`
+      # reads the runtime back from rustc and `--expect` holds it to the plan.
+      - name: Build and pack
+        if: ${{ !matrix.cell.held }}
+        shell: pwsh
+        env:
+          KEY: ${{ matrix.cell.key }}
+          TARGET: ${{ matrix.cell.target }}
+          FEATURES: ${{ matrix.cell.features }}
+          RUSTFLAGS: ${{ matrix.cell.crtStatic && '-C target-feature=+crt-static' || '' }}
+        run: |
+          if (Test-Path S:\) { throw "S: is taken; pick another letter for the Skia cache" }
+          New-Item -ItemType Directory -Force "$env:USERPROFILE\.cache" | Out-Null
+          subst S: "$env:USERPROFILE\.cache"
+          $env:XDG_CACHE_HOME = 'S:\'
+          $env:SKIA_SOURCE_DIR = node scripts/skia-source.mjs prepare
+          if ($LASTEXITCODE -ne 0) { throw "skia-source prepare failed" }
+          $features = if ($env:FEATURES) { @('--features', $env:FEATURES) } else { @() }
+          node scripts/skia-pack.mjs build --expect $env:KEY "$env:RUNNER_TEMP\archives" $env:TARGET @features
+          if ($LASTEXITCODE -ne 0) { throw "skia-pack build failed" }
+
+      - name: Keep the archive
+        if: ${{ !matrix.cell.held }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.cell.key }}
+          path: ${{ runner.temp }}/archives
+          if-no-files-found: error
+
+  linux:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJSON(needs.plan.outputs.linux) }}
+    name: linux ${{ matrix.cell.target }} ${{ matrix.cell.features || 'base' }}${{ matrix.cell.crtStatic && ' static' || '' }}
+    runs-on: ${{ startsWith(matrix.cell.target, 'x86_64') && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    # build.yml's build containers, by the digests `plan` read from it.
+    container:
+      image: >-
+        ${{ format('ghcr.io/{0}-{1}@{2}', github.repository,
+        endsWith(matrix.cell.target, '-musl') && 'musl' || 'glibc',
+        endsWith(matrix.cell.target, '-musl') && needs.plan.outputs.musl || needs.plan.outputs.glibc) }}
+    steps:
+      # build.yml's installer, at the version `plan` read from it, checked
+      # against its published sha256, and the justfile's nightly for a static
+      # build.
+      - name: Install rust
+        if: ${{ !matrix.cell.held }}
+        env:
+          RUSTUP_VERSION: ${{ needs.plan.outputs.rustup }}
+          RUSTUP_TARGET: ${{ matrix.cell.target }}
+          STATIC: ${{ matrix.cell.crtStatic }}
+          NIGHTLY: ${{ needs.plan.outputs.nightly }}
+        run: |
+          BASE="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_TARGET}"
+          curl --proto '=https' --tlsv1.2 -sSf -O "${BASE}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -O "${BASE}/rustup-init.sha256"
+          sha256sum -c rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --profile minimal --default-toolchain stable
+          rm -f rustup-init rustup-init.sha256
+          if [ "$STATIC" = true ]; then
+            "$HOME/.cargo/bin/rustup" toolchain install "$NIGHTLY" --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo CARGO_TERM_COLOR=always >> "$GITHUB_ENV"
+
+      # build.yml's `just`, at the version `plan` read from it, for
+      # `use-local-skia` below.
+      - name: Install just
+        if: ${{ !matrix.cell.held }}
+        env:
+          JUST_VERSION: ${{ needs.plan.outputs.just }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | bash -s -- --to /usr/local/bin --tag "$JUST_VERSION"
+          just --version
+
+      # The commit the run is for, with the two vendored sources Skia's Linux
+      # build takes from this repository, as build.yml fetches them.
+      - name: Checkout skia-canvas
+        if: ${{ !matrix.cell.held }}
+        env:
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          git init -q skia-canvas
+          cd skia-canvas
+          git remote add origin "${SERVER}/${REPO}"
+          git fetch --depth 1 origin "$SHA"
+          git checkout -q --detach FETCH_HEAD
+          git submodule update --init --depth 1 vendor/freetype vendor/zlib
+
+      # rust-skia at the commit crates.io's skia-bindings was packaged from --
+      # the one every key names -- patched with Linux's patches, as build.yml
+      # patches its checkout. `cargo fetch` first, before the checkout is
+      # patched in, so that the registry copy `skia-pack origin` and `pack`
+      # read the commit from is there.
+      - name: Checkout and patch rust-skia
+        if: ${{ !matrix.cell.held }}
+        run: |
+          set -euo pipefail
+          (cd skia-canvas && cargo fetch)
+          ORIGIN=$(node skia-canvas/scripts/skia-pack.mjs origin)
+          read -r VERSION COMMIT <<< "$ORIGIN"
+          git clone --depth 1 --branch "$VERSION" --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
+          HEAD=$(git -C rust-skia rev-parse HEAD)
+          if [ "$HEAD" != "$COMMIT" ]; then
+            echo "::error::rust-skia's tag $VERSION is $HEAD, but crates.io's skia-bindings $VERSION was packaged from $COMMIT; an archive built from it would carry another commit's Skia under that commit's key."
+            exit 1
+          fi
+          node skia-canvas/scripts/skia-source.mjs apply rust-skia
+          mkdir -p rust-skia/skia-bindings/skia/third_party/externals
+          ln -s "$GITHUB_WORKSPACE/skia-canvas/vendor/freetype" rust-skia/skia-bindings/skia/third_party/externals/freetype
+          ln -s "$GITHUB_WORKSPACE/skia-canvas/vendor/zlib" rust-skia/skia-bindings/skia/third_party/externals/zlib
+
+      # skia-bindings and skia-safe from the patched checkout, as build.yml's
+      # Linux build takes them: `use-local-skia` patches Cargo.toml to the
+      # checkout, which build.rs reads to find the Skia source its brotli
+      # step compiles from on a `freetype` build.
+      #
+      # Built with the image's RUSTFLAGS -- its linker, and `-crt-static` on
+      # musl, as the npm build is -- and no `--target`, so they reach
+      # skia-bindings' build script too: given `--target`, cargo passes
+      # RUSTFLAGS to the target alone, and a musl build script linked
+      # statically cannot load libclang for bindgen. A static musl build
+      # needs the two apart, the target with the static C runtime and the
+      # build script without, which only nightly's `-Zhost-config` gives:
+      # `host.rustflags` takes the image's flags for build scripts, and
+      # RUSTFLAGS, which with `target-applies-to-host` off reach the target
+      # alone, ask for `+crt-static`. `skia-pack build` reads the runtime
+      # back from RUSTFLAGS, and `--expect` holds the key skia-bindings
+      # computed from it to the plan.
+      - name: Build and pack
+        if: ${{ !matrix.cell.held }}
+        env:
+          KEY: ${{ matrix.cell.key }}
+          TARGET: ${{ matrix.cell.target }}
+          FEATURES: ${{ matrix.cell.features }}
+          STATIC: ${{ matrix.cell.crtStatic }}
+          NIGHTLY: ${{ needs.plan.outputs.nightly }}
+        run: |
+          set -euo pipefail
+          cd skia-canvas
+          just use-local-skia
+          args=()
+          if [ "$STATIC" = true ]; then
+            HOST_FLAGS=$(node -p 'JSON.stringify((process.env.RUSTFLAGS || "").split(/\s+/).filter(Boolean))')
+            export RUSTUP_TOOLCHAIN="$NIGHTLY"
+            export RUSTFLAGS="-C target-feature=+crt-static"
+            args=(--target "$TARGET" -Zhost-config -Ztarget-applies-to-host
+              --config "target-applies-to-host=false"
+              --config "host.rustflags=$HOST_FLAGS")
+          fi
+          node scripts/skia-pack.mjs build --expect "$KEY" "$RUNNER_TEMP/archives" "$TARGET" \
+            "${args[@]}" ${FEATURES:+--features "$FEATURES"}
+
+      - name: Keep the archive
+        if: ${{ !matrix.cell.held }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.cell.key }}
+          path: ${{ runner.temp }}/archives
+          if-no-files-found: error
+
+  # Uploads what the cells built, never replacing an asset: the archives are
+  # downloaded by URL with no hash a consumer could check, so an asset
+  # replaced after a crate release would change what an existing build
+  # links with nothing to show for it. A name the release already holds is
+  # refused unless the bytes are the same, which -- a Skia build not being
+  # byte-reproducible -- means this job re-run after a partial upload. Then
+  # `published` holds the release to the whole plan.
+  publish:
+    needs: [plan, mac, windows, linux]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Use Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+
+      - name: Use Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Collect the archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/archives
+          merge-multiple: true
+
+      - name: Upload the archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for archive in "$RUNNER_TEMP"/archives/skia-binaries-*.tar.gz; do
+            name=$(basename "$archive")
+            local_sum=$(sha256sum "$archive" | cut -d' ' -f1)
+            held=$(gh api "repos/$REPO/releases/tags/$TAG" --jq ".assets[] | select(.name == \"$name\") | .digest")
+            if [ -n "$held" ]; then
+              if [ "$held" = "sha256:$local_sum" ]; then
+                echo "$name: already held, same bytes"
+                continue
+              fi
+              echo "::error::$TAG already holds $name with $held; this run built sha256:$local_sum. Archives are never replaced."
+              exit 1
+            fi
+            gh release upload "$TAG" "$archive" --repo "$REPO"
+            echo "$name: uploaded"
+          done
+
+      - name: The release holds every planned archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/skia-pack.mjs published

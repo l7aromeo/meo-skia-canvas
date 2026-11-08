@@ -6,6 +6,20 @@
 //   node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static]
 //       pack a skia-bindings build that already ran: <features> are
 //       skia-bindings' cargo features, comma-separated
+//   node scripts/skia-pack.mjs build [--expect <key>] <out-dir> <target> [cargo args]
+//       build the crate in release for <target> with those cargo args, then
+//       pack the skia-bindings build it ran, its features and static C
+//       runtime as cargo and rustc report them; `--expect` refuses an
+//       archive under any other key
+//   node scripts/skia-pack.mjs plan
+//       print the archives this checkout publishes, as JSON: one per target,
+//       crate feature set and C runtime, with the key cargo predicts
+//   node scripts/skia-pack.mjs published
+//       refuse unless the release skia-binaries.txt names holds every planned
+//       archive
+//   node scripts/skia-pack.mjs origin
+//       print the skia-bindings version Cargo.lock names and the rust-skia
+//       commit its crates.io package was made from, space-separated
 //   node scripts/skia-pack.mjs manifest [--check]
 //       write skia-binaries.txt, or check the one in the tree
 //   node scripts/skia-pack.mjs --self-test
@@ -24,6 +38,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -169,13 +184,69 @@ export function pack(buildDir, outDir, how, vouch) {
       writeFileSync(join(dir, file), readFileSync(join(skia, file)));
     writeFileSync(join(dir, "tag.txt"), how.version);
     writeFileSync(join(dir, "key.txt"), name);
+    // Named relative to the staging directory, with no drive letter for GNU
+    // tar -- the one first on PATH in a Windows runner's bash -- to read
+    // `D:\...` as a remote `host:path`.
+    execFileSync("tar", ["-czf", archiveName(name), ARCHIVE_NAME], {
+      cwd: staging,
+    });
     mkdirSync(outDir, { recursive: true });
-    const archive = join(outDir, `${ARCHIVE_NAME}-${name}.tar.gz`);
-    execFileSync("tar", ["-czf", archive, "-C", staging, ARCHIVE_NAME]);
+    const archive = join(outDir, archiveName(name));
+    copyFileSync(join(staging, archiveName(name)), archive);
     return archive;
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
+}
+
+/**
+ * Whether `rustc --print cfg` output `cfg` has the static C runtime on:
+ * skia-bindings reads the same fact from `CARGO_CFG_TARGET_FEATURE`
+ * (cargo.rs `target_crt_static`) and keys by it. It is on by default for
+ * Rust's musl targets and off for MSVC, so it is read, not assumed.
+ */
+export function crtStaticIn(cfg) {
+  return /^target_feature="crt-static"$/m.test(cfg);
+}
+
+/**
+ * The `--target` a build of `target` on `host` passes cargo: none where the
+ * target is the host, so RUSTFLAGS reach skia-bindings' build script as they
+ * do in build.yml's builds -- given `--target`, cargo passes them to the
+ * target alone, and a musl build script would then link statically, where
+ * bindgen cannot load libclang -- and none where `cargoArgs` already name
+ * one, as a build with `-Zhost-config` must.
+ */
+export function targetArgs(target, host, cargoArgs) {
+  if (target === host) return [];
+  if (
+    cargoArgs.some((arg) => arg === "--target" || arg.startsWith("--target="))
+  )
+    return [];
+  return ["--target", target];
+}
+
+/**
+ * The skia-bindings build in cargo's JSON `messages`: the directory its build
+ * script ran in, and the features cargo built it with. Throws where cargo
+ * built none, or more than one, since then there is no single build to pack.
+ */
+export function bindingsBuildOf(messages) {
+  const isBindings = (m) => /[/#]skia-bindings[@#]/.test(m.package_id ?? "");
+  const scripts = messages.filter(
+    (m) => m.reason === "build-script-executed" && isBindings(m),
+  );
+  const libraries = messages.filter(
+    (m) => m.reason === "compiler-artifact" && isBindings(m),
+  );
+  if (scripts.length !== 1 || libraries.length !== 1)
+    throw new Error(
+      `skia-pack: cargo ran ${scripts.length} skia-bindings build scripts and built ${libraries.length} libraries; one of each is packed`,
+    );
+  return {
+    buildDir: dirname(scripts[0].out_dir),
+    features: libraries[0].features,
+  };
 }
 
 /// The manifest `build.rs` reads, at the crate's root and in its package.
@@ -194,6 +265,65 @@ export const HOSTED = {
   "win32-x64": ["x86_64-pc-windows-msvc", "win32"],
   "win32-arm64": ["aarch64-pc-windows-msvc", "win32"],
 };
+
+/// The crate's feature sets each platform's archives are built for: every
+/// combination of the features that change skia-bindings' build there.
+/// `metal` on macOS; `vulkan` and `freetype` on Linux; `vulkan` on Windows,
+/// which builds no FreeType (`usesFreetype`). The crate's other features
+/// reach no skia-bindings feature, and a consumer's `freetype` on macOS or
+/// Windows keys the archive without it.
+export const CRATE_FEATURE_SETS = {
+  darwin: [[], ["metal"]],
+  linux: [[], ["vulkan"], ["freetype"], ["vulkan", "freetype"]],
+  win32: [[], ["vulkan"]],
+};
+
+/**
+ * The C runtimes a consumer of `target` builds with, each its own key
+ * (`crtStaticIn`): both on Windows, where MSVC links it dynamically unless
+ * asked, and on musl, where Rust links it statically unless asked -- the npm
+ * build is the one that asks there. One otherwise, the target's default.
+ */
+export function crtVariants(target) {
+  return target.includes("-windows-") || target.endsWith("-musl")
+    ? [false, true]
+    : [false];
+}
+
+/**
+ * Every archive this checkout publishes: for each hosted target, crate feature
+ * set and C runtime, the key skia-bindings will ask for. `resolve(target,
+ * features)` gives skia-bindings' features for the crate's `features` on
+ * `target`, as cargo resolves them.
+ */
+export function planCells(commit, resolve) {
+  return Object.values(HOSTED).flatMap(([target, platform]) =>
+    CRATE_FEATURE_SETS[platform].flatMap((features) => {
+      const resolved = resolve(target, features);
+      if (!resolved)
+        throw new Error(
+          `skia-pack: cargo resolved no skia-bindings features for ${target} [${features}]`,
+        );
+      return crtVariants(target).map((crtStatic) => ({
+        target,
+        platform,
+        features: features.join(","),
+        crtStatic,
+        key: key(commit, target, resolved, crtStatic),
+      }));
+    }),
+  );
+}
+
+/** The archive file names `cells` plan that `held` does not include. */
+export function missingArchives(cells, held) {
+  return cells
+    .map((cell) => archiveName(cell.key))
+    .filter((name) => !held.includes(name));
+}
+
+/** The archive file name for `key`. */
+export const archiveName = (name) => `${ARCHIVE_NAME}-${name}.tar.gz`;
 
 /// Hex digits of the digest in a release's name, as many as a tree's
 /// (`PATCH_DIGEST_LENGTH` in scripts/skia-source.mjs).
@@ -350,7 +480,178 @@ function cases(scratch) {
     if (releaseName("0.157.0", base) === name)
       throw new Error("a new skia-bindings version kept the release");
   };
+  const crtIs = (cfg, expected) => () => {
+    if (crtStaticIn(cfg) !== expected)
+      throw new Error(`crt-static read as ${!expected}`);
+  };
+  const muslCfg =
+    'target_env="musl"\ntarget_feature="crt-static"\ntarget_os="linux"\n';
+  const msvcCfg =
+    'target_env="msvc"\ntarget_feature="sse2"\ntarget_os="windows"\n';
+  // cargo's JSON messages for a build, skia-bindings' ids in the form cargo
+  // gives a registry package and a path one.
+  const message = (reason, id, extra) => ({ reason, package_id: id, ...extra });
+  const registryId =
+    "registry+https://github.com/rust-lang/crates.io-index#skia-bindings@0.156.0";
+  const pathId = "path+file:///w/rust-skia/skia-bindings#0.156.0";
+  const bindingsIs = (messages, expected) => () => {
+    const got = bindingsBuildOf(messages);
+    if (JSON.stringify(got) !== JSON.stringify(expected))
+      throw new Error(`bindings build ${JSON.stringify(got)}`);
+  };
+  // Refused for the reason `bindingsBuildOf` gives, not any exception.
+  const bindingsRefused = (messages) => () => {
+    try {
+      bindingsBuildOf(messages);
+    } catch (e) {
+      if (e.message.endsWith("one of each is packed")) throw e;
+      return;
+    }
+  };
+  const ran = (id, dir) =>
+    message("build-script-executed", id, { out_dir: `${dir}/out` });
+  const built = (id, features) =>
+    message("compiler-artifact", id, { features });
+  // A resolver in the shape cargo answers: the base set, plus what each
+  // crate feature turns on.
+  const resolveLike = (target, features) => [
+    ...base,
+    ...(features.includes("metal") ? ["ganesh", "metal"] : []),
+    ...(features.includes("vulkan") ? ["ganesh", "vulkan"] : []),
+    ...(features.includes("freetype")
+      ? ["embed-freetype", "freetype-woff2"]
+      : []),
+  ];
+  const planIs = () => {
+    const cells = planCells(commit, resolveLike);
+    const keys = new Set(cells.map((cell) => cell.key));
+    if (cells.length !== 34) throw new Error(`${cells.length} cells`);
+    if (keys.size !== cells.length) throw new Error("two cells share a key");
+    for (const [target] of Object.values(HOSTED))
+      if (!cells.some((cell) => cell.target === target))
+        throw new Error(`no cell for ${target}`);
+    for (const name of [
+      "ce6727ef251518df37bc-x86_64-unknown-linux-musl-jpegd-jpege-pdf-svg-textlayout-webpd-webpe-static",
+      "ce6727ef251518df37bc-x86_64-unknown-linux-musl-jpegd-jpege-pdf-svg-textlayout-webpd-webpe",
+      "ce6727ef251518df37bc-aarch64-pc-windows-msvc-ganesh-jpegd-jpege-pdf-svg-textlayout-vulkan-webpd-webpe-static",
+      "ce6727ef251518df37bc-aarch64-apple-darwin-ganesh-jpegd-jpege-metal-pdf-svg-textlayout-webpd-webpe",
+      "ce6727ef251518df37bc-aarch64-unknown-linux-gnu-ftembed-ftwoff2-ganesh-jpegd-jpege-pdf-svg-textlayout-vulkan-webpd-webpe",
+    ])
+      if (!keys.has(name)) throw new Error(`no cell keyed ${name}`);
+    for (const cell of cells)
+      if (cell.crtStatic && cell.target.endsWith("-gnu"))
+        throw new Error(`a static cell for ${cell.target}`);
+  };
+  const missingIs = (held, expected) => () => {
+    const cells = planCells(commit, resolveLike);
+    const got = missingArchives(cells, held(cells));
+    if (JSON.stringify(got) !== JSON.stringify(expected(cells)))
+      throw new Error(`missing ${got.length}: ${got.slice(0, 3)}`);
+  };
   return [
+    [
+      "34 archives: every hosted target, feature set and consumer C runtime",
+      true,
+      planIs,
+    ],
+    [
+      "a plan with a feature set cargo cannot resolve",
+      false,
+      () => {
+        try {
+          planCells(commit, () => null);
+        } catch (e) {
+          if (e.message.includes("resolved no skia-bindings features")) throw e;
+        }
+      },
+    ],
+    [
+      "a release holding every planned archive, and more",
+      true,
+      missingIs(
+        (cells) => [
+          "skia-binaries-other.tar.gz",
+          ...cells.map((c) => archiveName(c.key)),
+        ],
+        () => [],
+      ),
+    ],
+    [
+      "a release missing one archive names it",
+      true,
+      missingIs(
+        (cells) => cells.slice(1).map((c) => archiveName(c.key)),
+        (cells) => [archiveName(cells[0].key)],
+      ),
+    ],
+    [
+      "a build for its host passes no --target, one for another target does",
+      true,
+      () => {
+        const got = [
+          targetArgs(
+            "x86_64-unknown-linux-musl",
+            "x86_64-unknown-linux-musl",
+            [],
+          ),
+          targetArgs("aarch64-pc-windows-msvc", "x86_64-pc-windows-msvc", []),
+          targetArgs("x86_64-unknown-linux-musl", "x86_64-unknown-linux-musl", [
+            "--target",
+            "x86_64-unknown-linux-musl",
+          ]),
+          targetArgs("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", [
+            "--target=aarch64-unknown-linux-gnu",
+          ]),
+        ];
+        const want = [[], ["--target", "aarch64-pc-windows-msvc"], [], []];
+        if (JSON.stringify(got) !== JSON.stringify(want))
+          throw new Error(JSON.stringify(got));
+      },
+    ],
+    ["a musl target's default static C runtime", true, crtIs(muslCfg, true)],
+    ["MSVC's dynamic C runtime", true, crtIs(msvcCfg, false)],
+    [
+      "crt-static is not read from a longer feature name",
+      true,
+      crtIs('target_feature="crt-static-x"\n', false),
+    ],
+    [
+      "the registry skia-bindings build and its features",
+      true,
+      bindingsIs(
+        [
+          ran(registryId, "/t/release/build/skia-bindings-1"),
+          ran("registry+https://x#other@1.0.0", "/t/release/build/other-1"),
+          built(registryId, ["pdf", "svg"]),
+        ],
+        {
+          buildDir: "/t/release/build/skia-bindings-1",
+          features: ["pdf", "svg"],
+        },
+      ),
+    ],
+    [
+      "a path skia-bindings, as under use-local-skia",
+      true,
+      bindingsIs(
+        [ran(pathId, "/t/b/skia-bindings-2"), built(pathId, ["metal"])],
+        { buildDir: "/t/b/skia-bindings-2", features: ["metal"] },
+      ),
+    ],
+    [
+      "a build that ran no skia-bindings build script",
+      false,
+      bindingsRefused([built(registryId, [])]),
+    ],
+    [
+      "a build that ran skia-bindings' build script twice",
+      false,
+      bindingsRefused([
+        ran(registryId, "/a/skia-bindings-1"),
+        ran(registryId, "/a/skia-bindings-2"),
+        built(registryId, []),
+      ]),
+    ],
     [
       "the manifest names the release, the URL and every hosted target's tree",
       true,
@@ -539,6 +840,81 @@ function packagedSkiaBindings() {
 }
 
 /**
+ * Packs the skia-bindings build in `buildDir` for `target`, once
+ * scripts/check-patched-skia.mjs finds it compiled `target`'s patched files
+ * and downloaded nothing. Returns the archive's path.
+ */
+async function packChecked(buildDir, outDir, target, features, crtStatic) {
+  const { commit, version } = packagedSkiaBindings();
+  const { PATCHED, buildLog, refusal } =
+    await import("./check-patched-skia.mjs");
+  const patched = PATCHED[platformOf(target)];
+  return pack(
+    buildDir,
+    outDir,
+    { commit, target, features, crtStatic, version },
+    () => refusal(buildLog(buildDir), patched),
+  );
+}
+
+/**
+ * The flags cargo passes rustc for the target, from the environment, in
+ * cargo's own order of precedence: `CARGO_ENCODED_RUSTFLAGS`, split on the
+ * unit separator, else `RUSTFLAGS`, split on whitespace.
+ */
+function rustflags() {
+  const encoded = process.env.CARGO_ENCODED_RUSTFLAGS;
+  if (encoded !== undefined) return encoded ? encoded.split("\x1f") : [];
+  return (process.env.RUSTFLAGS ?? "").split(/\s+/).filter(Boolean);
+}
+
+/**
+ * The asset names of the release `tag` in `repository`, or none where there
+ * is no such release yet: before the first upload for a tree, every archive
+ * is missing, which is the same answer.
+ */
+function releaseAssets(tag, repository) {
+  try {
+    return execFileSync(
+      "gh",
+      [
+        "release",
+        "view",
+        tag,
+        "--repo",
+        repository,
+        "--json",
+        "assets",
+        "--jq",
+        ".assets[].name",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    )
+      .split("\n")
+      .filter(Boolean);
+  } catch (error) {
+    if (String(error.stderr).includes("release not found")) return [];
+    throw error;
+  }
+}
+
+/**
+ * This tree's `planCells`, keyed by the commit crates.io's skia-bindings was
+ * packaged from, its features as cargo resolves them for each target.
+ */
+async function currentPlan() {
+  const { commit } = packagedSkiaBindings();
+  const { skiaFeatures } = await import("./skia-binaries.mjs");
+  return planCells(commit, (target, features) =>
+    skiaFeatures([
+      "--target",
+      target,
+      ...(features.length ? ["--features", features.join(",")] : []),
+    ]),
+  );
+}
+
+/**
  * This checkout's `skia-binaries.txt`: for each platform the tree `PATCHES`
  * names for it and the cfgs of build.rs's `SKIA_PATCHES` whose file and
  * marker that platform's check (`PATCHED` in scripts/check-patched-skia.mjs)
@@ -609,26 +985,98 @@ if (main) {
         throw new Error(
           "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static]",
         );
-      const { commit, version } = packagedSkiaBindings();
-      const { PATCHED, buildLog, refusal } =
-        await import("./check-patched-skia.mjs");
-      const patched = PATCHED[platformOf(target)];
-      const archive = pack(
+      const archive = await packChecked(
         buildDir,
         outDir,
+        target,
+        features.split(","),
+        crtStatic === "static",
+      );
+      console.log(`skia-pack: packed ${archive}`);
+    } else if (command === "origin") {
+      const { version, commit } = packagedSkiaBindings();
+      console.log(`${version} ${commit}`);
+    } else if (command === "plan") {
+      const cells = await currentPlan();
+      console.log(JSON.stringify(cells));
+    } else if (command === "published") {
+      const cells = await currentPlan();
+      const manifest = readFileSync(join(ROOT, MANIFEST), "utf8");
+      const tag = manifest.match(/^release (\S+)$/m)?.[1];
+      const repository = manifest
+        .match(/^url (\S+)$/m)?.[1]
+        ?.split("/releases/download/")[0];
+      if (!tag || !repository)
+        throw new Error(`skia-pack: ${MANIFEST} names no release or URL`);
+      const held = releaseAssets(tag, repository);
+      const missing = missingArchives(cells, held);
+      if (missing.length) {
+        console.error(
+          `skia-pack: ${tag} lacks ${missing.length} of ${cells.length} archives:\n  ${missing.join("\n  ")}\nDispatch skia-binaries.yml with publish on for these patches.`,
+        );
+        process.exit(1);
+      }
+      console.log(`skia-pack: ${tag} holds all ${cells.length} archives`);
+    } else if (command === "build") {
+      const expectAt = args[0] === "--expect" ? 2 : 0;
+      const expected = expectAt ? args[1] : null;
+      const [outDir, target, ...cargoArgs] = args.slice(expectAt);
+      if (!outDir || !target || (expectAt && !expected))
+        throw new Error(
+          "usage: node scripts/skia-pack.mjs build [--expect <key>] <out-dir> <target> [cargo args]",
+        );
+      const host = execFileSync("rustc", ["-vV"], { encoding: "utf8" }).match(
+        /^host: (\S+)$/m,
+      )?.[1];
+      const json = execFileSync(
+        "cargo",
+        [
+          "build",
+          "--release",
+          "--lib",
+          ...targetArgs(target, host, cargoArgs),
+          "--message-format=json-render-diagnostics",
+          ...cargoArgs,
+        ],
         {
-          commit,
-          target,
-          features: features.split(","),
-          crtStatic: crtStatic === "static",
-          version,
+          cwd: ROOT,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "inherit"],
+          maxBuffer: 1 << 30,
         },
-        () => refusal(buildLog(buildDir), patched),
+      );
+      const { buildDir, features } = bindingsBuildOf(
+        json
+          .split("\n")
+          .filter((line) => line.startsWith("{"))
+          .map((line) => JSON.parse(line)),
+      );
+      // RUSTFLAGS reach the target with or without `--target`, and with
+      // `-Zhost-config` they reach it alone, so they say what skia-bindings
+      // read from CARGO_CFG_TARGET_FEATURE.
+      const cfg = execFileSync(
+        "rustc",
+        ["--print", "cfg", "--target", target, ...rustflags()],
+        { encoding: "utf8" },
+      );
+      const crtStatic = crtStaticIn(cfg);
+      const { commit } = packagedSkiaBindings();
+      const built = key(commit, target, features, crtStatic);
+      if (expected && built !== expected)
+        throw new Error(
+          `skia-pack: this build packs as ${built}, not the planned ${expected}; plan and build disagree on its features or C runtime`,
+        );
+      const archive = await packChecked(
+        buildDir,
+        outDir,
+        target,
+        features,
+        crtStatic,
       );
       console.log(`skia-pack: packed ${archive}`);
     } else {
       console.error(
-        "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static] | manifest [--check] | --self-test",
+        "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static] | build [--expect <key>] <out-dir> <target> [cargo args] | plan | published | origin | manifest [--check] | --self-test",
       );
       process.exit(2);
     }
