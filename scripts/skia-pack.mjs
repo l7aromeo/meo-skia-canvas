@@ -48,6 +48,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -213,7 +214,8 @@ export function archiveFiles(output, target, features, has) {
  * Packs the skia-bindings build in `buildDir` into `outDir` as
  * `skia-binaries-<key>.tar.gz`, once `vouch` finds nothing wrong with its
  * log. `how` is `{ commit, target, features, crtStatic, version }`. Returns
- * the archive's path.
+ * `{ archive, files }`: the archive's path, and each file it holds as
+ * `{ name, bytes }`.
  */
 export function pack(buildDir, outDir, how, vouch) {
   const output = readFileSync(buildScriptLogs(buildDir).output, "utf8");
@@ -235,6 +237,10 @@ export function pack(buildDir, outDir, how, vouch) {
       writeFileSync(join(dir, file), readFileSync(join(skia, file)));
     writeFileSync(join(dir, "tag.txt"), how.version);
     writeFileSync(join(dir, "key.txt"), name);
+    const held = [...files, "tag.txt", "key.txt"].map((file) => ({
+      name: file,
+      bytes: statSync(join(dir, file)).size,
+    }));
     // Named relative to the staging directory, with no drive letter for GNU
     // tar -- the one first on PATH in a Windows runner's bash -- to read
     // `D:\...` as a remote `host:path`.
@@ -244,7 +250,7 @@ export function pack(buildDir, outDir, how, vouch) {
     mkdirSync(outDir, { recursive: true });
     const archive = join(outDir, archiveName(name));
     copyFileSync(join(staging, archiveName(name)), archive);
-    return archive;
+    return { archive, files: held };
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
@@ -396,6 +402,16 @@ export function missingArchives(cells, held) {
 /** The archive file name for `key`. */
 export const archiveName = (name) => `${ARCHIVE_NAME}-${name}.tar.gz`;
 
+/**
+ * What `pack` made, for a build's log: the archive, then each file it holds
+ * with its size, so a log shows an archive missing its libraries.
+ */
+export const packedReport = ({ archive, files }) =>
+  [
+    `skia-pack: packed ${archive}`,
+    ...files.map(({ name, bytes }) => `  ${name} ${bytes} bytes`),
+  ].join("\n");
+
 /// Hex digits of the digest in a release's name, as many as a tree's
 /// (`PATCH_DIGEST_LENGTH` in scripts/skia-source.mjs).
 const RELEASE_DIGEST_LENGTH = 12;
@@ -513,7 +529,7 @@ function cases(scratch) {
   });
   const packs = (dir, target, vouch, expected) => () => {
     const out = join(scratch, `out-${dir.split("/").pop()}`);
-    const archive = pack(dir, out, how(target), vouch);
+    const { archive, files } = pack(dir, out, how(target), vouch);
     const listing = execFileSync("tar", ["-tzf", archive], { encoding: "utf8" })
       .split("\n")
       .filter((line) => line && !line.endsWith("/"))
@@ -526,6 +542,11 @@ function cases(scratch) {
       .sort();
     if (JSON.stringify(listing) !== JSON.stringify(want))
       throw new Error(`archive holds ${listing}, not ${want}`);
+    // What `pack` reports holding is what the archive holds, sized.
+    const reported = files.map(({ name }) => `${ARCHIVE_NAME}/${name}`).sort();
+    if (JSON.stringify(reported) !== JSON.stringify(want))
+      throw new Error(`pack reports ${reported}, the archive holds ${want}`);
+
     const keyText = execFileSync(
       "tar",
       ["-xzOf", archive, `${ARCHIVE_NAME}/key.txt`],
@@ -534,6 +555,9 @@ function cases(scratch) {
     const name = archive.split("/").pop();
     if (name !== `${ARCHIVE_NAME}-${keyText}.tar.gz`)
       throw new Error(`key.txt holds ${keyText}, the archive is ${name}`);
+    const sized = `  key.txt ${Buffer.byteLength(keyText)} bytes`;
+    if (!packedReport({ archive, files }).split("\n").includes(sized))
+      throw new Error(`the report has no line \`${sized}\``);
   };
   const linux = "x86_64-unknown-linux-gnu";
   const windows = "x86_64-pc-windows-msvc";
@@ -1059,7 +1083,7 @@ function packagedSkiaBindings() {
 /**
  * Packs the skia-bindings build in `buildDir` for `target`, once
  * scripts/check-patched-skia.mjs finds it compiled `target`'s patched files
- * and downloaded nothing. Returns the archive's path.
+ * and downloaded nothing. Returns what `pack` does.
  */
 async function packChecked(buildDir, outDir, target, features, crtStatic) {
   const { commit, version } = packagedSkiaBindings();
@@ -1248,14 +1272,14 @@ if (main) {
         throw new Error(
           "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static]",
         );
-      const archive = await packChecked(
+      const packed = await packChecked(
         buildDir,
         outDir,
         target,
         features.split(","),
         crtStatic === "static",
       );
-      console.log(`skia-pack: packed ${archive}`);
+      console.log(packedReport(packed));
     } else if (command === "upload") {
       const [archive, tag] = args;
       const repository = process.env.GITHUB_REPOSITORY;
@@ -1338,14 +1362,14 @@ if (main) {
         throw new Error(
           `skia-pack: this build packs as ${built}, not the planned ${expected}; plan and build disagree on its features or C runtime`,
         );
-      const archive = await packChecked(
+      const packed = await packChecked(
         buildDir,
         outDir,
         target,
         features,
         crtStatic,
       );
-      console.log(`skia-pack: packed ${archive}`);
+      console.log(packedReport(packed));
     } else {
       console.error(
         "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static] | build [--expect <key>] <out-dir> <target> [cargo args] | plan | published | upload <archive> <release tag> | origin | manifest [--check] | --self-test",
