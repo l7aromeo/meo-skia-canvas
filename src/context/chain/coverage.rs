@@ -1430,7 +1430,7 @@ mod inked_tests {
     /// miter join set the limit to 1, where the bounds are tightest: half the
     /// width times the square root of 2, which a square cap's corner
     /// reaches. A dashed stroke takes the chain's layer and not this route.
-    const DRAWS: [(&str, Draw); 11] = [
+    const DRAWS: [(&str, Draw); 13] = [
         ("filled star", |ctx| {
             star(ctx);
             ctx.fill(FillRule::EvenOdd);
@@ -1499,6 +1499,17 @@ mod inked_tests {
         ("small hinted text", |ctx| {
             assert!(ctx.set_font_css("11px sans-serif"));
             ctx.fill_text("Hamburgefonstiv", 18.0, 50.0, None);
+        }),
+        // The size whose glyph masks land a level off an A8 plane's on a
+        // page of the page's own type -- see `layer::CoverageRun`.
+        ("16px text", |ctx| {
+            assert!(ctx.set_font_css(&format!("16px {OSWALD}")));
+            ctx.fill_text("Ajgy", 30.0, 50.0, None);
+        }),
+        ("text drawn at a half", |ctx| {
+            ctx.scale(0.5, 0.5);
+            assert!(ctx.set_font_css(&format!("40px {OSWALD}")));
+            ctx.fill_text("Ajgy", 60.0, 100.0, None);
         }),
     ];
 

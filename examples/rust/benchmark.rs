@@ -33,7 +33,7 @@
 //! GPU; treat the ratios as the transferable part, not the milliseconds.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     error::Error,
     f32::consts::PI,
     path::{Path, PathBuf},
@@ -49,6 +49,18 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const WIDTH: f32 = 1200.0;
 const HEIGHT: f32 = 900.0;
+
+/// The fraction of a pixel `text-blur-moved` moves each draw by, past the
+/// one before: the golden ratio's, whose multiples never repeat, so no draw
+/// lands where an earlier one did. `examples/node/benchmark.js` steps by the
+/// same.
+const GOLDEN_STEP: f64 = 0.618_033_988_749_894_9;
+
+thread_local! {
+    /// How many draws `text-blur-moved` has made, across every page, so that
+    /// each page goes on where the last one stopped.
+    static MOVED: Cell<u64> = const { Cell::new(0) };
+}
 
 /// The three formats a page can be held in, widest last.
 const DEPTHS: [(&str, PixelDepth); 3] = [
@@ -517,7 +529,7 @@ type Paint = fn(&mut Context2D, &Fixtures) -> Result<()>;
 /// opposite directions on a float page -- blending translucent layers against
 /// filling opaque ones -- so a single "float costs Nx" figure would be false
 /// either way.
-const DRAWS: [(&str, Paint); 16] = [
+const DRAWS: [(&str, Paint); 17] = [
     ("scene", |ctx, _| scene(ctx)),
     ("curves", |ctx, _| curves(ctx, 300)),
     ("dashes", |ctx, _| {
@@ -583,6 +595,29 @@ const DRAWS: [(&str, Paint); 16] = [
     ("blur", |ctx, _| {
         ctx.set_filter_css("blur(4px)")?;
         rects(ctx, flat)
+    }),
+    // Text under a blur, each draw moved by a fraction of a pixel no draw
+    // before it was, so that nothing a run kept matches and each is drawn
+    // and blurred: the cost of what its coverage is read, zeroed and blurred
+    // over.
+    ("text-blur-moved", |ctx, _| {
+        if !ctx.set_font_css("40px Helvetica") {
+            return Err("40px Helvetica is a font shorthand".into());
+        }
+        ctx.set_filter_css("blur(3px)")?;
+        for i in 0..50 {
+            let n = MOVED.get() + 1;
+            MOVED.set(n);
+            let fraction = (n as f64 * GOLDEN_STEP).fract() as f32;
+            let (column, row) = ((i % 10) as f32, (i / 10) as f32);
+            ctx.fill_text(
+                "Ag",
+                column * 38.0 + fraction,
+                40.0 + row * 50.0,
+                None,
+            );
+        }
+        Ok(())
     }),
     ("shadows", |ctx, _| panels(ctx, true)),
     ("clip", |ctx, _| {

@@ -64,8 +64,9 @@ use crate::{
     pixels::PixelColorSpace,
     started,
     typography::{
-        Baseline, DecorationStyle, DrawnRun, FontSpec, PendingInk, RunPaint,
-        Spacing, TextExtents, TypesetInputs, Typesetter, paragraph_style,
+        Baseline, DecorationStyle, DrawnRun, DrawnText, FontSpec, PendingInk,
+        RunPaint, Spacing, TextExtents, TypesetInputs, Typesetter,
+        paragraph_style,
     },
     utils::*,
 };
@@ -73,9 +74,9 @@ use chain::{Step, canvas_reach};
 use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
-    BlurDraw, Composite, CoverageRun, Entries, ExactColour, Group, Layer,
-    LayerRec, Replay, coverage_files, holds_a_cut, holds_a_pair,
-    reach_the_clip,
+    BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
+    Entries, ExactColour, Group, Layer, LayerRec, Replay, coverage_files,
+    holds_a_cut, holds_a_pair, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use run_mask::Kept;
@@ -1626,11 +1627,15 @@ impl Context2D {
         // run over the page's every pixel took 1.7 ms a 40px word under a
         // drop shadow. Where either recording does not say, the layer keeps
         // what the entries reach.
-        let record = |paint: &Paint| {
+        let recorded = |paint: &Paint| {
             let mut paint = paint.clone();
             paint
                 .set_image_filter(None)
                 .set_blend_mode(BlendMode::SrcOver);
+            paint
+        };
+        let record = |paint: &Paint| {
+            let paint = recorded(paint);
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(bounds, true);
             canvas.set_matrix(&self.state.matrix.into());
@@ -1643,12 +1648,76 @@ impl Context2D {
                 .finish_recording_as_picture(None)
                 .map(|p| (p, reach))
         };
+        let dual = self.recorder.borrow().dual();
+        // The paint the run's pixels are recorded in.
+        let pixels_paint = match dual {
+            false => paint,
+            true => exact.unwrap_or(paint),
+        };
+        // A kept run is filed as the draw it is, and recorded when a target
+        // first plays it -- see `layer::DeferredPicture` -- with what it can
+        // ink worked out now: in the paint its pixels are recorded in, and on
+        // a page that keeps a recording for each kind of target in its own
+        // paint for a document too, the reach the two join to.
+        let deferred = text.and_then(|text| text.defer).and_then(|defer| {
+            let (pixels, mut reach) = defer(&recorded(pixels_paint))?;
+            let document = match dual {
+                false => None,
+                true => {
+                    let (document, document_reach) = defer(&recorded(paint))?;
+                    reach = reach.zip(document_reach).map(|(mut a, b)| {
+                        a.join(b);
+                        a
+                    });
+                    Some(document)
+                }
+            };
+            let deferred = Arc::new(DeferredPicture::new(
+                pixels,
+                document,
+                bounds,
+                self.state.matrix,
+            ));
+            Some((Layer::Deferred(deferred), reach))
+        });
+        let (entry, reach) = match dual {
+            _ if deferred.is_some() => deferred,
+            false => record(paint)
+                .map(|(picture, reach)| (Layer::Picture(picture), reach)),
+            true => record(exact.unwrap_or(paint)).zip(record(paint)).map(
+                |((pixels, pixels_reach), (document, document_reach))| {
+                    let reach =
+                        pixels_reach.zip(document_reach).map(|(mut a, b)| {
+                            a.join(b);
+                            a
+                        });
+                    (Layer::Targeted(Arc::new((pixels, document))), reach)
+                },
+            ),
+        }
+        .unzip();
+        let reach = reach.flatten();
         // A run of text in one flat colour that the coverage route could
-        // play is recorded once more, in its colour opaque, through the paint
-        // its pixels are drawn in -- see `layer::CoverageRun` -- before the
-        // run itself, so that what the run reaches is the run's. A run naming
+        // play is drawn once more, in its colour opaque, through the paint
+        // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
+        // the paint the run's pixels are recorded in, as it is for an opaque
+        // colour placed on the page's bytes, the same calls would record the
+        // same picture, and the run's own is taken -- recorded when first
+        // played where the run's is. A run naming
         // a line colour of its own is drawn in two colours, and keeps the
         // chain.
+        let pixels = match &entry {
+            Some(Layer::Picture(picture)) => {
+                Some(CoveragePicture::Recorded(picture.clone()))
+            }
+            Some(Layer::Targeted(pictures)) => {
+                Some(CoveragePicture::Recorded(pictures.0.clone()))
+            }
+            Some(Layer::Deferred(deferred)) => {
+                Some(CoveragePicture::Deferred(Arc::clone(deferred)))
+            }
+            _ => None,
+        };
         let coverage = match exact {
             Some(exact)
                 if reached.is_some()
@@ -1666,7 +1735,40 @@ impl Context2D {
                     .and_then(|colour| {
                         let mut opaque = exact.clone();
                         opaque.set_alpha_f(1.0);
-                        record(&opaque).map(|(picture, _)| {
+                        #[cfg(test)]
+                        let pixels =
+                            pixels.filter(|_| SHARES_COVERAGE_PICTURE.get());
+                        let picture = match pixels.filter(|_| {
+                            recorded(&opaque) == recorded(pixels_paint)
+                        }) {
+                            Some(picture) => {
+                                #[cfg(test)]
+                                SHARED_COVERAGE_PICTURES
+                                    .set(SHARED_COVERAGE_PICTURES.get() + 1);
+                                Some(picture)
+                            }
+                            // Its own, recorded when first played where the
+                            // run is kept, as the run's pixels are.
+                            None => match text
+                                .and_then(|text| text.defer)
+                                .and_then(|defer| defer(&recorded(&opaque)))
+                            {
+                                Some((drawn, _)) => {
+                                    Some(CoveragePicture::Deferred(Arc::new(
+                                        DeferredPicture::new(
+                                            drawn,
+                                            None,
+                                            bounds,
+                                            self.state.matrix,
+                                        ),
+                                    )))
+                                }
+                                None => record(&opaque).map(|(picture, _)| {
+                                    CoveragePicture::Recorded(picture)
+                                }),
+                            },
+                        };
+                        picture.map(|picture| {
                             Arc::new(CoverageRun {
                                 picture,
                                 exact: colour,
@@ -1676,7 +1778,7 @@ impl Context2D {
                                         text.kept.clone()?,
                                         Matrix::concat(
                                             &self.state.matrix,
-                                            &Matrix::translate(text.at),
+                                            &text.anchor,
                                         ),
                                         &opaque,
                                     )
@@ -1687,22 +1789,6 @@ impl Context2D {
             }
             _ => None,
         };
-        let (entry, reach) = match self.recorder.borrow().dual() {
-            false => record(paint)
-                .map(|(picture, reach)| (Layer::Picture(picture), reach)),
-            true => record(exact.unwrap_or(paint)).zip(record(paint)).map(
-                |((pixels, pixels_reach), (document, document_reach))| {
-                    let reach =
-                        pixels_reach.zip(document_reach).map(|(mut a, b)| {
-                            a.join(b);
-                            a
-                        });
-                    (Layer::Targeted(Arc::new((pixels, document))), reach)
-                },
-            ),
-        }
-        .unzip();
-        let reach = reach.flatten();
         let mut through = Paint::default();
         through
             .set_blend_mode(self.state.global_composite_operation)
@@ -3401,6 +3487,38 @@ impl Context2D {
             // which draw what `Paragraph::paint` does.
             let reached = Cell::new(None);
             let chained = self.draw_chain(true).is_some();
+            // A kept run is drawn when a target first plays it, from the
+            // blobs it keeps for the paint -- see `layer::DeferredPicture` --
+            // as the draw below would have drawn it: at its offset, not
+            // condensed, and answering what it can ink as it does.
+            let defer = |paint: &Paint| {
+                let kept = kept.as_ref()?;
+                #[cfg(test)]
+                if !DEFERS.get()
+                    || PAINTER_OVERRIDE.get() == Some(Painter::Paragraph)
+                {
+                    return None;
+                }
+                if kept.condensation() != 1.0 {
+                    return None;
+                }
+                let (drawn, reach) = kept.deferred(
+                    origin + kept.offset(),
+                    paint,
+                    global_alpha,
+                    faint,
+                )?;
+                // The draw is recorded under the transform alone, which maps
+                // what it can ink as the recording canvas would.
+                let reach =
+                    reach.map(|reach| self.state.matrix.map_rect(reach).0);
+                #[cfg(test)]
+                if reach.is_some() {
+                    TEXT_REACHED.set(reach);
+                }
+                reached.set(reach);
+                Some((drawn, reach))
+            };
             self.render_to_canvas(
                 &paint,
                 dyed,
@@ -3410,7 +3528,17 @@ impl Context2D {
                     lines: typesetter.names_a_line_colour(),
                     reached: &reached,
                     kept: kept.as_ref().map(|kept| kept.drawn()),
-                    at: origin,
+                    anchor: kept.as_ref().map_or_else(
+                        || Matrix::translate(origin),
+                        |kept| {
+                            drawn_from(
+                                origin,
+                                kept.offset(),
+                                kept.condensation(),
+                            )
+                        },
+                    ),
+                    defer: Some(&defer),
                 }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
@@ -3907,9 +4035,43 @@ pub struct TextRun<'a> {
     /// `Typesetter::laid_out` -- which a blurred run's coverage is kept
     /// under: see [`run_mask`].
     pub kept: Option<Arc<RunPaint>>,
-    /// Where the run is drawn, in the canvas's units under its transform.
-    pub at: Point,
+    /// Where the kept run's runs are drawn from, under the canvas's
+    /// transform: the anchor moved by the layout's offset, and squeezed by
+    /// its condensation where it has one -- the transform its glyphs'
+    /// positions are drawn under, which `run_mask` places them by.
+    pub anchor: Matrix,
+    /// The kept run's draw in a paint, to be recorded when a target first
+    /// plays it, and what it can ink, in the units of the canvas it draws
+    /// on -- see `layer::DeferredPicture`. `None`, or answering `None`,
+    /// where the run is recorded as it is drawn.
+    pub(crate) defer: Option<&'a Defer<'a>>,
 }
+
+/// The transform a run anchored at `origin` is drawn from -- see
+/// [`TextRun::anchor`] -- as `Context2D::draw_text` draws it: at `offset`
+/// from the anchor, and under a squeeze by `condensation` about the anchor
+/// where that is not 1.
+fn drawn_from(origin: Point, offset: Point, condensation: f32) -> Matrix {
+    #[cfg(test)]
+    if run_mask::RULE.get() == run_mask::Rule::AnchorOnly {
+        return Matrix::translate(origin);
+    }
+    match condensation {
+        1.0 => Matrix::translate(origin + offset),
+        scale => Matrix::concat(
+            &Matrix::translate(origin),
+            &Matrix::concat(
+                &Matrix::scale((scale, 1.0)),
+                &Matrix::translate(offset),
+            ),
+        ),
+    }
+}
+
+/// What [`TextRun::defer`] asks: the kept run's draw in the paint it is
+/// handed, and what it can ink.
+pub(crate) type Defer<'a> =
+    dyn Fn(&Paint) -> Option<(DrawnText, Option<Rect>)> + 'a;
 
 /// What a draw handed to [`Context2D::render_to_canvas`] is drawing, which
 /// a run naming a line colour needs: the line holds the `globalAlpha` apart
@@ -4083,6 +4245,19 @@ thread_local! {
     /// The last reach a run of text drawn on this thread answered, in the
     /// units of the canvas it was drawn on -- see [`Context2D::draw_text`].
     static TEXT_REACHED: Cell<Option<Rect>> = const { Cell::new(None) };
+    /// Whether a run's coverage copy may be the picture of its pixels where
+    /// the two are drawn in one paint, so that a test can hold the shared
+    /// picture to one recorded on its own.
+    pub(crate) static SHARES_COVERAGE_PICTURE: Cell<bool> =
+        const { Cell::new(true) };
+    /// How many runs on this thread took the picture of their pixels as
+    /// their coverage copy.
+    pub(crate) static SHARED_COVERAGE_PICTURES: Cell<usize> =
+        const { Cell::new(0) };
+    /// Whether a kept run under a chain may be recorded when first played
+    /// -- see `layer::DeferredPicture` -- so that a test can hold it to the
+    /// run recorded as it is drawn.
+    pub(crate) static DEFERS: Cell<bool> = const { Cell::new(true) };
 }
 
 #[cfg(test)]
@@ -7045,8 +7220,8 @@ mod text_reach_tests {
     use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
     use crate::{
         node::typography::{
-            REACH_BOUND, REACH_INSET, REACHED_FAMILIES, ReachBound,
-            forget_laid_out,
+            FONT_BOX_FLOOR, MATCH_IGNORES_STROKE, REACH_BOUND, REACH_INSET,
+            REACHED_FAMILIES, ReachBound, forget_laid_out,
         },
         prelude::*,
     };
@@ -7754,6 +7929,85 @@ mod text_reach_tests {
             vec![("cpu drawn at 0.5", 1.0)],
             "a pixel past with no margin"
         );
+    }
+
+    #[test]
+    fn the_font_box_widens_a_reach_only_where_it_is_kept() {
+        // A run's reach takes in its font's declared box only where the
+        // sweep has not been played without it -- see `keeps_font_box`.
+        // Helvetica's box reaches far past "Ag": on macOS the reach is the
+        // glyphs' own boxes and lies inside the one with the font's box.
+        let scene = Scene {
+            font: "Helvetica",
+            filter: "blur(3px)",
+            ..BASE
+        };
+        if !resolves(scene.font) {
+            return;
+        }
+        forget_laid_out();
+        let own = reached(&scene).expect("a reach");
+        FONT_BOX_FLOOR.set(true);
+        forget_laid_out();
+        let boxed = reached(&scene).expect("a reach");
+        FONT_BOX_FLOOR.set(false);
+        forget_laid_out();
+        eprintln!(
+            "own {own:?}, {} wide; with the font's box {boxed:?}, {} wide",
+            own.width(),
+            boxed.width()
+        );
+        let mut joined = own;
+        joined.join(boxed);
+        assert_eq!(joined, boxed, "the font's box holds the glyphs' own");
+        match cfg!(target_os = "macos") {
+            true => assert!(own.width() < boxed.width() / 2.0, "{own:?}"),
+            false => assert_eq!(own, boxed),
+        }
+    }
+
+    /// The reach of each of `scenes`, drawn in turn on fresh canvases that
+    /// share the runs they lay out -- see `Typesetting::typography` -- once
+    /// each pass: the first pass lays each run out afresh, the second keeps
+    /// it, and the third draws it from what the second kept. Bits, so that
+    /// equal means the same answer.
+    fn reaches_over_passes(scenes: &[Scene]) -> [Vec<Option<[u32; 4]>>; 3] {
+        let bits =
+            |r: Rect| [r.left, r.top, r.right, r.bottom].map(f32::to_bits);
+        forget_laid_out();
+        [0, 1, 2].map(|_| {
+            scenes
+                .iter()
+                .map(|scene| reached(scene).map(bits))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn a_kept_runs_reach_is_the_reach_worked_out_afresh() {
+        // A kept run keeps what it can ink beside the blobs of each paint
+        // it is drawn in -- see `PaintedBlobs::inks` -- and places it at
+        // each draw's anchor. Over the scenes a test run plays, and the same
+        // run stroked at two widths in turn, the kept answer is the one
+        // worked out afresh, bit for bit; a run found by the blobs of
+        // another width answers that width's reach, and is caught.
+        let mut scenes: Vec<Scene> = sweep(false)
+            .into_iter()
+            .filter(|scene| resolves(scene.font))
+            .collect();
+        scenes.extend(
+            [Some(1.0), Some(12.0), Some(1.0)]
+                .map(|stroke| Scene { stroke, ..BASE }),
+        );
+        let [fresh, kept, again] = reaches_over_passes(&scenes);
+        assert!(fresh.iter().filter(|r| r.is_some()).count() > 10);
+        assert_eq!(fresh, kept, "the second pass, which keeps the runs");
+        assert_eq!(fresh, again, "the third, drawn from what was kept");
+        let strokes = &scenes[scenes.len() - 3..];
+        MATCH_IGNORES_STROKE.set(true);
+        let [fresh, _, again] = reaches_over_passes(strokes);
+        MATCH_IGNORES_STROKE.set(false);
+        assert_ne!(fresh, again, "kept for another width, and not caught");
     }
 
     /// What a run of text in a filter chain reports it can ink holds all it

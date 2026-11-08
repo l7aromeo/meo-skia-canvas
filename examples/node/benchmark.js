@@ -124,6 +124,12 @@ function draw(options, paint) {
   rasterize(canvas);
 }
 
+// The fraction of a pixel `text-blur-moved` moves each draw by, past the one before: the golden ratio's, whose
+// multiples never repeat, so no draw lands where an earlier one did. `examples/rust/benchmark.rs` steps by the same.
+const GOLDEN_STEP = 0.6180339887498949;
+// How many draws `text-blur-moved` has made, across every page, so that each page goes on where the last stopped.
+let moved = 0;
+
 // Scatters `i` across `span` without a random number generator, which would
 // make one run's timing incomparable with the next. The strides are the ones
 // `examples/rust/benchmark.rs` uses.
@@ -320,6 +326,24 @@ const DRAWS = [
     (ctx) => {
       ctx.filter = "blur(4px)";
       rects(ctx, (i) => `hsl(${(i * 13) % 360} 60% 55%)`);
+    },
+  ],
+  // Text under a blur, each draw moved by a fraction of a pixel no draw before it was, so that nothing a run kept
+  // matches and each is drawn and blurred: the cost of what its coverage is read, zeroed and blurred over.
+  [
+    "text-blur-moved",
+    (ctx) => {
+      ctx.font = "40px Helvetica";
+      ctx.filter = "blur(3px)";
+      for (let i = 0; i < 50; i++) {
+        moved += 1;
+        const fraction = (moved * GOLDEN_STEP) % 1;
+        ctx.fillText(
+          "Ag",
+          (i % 10) * 38 + fraction,
+          40 + Math.floor(i / 10) * 50,
+        );
+      }
     },
   ],
   ["shadows", (ctx) => panels(ctx, true)],

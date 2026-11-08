@@ -22,6 +22,7 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     f32::consts::SQRT_2,
+    fmt,
     marker::PhantomData,
     sync::{Arc, OnceLock},
 };
@@ -51,7 +52,7 @@ use crate::{
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
-        typography::RunPaint,
+        typography::{DrawnText, RunPaint},
         utils::{color_space_name, skia_paint_color_onto_own},
     },
     pixels::PixelColorSpace,
@@ -91,6 +92,9 @@ pub enum Layer {
     /// A canvas pattern painted over what its group holds, made from the
     /// canvas's page at the scale it is played back at -- see [`PatternDraw`].
     Pattern(Arc<PatternDraw>),
+    /// A run of text recorded the first time a target plays it -- see
+    /// [`DeferredPicture`]: as a picture once recorded.
+    Deferred(Arc<DeferredPicture>),
 }
 
 impl Layer {
@@ -108,6 +112,11 @@ impl Layer {
             Layer::Cut(op) => op.playback(canvas, target),
             Layer::Clipped(piece) => piece.playback(canvas, target),
             Layer::Pattern(tile) => tile.playback(canvas, target),
+            Layer::Deferred(deferred) => {
+                if let Some(picture) = deferred.played_for(target) {
+                    picture.playback(canvas);
+                }
+            }
         }
     }
 
@@ -130,6 +139,179 @@ impl Layer {
             Layer::Cut(op) => Some(op.reach()),
             Layer::Clipped(piece) => piece.reach(),
             Layer::Pattern(tile) => Some(tile.reach()),
+            // The pixels' recording, as for a pair, recorded to answer.
+            Layer::Deferred(deferred) => Some(
+                deferred.picture().map_or_else(Rect::new_empty, |picture| {
+                    picture.cull_rect()
+                }),
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Where the deferred runs filed on this thread count their recordings,
+    /// on whichever thread plays them -- see [`DeferredPicture`]: those
+    /// played as pixels, then those played for a document.
+    pub(crate) static DEFERRED_WATCH: RefCell<Option<Arc<DeferredCounts>>> =
+        const { RefCell::new(None) };
+    /// A mutant of [`DeferredPicture::picture`] that records nothing, for the
+    /// runs filed on this thread: every target that plays one must then draw
+    /// otherwise.
+    pub(crate) static DEFERRED_DRAWS_NOTHING: Cell<bool> =
+        const { Cell::new(false) };
+    /// How many runs this thread has filed to be recorded when first played.
+    pub(crate) static DEFERRED_FILED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many of a [`DeferredPicture`]'s recordings were made: those played as
+/// pixels, then those played for a document.
+#[cfg(test)]
+pub(crate) type DeferredCounts = [std::sync::atomic::AtomicUsize; 2];
+
+/// A kept run of text under a filter chain, filed as the draw it is and
+/// recorded the first time a target plays it.
+///
+/// On a page the coverage route plays on, a run drawn again where it was kept
+/// composites what it kept without drawing its coverage -- see
+/// `run_mask::kept` -- and nothing else of the chain's group is played, so a
+/// picture recorded at every draw would be thrown away unplayed. Recorded
+/// here, under the transform and over the bounds the draw would have been
+/// recorded under, with the same calls -- the run's blobs drawn as
+/// [`LaidOut::paint`](crate::node::typography::LaidOut::paint) draws them,
+/// then [`reach_the_clip`] -- it is the picture the draw would have
+/// recorded. What the run can ink, which bounds the chain's layer, is worked
+/// out when it is filed, without drawing.
+///
+/// On a page that keeps a recording for each kind of target it stands for
+/// the pair [`Layer::Targeted`] holds: the run in the paint placed for pixels,
+/// and in its own paint for a document, each recorded when a target of its
+/// kind first plays it.
+pub struct DeferredPicture {
+    pixels: Deferral,
+    document: Option<Deferral>,
+    bounds: Rect,
+    matrix: Matrix,
+    /// The test switches of the thread that filed it -- see
+    /// [`DEFERRED_WATCH`] and [`DEFERRED_DRAWS_NOTHING`].
+    #[cfg(test)]
+    watch: (Option<Arc<DeferredCounts>>, bool),
+}
+
+/// One of a [`DeferredPicture`]'s recordings: the draw, and its picture once
+/// a target has played it.
+struct Deferral {
+    text: DrawnText,
+    picture: OnceLock<Option<Picture>>,
+}
+
+impl Deferral {
+    fn new(text: DrawnText) -> Self {
+        Self {
+            text,
+            picture: OnceLock::new(),
+        }
+    }
+}
+
+impl fmt::Debug for DeferredPicture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeferredPicture")
+            .field("recorded", &self.pixels.picture.get().is_some())
+            .field("pair", &self.document.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeferredPicture {
+    /// `pixels`, and on a page that keeps a recording for each kind of
+    /// target `document`, each recorded over `bounds` under `matrix` when
+    /// first played.
+    pub(crate) fn new(
+        pixels: DrawnText,
+        document: Option<DrawnText>,
+        bounds: Rect,
+        matrix: Matrix,
+    ) -> Self {
+        #[cfg(test)]
+        DEFERRED_FILED.set(DEFERRED_FILED.get() + 1);
+        Self {
+            pixels: Deferral::new(pixels),
+            document: document.map(Deferral::new),
+            bounds,
+            matrix,
+            #[cfg(test)]
+            watch: (
+                DEFERRED_WATCH.with_borrow(Clone::clone),
+                DEFERRED_DRAWS_NOTHING.get(),
+            ),
+        }
+    }
+
+    /// The picture played as pixels, recorded now if no target has played
+    /// it yet. `None` where Skia records nothing.
+    pub(crate) fn picture(&self) -> Option<&Picture> {
+        self.recorded(&self.pixels)
+    }
+
+    /// The picture played for `target`: a document's own where the page
+    /// keeps one, the pixels' otherwise.
+    pub(crate) fn played_for(&self, target: Target) -> Option<&Picture> {
+        match (target, &self.document) {
+            (Target::Document, Some(document)) => self.recorded(document),
+            _ => self.picture(),
+        }
+    }
+
+    /// Whether this stands for a pair of recordings -- see
+    /// [`holds_a_pair`].
+    pub(crate) fn is_pair(&self) -> bool {
+        self.document.is_some()
+    }
+
+    fn recorded<'a>(&self, deferral: &'a Deferral) -> Option<&'a Picture> {
+        deferral
+            .picture
+            .get_or_init(|| {
+                #[cfg(test)]
+                if let Some(watch) = &self.watch.0 {
+                    let kind =
+                        usize::from(!std::ptr::eq(deferral, &self.pixels));
+                    watch[kind]
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let mut recorder = PictureRecorder::new();
+                let canvas = recorder.begin_recording(self.bounds, true);
+                canvas.set_matrix(&self.matrix.into());
+                #[cfg(test)]
+                if self.watch.1 {
+                    return recorder.finish_recording_as_picture(None);
+                }
+                deferral.text.draw(canvas);
+                reach_the_clip(canvas);
+                recorder.finish_recording_as_picture(None)
+            })
+            .as_ref()
+    }
+}
+
+/// What a run's coverage copy is drawn from -- see [`CoverageRun`]: a
+/// picture, or the run's own picture recorded when first played.
+#[derive(Clone, Debug)]
+pub enum CoveragePicture {
+    /// Recorded when the run was drawn.
+    Recorded(Picture),
+    /// The run's own -- see [`DeferredPicture`].
+    Deferred(Arc<DeferredPicture>),
+}
+
+impl CoveragePicture {
+    /// The picture, recorded now where it was deferred.
+    pub(crate) fn picture(&self) -> Option<&Picture> {
+        match self {
+            CoveragePicture::Recorded(picture) => Some(picture),
+            CoveragePicture::Deferred(deferred) => deferred.picture(),
         }
     }
 }
@@ -179,6 +361,7 @@ thread_local! {
     pub(crate) static COVERAGE_ROUTE: Cell<bool> = const { Cell::new(true) };
     /// How many blurred draws played on this thread took the coverage route.
     pub(crate) static COVERAGE_RUNS: Cell<usize> = const { Cell::new(0) };
+
     /// Whether the coverage route draws its plane through the chain's own
     /// paint, shader and all, so that a test can hold the plain paint it
     /// draws through -- see [`BlurOp::playback`] -- to it.
@@ -204,26 +387,26 @@ fn keeps_text_reach() -> bool {
 /// kept, at densities 1 to 3 and drawn into another canvas at 0.5 and 1.5.
 ///
 /// - On CoreText, in Oswald, Helvetica, Times New Roman, Zapfino, Apple Color
-///   Emoji and Monoton: on the CPU raster 98 of 25,600 playbacks inked past the
-///   reach with no margin, and on Metal 92 of 25,600, each by at most 1.29
-///   pixels.
+///   Emoji and Monoton, with each glyph's own box and not the font's -- see
+///   `typography::keeps_font_box`: on the CPU raster 2,558 of 25,600 playbacks
+///   inked past the reach with no margin, and on Metal 2,510 of 25,600, each by
+///   at most 1.73 pixels: Helvetica's 40px "fj Wq", scaled 1.7, kept and drawn
+///   at 0.5.
 /// - On FreeType, on the Linux runner's CPU raster, in Oswald, DejaVu Sans,
-///   Noto Color Emoji and Monoton, 142 of 16,640 did, by at most 1.70: DejaVu
-///   Sans's 13px "fj Wq", scaled 1.7 and stroked 40, at density 1. The runner's
-///   Vulkan device plays the sweep a test run plays, not the full one.
+///   Noto Color Emoji and Monoton, with the font's box as well, 142 of 16,640
+///   did, by at most 1.70: DejaVu Sans's 13px "fj Wq", scaled 1.7 and stroked
+///   40, at density 1. The runner's Vulkan device plays the sweep a test run
+///   plays, not the full one.
 ///
 /// Two pixels, the smallest whole number at or above the worst measured,
-/// 1.70. What a reading measures is the ink's whole-pixel edge less the
+/// 1.73. What a reading measures is the ink's whole-pixel edge less the
 /// reach's own, `ceil(reach + s) - reach`, where `s` is how far the ink truly
 /// spills past the reach, so a reading of `o` says only `o - 1 < s <= o`; and
 /// a pixel is cut past `ceil(reach + HINTED_INK_DRIFT)`, so every phase of the
-/// reach against the pixel grid is held exactly when `s` is within this. One
-/// pixel would hold the 1.29 on CoreText at every phase -- moved through 64
-/// phases to a whole-pixel reach edge it inked no further, so no test here
-/// can hold such an edge with an overshoot between one pixel and two -- but
-/// FreeType's 1.70 bounds its spill only by 1.70, and its phases could not be
-/// swept on this machine; no reading measured needs more than one. The worst on
-/// each are strokes whose join half their width bounds exactly: the stroke's
+/// reach against the pixel grid is held exactly when `s` is within this. A
+/// reach shrunk by 1.1 pixels on every side fails the CoreText sweep, 15,686
+/// playbacks inking past it by up to 7. The worst with the font's box were
+/// strokes whose join half their width bounds exactly: the stroke's
 /// anti-aliased fringe. On CoreText that case is held by
 /// `a_wide_round_stroke_inks_a_pixel_past_its_reach`.
 pub(crate) const HINTED_INK_DRIFT: f32 = 2.0;
@@ -1562,14 +1745,18 @@ impl LayerRec {
     /// [`composited`] trades its alpha for a colour filter that leaves a
     /// transparent pixel transparent.
     pub(crate) fn footprint(&self, drawn: Option<Rect>) -> Option<Rect> {
+        self.confines().then_some(drawn).flatten()
+    }
+
+    /// Whether the layer can be confined to what it holds draws in -- see
+    /// [`Self::footprint`].
+    fn confines(&self) -> bool {
         let plain = self.paint.as_ref().is_none_or(|paint| {
             paint.image_filter().is_none()
                 && paint.color_filter().is_none()
                 && paint.as_blend_mode() == Some(BlendMode::SrcOver)
         });
-        (plain && self.backdrop.is_none())
-            .then_some(drawn)
-            .flatten()
+        plain && self.backdrop.is_none()
     }
 
     /// Whether a layer holding nothing still changes the page: through a
@@ -1652,9 +1839,11 @@ pub enum Composite {
     },
 }
 
-/// A run of text in one flat colour under a sole `blur()`, recorded a second
-/// time in that colour opaque, so that on a page the coverage route plays on
-/// its blur is made from its coverage alone -- see [`chain::coverage`].
+/// A run of text in one flat colour under a sole `blur()`, drawn in that
+/// colour opaque -- recorded a second time, or the picture of its pixels
+/// where that is the paint they are drawn in -- so that on a page the
+/// coverage route plays on its blur is made from its coverage alone -- see
+/// [`chain::coverage`].
 ///
 /// Opaque because Skia pre-blends a glyph's mask by the paint's colour and
 /// never by its alpha: `SkScalerContextRec::setLuminanceColor` keeps only
@@ -1668,8 +1857,8 @@ pub enum Composite {
 /// -- is covered as the run is.
 #[derive(Debug)]
 pub struct CoverageRun {
-    /// The run, drawn opaque.
-    pub picture: Picture,
+    /// The run, drawn opaque: its own picture, or the one of its pixels.
+    pub picture: CoveragePicture,
     /// The run's colour, held exactly in the page's space.
     pub exact: ExactColour,
     /// The alpha the run was drawn at.
@@ -1683,12 +1872,16 @@ pub struct CoverageRun {
 impl Composite {
     /// The rectangle the group can be confined to -- see
     /// [`LayerRec::footprint`] -- or for a group that opens no layer, the
-    /// rectangle its entries draw in.
-    fn footprint(&self, drawn: Option<Rect>) -> Option<Rect> {
+    /// rectangle its entries draw in, which `drawn` answers. Asked only
+    /// where the layer can be confined: answering it plays nothing, but an
+    /// entry recorded when first played -- see [`DeferredPicture`] -- is
+    /// recorded to answer, and a chain's layer, under its image filter,
+    /// never is confined.
+    fn footprint(&self, drawn: impl FnOnce() -> Option<Rect>) -> Option<Rect> {
         match self {
-            Composite::Plain => drawn,
+            Composite::Plain => drawn(),
             Composite::Layer(rec) | Composite::Chain { rec, .. } => {
-                rec.footprint(drawn)
+                rec.confines().then(drawn).flatten()
             }
         }
     }
@@ -1934,8 +2127,9 @@ impl Group {
     /// were.
     pub fn playback(self: &Arc<Self>, canvas: &SkCanvas, target: Target) {
         let pixels = target != Target::Document && blur_mask::draws_on(canvas);
-        let within = pixels
-            .then(|| self.composite.footprint(reach_of(&self.contents.layers)));
+        let within = pixels.then(|| {
+            self.composite.footprint(|| reach_of(&self.contents.layers))
+        });
         self.playback_within(canvas, target, within.flatten());
     }
 
@@ -1944,8 +2138,9 @@ impl Group {
     /// they are played under, where the layer can be confined to it. `None`
     /// where it covers what the clip allows.
     pub fn reach(&self) -> Option<Rect> {
-        let drawn =
-            self.composite.footprint(reach_of(&self.contents.layers))?;
+        let drawn = self
+            .composite
+            .footprint(|| reach_of(&self.contents.layers))?;
         Some(self.contents_matrix.map_rect(drawn).0)
     }
 
@@ -2176,20 +2371,33 @@ impl Group {
                         false,
                         sigma * replay_scale(canvas),
                     )
-                    && let Some(sharp) = chain::coverage::sharp(
-                        canvas,
-                        *sigma,
-                        content,
-                        chain::coverage::Plane::Alpha,
-                        |plane| {
-                            self.draw_chained_as(plane, target, &back, |plane| {
-                                plane.draw_picture(&run.picture, None, None);
-                            })
-                        },
-                    )
+                    && let Some(at) =
+                        chain::coverage::Placement::of(canvas, *sigma, content)
                 {
-                    #[cfg(test)]
-                    COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
+                    let sharp = || {
+                        chain::coverage::sharp(
+                            canvas,
+                            *sigma,
+                            content,
+                            chain::coverage::Plane::Alpha,
+                            |plane| {
+                                self.draw_chained_as(
+                                    plane,
+                                    target,
+                                    &back,
+                                    |plane| {
+                                        if let Some(picture) =
+                                            run.picture.picture()
+                                        {
+                                            plane.draw_picture(
+                                                picture, None, None,
+                                            );
+                                        }
+                                    },
+                                )
+                            },
+                        )
+                    };
                     let (rgb, gain) =
                         (run.exact.at(run.alpha).0.rgb, byte_alpha(run.alpha));
                     // A kept run is found by where its picture is played on
@@ -2208,19 +2416,38 @@ impl Group {
                             gain,
                         )
                     });
-                    let outcome = run_mask::drawn(placed, sharp, |sharp| {
-                        chain::coverage::coloured(
-                            canvas,
-                            &sharp.blurred(),
-                            rgb,
-                            gain,
-                        )
-                    });
-                    if let Some(outcome) = outcome {
-                        outcome.composite(canvas, &paint);
+                    // Composited from what was kept without drawing the run
+                    // where its glyphs decide its coverage -- see
+                    // `run_mask::kept` -- but not under a destination, which
+                    // `confine` cuts the plane by where the run lies.
+                    let kept = placed
+                        .as_ref()
+                        .filter(|_| self.within.is_none())
+                        .and_then(|placed| run_mask::kept(placed, &at, sharp));
+                    // `None` where no plane could be made, for the chain to
+                    // draw the run.
+                    let route = match kept {
+                        Some(outcome) => Some(Some(outcome)),
+                        None => sharp().map(|sharp| {
+                            run_mask::drawn(placed, &at, sharp, |sharp| {
+                                chain::coverage::coloured(
+                                    canvas,
+                                    &sharp.blurred(),
+                                    rgb,
+                                    gain,
+                                )
+                            })
+                        }),
+                    };
+                    if let Some(outcome) = route {
+                        #[cfg(test)]
+                        COVERAGE_RUNS.with(|runs| runs.set(runs.get() + 1));
+                        if let Some(outcome) = outcome {
+                            outcome.composite(canvas, &paint);
+                        }
+                        canvas.restore();
+                        return;
                     }
-                    canvas.restore();
-                    return;
                 }
                 // A group a canvas drawn into another brings with it is played
                 // once for each time that canvas is, and its chain is run the
@@ -2469,6 +2696,9 @@ impl Clipped {
             let mut within = match &self.entry {
                 Layer::Picture(picture) => drawn_by(picture),
                 Layer::Targeted(pictures) => drawn_by(&pictures.0),
+                Layer::Deferred(deferred) => {
+                    deferred.picture().and_then(drawn_by)
+                }
                 entry => entry.reach(),
             }?;
             if !within.intersect(self.bounds) {
@@ -2941,6 +3171,9 @@ fn offscreen_layers(entry: &Layer, features: VectorFeatures) -> usize {
         Layer::Targeted(pictures) => {
             pictures.0.approximate_op_count_nested(true)
         }
+        Layer::Deferred(deferred) => deferred
+            .picture()
+            .map_or(0, |picture| picture.approximate_op_count_nested(true)),
         _ => 1,
     }
 }
@@ -3108,7 +3341,8 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         Layer::Picture(_)
         | Layer::Blur(_)
         | Layer::Targeted(_)
-        | Layer::Pattern(_) => false,
+        | Layer::Pattern(_)
+        | Layer::Deferred(_) => false,
     })
 }
 
@@ -3120,10 +3354,12 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
 pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
         Layer::Targeted(_) => true,
+        Layer::Deferred(deferred) => deferred.is_pair(),
         Layer::Cut(op) => op.documents.is_some(),
         Layer::Group(group) => holds_a_pair(&group.contents.layers),
         Layer::Clipped(piece) => match &piece.entry {
             Layer::Targeted(_) => true,
+            Layer::Deferred(deferred) => deferred.is_pair(),
             Layer::Cut(op) => op.documents.is_some(),
             _ => false,
         },
