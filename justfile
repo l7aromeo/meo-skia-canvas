@@ -144,7 +144,7 @@ prepush: fmt-check (check-docs "origin/main") check-repo (typecheck prepush_type
 # no workflow at all. The rest of `prepush` runs in rust-ci.yml, where the Skia
 # they compile against is built.
 [doc("The checks in prepush that build no Skia, which ci.yml's repo job runs.")]
-check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches lint-js
+check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack lint-js
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -296,6 +296,11 @@ check-docs base="":
 check-skia-patches: ensure-deps
     node scripts/check-skia-patches.mjs --self-test
     node scripts/check-skia-patches.mjs
+
+[doc("Hold the crate's patched-Skia archives to skia-bindings' key and layout, and skia-binaries.txt to PATCHES.")]
+check-skia-pack: ensure-deps
+    node scripts/skia-pack.mjs --self-test
+    node scripts/skia-pack.mjs manifest --check
 
 # Every job in a gated workflow is named by that workflow's aggregate.
 #
@@ -1682,6 +1687,12 @@ release-crate bump="patch" wait="false":
     # `unfiled` is allowed while the work is in progress and refused here,
     # before anything is bumped.
     just check-parity --require-filed
+
+    # A crate release goes out with the archives of its patches published,
+    # by .github/workflows/skia-binaries.yml, since a crate build that names
+    # skia-binaries.txt's URL downloads from that release and a missing
+    # archive there is a 404. This refuses until all of them are there.
+    node scripts/skia-pack.mjs published
 
     if ! cargo set-version --help &>/dev/null; then
         echo "Error: needs cargo-edit — cargo install cargo-edit"

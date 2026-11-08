@@ -28,7 +28,7 @@ configure time.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan"] }
 ```
 
 ```rust,no_run
@@ -73,7 +73,7 @@ Reference: [`docs/rust.md`](https://github.com/l7aromeo/meo-skia-canvas/blob/mai
 | `vulkan`     | Vulkan backend (Linux / Windows).                                                        |
 | `metal`      | Metal backend (macOS).                                                                   |
 | `window`     | `winit`-backed event loop.                                                               |
-| `freetype`   | Bundle FreeType + WOFF2 (recommended on minimal containers).                             |
+| `freetype`   | Does nothing. Linux builds always embed FreeType and its WOFF2 support.                  |
 | `fetch`      | `Image::from_url` and `ImageData::from_url`, over `http` and `https`.                    |
 | `node-addon` | Register the `#[neon::main]` Node addon entry point. Pure-Rust consumers leave this off. |
 

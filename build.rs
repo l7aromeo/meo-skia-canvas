@@ -42,7 +42,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 6] = [
+const SKIA_PATCHES: [SkiaPatch; 7] = [
     // `containers/skia-atlas-size.patch`: Ganesh's path atlas capped at 512 by
     // 512, where an atlas row of 512 or more can move a path's coverage.
     SkiaPatch {
@@ -89,6 +89,14 @@ const SKIA_PATCHES: [SkiaPatch; 6] = [
         cfg: "meo_exact_blend_division",
         file: "src/opts/SkRasterPipeline_opts.h",
         marker: "(d*sa) / (sa - s)",
+    },
+    // `containers/skia-patch-marker.patch`: no fix, one function only this
+    // repository's patched Skia defines, which the archives built from it
+    // carry for a crate build to link against.
+    SkiaPatch {
+        cfg: "meo_skia_marker",
+        file: "src/core/SkGraphics.cpp",
+        marker: "meo_skia_canvas_needs_its_patched_skia_see_SKIA_BINARIES_URL",
     },
 ];
 
@@ -146,7 +154,7 @@ fn graphite_bindings() {
 }
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
-// Re-check: link a Linux build with `freetype` from an unpatched Skia tree with
+// Re-check: link a Linux build from an unpatched Skia tree with
 // this function returning at once; it fails on undefined `kCmdLut` and
 // `BrotliDecoderEnsureStaticInit`
 //
@@ -154,10 +162,8 @@ fn graphite_bindings() {
 // `kCmdLut`, into a new `c/dec/prefix.c` and its static initialisation into a
 // new `c/dec/static_init.c`, and Skia's `third_party/brotli/BUILD.gn` lists
 // neither, so `decode.c`'s references to both are left undefined. Only
-// `freetype-woff2` links brotli -- `freetype` turns it on, and skia-bindings
-// drops it on macOS -- so the link fails on Linux alone, for every build of
-// skia-bindings from source, which is every Linux build with `freetype`: no
-// prebuilt archive carries that feature set.
+// `freetype-woff2` links brotli, and Cargo.toml turns it on for Linux alone,
+// so the link fails there, for every build of skia-bindings from source.
 //
 // The files are compiled here from the brotli source the Skia build used,
 // never from a copy of our own, and only those that build's `BUILD.gn` leaves
@@ -167,14 +173,17 @@ fn graphite_bindings() {
 fn brotli_command_table() {
     println!("cargo:rerun-if-env-changed=SKIA_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=CARGO_HOME");
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "linux" || env::var_os("CARGO_FEATURE_FREETYPE").is_none() {
+    // docs.rs builds against skia-bindings' stub: no Skia is compiled or
+    // linked, so there is no decoder to complete and no source to find.
+    if target_os != "linux" || env::var_os("DOCS_RS").is_some() {
         return;
     }
     let skia = skia_source().unwrap_or_else(|reason| {
         panic!(
             "meo-skia-canvas: cannot find the Skia source skia-bindings built from ({reason}). \
-             With `freetype` on Linux this build compiles brotli's decoder sources from \
+             On Linux this build compiles brotli's decoder sources from \
              that source, which Skia's own build leaves out. Set SKIA_SOURCE_DIR to the \
              skia-bindings package's `skia` directory to name it."
         )

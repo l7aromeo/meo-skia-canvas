@@ -1,0 +1,18 @@
+--- a/skia-bindings/skia/src/core/SkGraphics.cpp
++++ b/skia-bindings/skia/src/core/SkGraphics.cpp
+@@ -19,6 +19,15 @@
+ #include "src/core/SkSwizzlePriv.h"
+ #include "src/core/SkTypefaceCache.h"
+ 
++// meo-skia-canvas: present only in Skia built with that repository's patches.
++// A crate build that names its patched archives in SKIA_BINARIES_URL links
++// against this function, so a build that fell back to crates.io's unpatched
++// Skia fails to link rather than drawing with Skia it did not ask for. The
++// name is what the linker prints, so it says what to check.
++extern "C" const char* meo_skia_canvas_needs_its_patched_skia_see_SKIA_BINARIES_URL() {
++    return "meo-skia-canvas";
++}
++
+ void SkGraphics::Init() {
+     // SkGraphics::Init() must be thread-safe and idempotent.
+     SkCpu::CacheRuntimeFeatures();
