@@ -63,6 +63,10 @@ mod mac {
     // whose bytes land at a freed font's address with its length is read
     // through the freed font's table directory. The re-check fails once a
     // reused address reads its own tables, and reports the cache's depth.
+    // When CoreText gives a face's bytes up differs too: on 27.2 when the
+    // next font is parsed, on the macOS 26 of GitHub's `macos-26-arm64` image
+    // at the face's drop, a load earlier. The quarantine counts from the
+    // release itself, so it holds the address as long on both.
     // Only faces made through `font_data` are kept apart: a caller making
     // faces from bytes with skia-safe directly is outside this. Linux and
     // Windows build their faces without CoreText and were not measured.
@@ -122,6 +126,14 @@ mod mac {
         #[cfg(test)]
         pub(crate) fn loads(&self) -> u64 {
             self.loads
+        }
+
+        /// The load count at which the oldest mapping held was given up:
+        /// when CoreText let go of its font, which is not the same load on
+        /// every macOS (see `a_held_address_is_given_up_after_its_loads`).
+        #[cfg(test)]
+        pub(crate) fn held_since(&self) -> Option<u64> {
+            self.held.front().map(|&(_, at)| at)
         }
     }
 
@@ -533,8 +545,15 @@ mod mac {
             });
         }
 
-        /// An address is given up after exactly [`QUARANTINE_LOADS`] loads,
-        /// and a font mapped there then reads its own tables.
+        /// An address is given up on exactly the [`QUARANTINE_LOADS`]th load
+        /// after CoreText lets go of its font, and a font mapped there then
+        /// reads its own tables.
+        ///
+        /// When CoreText lets go is not the same on every macOS: on 27.2 the
+        /// face's bytes are released by the next font CoreText parses, on the
+        /// macOS 26 of GitHub's `macos-26-arm64` image at the face's drop, a
+        /// load earlier. The count runs from whichever it was, as
+        /// [`Quarantine::load`] counts it.
         #[test]
         fn a_held_address_is_given_up_after_its_loads() {
             alone("a_held_address_is_given_up_after_its_loads", || {
@@ -548,18 +567,26 @@ mod mac {
                     1,
                     "CoreText let the first go"
                 );
-                for k in 1..QUARANTINE_LOADS as usize {
-                    kept.push(face(&filler(k), quarantine, None).0);
+                let since = quarantine.lock().held_since().expect("one held");
+                // Loads since the release, and mappings held, read under one
+                // lock taken and dropped here: an assertion's message must
+                // not lock again while its left side holds the guard.
+                let state = || {
+                    let q = quarantine.lock();
+                    (q.loads() - since, q.held())
+                };
+                while state().0 < QUARANTINE_LOADS - 1 {
+                    kept.push(face(&filler(kept.len()), quarantine, None).0);
+                    let (after, held) = state();
                     assert_eq!(
-                        quarantine.lock().held(),
-                        1,
-                        "still held after {k} loads"
+                        held, 1,
+                        "still held {after} loads after CoreText let it go"
                     );
                 }
                 let (face_c, at_c) = face(&shipped, quarantine, Some(at));
                 assert_eq!(
-                    quarantine.lock().held(),
-                    0,
+                    state(),
+                    (QUARANTINE_LOADS, 0),
                     "given up on the last load"
                 );
                 assert_eq!(at_c, at, "the address was free again");
