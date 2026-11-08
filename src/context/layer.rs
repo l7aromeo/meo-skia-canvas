@@ -179,6 +179,10 @@ thread_local! {
     pub(crate) static COVERAGE_ROUTE: Cell<bool> = const { Cell::new(true) };
     /// How many blurred draws played on this thread took the coverage route.
     pub(crate) static COVERAGE_RUNS: Cell<usize> = const { Cell::new(0) };
+    /// Whether the coverage route draws its plane through the chain's own
+    /// paint, shader and all, so that a test can hold the plain paint it
+    /// draws through -- see [`BlurOp::playback`] -- to it.
+    pub(crate) static SHADED_PLANE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether [`Composite::Chain`]'s `reach` bounds its layer -- see
@@ -3265,7 +3269,7 @@ impl BlurDraw {
             .filter(|_| !path.is_inverse_fill_type());
         let geometry = match rect {
             Some((rect, _, direction)) => Geometry::Rect(rect, direction),
-            None => Geometry::Path(path.serialize()),
+            None => Geometry::Path(KeptPath::of(path)),
         };
         BlurDraw {
             geometry,
@@ -3320,7 +3324,8 @@ struct BlurPaint {
 /// geometry and the frame it was drawn in -- the transform and the clip --
 /// and the blur's standard deviation in canvas pixels. A page is read from
 /// several threads at once and Skia's `Path` is not `Sync`, so geometry that
-/// is not a rectangle, and the clip, are kept serialized as `Data`, which is.
+/// is not a rectangle is kept behind a lock -- see [`KeptPath`] -- and the
+/// clip serialized as `Data`, which is `Sync`.
 ///
 /// Consecutive rectangles drawn alike join one op, so that a run of them
 /// costs the recording one entry and its playback one frame, one clip and
@@ -3378,12 +3383,12 @@ impl Geometries {
 }
 
 /// What a [`BlurOp`] draws: a rectangle, which nearly every blurred draw is
-/// and which is plain data, or any other path, serialized.
+/// and which is plain data, or any other path, kept parsed.
 #[derive(Clone, Debug)]
 enum Geometry {
     /// A closed rectangle, drawn as the path `Path::rect` makes of it.
     Rect(Rect, PathDirection),
-    Path(Data),
+    Path(KeptPath),
 }
 
 impl Geometry {
@@ -3392,8 +3397,38 @@ impl Geometry {
             Geometry::Rect(rect, direction) => {
                 Some(Path::rect(rect, *direction))
             }
-            Geometry::Path(data) => Path::deserialize(data),
+            Geometry::Path(kept) => Some(kept.path()),
         }
+    }
+}
+
+/// A path a page keeps for every playback of it, shared by the threads that
+/// play it.
+///
+/// Skia's `Path` is `Send` and not `Sync`, so it is held behind a lock, and
+/// each playback takes a copy of its own. A copy is one reference count: in
+/// Skia M156 an `SkPath` is a reference to an immutable `SkPathData` -- its
+/// points, verbs and bounds -- and a fill type (`include/core/SkPath.h`,
+/// `src/core/SkPathData.h`), so nothing is parsed and nothing allocated, where
+/// a path kept serialized is parsed again, and its points copied, on every
+/// draw.
+#[derive(Debug)]
+struct KeptPath(Mutex<Path>);
+
+impl KeptPath {
+    fn of(path: &Path) -> Self {
+        KeptPath(Mutex::new(path.clone()))
+    }
+
+    /// The path, a copy sharing its points with the one kept.
+    fn path(&self) -> Path {
+        self.0.lock().clone()
+    }
+}
+
+impl Clone for KeptPath {
+    fn clone(&self) -> Self {
+        KeptPath(Mutex::new(self.path()))
     }
 }
 
@@ -3549,13 +3584,34 @@ impl BlurOp {
                 {
                     let gain = chain.gain.alpha_f();
                     let info = canvas.image_info();
+                    // The plane holds coverage alone, so a fill draws it
+                    // opaque without the exact colour's shader: the shader
+                    // returns an alpha of 1 -- see `ExactColour::shader` --
+                    // and `result_chain` sets the paint's to 1, so either
+                    // way a pixel holds its coverage, and Skia builds no
+                    // shader stages to find it. A stroke keeps the shader:
+                    // Skia draws one thinner than a pixel as a hairline with
+                    // its paint's alpha cut to a byte by the width
+                    // (`modifyPaintForHairlines`, `src/core/SkDraw.cpp`),
+                    // which a shaded paint and a plain one round apart --
+                    // a 0.1-wide stroke differed on 178 of 2,304 pages --
+                    // while it never touches a fill (`DrawTreatAsHairline`,
+                    // `src/core/SkDrawProcs.h`).
+                    let mut plane_paint = chain.draw.clone();
+                    if self.paint.style == PaintStyle::Fill {
+                        plane_paint.set_shader(None).set_alpha_f(1.0);
+                    }
+                    #[cfg(test)]
+                    if SHADED_PLANE.get() {
+                        plane_paint = chain.draw.clone();
+                    }
                     for path in self.paths() {
                         let sharp = chain::coverage::sharp(
                             canvas,
                             self.paint.sigma,
                             Some(self.content(&path)),
                             chain::coverage::Plane::Drawn,
-                            |plane| self.draw_into(plane, &path, &chain.draw),
+                            |plane| self.draw_into(plane, &path, &plane_paint),
                         );
                         let Some(sharp) = sharp else {
                             continue;

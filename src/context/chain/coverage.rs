@@ -21,7 +21,7 @@ use skia_safe::{
 };
 
 use super::{
-    Depth, Outcome, Step, clear_unless_zeroed, layer_info, layer_surface,
+    Depth, Outcome, Step, clear_unless_zeroed, ink, layer_info, layer_surface,
     placed, pool, region, split, trims_composite,
 };
 use crate::{
@@ -49,6 +49,15 @@ thread_local! {
     /// How many planes [`alpha_into`] has read where they lie on this
     /// thread, for a test to tell that read from `read_pixels`.
     static READ_IN_PLACE: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Whether [`Placement::of`] on this thread takes the whole region as
+    /// inked, for a test to hold the inked rectangle to what reading all of
+    /// it finds.
+    static INKED_IS_REGION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// How many placements on this thread had an inked rectangle smaller
+    /// than their region, for a test to tell that it held one to anything.
+    static INKED_WITHIN: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -280,17 +289,90 @@ impl Blurred {
     }
 }
 
-/// A draw's coverage before it is blurred: one byte a pixel of `region`, and
-/// the device sigmas the blur takes along x and y.
+/// Where [`Coverage::of`] places a draw's coverage for a blur on `canvas`,
+/// decided before anything is drawn: by the canvas's transform and clip, the
+/// blur's sigma and what the draw paints, and by nothing about the plane it
+/// is drawn on.
+pub(crate) struct Placement {
+    /// What the blur works on, in layer pixels: [`Self::region`] widened by
+    /// the blur's reach, and the rectangle [`Coverage::region`] reports.
+    pub(crate) worked: IRect,
+    /// The rectangle of the plane a draw's coverage is taken over, in layer
+    /// pixels: what it paints within the blur's reach of the clip, and the
+    /// clip within reach of what it paints.
+    pub(crate) region: IRect,
+    /// The part of [`Self::region`] the draw can cover, in layer pixels:
+    /// what it paints, a pixel either side -- see [`ink`] -- and the region
+    /// itself where nothing bounds what it paints. Coverage outside it is
+    /// zero, so only it is cleared and read.
+    pub(crate) inked: IRect,
+    /// The plane the draw is made on, in layer pixels: on the CPU it starts
+    /// at the device's origin, as the chain's layer does.
+    pub(crate) drawn: IRect,
+    /// The part of the canvas's transform the draw is made under, on the
+    /// plane.
+    pub(crate) layer: Matrix,
+    /// The part of the transform left to place the blurred result on the
+    /// device.
+    pub(crate) rest: Matrix,
+}
+
+impl Placement {
+    /// The placement of a draw painting within `content`, a rectangle in the
+    /// canvas's local coordinates, blurred by `sigma` on `canvas`. `None` where
+    /// the transform does not split into a layer's part and the rest, or the
+    /// draw lies outside the clip.
+    pub(crate) fn of(
+        canvas: &SkCanvas,
+        sigma: f32,
+        content: Option<Rect>,
+    ) -> Option<Placement> {
+        let base = canvas.local_to_device_as_3x3();
+        let (layer, rest) = split(&base)?;
+        let steps = [Step::Blur(sigma)];
+        let (to_draw, worked) = region(canvas, &steps, content, &layer, &rest)?;
+        let (region, drawn) =
+            placed(canvas, to_draw, rest.is_identity(), false);
+        let inked = content
+            .and_then(|content| {
+                IRect::intersect(&ink(&layer, content), &region)
+            })
+            .unwrap_or(region);
+        #[cfg(test)]
+        let inked = match INKED_IS_REGION.with(std::cell::Cell::get) {
+            true => region,
+            false => inked,
+        };
+        #[cfg(test)]
+        if inked != region {
+            INKED_WITHIN.with(|n| n.set(n.get() + 1));
+        }
+        Some(Placement {
+            worked: IRect::join(&worked, &region),
+            region,
+            inked,
+            drawn,
+            layer,
+            rest,
+        })
+    }
+}
+
+/// A draw's coverage before it is blurred: one byte a pixel of `inked`, zero
+/// everywhere else in `region`, what the blur works on, and the device
+/// sigmas the blur takes along x and y.
 ///
 /// Bytes rather than the floats the blur takes, because a kept result is
 /// found by comparing a draw's coverage with the coverage it was made from
 /// -- see `run_mask::drawn` and `kept::CoverageInput` -- and a draw that finds
 /// one is never blurred: comparing and keeping bytes costs a quarter of the
 /// memory and none of the conversion, and [`Self::blurred`] widens them to
-/// the same floats.
+/// the same floats. Only the inked rectangle's, because the region around it
+/// is the blur's reach on every side: on #506's 15 by 12 ellipse under
+/// blur(3px), 270 bytes of 2,754.
 pub(crate) struct Coverage {
-    bytes: Vec<u8>,
+    ink: Vec<u8>,
+    inked: IRect,
     region: IRect,
     rest: Matrix,
     sigma: (f32, f32),
@@ -313,13 +395,14 @@ impl Coverage {
         plane: Plane,
         draw: impl FnOnce(&SkCanvas),
     ) -> Option<Coverage> {
-        let base = canvas.local_to_device_as_3x3();
-        let (layer, rest) = split(&base)?;
-        let steps = [Step::Blur(sigma)];
-        let (to_draw, worked) = region(canvas, &steps, content, &layer, &rest)?;
-        let (region, drawn) =
-            placed(canvas, to_draw, rest.is_identity(), false);
-        let worked = IRect::join(&worked, &region);
+        let Placement {
+            worked,
+            region,
+            inked,
+            drawn,
+            layer,
+            rest,
+        } = Placement::of(canvas, sigma, content)?;
         let surface = |drawn: IRect| {
             let surface = match plane {
                 Plane::Drawn => {
@@ -347,7 +430,9 @@ impl Coverage {
                 (surface, drawn, None)
             }
         };
-        let read = region.with_offset((-drawn.left, -drawn.top));
+        // The plane is zero wherever a draw reads it: one made for it is
+        // made zero, and a kept one is cleared where this draw is read.
+        let read = inked.with_offset((-drawn.left, -drawn.top));
         match kept {
             // What an earlier draw left where this one is read.
             Some(true) => zero_within(&mut surface, read)?,
@@ -365,20 +450,9 @@ impl Coverage {
         draw(offscreen);
         offscreen.restore_to_count(1);
         offscreen.reset_matrix();
-        // The region's coverage on a plane of what the blur works on: zero
-        // around it, where nothing is painted.
-        let (w, h) = (worked.width() as usize, worked.height() as usize);
-        let mut bytes = vec![0u8; w * h];
-        let (dx, dy) = (
-            (region.left - worked.left) as usize,
-            (region.top - worked.top) as usize,
-        );
         let line = read.width() as usize;
-        let rows = bytes[dy * w..]
-            .chunks_mut(w)
-            .take(read.height() as usize)
-            .map(|row| &mut row[dx..][..line]);
-        if !alpha_into(&mut surface, read, rows) {
+        let mut ink = vec![0u8; line * read.height() as usize];
+        if !alpha_into(&mut surface, read, ink.chunks_mut(line.max(1))) {
             return None;
         }
         if kept.is_some() {
@@ -386,24 +460,62 @@ impl Coverage {
         }
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
         Some(Coverage {
-            bytes,
+            ink,
+            inked,
             region: worked,
             rest,
             sigma: (sigma * scale.0, sigma * scale.1),
         })
     }
 
-    /// Each pixel's coverage, row by row across [`Self::region`]: the read
+    /// Each pixel's coverage, row by row across [`Self::region`]: the inked
     /// rectangle's and zero around it, out to what the blur works on.
-    /// Everything the blur reads but the sigmas.
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.bytes
+    /// Everything the blur reads but the sigmas, made on each call.
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0u8; self.region_len()];
+        self.widen_into(&mut bytes, |byte| byte);
+        bytes
     }
 
-    /// The device pixels [`Self::bytes`] cover: the read rectangle widened
-    /// by what the blur works on.
+    /// The coverage of the inked rectangle, row by row, and the rectangle in
+    /// device pixels. Every pixel of [`Self::region`] outside it is zero.
+    pub(crate) fn ink(&self) -> (&[u8], IRect) {
+        (&self.ink, self.inked)
+    }
+
+    /// The device pixels the blur works on: the region the coverage is
+    /// taken over -- see [`Placement`] -- widened by the blur's reach.
     pub(crate) fn region(&self) -> IRect {
         self.region
+    }
+
+    /// How many pixels [`Self::region`] holds.
+    fn region_len(&self) -> usize {
+        self.region.width() as usize * self.region.height() as usize
+    }
+
+    /// Writes the inked rectangle's bytes into `out`, one value a pixel of
+    /// [`Self::region`] row by row, each through `value`; the rest of `out`
+    /// is left as it is.
+    fn widen_into<T>(&self, out: &mut [T], value: impl Fn(u8) -> T) {
+        let w = self.region.width() as usize;
+        let line = self.inked.width() as usize;
+        if line == 0 {
+            return;
+        }
+        let (dx, dy) = (
+            (self.inked.left - self.region.left) as usize,
+            (self.inked.top - self.region.top) as usize,
+        );
+        out[dy * w..]
+            .chunks_mut(w)
+            .zip(self.ink.chunks(line))
+            .for_each(|(row, ink)| {
+                row[dx..][..line]
+                    .iter_mut()
+                    .zip(ink)
+                    .for_each(|(out, &byte)| *out = value(byte));
+            });
     }
 
     /// The device sigmas the blur takes along x and y.
@@ -420,13 +532,10 @@ impl Coverage {
     pub(crate) fn blurred(self) -> Blurred {
         let (w, h) =
             (self.region.width() as usize, self.region.height() as usize);
-        let values = exact_blur::blur_alpha(
-            self.bytes.iter().copied().map(f32::from).collect(),
-            w,
-            h,
-            self.sigma.0,
-            self.sigma.1,
-        );
+        let mut values = vec![0.0f32; self.region_len()];
+        self.widen_into(&mut values, f32::from);
+        let values =
+            exact_blur::blur_alpha(values, w, h, self.sigma.0, self.sigma.1);
         Blurred {
             values,
             region: self.region,
@@ -756,9 +865,9 @@ mod tests {
                             coverage.region.height() as usize,
                         );
                         let plane: Vec<u8> = coverage
-                            .bytes
-                            .iter()
-                            .flat_map(|&v| [0, 0, 0, v])
+                            .bytes()
+                            .into_iter()
+                            .flat_map(|v| [0, 0, 0, v])
                             .collect();
                         let exact = exact_blur::reference(
                             &plane,
@@ -1262,5 +1371,451 @@ mod tests {
         );
         assert!(surface.read_pixels(&rgba, &mut pixel, 4, (0, 0)));
         assert_eq!(pixel, [255, 0, 0, 255], "a red pixel");
+    }
+}
+
+#[cfg(test)]
+mod inked_tests {
+    //! That the coverage route's plane holds what the shortcuts it takes
+    //! leave out: the inked rectangle [`super::Placement::of`] gives holds
+    //! every pixel a draw covers, so a page drawn reading only it is the page
+    //! drawn reading the whole region, across what decides how far a draw
+    //! reaches past its path; and a fill's plane drawn without the exact
+    //! colour's shader is the plane drawn with it.
+
+    use std::f32::consts::{PI, TAU};
+
+    use super::{INKED_IS_REGION, INKED_WITHIN};
+    use crate::{
+        context::layer::{COVERAGE_RUNS, SHADED_PLANE},
+        pixels::PixelColorSpace,
+        prelude::*,
+    };
+
+    /// The family Oswald is registered under here, so that it cannot be
+    /// found as a system font of the same name instead.
+    const OSWALD: &str = "InkedOswald";
+
+    /// A five-pointed star of radius 30 about the canvas's centre.
+    fn star(ctx: &mut Context2D) {
+        ctx.begin_path();
+        for i in 0..5 {
+            let a = i as f32 * PI * 4.0 / 5.0 - PI / 2.0;
+            let (x, y) = (60.0 + 30.0 * a.cos(), 45.0 + 30.0 * a.sin());
+            match i {
+                0 => ctx.move_to(x, y),
+                _ => ctx.line_to(x, y),
+            }
+        }
+        ctx.close_path();
+    }
+
+    /// An open zigzag whose turns are sharp enough to reach far past its
+    /// points with a miter join.
+    fn zigzag(ctx: &mut Context2D) {
+        ctx.begin_path();
+        ctx.move_to(25.0, 60.0);
+        ctx.line_to(45.0, 25.0);
+        ctx.line_to(55.0, 62.0);
+        ctx.line_to(75.0, 28.0);
+        ctx.line_to(95.0, 58.0);
+    }
+
+    /// A draw onto a context, its paint and transform set.
+    type Draw = fn(&mut Context2D);
+
+    /// The draws swept: each a way a draw reaches past its path's bounds,
+    /// or a shape the bounds fit tightly. A stroke's bounds reach half its
+    /// width times the miter limit past its path, so the strokes without a
+    /// miter join set the limit to 1, where the bounds are tightest: half the
+    /// width times the square root of 2, which a square cap's corner
+    /// reaches. A dashed stroke takes the chain's layer and not this route.
+    const DRAWS: [(&str, Draw); 11] = [
+        ("filled star", |ctx| {
+            star(ctx);
+            ctx.fill(FillRule::EvenOdd);
+        }),
+        ("filled ellipse", |ctx| {
+            ctx.begin_path();
+            ctx.ellipse(60.0, 45.0, 7.5, 6.0, 0.3, 0.0, TAU, false)
+                .expect("an ellipse");
+            ctx.fill(FillRule::NonZero);
+        }),
+        ("mitred star, limit 10", |ctx| {
+            ctx.set_line_width(4.0);
+            ctx.set_line_join(StrokeJoin::Miter);
+            ctx.set_miter_limit(10.0);
+            star(ctx);
+            ctx.stroke();
+        }),
+        ("mitred zigzag, limit 4", |ctx| {
+            ctx.set_line_width(5.0);
+            ctx.set_line_join(StrokeJoin::Miter);
+            ctx.set_miter_limit(4.0);
+            zigzag(ctx);
+            ctx.stroke();
+        }),
+        ("square caps", |ctx| {
+            ctx.set_line_width(6.0);
+            ctx.set_miter_limit(1.0);
+            ctx.set_line_cap(StrokeCap::Square);
+            ctx.begin_path();
+            ctx.move_to(30.0, 30.0);
+            ctx.line_to(90.0, 60.0);
+            ctx.stroke();
+        }),
+        ("round caps and joins", |ctx| {
+            ctx.set_line_width(7.0);
+            ctx.set_miter_limit(1.0);
+            ctx.set_line_cap(StrokeCap::Round);
+            ctx.set_line_join(StrokeJoin::Round);
+            zigzag(ctx);
+            ctx.stroke();
+        }),
+        ("thin stroke", |ctx| {
+            ctx.set_line_width(0.1);
+            ctx.set_miter_limit(1.0);
+            zigzag(ctx);
+            ctx.stroke();
+        }),
+        ("stroked curve", |ctx| {
+            ctx.set_line_width(3.0);
+            ctx.set_miter_limit(1.0);
+            ctx.begin_path();
+            ctx.move_to(20.5, 70.2);
+            ctx.bezier_curve_to(40.0, 5.0, 80.0, 95.0, 100.3, 22.7);
+            ctx.stroke();
+        }),
+        ("text filled", |ctx| {
+            assert!(ctx.set_font_css(&format!("32px {OSWALD}")));
+            ctx.fill_text("Ajgy", 30.0, 58.0, None);
+        }),
+        ("text stroked", |ctx| {
+            assert!(ctx.set_font_css(&format!("32px {OSWALD}")));
+            ctx.set_line_width(3.0);
+            ctx.set_line_join(StrokeJoin::Miter);
+            ctx.stroke_text("AVW", 30.0, 58.0, None);
+        }),
+        ("small hinted text", |ctx| {
+            assert!(ctx.set_font_css("11px sans-serif"));
+            ctx.fill_text("Hamburgefonstiv", 18.0, 50.0, None);
+        }),
+    ];
+
+    /// Transforms the draws are swept under: none, a turn, a skew and an
+    /// uneven scale, each about the canvas's centre.
+    const FRAMES: [Affine; 4] = [
+        Affine::IDENTITY,
+        Affine {
+            a: 0.866,
+            b: 0.5,
+            c: -0.5,
+            d: 0.866,
+            tx: 30.5,
+            ty: -24.0,
+        },
+        Affine {
+            a: 1.0,
+            b: 0.0,
+            c: 0.4,
+            d: 1.0,
+            tx: -18.0,
+            ty: 0.0,
+        },
+        Affine {
+            a: 1.7,
+            b: 0.0,
+            c: 0.0,
+            d: 0.6,
+            tx: -42.0,
+            ty: 18.0,
+        },
+    ];
+
+    /// Sub-pixel places a draw is moved to, so that its edges fall at each
+    /// quarter of a pixel along each axis.
+    const PHASES: [(f32, f32); 4] =
+        [(0.0, 0.0), (0.25, 0.5), (0.5, 0.75), (0.75, 0.25)];
+
+    /// How a page is drawn: what it is held to, and its colour and space.
+    #[derive(Clone, Copy)]
+    struct Way {
+        /// The inked rectangle taken as the whole region.
+        whole: bool,
+        /// The coverage plane drawn through the chain's shaded paint.
+        shaded: bool,
+        /// The fill and stroke colour, and the page's colour space.
+        colour: &'static str,
+        space: PixelColorSpace,
+    }
+
+    /// As the route draws: the inked rectangle, the plain paint, on an sRGB
+    /// page.
+    const ROUTE: Way = Way {
+        whole: false,
+        shaded: false,
+        colour: "rgb(200 120 40)",
+        space: PixelColorSpace::Srgb,
+    };
+
+    /// `draw` under `frame`, moved by `phase`, blurred by `sigma` on a
+    /// 120x90 eight-bit CPU page at `density`, drawn `way`, as premultiplied
+    /// pixels.
+    fn page(
+        draw: Draw,
+        frame: Affine,
+        phase: (f32, f32),
+        sigma: f32,
+        density: u32,
+        way: Way,
+    ) -> Vec<u8> {
+        INKED_IS_REGION.with(|w| w.set(way.whole));
+        SHADED_PLANE.with(|s| s.set(way.shaded));
+        let mut canvas = Canvas::with_options(
+            120.0,
+            90.0,
+            CanvasOptions {
+                gpu: false,
+                color_space: way.space,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        ctx.set_filter_css(&format!("blur({sigma}px)"))
+            .expect("a filter");
+        ctx.set_fill_style_css(way.colour).expect("a colour");
+        ctx.set_stroke_style_css(way.colour).expect("a colour");
+        ctx.translate(phase.0, phase.1);
+        ctx.transform(frame);
+        draw(ctx);
+        let pixels = canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    density,
+                    pixels: PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        INKED_IS_REGION.with(|w| w.set(false));
+        SHADED_PLANE.with(|s| s.set(false));
+        pixels
+    }
+
+    #[test]
+    fn a_draw_covers_nothing_outside_its_inked_rectangle() {
+        FontLibrary::new()
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let mut differ = Vec::new();
+        let (mut cases, mut routed) = (0, 0);
+        for (name, draw) in DRAWS {
+            let mut within = 0;
+            for (f, frame) in FRAMES.into_iter().enumerate() {
+                for phase in PHASES {
+                    for (sigma, density) in [(0.6, 1), (1.5, 1), (1.5, 2)] {
+                        let (runs, inked) = (
+                            COVERAGE_RUNS.with(|r| r.get()),
+                            INKED_WITHIN.with(|n| n.get()),
+                        );
+                        let ours =
+                            page(draw, frame, phase, sigma, density, ROUTE);
+                        routed +=
+                            usize::from(COVERAGE_RUNS.with(|r| r.get()) > runs);
+                        within +=
+                            usize::from(INKED_WITHIN.with(|n| n.get()) > inked);
+                        let whole = page(
+                            draw,
+                            frame,
+                            phase,
+                            sigma,
+                            density,
+                            Way {
+                                whole: true,
+                                ..ROUTE
+                            },
+                        );
+                        cases += 1;
+                        if ours != whole {
+                            differ.push(format!(
+                                "{name}, frame {f}, phase {phase:?}, sigma {sigma}, density {density}"
+                            ));
+                        }
+                    }
+                }
+            }
+            // The control: somewhere its inked rectangle was smaller than
+            // its region, or the draw held the rectangle to nothing.
+            assert!(within > 0, "{name}: inked across its whole region");
+        }
+        assert!(
+            differ.is_empty(),
+            "{} of {cases} differ: {differ:#?}",
+            differ.len()
+        );
+        assert_eq!(routed, cases, "draws that missed the coverage route");
+    }
+
+    #[test]
+    fn a_fill_drawn_plain_holds_what_the_shaded_paint_covers() {
+        // The route draws a fill's plane without the exact colour's shader.
+        // Each fill, in colours opaque and not, on every eight-bit page
+        // space, under each transform, is the same page drawn through the
+        // chain's shaded paint. A stroke keeps the shader -- see
+        // `BlurOp::playback` -- so it is not swept.
+        let fills: [(&str, Draw); 4] = [
+            DRAWS[0],
+            DRAWS[1],
+            ("filled zigzag", |ctx| {
+                zigzag(ctx);
+                ctx.fill(FillRule::NonZero);
+            }),
+            ("sliver a third of a pixel wide", |ctx| {
+                ctx.begin_path();
+                ctx.rect(30.2, 20.1, 0.33, 50.0);
+                ctx.rect(40.6, 45.3, 60.0, 0.33);
+                ctx.fill(FillRule::NonZero);
+            }),
+        ];
+        let colours = [
+            "rgb(200 120 40)",
+            "rgb(30 60 200 / 0.7)",
+            "black",
+            "rgb(250 20 140 / 0.55)",
+        ];
+        let spaces = [
+            PixelColorSpace::Srgb,
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::Rec2020,
+        ];
+        let mut differ = Vec::new();
+        let (mut cases, mut routed) = (0, 0);
+        for (name, draw) in fills {
+            for (f, frame) in FRAMES.into_iter().enumerate() {
+                for phase in [PHASES[0], PHASES[2]] {
+                    for (sigma, density) in [(0.6, 1), (1.5, 1), (1.5, 2)] {
+                        for colour in colours {
+                            for space in spaces {
+                                let way = Way {
+                                    colour,
+                                    space,
+                                    ..ROUTE
+                                };
+                                let runs = COVERAGE_RUNS.with(|r| r.get());
+                                let plain = page(
+                                    draw, frame, phase, sigma, density, way,
+                                );
+                                routed += usize::from(
+                                    COVERAGE_RUNS.with(|r| r.get()) > runs,
+                                );
+                                let shaded = page(
+                                    draw,
+                                    frame,
+                                    phase,
+                                    sigma,
+                                    density,
+                                    Way {
+                                        shaded: true,
+                                        ..way
+                                    },
+                                );
+                                cases += 1;
+                                if plain != shaded {
+                                    differ.push(format!(
+                                        "{name}, frame {f}, phase {phase:?}, sigma {sigma}, density {density}, {colour}, {space:?}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "{} of {cases} differ: {differ:#?}",
+            differ.len()
+        );
+        // The control: every draw took the route, or the paint it draws its
+        // plane through decided nothing.
+        assert_eq!(routed, cases, "draws that missed the coverage route");
+    }
+
+    #[test]
+    fn a_stroke_draws_its_plane_through_the_shaded_paint() {
+        // A stroke thinner than a pixel is a hairline with its paint's alpha
+        // cut to a byte by its width, which a shaded paint and a plain one
+        // round apart, so the route keeps the shaded paint for every stroke
+        // -- see `BlurOp::playback`. Each stroke here, drawn as the route
+        // draws it, is the page drawn through the shaded paint; were strokes
+        // drawn plain, the 0.1-wide one would differ.
+        let strokes: Vec<(&str, Draw)> = DRAWS
+            .into_iter()
+            // Text takes its own route, which this paint does not reach.
+            .filter(|(name, _)| {
+                !name.contains("text")
+                    && ["stroke", "caps", "mitred"]
+                        .iter()
+                        .any(|k| name.contains(k))
+            })
+            .collect();
+        assert!(
+            strokes.iter().any(|(name, _)| *name == "thin stroke"),
+            "the control: the sweep holds a stroke thinner than a pixel"
+        );
+        let mut differ = Vec::new();
+        let (mut cases, mut routed) = (0, 0);
+        for (name, draw) in strokes {
+            for (f, frame) in FRAMES.into_iter().enumerate() {
+                for phase in [PHASES[0], PHASES[2]] {
+                    for (sigma, density) in [(0.6, 1), (1.5, 1), (1.5, 2)] {
+                        for colour in
+                            ["rgb(200 120 40)", "rgb(30 60 200 / 0.7)"]
+                        {
+                            let way = Way { colour, ..ROUTE };
+                            let runs = COVERAGE_RUNS.with(|r| r.get());
+                            let route =
+                                page(draw, frame, phase, sigma, density, way);
+                            routed += usize::from(
+                                COVERAGE_RUNS.with(|r| r.get()) > runs,
+                            );
+                            let shaded = page(
+                                draw,
+                                frame,
+                                phase,
+                                sigma,
+                                density,
+                                Way {
+                                    shaded: true,
+                                    ..way
+                                },
+                            );
+                            cases += 1;
+                            if route != shaded {
+                                differ.push(format!(
+                                    "{name}, frame {f}, phase {phase:?}, sigma {sigma}, density {density}, {colour}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "{} of {cases} differ: {differ:#?}",
+            differ.len()
+        );
+        assert_eq!(routed, cases, "draws that missed the coverage route");
     }
 }

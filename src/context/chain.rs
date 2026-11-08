@@ -477,17 +477,7 @@ pub(crate) fn plan(
     let (region, drawn) =
         placed(canvas, to_draw, rest.is_identity(), is_on_gpu(canvas));
     let worked = IRect::join(&worked, &region);
-    // The rectangle `region` takes as painted: a pixel either side for
-    // anti-aliasing. A rounded rectangle's coverage stays inside its bounds
-    // rounded out, so for one the pixel changes nothing; it keeps what one
-    // chain reads and what another is taken to paint the same rectangle.
-    let ink = content.map(|content| {
-        layer
-            .map_rect(content)
-            .0
-            .with_outset((1.0, 1.0))
-            .round_out()
-    });
+    let ink = content.map(|content| ink(&layer, content));
     #[cfg(test)]
     RUNS.with(|runs| runs.set(runs.get() + 1));
     #[cfg(test)]
@@ -903,6 +893,19 @@ fn layer_surface(
         Some(surface) => Some((surface, key)),
         None => started::raster(&info, None, None).map(|raster| (raster, None)),
     }
+}
+
+/// The rectangle `region` takes as painted, in the layer's pixels:
+/// `content` under `layer`, with a pixel either side for anti-aliasing,
+/// rounded out. A rounded rectangle's coverage stays inside its bounds
+/// rounded out, so for one the pixel changes nothing; it keeps what one
+/// chain reads and what another is taken to paint the same rectangle.
+pub(super) fn ink(layer: &Matrix, content: Rect) -> IRect {
+    layer
+        .map_rect(content)
+        .0
+        .with_outset((1.0, 1.0))
+        .round_out()
 }
 
 /// The layer's bounds, in its own pixels: the region drawn into, and the
