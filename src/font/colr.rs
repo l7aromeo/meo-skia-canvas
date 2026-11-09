@@ -2679,6 +2679,203 @@ mod tests {
         eprintln!("{held} channels held, {near} off the exact composite");
     }
 
+    // TEMPORARY probe, reverted before merge: the same overlaps drawn as
+    // plain raster images with `drawImage`, no COLR route and no atlas.
+    #[test]
+    #[ignore = "probe"]
+    fn probe_overlapping_plain_images_on_this_gpu() {
+        use crate::{
+            gpu::RenderingEngine, image::Image, paint::BlendMode::*,
+            pixels::PixelExportOptions, prelude::*,
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("PROBE no GPU");
+            return;
+        }
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let image = |bytes: &[u8]| {
+            Image::from_pixels(
+                bytes,
+                120,
+                60,
+                480,
+                PixelExportOptions {
+                    premultiplied: true,
+                    ..Default::default()
+                },
+            )
+            .expect("an image")
+        };
+        let width = |text: &str| {
+            let mut canvas = crate::canvas::Canvas::new(10.0, 10.0);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css("32px AtlasColr"));
+            ctx.measure_text(text, None).width
+        };
+        // Part A: the near-tie test's two glyphs, as images.
+        let (first, second) =
+            (code_points(0xf0100, 1), code_points(0xf0101, 1));
+        let (at, overlap) = (4.0, 18.0);
+        let first_bytes = overlap_page(false, true, &|ctx| {
+            ctx.fill_text(&first, at, 40.0, None);
+        });
+        let second_bytes = overlap_page(false, true, &|ctx| {
+            ctx.fill_text(&second, at + overlap, 40.0, None);
+        });
+        let images = [image(&first_bytes), image(&second_bytes)];
+        let plain = |gpu: bool,
+                     count: usize,
+                     blend: crate::paint::BlendMode,
+                     alpha: f32| {
+            overlap_page(gpu, false, &|ctx| {
+                ctx.set_global_composite_operation(blend);
+                ctx.set_global_alpha(alpha);
+                for drawn in &images[..count] {
+                    ctx.draw_image(drawn, 0.0, 0.0);
+                }
+            })
+        };
+        let blends: [(_, Composite); 6] = [
+            (SourceOver, |s, sa, d, _, _| s + d * (1.0 - sa)),
+            (Multiply, |s, sa, d, da, alpha| match alpha {
+                true => sa + da - sa * da,
+                false => s * (1.0 - da) + d * (1.0 - sa) + s * d,
+            }),
+            (Darken, |s, sa, d, da, alpha| match alpha {
+                true => sa + da * (1.0 - sa),
+                false => s + d - (s * da).max(d * sa),
+            }),
+            (Difference, |s, sa, d, da, alpha| match alpha {
+                true => sa + da * (1.0 - sa),
+                false => s + d - 2.0 * (s * da).min(d * sa),
+            }),
+            (Xor, |s, sa, d, da, _| s * (1.0 - da) + d * (1.0 - sa)),
+            (Lighter, |s, _, d, _, _| (s + d).min(1.0)),
+        ];
+        for (blend, composite) in blends {
+            for (alpha, scale) in [(1.0, 1.0), (0.5, 128.0 / 255.0)] {
+                for gpu in [false, true] {
+                    let page = plain(gpu, 1, blend, alpha);
+                    let drawn = plain(gpu, 2, blend, alpha);
+                    let (mut held, mut off, mut far) = (0, 0, 0);
+                    let (mut worst, mut tie_worst) = (0.0_f64, 0.0_f64);
+                    for p in (0..second_bytes.len()).step_by(4) {
+                        let sa = f64::from(second_bytes[p + 3]) / 255.0 * scale;
+                        if sa == 0.0 {
+                            continue;
+                        }
+                        let da = f64::from(page[p + 3]) / 255.0;
+                        for c in p..p + 4 {
+                            let s = f64::from(second_bytes[c]) / 255.0 * scale;
+                            let d = f64::from(page[c]) / 255.0;
+                            let exact =
+                                composite(s, sa, d, da, c == p + 3) * 255.0;
+                            let got = f64::from(drawn[c]);
+                            held += 1;
+                            if got == exact.round() {
+                                continue;
+                            }
+                            off += 1;
+                            let from_tie = (exact - exact.floor() - 0.5).abs();
+                            worst = worst.max((got - exact).abs());
+                            tie_worst = tie_worst.max(from_tie);
+                            if (got - exact).abs() >= 1.0
+                                || from_tie > GPU_TIE_LEVELS
+                            {
+                                far += 1;
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "PROBE A plain {blend:?} alpha {alpha} {}: held {held} \
+                         off {off} beyond-rule {far} worst {worst:.4} \
+                         worst-from-tie {tie_worst:.4}",
+                        if gpu { "gpu" } else { "cpu" }
+                    );
+                }
+            }
+        }
+        // Part B: the overlap test's four glyphs, as the COLR route draws
+        // them and as four plain images at the same origins; the largest
+        // GPU-CPU difference of each.
+        let run = code_points(0xf0100, 4);
+        let glyphs: Vec<String> = run.chars().map(String::from).collect();
+        let mut origins = vec![4.0_f32];
+        for glyph in &glyphs[..3] {
+            let last = *origins.last().expect("an origin");
+            origins.push(last + width(glyph) - 18.0);
+        }
+        let four: Vec<Image> = zip(&glyphs, &origins)
+            .map(|(glyph, x)| {
+                image(&overlap_page(false, true, &|ctx| {
+                    ctx.fill_text(glyph, *x, 40.0, None);
+                }))
+            })
+            .collect();
+        let every = [
+            SourceOver,
+            SourceIn,
+            SourceOut,
+            SourceAtop,
+            DestinationOver,
+            DestinationIn,
+            DestinationOut,
+            DestinationAtop,
+            Copy,
+            Xor,
+            Multiply,
+            Screen,
+            Overlay,
+            Darken,
+            Lighten,
+            ColorDodge,
+            ColorBurn,
+            HardLight,
+            SoftLight,
+            Difference,
+            Exclusion,
+            Hue,
+            Saturation,
+            Color,
+            Luminosity,
+            Lighter,
+            Clear,
+        ];
+        for blend in every {
+            for alpha in [1.0_f32, 0.5] {
+                let colr = |gpu| {
+                    overlap_page(gpu, false, &|ctx| {
+                        ctx.set_global_composite_operation(blend);
+                        ctx.set_global_alpha(alpha);
+                        ctx.set_letter_spacing(-18.0);
+                        ctx.fill_text(&run, 4.0, 40.0, None);
+                    })
+                };
+                let images = |gpu| {
+                    overlap_page(gpu, false, &|ctx| {
+                        ctx.set_global_composite_operation(blend);
+                        ctx.set_global_alpha(alpha);
+                        for drawn in &four {
+                            ctx.draw_image(drawn, 0.0, 0.0);
+                        }
+                    })
+                };
+                let most = |a: Vec<u8>, b: Vec<u8>| {
+                    zip(&a, &b).map(|(x, y)| x.abs_diff(*y)).max()
+                };
+                eprintln!(
+                    "PROBE B {blend:?} alpha {alpha}: colr gpu-cpu {:?} \
+                     plain gpu-cpu {:?}",
+                    most(colr(true), colr(false)),
+                    most(images(true), images(false)),
+                );
+            }
+        }
+    }
+
     #[test]
     fn plain_glyphs_in_a_run_of_colour_glyphs_are_drawn_where_it_is_played() {
         // A run holding colour glyphs is drawn again where the page is
