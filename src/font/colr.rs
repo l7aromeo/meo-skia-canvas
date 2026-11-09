@@ -262,9 +262,14 @@ fn assembled(tables: &[(&[u8; 4], Data)]) -> Vec<u8> {
     /// The sfnt version of a font with TrueType or CFF outlines alike, as a
     /// reader takes it: `0x00010000`.
     const SFNT_VERSION: u32 = 0x0001_0000;
-    /// The bytes of the offset table before the directory, and of each
-    /// directory record.
+    /// The bytes of the table directory before its table records:
+    /// `sfntVersion`, a `uint32`, then `numTables`, `searchRange`,
+    /// `entrySelector` and `rangeShift`, a `uint16` each -- OpenType 1.9,
+    /// "The OpenType font file", `TableDirectory`. Fixed by the format.
     const OFFSET_TABLE: usize = 12;
+    /// The bytes of each table record: `tableTag`, `checksum`, `offset` and
+    /// `length`, four bytes each -- OpenType 1.9, "The OpenType font file",
+    /// `TableRecord`. Fixed by the format.
     const RECORD: usize = 16;
     let mut sorted: Vec<&(&[u8; 4], Data)> = tables.iter().collect();
     sorted.sort_by_key(|(tag, _)| **tag);
