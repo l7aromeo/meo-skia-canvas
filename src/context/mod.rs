@@ -20,7 +20,7 @@ use skia_safe::{
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 pub mod api;
@@ -1305,9 +1305,10 @@ impl Context2D {
     /// those pixels: `run`, the run kept whole, with its shadow and through
     /// the blend that covers beyond it, as `draw` -- the run's draw into one
     /// recording, as `render_to_canvas` records it -- draws them. Recorded
-    /// as well, by `draw`, into each recording the page keeps, for a
-    /// document and for the run's bounds. `false`, filing nothing, where
-    /// Skia records nothing.
+    /// as well, from the run, in the paints `draw` takes for each recording
+    /// the page keeps, when something first asks -- see
+    /// `layer::ColourText::recorded`; a test records them now, by `draw`,
+    /// to hold the one to the other.
     fn files_as_colour_text<D>(
         &self,
         paint: &Paint,
@@ -1320,54 +1321,71 @@ impl Context2D {
     where
         D: Fn(&SkCanvas, Recording),
     {
-        let record = |recording: Recording| {
-            let mut recorder = PictureRecorder::new();
-            let canvas = recorder.begin_recording(self.bounds, true);
-            canvas.set_matrix(&self.state.matrix.into());
-            draw(canvas, recording);
-            recorder.finish_recording_as_picture(None)
-        };
         let dual = self.records_pixels_apart();
         let pixels = match dual {
             true => Recording::Pixels,
             false => Recording::Shared,
         };
-        let Some(recorded) = record(pixels) else {
-            return false;
-        };
-        let document = match dual {
-            true => match record(Recording::Document) {
-                Some(document) => Some(document),
-                None => return false,
-            },
-            false => None,
-        };
-        // The paints `draw` draws the run's pixels in -- see
+        // The paints `draw` draws the run in for `recording` -- see
         // `render_to_canvas`: through a layer the blend composites where it
-        // covers beyond the draw, the run's own over it there.
+        // covers beyond the draw, the run's own over it there, and its
+        // shadow cast from that.
         let blend = self.state.global_composite_operation;
         let beyond = covers_beyond_the_draw(blend);
-        let mut drawn = match pixels {
-            Recording::Pixels => exact.unwrap_or(paint).clone(),
-            _ => paint.clone(),
+        let paints = |recording: Recording| {
+            let mut drawn = match recording {
+                Recording::Pixels => exact.unwrap_or(paint).clone(),
+                _ => paint.clone(),
+            };
+            if beyond {
+                drawn.set_blend_mode(BlendMode::SrcOver);
+            }
+            let cast_from = if beyond { &drawn } else { paint };
+            let shadow = self
+                .paint_for_shadow_in(cast_from, recording, lines)
+                .map(|(shadow, pass)| {
+                    let replay = match pass {
+                        Pass::Draw => run.clone(),
+                        Pass::AlphaInShadow => run.opaque(),
+                    };
+                    layer::ColourShadow {
+                        paint: shadow,
+                        replay,
+                        offset: self.state.shadow_offset,
+                    }
+                });
+            (drawn, shadow)
         };
-        if beyond {
-            drawn.set_blend_mode(BlendMode::SrcOver);
-        }
-        let cast_from = if beyond { &drawn } else { paint };
-        let shadow = self.paint_for_shadow_in(cast_from, pixels, lines).map(
-            |(shadow, pass)| {
-                let replay = match pass {
-                    Pass::Draw => run.clone(),
-                    Pass::AlphaInShadow => run.opaque(),
+        let (drawn, shadow) = paints(pixels);
+        #[cfg_attr(not(test), expect(unused_mut))]
+        let mut recording = OnceLock::new();
+        #[cfg_attr(not(test), expect(unused_mut))]
+        let mut document = dual.then(|| {
+            let (paint, shadow) = paints(Recording::Document);
+            layer::ColourRecording::later(paint, shadow)
+        });
+        #[cfg(test)]
+        if COLOUR_RECORDED_AT_ONCE.get() {
+            let record = |recording: Recording| {
+                let mut recorder = PictureRecorder::new();
+                let canvas = recorder.begin_recording(self.bounds, true);
+                canvas.set_matrix(&self.state.matrix.into());
+                draw(canvas, recording);
+                recorder.finish_recording_as_picture(None)
+            };
+            let Some(recorded) = record(pixels) else {
+                return false;
+            };
+            recording = OnceLock::from(Some(recorded));
+            if dual {
+                let Some(recorded) = record(Recording::Document) else {
+                    return false;
                 };
-                layer::ColourShadow {
-                    paint: shadow,
-                    replay,
-                    offset: self.state.shadow_offset,
-                }
-            },
-        );
+                document = Some(layer::ColourRecording::recorded(recorded));
+            }
+        }
+        #[cfg(not(test))]
+        let _ = draw;
         let text = Arc::new(layer::ColourText {
             matrix: self.state.matrix,
             replay: Some(run),
@@ -1375,9 +1393,12 @@ impl Context2D {
             inked: Rect::new_empty(),
             shadow,
             blend: beyond.then_some(blend),
-            recorded,
+            recording,
+            bounds: self.bounds,
             document,
             clip: None,
+            #[cfg(test)]
+            watch: layer::COLOUR_WATCH.with_borrow(Clone::clone),
         });
         self.with_recorder(|mut recorder| {
             recorder.append_colour_text(
@@ -1747,19 +1768,23 @@ impl Context2D {
             false => paint,
             true => exact.unwrap_or(paint),
         };
-        let colour_entry = |run: Replay, recorded_as: Picture, document| {
-            Layer::ColourText(Arc::new(layer::ColourText {
-                matrix: self.state.matrix,
-                replay: Some(run),
-                paint: recorded(pixels_paint),
-                inked: Rect::new_empty(),
-                shadow: None,
-                blend: None,
-                recorded: recorded_as,
-                document,
-                clip: None,
-            }))
-        };
+        let colour_entry =
+            |run: Replay, recorded_as: Picture, document: Option<Picture>| {
+                Layer::ColourText(Arc::new(layer::ColourText {
+                    matrix: self.state.matrix,
+                    replay: Some(run),
+                    paint: recorded(pixels_paint),
+                    inked: Rect::new_empty(),
+                    shadow: None,
+                    blend: None,
+                    recording: OnceLock::from(Some(recorded_as)),
+                    bounds: self.bounds,
+                    document: document.map(layer::ColourRecording::recorded),
+                    clip: None,
+                    #[cfg(test)]
+                    watch: None,
+                }))
+            };
         // A kept run is filed as the draw it is, and recorded when a target
         // first plays it -- see `layer::DeferredPicture` -- with what it can
         // ink worked out now: in the paint its pixels are recorded in, and on
@@ -2141,9 +2166,12 @@ impl Context2D {
             inked,
             shadow: None,
             blend: None,
-            recorded,
-            document,
+            recording: OnceLock::from(Some(recorded)),
+            bounds: self.bounds,
+            document: document.map(layer::ColourRecording::recorded),
             clip: None,
+            #[cfg(test)]
+            watch: None,
         }))
     }
 
@@ -4488,6 +4516,12 @@ thread_local! {
     /// -- see `layer::DeferredPicture` -- so that a test can hold it to the
     /// run recorded as it is drawn.
     pub(crate) static DEFERS: Cell<bool> = const { Cell::new(true) };
+    /// Whether a run holding colour glyphs is recorded for pixels as it is
+    /// drawn rather than when first asked for -- see
+    /// `layer::ColourText::recorded` -- so that a test can hold the one to
+    /// the other.
+    pub(crate) static COLOUR_RECORDED_AT_ONCE: Cell<bool> =
+        const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -8386,5 +8420,263 @@ mod text_reach_tests {
             past.len(),
             parted.len()
         );
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod colour_recording_tests {
+    //! A run holding colour glyphs is recorded for pixels only when first
+    //! asked for, and the recording is the one made as it was drawn -- see
+    //! `layer::ColourText::recorded`.
+
+    use super::{
+        COLOUR_RECORDED_AT_ONCE,
+        layer::{COLOUR_WATCH, ColourText, Layer, drawn_by},
+    };
+    use crate::{
+        export::{EncodeOptions, ImageFormat},
+        paint::BlendMode,
+        pixels::{ImageDataExport, PixelExportOptions},
+        prelude::*,
+    };
+    use skia_safe::{Color, surfaces};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    /// The family the colour test font is registered under.
+    const FAMILY: &str = "LazyColr";
+
+    /// Colour glyphs of the test font, each with colour paint: a radial
+    /// gradient, a sweep, a translucent fill and a composite.
+    const TEXT: &str = "\u{f0200}\u{f0b06}\u{f0508}\u{f0600}";
+
+    /// The page's size in its own units.
+    const SIDE: (f32, f32) = (320.0, 160.0);
+
+    /// The scenes, each a way `render_to_canvas` records a run otherwise.
+    const SCENES: [&str; 7] = [
+        "plain",
+        "shadow",
+        "shadow at half alpha",
+        "underlined in red at half alpha",
+        "copy",
+        "condensed",
+        "clipped",
+    ];
+
+    /// The ways a page is read, and how many recordings each asks for of
+    /// the two runs a scene draws: none on its own pixels, nor as an SVG,
+    /// which embeds a colour glyph as pixels; the pixels' of each run drawn
+    /// into another canvas, which takes the page as a picture -- see
+    /// `Context2D::picture` -- and the document's of each as a PDF.
+    const READS: [(&str, usize); 4] = [
+        ("pixels", 0),
+        ("drawn into another canvas", 2),
+        ("PDF", 2),
+        ("SVG", 0),
+    ];
+
+    /// A CPU canvas of [`SIDE`].
+    fn canvas() -> Canvas {
+        Canvas::with_options(
+            SIDE.0,
+            SIDE.1,
+            CanvasOptions {
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas")
+    }
+
+    /// `scene` drawn twice on a CPU canvas, each run recorded as it is
+    /// drawn where `at_once`, and where the runs filed count the
+    /// recordings made of them later.
+    fn scene(scene: &str, at_once: bool) -> (Canvas, Arc<AtomicUsize>) {
+        let library = FontLibrary::new();
+        library
+            .use_paths(
+                Some(FAMILY),
+                ["tests/assets/fonts/color-fonts/\
+                     test_glyphs-glyf_colr_1_variable.ttf"],
+            )
+            .expect("the font registers");
+        let asked = Arc::new(AtomicUsize::new(0));
+        COLOUR_RECORDED_AT_ONCE.set(at_once);
+        COLOUR_WATCH.with_borrow_mut(|watch| *watch = Some(Arc::clone(&asked)));
+        let mut canvas = canvas();
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("white").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        ctx.rotate(0.05);
+        assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+        ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+        match scene {
+            "shadow" | "shadow at half alpha" => {
+                ctx.set_shadow_color_css("rgba(0,0,0,0.6)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(6.0, 4.0);
+                ctx.set_shadow_blur(3.0);
+                if scene == "shadow at half alpha" {
+                    ctx.set_global_alpha(0.5);
+                }
+            }
+            "underlined in red at half alpha" => {
+                ctx.set_text_decoration_css("underline rgb(200,0,0)")
+                    .expect("a decoration");
+                ctx.set_shadow_color_css("rgba(0,0,0,0.6)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(6.0, 4.0);
+                ctx.set_global_alpha(0.5);
+            }
+            "copy" => ctx.set_global_composite_operation(BlendMode::Copy),
+            "clipped" => {
+                ctx.begin_path();
+                ctx.rect(30.5, 20.0, 200.0, 90.0);
+                ctx.clip(FillRule::NonZero);
+            }
+            _ => {}
+        }
+        let width = (scene == "condensed").then_some(120.0);
+        for (x, y) in [(20.3, 60.6), (40.7, 130.2)] {
+            ctx.fill_text(TEXT, x, y, width);
+        }
+        COLOUR_RECORDED_AT_ONCE.set(false);
+        COLOUR_WATCH.with_borrow_mut(|watch| *watch = None);
+        (canvas, asked)
+    }
+
+    /// `canvas` read as `read`.
+    fn read(canvas: &mut Canvas, read: &str) -> Vec<u8> {
+        let premultiplied = ImageDataExport {
+            pixels: PixelExportOptions {
+                premultiplied: true,
+                ..PixelExportOptions::default()
+            },
+            ..ImageDataExport::default()
+        };
+        match read {
+            "PDF" => canvas
+                .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+                .expect("a PDF"),
+            "SVG" => canvas
+                .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+                .expect("an SVG"),
+            "drawn into another canvas" => {
+                let mut outer = self::canvas();
+                outer.context().draw_canvas(canvas, 3.0, 2.0);
+                outer
+                    .to_image_data(None, &premultiplied)
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec()
+            }
+            _ => canvas
+                .to_image_data(None, &premultiplied)
+                .expect("pixels")
+                .pixels()
+                .to_vec(),
+        }
+    }
+
+    /// The runs holding colour glyphs `canvas`'s page files.
+    fn runs(canvas: &mut Canvas) -> Vec<Arc<ColourText>> {
+        let page = canvas.context().inner.page();
+        page.layers
+            .iter()
+            .filter_map(|layer| match layer {
+                Layer::ColourText(text) => Some(Arc::clone(text)),
+                Layer::Clipped(piece) => match piece.entry() {
+                    Layer::ColourText(text) => Some(Arc::clone(text)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Each of `runs`' recordings, for pixels and for a document, played
+    /// onto a white raster of the page's size.
+    fn played(runs: &[Arc<ColourText>]) -> Vec<Vec<u8>> {
+        runs.iter()
+            .flat_map(|run| [run.recorded(), run.recorded_for_document()])
+            .map(|recorded| {
+                let mut surface =
+                    surfaces::raster_n32_premul((SIDE.0 as i32, SIDE.1 as i32))
+                        .expect("a raster");
+                surface.canvas().clear(Color::WHITE);
+                recorded.expect("a recording").playback(surface.canvas());
+                let info = surface.image_info();
+                let mut bytes = vec![0; info.compute_min_byte_size()];
+                assert!(surface.read_pixels(
+                    &info,
+                    &mut bytes,
+                    info.min_row_bytes(),
+                    (0, 0),
+                ));
+                bytes
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_colour_run_is_recorded_only_when_asked() {
+        for scene in SCENES {
+            for (read, asks) in READS {
+                let (mut at_once, _) = self::scene(scene, true);
+                let (mut later, asked) = self::scene(scene, false);
+                let bytes = self::read(&mut later, read);
+                assert!(
+                    self::read(&mut at_once, read) == bytes,
+                    "{scene}, {read}: the bytes differ"
+                );
+                assert_eq!(
+                    asked.load(Ordering::Relaxed),
+                    asks,
+                    "{scene}, {read}: the recordings asked for"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_colour_run_recorded_when_asked_is_recorded_as_drawn() {
+        for scene in SCENES {
+            let (mut at_once, asked) = self::scene(scene, true);
+            let at_once = runs(&mut at_once);
+            assert_eq!(at_once.len(), 2, "{scene}: the runs filed");
+            let at_once = played(&at_once);
+            assert_eq!(asked.load(Ordering::Relaxed), 0, "{scene}: asked");
+            let (mut later, asked) = self::scene(scene, false);
+            let later = runs(&mut later);
+            // What each run reaches, known before it is recorded, is what
+            // its recording reaches.
+            let reaches: Vec<_> = later.iter().map(|run| run.reach()).collect();
+            assert_eq!(asked.load(Ordering::Relaxed), 0, "{scene}: asked");
+            for (run, reach) in later.iter().zip(reaches) {
+                let recorded = run.recorded().expect("a recording");
+                assert_eq!(reach, recorded.cull_rect(), "{scene}: the reach");
+                assert_eq!(Some(reach), drawn_by(recorded), "{scene}: drawn");
+            }
+            let later = played(&later);
+            assert_eq!(
+                asked.load(Ordering::Relaxed),
+                4,
+                "{scene}: the recordings made when asked"
+            );
+            for (run, (at_once, later)) in
+                at_once.iter().zip(&later).enumerate()
+            {
+                assert!(
+                    at_once.iter().any(|&byte| byte != u8::MAX),
+                    "{scene}: recording {run} holds nothing"
+                );
+                let apart =
+                    at_once.iter().zip(later).filter(|(a, b)| a != b).count();
+                assert_eq!(apart, 0, "{scene}: recording {run}, bytes apart");
+            }
+        }
     }
 }
