@@ -41,6 +41,35 @@ fn register() {
         .expect("the COLRv0 font registers");
 }
 
+/// `text`, each of whose characters other than spaces is a colour glyph of
+/// the COLRv1 test font: a code point the 48px reference layout lists and
+/// not under its `withoutColourPaint`. A character the font lacks falls
+/// back to a platform face and is drawn as plain text, so a scene meaning
+/// to draw colour glyphs would draw something else and pass for it.
+fn colour_text(text: &str) -> &str {
+    let file = format!("{REFERENCES}/chrome-test-glyphs-48px.json");
+    let spec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).expect(&file))
+            .expect("JSON");
+    let listed = |key: &str| -> Vec<String> {
+        spec[key]
+            .as_array()
+            .expect(key)
+            .iter()
+            .map(|hex| hex.as_str().expect("hex").to_lowercase())
+            .collect()
+    };
+    let (mapped, plain) = (listed("codepoints"), listed("withoutColourPaint"));
+    for c in text.chars().filter(|c| !c.is_whitespace()) {
+        let hex = format!("{:x}", u32::from(c));
+        assert!(
+            mapped.contains(&hex) && !plain.contains(&hex),
+            "U+{hex} is no colour glyph of the test font"
+        );
+    }
+    text
+}
+
 fn pixels(canvas: &mut Canvas) -> Vec<u8> {
     canvas
         .to_image_data(None, &ImageDataExport::default())
@@ -525,7 +554,7 @@ mod played_back {
         ctx.translate(at.0, at.1);
         assert!(ctx.set_font_css("48px ColrGlyphs"));
         ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
-        ctx.fill_text(TEXT, 10.3, 60.7, None);
+        ctx.fill_text(colour_text(TEXT), 10.3, 60.7, None);
     }
 
     /// A canvas `scale` times [`SIDE`], on the GPU where `gpu`.
@@ -683,7 +712,7 @@ mod on_the_gpu {
         assert!(ctx.set_font_css("48px ColrGlyphs"));
         ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
         set_up(ctx);
-        ctx.fill_text(TEXT, 10.3, 70.7, None);
+        ctx.fill_text(colour_text(TEXT), 10.3, 70.7, None);
         Some(pixels(&mut canvas))
     }
 
@@ -777,7 +806,7 @@ mod on_the_gpu {
         let ctx = canvas.context();
         assert!(ctx.set_font_css("48px ColrGlyphs"));
         ctx.set_fill_style_css(fill).expect("a colour");
-        ctx.fill_text(TEXT, 10.3, 70.7, None);
+        ctx.fill_text(colour_text(TEXT), 10.3, 70.7, None);
         let export = ImageDataExport {
             pixels: PixelExportOptions {
                 premultiplied: true,

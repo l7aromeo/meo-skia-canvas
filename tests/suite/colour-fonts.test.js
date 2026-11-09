@@ -47,6 +47,28 @@ const layout = (name) =>
   JSON.parse(fs.readFileSync(path.join(REFERENCES, `${name}.json`), "utf8"));
 
 /**
+ * `text`, each of whose characters other than spaces is a colour glyph of
+ * the COLRv1 test font: a code point the 48px reference layout lists and
+ * not under its `withoutColourPaint`. A character the font lacks falls back
+ * to a platform face and is drawn as plain text, so a scene meaning to draw
+ * colour glyphs would draw something else and pass for it.
+ *
+ * @param {string} text
+ */
+const colourText = (text) => {
+  const spec = layout("chrome-test-glyphs-48px");
+  for (const c of text) {
+    if (/\s/.test(c)) continue;
+    const hex = /** @type {number} */ (c.codePointAt(0)).toString(16);
+    assert.ok(
+      spec.codepoints.includes(hex) && !spec.withoutColourPaint.includes(hex),
+      `U+${hex} is no colour glyph of the test font`,
+    );
+  }
+  return text;
+};
+
+/**
  * A canvas drawing on the CPU, as Chrome drew the references -- see
  * `tests/assets/images/colr/README.md`.
  */
@@ -279,10 +301,10 @@ describe("COLR colour fonts", () => {
       ctx.lineWidth = 3;
       if (stroke) {
         ctx.strokeStyle = "green";
-        ctx.strokeText("\u{f0b06}", 10, 85);
+        ctx.strokeText(colourText("\u{f0b06}"), 10, 85);
       } else {
         ctx.fillStyle = "green";
-        ctx.fillText("\u{f0b06}", 10, 85);
+        ctx.fillText(colourText("\u{f0b06}"), 10, 85);
       }
       return ctx.getImageData(0, 0, 100, 100).data;
     };
@@ -297,7 +319,7 @@ describe("COLR colour fonts", () => {
     const canvas = new Canvas(120, 100),
       ctx = canvas.getContext("2d");
     ctx.font = "72px ColrGlyphs";
-    ctx.fillText("\u{f0200}", 10, 85);
+    ctx.fillText(colourText("\u{f0200}"), 10, 85);
     const svg = canvas.toBufferSync("svg").toString();
     assert.match(svg, /<image/);
   });

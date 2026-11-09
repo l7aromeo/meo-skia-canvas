@@ -8435,6 +8435,7 @@ mod colour_recording_tests {
     };
     use crate::{
         export::{EncodeOptions, ImageFormat},
+        font::colr::assert_colour_text,
         paint::BlendMode,
         pixels::{ImageDataExport, PixelExportOptions},
         prelude::*,
@@ -8447,6 +8448,10 @@ mod colour_recording_tests {
 
     /// The family the colour test font is registered under.
     const FAMILY: &str = "LazyColr";
+
+    /// The colour test font.
+    const FONT: &str =
+        "tests/assets/fonts/color-fonts/test_glyphs-glyf_colr_1_variable.ttf";
 
     /// Colour glyphs of the test font, each with colour paint: a radial
     /// gradient, a sweep, a translucent fill and a composite.
@@ -8497,11 +8502,7 @@ mod colour_recording_tests {
     fn scene(scene: &str, at_once: bool) -> (Canvas, Arc<AtomicUsize>) {
         let library = FontLibrary::new();
         library
-            .use_paths(
-                Some(FAMILY),
-                ["tests/assets/fonts/color-fonts/\
-                     test_glyphs-glyf_colr_1_variable.ttf"],
-            )
+            .use_paths(Some(FAMILY), [FONT])
             .expect("the font registers");
         let asked = Arc::new(AtomicUsize::new(0));
         COLOUR_RECORDED_AT_ONCE.set(at_once);
@@ -8540,6 +8541,7 @@ mod colour_recording_tests {
             _ => {}
         }
         let width = (scene == "condensed").then_some(120.0);
+        assert_colour_text(FONT, TEXT);
         for (x, y) in [(20.3, 60.6), (40.7, 130.2)] {
             ctx.fill_text(TEXT, x, y, width);
         }

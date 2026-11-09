@@ -720,6 +720,32 @@ impl ColourRun {
     }
 }
 
+/// Panics unless every character of `text` maps, in the font at `path`, to
+/// a glyph its `COLR` table paints: a character the font lacks falls back
+/// to a platform face and is drawn as plain text, so a test meaning to
+/// draw colour glyphs would draw something else and pass for it.
+#[cfg(test)]
+pub(crate) fn assert_colour_text(path: &str, text: &str) {
+    let bytes = std::fs::read(path).expect(path);
+    let typeface = skia_safe::FontMgr::new()
+        .new_from_data(Data::new_copy(&bytes), None)
+        .expect("the font loads");
+    let font = skia_safe::Font::from_typeface(&typeface, 16.0);
+    let run = ColourRun::of(&font, &Paint::default()).expect("a COLR face");
+    for c in text.chars() {
+        let glyph = typeface.unichar_to_glyph(c as i32);
+        let painted = glyph != 0
+            && run
+                .glyph(glyph)
+                .is_some_and(|glyph| glyph.picture.is_some());
+        assert!(
+            painted,
+            "U+{:04X} is no colour glyph of {path}: a fallback face draws it",
+            u32::from(c)
+        );
+    }
+}
+
 /// Whether `canvas` draws on a GPU context.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 fn on_gpu(canvas: &Canvas) -> bool {
@@ -2216,8 +2242,17 @@ mod tests {
         scene(ctx);
         ONE_BY_ONE.set(one_by_one);
         let before = ATLAS_DRAWS.get();
+        // Premultiplied, as the pixels are stored: a translucent result read
+        // back unpremultiplied moves a level of difference up to 255.
+        let export = crate::pixels::ImageDataExport {
+            pixels: crate::pixels::PixelExportOptions {
+                premultiplied: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let pixels = canvas
-            .to_image_data(None, &crate::pixels::ImageDataExport::default())
+            .to_image_data(None, &export)
             .expect("pixels")
             .pixels()
             .to_vec();
@@ -2225,18 +2260,24 @@ mod tests {
         (pixels, ATLAS_DRAWS.get() - before)
     }
 
-    /// `count` of the test font's code points from `first`, as text.
+    /// `count` of the test font's code points from `first`, as text, each
+    /// one a colour glyph of the font -- see [`assert_colour_text`].
     fn code_points(first: u32, count: u32) -> String {
-        (first..first + count).filter_map(char::from_u32).collect()
+        let text: String =
+            (first..first + count).filter_map(char::from_u32).collect();
+        assert_colour_text(VARIABLE, &text);
+        text
     }
 
     /// What a test draws on a canvas [`atlas_scene`] sets up.
     type AtlasScene = dyn Fn(&mut crate::context2d::Context2D);
 
-    /// Two lines of 16 of the test font's colour glyphs.
+    /// Two lines of 16 of the test font's colour glyphs, every one of them
+    /// a code point the font maps: past U+F0103 the font maps none until
+    /// U+F0200, and a character it lacks falls back to a platform face.
     fn atlas_lines(ctx: &mut crate::context2d::Context2D) {
-        ctx.fill_text(&code_points(0xf0100, 16), 4.0, 40.0, None);
-        ctx.fill_text(&code_points(0xf0200, 16), 4.0, 90.0, None);
+        ctx.fill_text(&code_points(0xf0200, 16), 4.0, 40.0, None);
+        ctx.fill_text(&code_points(0xf0210, 16), 4.0, 90.0, None);
     }
 
     /// The scenes the atlas is held to drawing one by one with: each named,
@@ -2326,7 +2367,7 @@ mod tests {
                 "in reverse after in order",
                 true,
                 Box::new(|ctx| {
-                    let text = code_points(0xf0100, 16);
+                    let text = code_points(0xf0200, 16);
                     let reversed: String = text.chars().rev().collect();
                     ctx.fill_text(&text, 4.0, 40.0, None);
                     ctx.fill_text(&reversed, 4.0, 90.0, None);
@@ -2385,13 +2426,25 @@ mod tests {
         }
     }
 
-    /// How far a channel of the GPU canvas may stand from the CPU canvas's
-    /// where colour glyph images overlap under any blend: the most measured
-    /// across every blend at an alpha of 1 and of 0.5 but the four a layer
-    /// composites, drawn from atlases or one by one. Read from a copy of the
-    /// page taken before the glyph beneath landed, an overlap stood 11 to
-    /// 197 levels off.
+    /// How far a premultiplied channel of the GPU canvas may stand from the
+    /// CPU canvas's where one colour glyph image composites over another:
+    /// a level each way from the exact composite. The GPU misses it only
+    /// within [`GPU_TIE_LEVELS`] of a tie -- see
+    /// `the_second_of_two_overlapping_glyphs_misses_the_exact_composite_on_the_gpu_only_near_a_tie`
+    /// -- and the CPU raster rounds an alpha below 1 into its arithmetic up
+    /// to 1.24 levels from it. That raster is Chrome's CPU canvas byte for
+    /// byte for one glyph image over the page; for one over another it is
+    /// the same raster, not compared with Chrome. Read from a copy of the page
+    /// taken before the glyph beneath landed, an overlap stood 11 to 197
+    /// levels off.
     const OVERLAP_LEVELS: u8 = 2;
+
+    /// How near a tie of the exact composite, in levels, the GPU may store a
+    /// channel a level from it: the bound `GPU_COMPOSITE_TIE_LEVELS` in
+    /// `tests/colour_fonts.rs` holds the GPU canvas to for one glyph image
+    /// over the page, as `docs/browser-differences.md` gives it for any
+    /// image.
+    const GPU_TIE_LEVELS: f64 = 0.18;
 
     #[test]
     fn overlapping_colour_glyphs_blend_on_the_gpu_as_on_the_cpu() {
@@ -2442,13 +2495,6 @@ mod tests {
         ];
         for blend in every {
             for alpha in [1.0, 0.5] {
-                // A layer composites these through the alpha, apart from
-                // the CPU canvas whether the glyphs overlap or not, and for
-                // text of any font: a separate defect.
-                let layered = [SourceIn, Copy, DestinationIn, DestinationAtop];
-                if alpha < 1.0 && layered.contains(&blend) {
-                    continue;
-                }
                 let scene = move |ctx: &mut crate::context2d::Context2D| {
                     ctx.set_global_composite_operation(blend);
                     ctx.set_global_alpha(alpha);
@@ -2464,6 +2510,144 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The premultiplied pixels of a canvas over `rgb(200 120 60)`, on the
+    /// GPU where `gpu`, with the test font set at 32px in `rgb(40 90 160)`
+    /// and `draw` drawn on it; over nothing where `bare`.
+    fn overlap_page(
+        gpu: bool,
+        bare: bool,
+        draw: &dyn Fn(&mut crate::context2d::Context2D),
+    ) -> Vec<u8> {
+        let mut canvas = crate::canvas::Canvas::new(120.0, 60.0);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        if !bare {
+            ctx.set_fill_style_css("rgb(200 120 60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 120.0, 60.0);
+        }
+        ctx.set_fill_style_css("rgb(40 90 160)").expect("a colour");
+        assert!(ctx.set_font_css("32px AtlasColr"));
+        draw(ctx);
+        let export = crate::pixels::ImageDataExport {
+            pixels: crate::pixels::PixelExportOptions {
+                premultiplied: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        canvas
+            .to_image_data(None, &export)
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// A blend's composite of a premultiplied channel `s` of alpha `sa`
+    /// over `d` of alpha `da`, all from 0 to 1; the last argument says
+    /// whether the channel is the alpha.
+    type Composite = fn(f64, f64, f64, f64, bool) -> f64;
+
+    #[test]
+    fn the_second_of_two_overlapping_glyphs_misses_the_exact_composite_on_the_gpu_only_near_a_tie()
+     {
+        // Two colour glyphs drawn as one run, the second over the first.
+        // Each channel the second covers is the exact composite of its
+        // premultiplied bytes, scaled by the alpha, over the page the first
+        // left, on the GPU a level from that only near a tie. Drawn from
+        // one atlas under a blend that reads the page in the shader, the
+        // second read the page as it was before the first landed -- see
+        // `ColourRun::draw_all`.
+        use crate::{gpu::RenderingEngine, paint::BlendMode::*, prelude::*};
+        if !RenderingEngine::GPU.selectable() {
+            if cfg!(target_os = "macos") {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let (first, second) =
+            (code_points(0xf0100, 1), code_points(0xf0101, 1));
+        // The second glyph's origin, 18 pixels into the first's 32.
+        let (at, overlap) = (4.0, 18.0);
+        let spacing = {
+            let mut canvas = crate::canvas::Canvas::new(10.0, 10.0);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css("32px AtlasColr"));
+            overlap - ctx.measure_text(&first, None).width
+        };
+        let source = overlap_page(false, true, &|ctx| {
+            ctx.fill_text(&second, at + overlap, 40.0, None);
+        });
+        let blends: [(_, Composite); 6] = [
+            (SourceOver, |s, sa, d, _, _| s + d * (1.0 - sa)),
+            (Multiply, |s, sa, d, da, alpha| match alpha {
+                true => sa + da - sa * da,
+                false => s * (1.0 - da) + d * (1.0 - sa) + s * d,
+            }),
+            (Darken, |s, sa, d, da, alpha| match alpha {
+                true => sa + da * (1.0 - sa),
+                false => s + d - (s * da).max(d * sa),
+            }),
+            (Difference, |s, sa, d, da, alpha| match alpha {
+                true => sa + da * (1.0 - sa),
+                false => s + d - 2.0 * (s * da).min(d * sa),
+            }),
+            (Xor, |s, sa, d, da, _| s * (1.0 - da) + d * (1.0 - sa)),
+            (Lighter, |s, _, d, _, _| (s + d).min(1.0)),
+        ];
+        let (mut held, mut near) = (0, 0);
+        for (blend, composite) in blends {
+            // A `globalAlpha` of 0.5 is an alpha byte of 128.
+            for (alpha, scale) in [(1.0, 1.0), (0.5, 128.0 / 255.0)] {
+                let set = |ctx: &mut crate::context2d::Context2D| {
+                    ctx.set_global_composite_operation(blend);
+                    ctx.set_global_alpha(alpha);
+                };
+                let page = overlap_page(true, false, &|ctx| {
+                    set(ctx);
+                    ctx.fill_text(&first, at, 40.0, None);
+                });
+                let drawn = overlap_page(true, false, &|ctx| {
+                    set(ctx);
+                    ctx.set_letter_spacing(spacing);
+                    let run = format!("{first}{second}");
+                    ctx.fill_text(&run, at, 40.0, None);
+                });
+                for p in (0..source.len()).step_by(4) {
+                    let sa = f64::from(source[p + 3]) / 255.0 * scale;
+                    if sa == 0.0 {
+                        continue;
+                    }
+                    let da = f64::from(page[p + 3]) / 255.0;
+                    for c in p..p + 4 {
+                        let s = f64::from(source[c]) / 255.0 * scale;
+                        let d = f64::from(page[c]) / 255.0;
+                        let exact = composite(s, sa, d, da, c == p + 3) * 255.0;
+                        let got = f64::from(drawn[c]);
+                        held += 1;
+                        if got == exact.round() {
+                            continue;
+                        }
+                        near += 1;
+                        let from_tie = (exact - exact.floor() - 0.5).abs();
+                        assert!(
+                            (got - exact).abs() < 1.0
+                                && from_tie <= GPU_TIE_LEVELS,
+                            "{blend:?} at {alpha}: the GPU stores {got} for \
+                             {exact}, {from_tie} from a tie"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(held > 10_000, "only {held} channels to hold");
+        eprintln!("{held} channels held, {near} off the exact composite");
     }
 
     #[test]
