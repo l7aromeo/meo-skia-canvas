@@ -23,19 +23,15 @@ const layout = (n) =>
 
 const reference = async (spec) => {
   const image = await loadImage(path.join(refs, spec.reference)),
-    c = new Canvas(spec.width, spec.height);
-  c.gpu = false;
-  const ctx = c.getContext("2d");
+    c = new Canvas(spec.width, spec.height),
+    ctx = c.getContext("2d");
   ctx.drawImage(image, 0, 0);
   return ctx.getImageData(0, 0, spec.width, spec.height).data;
 };
 
-// Drawn on the CPU canvas, as Chrome drew the references, and on the
-// default one, which is the GPU where the machine has one.
-const sheet = (spec, gpu) => {
-  const c = new Canvas(spec.width, spec.height);
-  c.gpu = gpu;
-  const ctx = c.getContext("2d");
+const sheet = (spec) => {
+  const c = new Canvas(spec.width, spec.height),
+    ctx = c.getContext("2d");
   ctx.fillStyle = spec.background;
   ctx.fillRect(0, 0, spec.width, spec.height);
   if (spec.cases) {
@@ -129,25 +125,23 @@ const notdef = (spec) => {
   console.log(
     `platform ${process.platform} ${process.arch} ${require("os").release()}`,
   );
-  for (const gpu of [false, true])
-    for (const name of [
-      "chrome-test-glyphs-48px",
-      "chrome-test-glyphs-48px-varied",
-      "chrome-colr-v0",
-    ]) {
-      const spec = layout(name),
-        ours = sheet(spec, gpu),
-        chrome = await reference(spec);
-      console.log(
-        gpu ? "gpu" : "cpu",
-        name,
-        JSON.stringify({
-          colouredOurs: coloured(ours),
-          colouredChrome: coloured(chrome),
-          ...compare(ours, chrome, spec.width, spec.height, notdef(spec)),
-        }),
-      );
-    }
+  for (const name of [
+    "chrome-test-glyphs-48px",
+    "chrome-test-glyphs-48px-varied",
+    "chrome-colr-v0",
+  ]) {
+    const spec = layout(name),
+      ours = sheet(spec),
+      chrome = await reference(spec);
+    console.log(
+      name,
+      JSON.stringify({
+        colouredOurs: coloured(ours),
+        colouredChrome: coloured(chrome),
+        ...compare(ours, chrome, spec.width, spec.height, notdef(spec)),
+      }),
+    );
+  }
 })().catch((e) => {
   console.error(e);
   process.exit(1);
