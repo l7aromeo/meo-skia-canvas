@@ -712,22 +712,23 @@ thread_local! {
     static RASTERS_ON_GPU: Cell<usize> = const { Cell::new(0) };
 }
 
-/// The textures this thread has made of kept glyph images on a GPU
-/// canvas: the id of the context they belong to, and each texture by the
-/// unique id of the image [`glyph_image`] keeps.
+/// The textures this thread has made of kept glyph images on GPU canvases,
+/// for each context they belong to: by the unique id of the image
+/// [`glyph_image`] keeps. A thread draws on one or two contexts -- its own
+/// and a window's -- so they are found by looking.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-type Textures = Option<(DirectContextId, HashMap<u32, Image>)>;
+type Textures = Vec<(DirectContextId, HashMap<u32, Image>)>;
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 thread_local! {
     /// The textures [`resident`] made.
-    static TEXTURES: RefCell<Textures> = const { RefCell::new(None) };
+    static TEXTURES: RefCell<Textures> = const { RefCell::new(Vec::new()) };
 }
 
 /// `image`, a glyph image [`glyph_image`] keeps, as a texture on the GPU
-/// context `canvas` draws to, made once and kept beside the image; `image`
-/// itself on a canvas with no GPU context, or where the texture could not
-/// be made.
+/// context `canvas` draws to, made once for that context and kept beside
+/// the image; `image` itself on a canvas with no GPU context, or where the
+/// texture could not be made.
 ///
 /// A raster image drawn on a GPU canvas is uploaded into a texture that
 /// Ganesh keys by the image's pixels (`GrMakeCachedBitmapProxyView` in
@@ -740,10 +741,17 @@ thread_local! {
 /// next page's glyphs over budget, and each playback would upload every
 /// glyph again. A texture held here is not the cache's to free.
 ///
-/// The textures go when the images they were made of go, so they are held
-/// within [`GLYPH_IMAGE_BYTES_KEPT`] as the images are. One context's are
-/// kept at a time: a canvas drawing on another context on the same thread,
-/// a window's, lets them go.
+/// Held, the textures still count against the context's budget, which
+/// Ganesh sets at 256 MiB (`GrResourceCache::kDefaultMaxSize`) and this
+/// crate leaves as it is: no more of it than the glyph images they were
+/// made of, within [`GLYPH_IMAGE_BYTES_KEPT`] for each context, since they
+/// go when those images go. While the cache is over budget it frees what
+/// no one holds, so the textures held here move that point by at most
+/// that much and are never what it frees.
+///
+/// Each context keeps its own, so canvases drawing on two contexts in turn
+/// on one thread -- a window's and the thread's own -- upload each glyph
+/// once for each, not again at every turn.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 fn resident(canvas: &Canvas, image: Image) -> Image {
     let Some(mut context) = canvas.direct_context() else {
@@ -751,10 +759,14 @@ fn resident(canvas: &Canvas, image: Image) -> Image {
     };
     let of = context.id();
     TEXTURES.with_borrow_mut(|held| {
-        let textures = match held {
-            Some((id, textures)) if *id == of => textures,
-            _ => &mut held.insert((of, HashMap::new())).1,
+        let at = match held.iter().position(|(id, _)| *id == of) {
+            Some(at) => at,
+            None => {
+                held.push((of, HashMap::new()));
+                held.len() - 1
+            }
         };
+        let textures = &mut held[at].1;
         if let Some(texture) = textures.get(&image.unique_id()) {
             return texture.clone();
         }
@@ -780,11 +792,21 @@ fn resident(_canvas: &Canvas, image: Image) -> Image {
 }
 
 /// Lets go of the glyph textures this thread holds, which hold their
-/// context: called as the glyph images they were made of go, and by a GPU
+/// contexts: called as the glyph images they were made of go, and by a GPU
 /// engine before it frees or drops an idle context.
 pub(crate) fn release_textures() {
     #[cfg(any(feature = "metal", feature = "vulkan"))]
-    TEXTURES.set(None);
+    TEXTURES.set(Vec::new());
+}
+
+/// Lets go of the glyph textures this thread holds on `context`, which hold
+/// it: called by a window's renderer as it abandons its context.
+#[cfg(all(
+    any(feature = "metal", feature = "vulkan"),
+    any(feature = "window", test)
+))]
+pub(crate) fn release_textures_of(context: DirectContextId) {
+    TEXTURES.with_borrow_mut(|held| held.retain(|(id, _)| *id != context));
 }
 
 /// The glyph `picture` records, inking within `bounds`, as an image under
@@ -1678,6 +1700,80 @@ mod tests {
         };
         assert_eq!(draws_made(48.0), [1, 0]);
         assert_eq!(draws_made(LARGEST_KEPT_TEXT + 44.0), [1, 1]);
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn glyphs_drawn_on_two_contexts_in_turn_are_uploaded_once_for_each() {
+        // A window's renderer draws on a context of its own, on the thread
+        // whose context the offscreen canvases share; drawn in turn, each
+        // keeps the textures made for it.
+        use crate::gpu::{RenderingEngine, another_context};
+        use skia_safe::gpu::{Budgeted, surfaces};
+        let mut image_surface = started::raster(
+            &ImageInfo::new_n32_premul((24, 24), None),
+            None,
+            None,
+        )
+        .expect("a raster");
+        image_surface.canvas().clear(Color::RED);
+        let image = image_surface.image_snapshot();
+        let info = ImageInfo::new_n32_premul((64, 64), None);
+        let mut window = another_context().expect("a second context");
+        let mut window_page = surfaces::render_target(
+            &mut window,
+            Budgeted::Yes,
+            &info,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("a window's page");
+        let mut made = Vec::new();
+        RenderingEngine::GPU.with_direct_context(|context| {
+            let context = context.expect("the thread's context");
+            let mut page = surfaces::render_target(
+                context,
+                Budgeted::Yes,
+                &info,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a page");
+            for _ in 0..4 {
+                for surface in [&mut page, &mut window_page] {
+                    let before = TEXTURES_MADE.get();
+                    let texture = resident(surface.canvas(), image.clone());
+                    assert!(texture.is_texture_backed(), "drawn from the CPU");
+                    made.push(TEXTURES_MADE.get() - before);
+                }
+            }
+            // The window's renderer lets its context go: its textures go,
+            // and the thread's stay.
+            release_textures_of(
+                window_page
+                    .canvas()
+                    .direct_context()
+                    .expect("a context")
+                    .id(),
+            );
+            for surface in [&mut page, &mut window_page] {
+                let before = TEXTURES_MADE.get();
+                resident(surface.canvas(), image.clone());
+                made.push(TEXTURES_MADE.get() - before);
+            }
+        });
+        release_textures();
+        assert_eq!(
+            made,
+            [1, 1, 0, 0, 0, 0, 0, 0, 0, 1],
+            "textures made each turn, then after the window's release"
+        );
     }
 
     #[cfg(any(feature = "metal", feature = "vulkan"))]
