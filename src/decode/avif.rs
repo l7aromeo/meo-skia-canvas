@@ -629,10 +629,6 @@ fn plane_of(rows: &[&[u8]], deep: bool) -> Plane {
     }
 }
 
-/// Three planes composed into RGBA, alpha left opaque.
-///
-/// `max` is the largest value a sample of this depth can hold, which is what
-/// the conversion scales against.
 /// Everything the planes have to be read through to become RGB.
 #[derive(Clone, Copy)]
 struct Conversion {
@@ -646,6 +642,10 @@ struct Conversion {
     deep: bool,
 }
 
+/// Three planes composed into RGBA, alpha left opaque.
+///
+/// `max` is the largest value a sample of this depth can hold, which is what
+/// the conversion scales against.
 fn compose(
     luma: &Plane,
     cb: &Plane,
