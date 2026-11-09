@@ -27,9 +27,10 @@
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, iter::zip, rc::Rc};
 
 use crate::{
+    cache_map::CacheMap,
     export::{VectorFeatures, blend_features},
     started,
 };
@@ -42,7 +43,8 @@ use skia_safe::{
     AlphaType, BlendMode, Canvas, ClipOp, Color, Color4f, ColorSpace,
     ColorType, Data, GlyphId, IPoint, IRect, ISize, Image, ImageFilter,
     ImageInfo, Matrix, Paint, Path, PathBuilder, Picture, PictureRecorder,
-    Point, Rect, RoundOut, Shader, TileMode, Typeface,
+    Point, RSXform, Rect, RoundOut, SamplingOptions, Shader, TileMode,
+    Typeface,
     canvas::SaveLayerRec,
     gradient::{
         Colors as GradientColors, Gradient, Interpolation, interpolation,
@@ -102,6 +104,19 @@ const GLYPH_IMAGE_BYTES_KEPT: usize = 8 << 20;
 /// the same, so that it is drawn on the CPU wherever pixels are made, but
 /// not kept.
 const LARGEST_KEPT_TEXT: f32 = 256.0;
+
+/// The widest and tallest, in pixels, an atlas of a run's glyph images is
+/// made -- see [`atlas`]. Chosen, not fixed: an atlas this size is 4 MiB in
+/// eight-bit RGBA, within [`ATLAS_BYTES_KEPT`], and a quarter of the 4096
+/// every Vulkan device takes a texture to (`maxImageDimension2D` among the
+/// Vulkan specification's required limits). A run whose images outgrow it
+/// is drawn from as many atlases as it fills.
+const ATLAS_SIDE: i32 = 1024;
+
+/// How many bytes of run atlases a thread keeps before it drops them all
+/// and makes them again -- see [`atlas`]: as many as the glyph images they
+/// are copied from, [`GLYPH_IMAGE_BYTES_KEPT`].
+const ATLAS_BYTES_KEPT: usize = GLYPH_IMAGE_BYTES_KEPT;
 
 /// The tables a face's paint graphs and the outlines they clip to are read
 /// from, where the platform cannot hand the font's own file back -- see
@@ -340,24 +355,25 @@ fn packed(colour: Color) -> u32 {
 
 /// Drops every face and glyph this thread keeps.
 pub(crate) fn forget() {
-    FACES.with_borrow_mut(HashMap::clear);
-    GLYPHS.with_borrow_mut(HashMap::clear);
+    FACES.with_borrow_mut(|faces| faces.clear());
+    GLYPHS.with_borrow_mut(|glyphs| glyphs.clear());
     GLYPH_IMAGES.with_borrow_mut(|(images, held)| {
         images.clear();
         *held = 0;
     });
+    drop_atlases();
     release_textures();
 }
 
 thread_local! {
     /// The answer [`colr_face`] gave for each typeface, by its unique id,
     /// which no other typeface in the process takes.
-    static FACES: RefCell<HashMap<TypefaceId, Option<Rc<ColrFace>>>> =
-        RefCell::new(HashMap::new());
+    static FACES: RefCell<CacheMap<TypefaceId, Option<Rc<ColrFace>>>> =
+        RefCell::new(CacheMap::default());
     /// The glyphs [`colr_glyph`] recorded, by typeface, glyph and
     /// foreground colour -- see [`packed`].
-    static GLYPHS: RefCell<HashMap<GlyphKey, Option<Rc<ColrGlyph>>>> =
-        RefCell::new(HashMap::new());
+    static GLYPHS: RefCell<CacheMap<GlyphKey, Option<Rc<ColrGlyph>>>> =
+        RefCell::new(CacheMap::default());
 }
 
 /// What a recorded glyph is kept by: its typeface's unique id, the glyph,
@@ -472,6 +488,166 @@ impl ColourRun {
         canvas.restore();
     }
 
+    /// Draws `glyphs`, each with its origin, onto `canvas` in `paint`, in
+    /// order, as [`Self::draw`] draws each.
+    ///
+    /// While an [`ImageRoute`] is open on a GPU canvas, the glyph images
+    /// under a paint that blends by coefficients -- see
+    /// [`blends_by_coefficients`] -- and carries no image filter are drawn
+    /// together: copied into one image, an atlas, and drawn from it with one
+    /// `drawAtlas` -- see [`Self::draw_atlas`]. Ganesh draws each image it is
+    /// handed as an operation of its own, which it cannot merge with the
+    /// next where the two read different textures: drawn an image apiece, a
+    /// page of 32 runs of 16 glyphs was 512 texture operations, and merging,
+    /// binding and drawing them cost about 0.06 milliseconds a page. Drawn
+    /// from an atlas, a glyph under a clip edge at a fraction of a pixel
+    /// stands from the CPU canvas as one unclipped does, where an image of
+    /// its own stands up to 22 levels from it, and 11 at half alpha.
+    ///
+    /// Under any other paint each glyph keeps its own image. A blend past
+    /// the coefficients reads the page in the shader from one copy for each
+    /// draw, so the overlapping sprites of one atlas would each read the
+    /// page as it was before the others landed, as much as 197 levels from
+    /// the CPU canvas; an image filter is applied to a glyph alone -- see
+    /// [`filtered`]. The CPU canvas draws each image on its own: its raster
+    /// draws an atlas's sprites through an image shader, sampling each
+    /// texel, where it blends an image drawn at a whole pixel a row at a
+    /// time -- 0.043 milliseconds more a page of 512 glyphs -- and applies
+    /// an atlas's alpha up to two levels from an image's, which is Chrome's
+    /// bytes.
+    pub(crate) fn draw_all(
+        &self,
+        canvas: &Canvas,
+        glyphs: &[(Rc<ColrGlyph>, Point)],
+        paint: &Paint,
+    ) {
+        if on_gpu(canvas)
+            && blends_by_coefficients(paint.blend_mode_or(BlendMode::SrcOver))
+            && paint.image_filter().is_none()
+            && let Some(format) = ROUTE.with_borrow(Clone::clone)
+            && self.draw_atlas(canvas, glyphs, paint, &format)
+        {
+            return;
+        }
+        for (glyph, at) in glyphs {
+            self.draw(canvas, glyph, *at, paint);
+        }
+    }
+
+    /// Draws `glyphs`, each with its origin, as images made on the CPU in
+    /// `format`, from atlases they are copied into, onto `canvas` in
+    /// `paint`, which carries no image filter. `false`, having
+    /// drawn nothing, under a perspective, or where the glyphs are past
+    /// [`LARGEST_KEPT_TEXT`] and their images are not kept.
+    ///
+    /// Each image is drawn as [`Self::draw_image`] draws it: at the whole
+    /// device pixel its glyph's layer would have landed on, sampled at the
+    /// nearest texel, so each pixel reads one texel of the image as drawing
+    /// the image there reads it, through `paint`'s alpha, colour filter and
+    /// blend. An
+    /// atlas's sprites are drawn in order, so where two glyphs overlap the
+    /// later lies on top as it did drawn on its own.
+    fn draw_atlas(
+        &self,
+        canvas: &Canvas,
+        glyphs: &[(Rc<ColrGlyph>, Point)],
+        paint: &Paint,
+        format: &Format,
+    ) -> bool {
+        #[cfg(test)]
+        if ONE_BY_ONE.get() {
+            return false;
+        }
+        let device = canvas.local_to_device_as_3x3();
+        if device.has_perspective() {
+            return false;
+        }
+        // The device transform less its translation, which every glyph of
+        // the run shares: a glyph is placed by a translation alone.
+        let mut shape = device;
+        shape.pre_concat(&self.to_run);
+        shape.set_translate_x(0.0).set_translate_y(0.0);
+        if self.largest(&shape) > LARGEST_KEPT_TEXT {
+            return false;
+        }
+        let placed: Vec<(Image, IPoint)> = glyphs
+            .iter()
+            .filter_map(|(glyph, at)| {
+                let (Some(picture), Some(bounds)) =
+                    (&glyph.picture, glyph.bounds)
+                else {
+                    return None;
+                };
+                let origin = device.map_point(snapped(canvas, *at));
+                // The origin `snapped` placed on a whole device pixel.
+                let origin = IPoint::new(
+                    origin.x.round() as i32,
+                    origin.y.round() as i32,
+                );
+                let (image, offset) =
+                    glyph_image(picture, bounds, &shape, format, true)?;
+                Some((image, origin + offset))
+            })
+            .collect();
+        let composite = composite(paint);
+        let one = |image: &Image, at: IPoint| {
+            let image = resident(canvas, image.clone());
+            noted(canvas, &image);
+            canvas.draw_image(
+                &image,
+                (at.x as f32, at.y as f32),
+                Some(&composite),
+            );
+        };
+        canvas.save();
+        canvas.reset_matrix();
+        let mut start = 0;
+        while start < placed.len() {
+            let end = start + fits(&placed[start..]);
+            let chunk = &placed[start..end];
+            start = end;
+            // Within the bounds `fits` keeps to, only a raster that cannot
+            // be had refuses an atlas; its glyphs are drawn one at a time.
+            let Some((image, sprites)) = atlas(chunk, format) else {
+                chunk.iter().for_each(|(image, at)| one(image, *at));
+                continue;
+            };
+            let image = resident(canvas, image);
+            noted(canvas, &image);
+            let moved: Vec<RSXform> = chunk
+                .iter()
+                .map(|(_, at)| {
+                    RSXform::new(1.0, 0.0, (at.x as f32, at.y as f32))
+                })
+                .collect();
+            // With no colours given, the blend mode `drawAtlas` takes for
+            // them is not read.
+            canvas.draw_atlas(
+                &image,
+                &moved,
+                &sprites,
+                None,
+                BlendMode::Dst,
+                SamplingOptions::default(),
+                None,
+                &composite,
+            );
+            #[cfg(test)]
+            ATLAS_DRAWS.set(ATLAS_DRAWS.get() + 1);
+        }
+        canvas.restore();
+        true
+    }
+
+    /// The longest side, in device pixels, of the text `shape` -- the device
+    /// transform less its translation, over the run's -- draws this run's
+    /// face at: its em square's, mapped.
+    fn largest(&self, shape: &Matrix) -> f32 {
+        (shape.scale_x().hypot(shape.skew_y()))
+            .max(shape.skew_x().hypot(shape.scale_y()))
+            * self.face.upem
+    }
+
     /// Draws the glyph `picture` records, inking within `bounds`, under
     /// `placed` as an image made on the CPU in `format`, at the transform
     /// `canvas` carries -- see [`ImageRoute`]. `false`, having drawn
@@ -507,39 +683,31 @@ impl ColourRun {
         );
         let mut shape = device;
         shape.set_translate_x(0.0).set_translate_y(0.0);
-        let largest = (shape.scale_x().hypot(shape.skew_y()))
-            .max(shape.skew_x().hypot(shape.scale_y()))
-            * self.face.upem;
-        let keep = largest <= LARGEST_KEPT_TEXT;
+        let keep = self.largest(&shape) <= LARGEST_KEPT_TEXT;
         let Some((image, offset)) =
             glyph_image(picture, bounds, &shape, format, keep)
         else {
             return true;
         };
-        let mut composite = Paint::default();
-        composite.set_blend_mode(paint.blend_mode_or(BlendMode::SrcOver));
-        let (image, offset) = match paint.image_filter() {
+        let (image, offset, composite) = match paint.image_filter() {
             Some(filter) => {
                 match filtered(image, offset, &canvas_shape, paint, &filter) {
-                    Some(filtered) => filtered,
+                    Some((image, offset)) => {
+                        let mut composite = Paint::default();
+                        composite.set_blend_mode(
+                            paint.blend_mode_or(BlendMode::SrcOver),
+                        );
+                        (image, offset, composite)
+                    }
                     None => return true,
                 }
             }
-            None => {
-                composite.set_alpha(paint.alpha());
-                if let Some(filter) = paint.color_filter() {
-                    composite.set_color_filter(filter);
-                }
-                match keep {
-                    true => (resident(canvas, image), offset),
-                    false => (image, offset),
-                }
-            }
+            None => match keep {
+                true => (resident(canvas, image), offset, composite(paint)),
+                false => (image, offset, composite(paint)),
+            },
         };
-        #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
-        if canvas.direct_context().is_some() && !image.is_texture_backed() {
-            RASTERS_ON_GPU.set(RASTERS_ON_GPU.get() + 1);
-        }
+        noted(canvas, &image);
         canvas.save();
         canvas.reset_matrix();
         canvas.draw_image(
@@ -550,6 +718,181 @@ impl ColourRun {
         canvas.restore();
         true
     }
+}
+
+/// Whether `canvas` draws on a GPU context.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn on_gpu(canvas: &Canvas) -> bool {
+    canvas.direct_context().is_some()
+}
+
+/// Whether `canvas` draws on a GPU context: never, without a GPU engine.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+fn on_gpu(_canvas: &Canvas) -> bool {
+    false
+}
+
+/// Whether `mode` is one Skia blends by a coefficient of each colour --
+/// one up to `SkBlendMode::kLastCoeffMode`, `kScreen`, in
+/// `include/core/SkBlendMode.h` -- which a GPU blends in its fixed-function
+/// stage, each fragment over what the one before it wrote. Past it, Ganesh
+/// reads the page beneath in the shader, from a copy it takes once for a
+/// draw.
+fn blends_by_coefficients(mode: BlendMode) -> bool {
+    mode as i32 <= BlendMode::Screen as i32
+}
+
+/// Counts `image`, about to be drawn on `canvas`, among the raster glyph
+/// images drawn on a GPU canvas, each of which Skia uploads unless it still
+/// holds the texture -- see `RASTERS_ON_GPU`. Nothing outside the tests.
+#[cfg_attr(
+    not(all(test, any(feature = "metal", feature = "vulkan"))),
+    expect(unused_variables)
+)]
+fn noted(canvas: &Canvas, image: &Image) {
+    #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
+    if canvas.direct_context().is_some() && !image.is_texture_backed() {
+        RASTERS_ON_GPU.set(RASTERS_ON_GPU.get() + 1);
+    }
+}
+
+/// The paint a glyph image is composited onto the page in where `paint`
+/// carries no image filter: `paint`'s blend, alpha and colour filter, as
+/// the glyph's layer was composited through them.
+fn composite(paint: &Paint) -> Paint {
+    let mut composite = Paint::default();
+    composite.set_blend_mode(paint.blend_mode_or(BlendMode::SrcOver));
+    composite.set_alpha(paint.alpha());
+    if let Some(filter) = paint.color_filter() {
+        composite.set_color_filter(filter);
+    }
+    composite
+}
+
+/// Where each of `images` lies in an atlas of them, packed into rows from
+/// the top left of a square [`ATLAS_SIDE`] across, each row as tall as its
+/// tallest image, and how many of them, from the first, fit: at least one,
+/// which is drawn on its own where it does not fit with another.
+fn packed_sprites(images: &[(Image, IPoint)]) -> (Vec<IRect>, usize) {
+    let (mut x, mut y, mut row) = (0, 0, 0);
+    let mut sprites = Vec::with_capacity(images.len());
+    for (image, _) in images {
+        let (width, height) = (image.width(), image.height());
+        if x + width > ATLAS_SIDE {
+            (x, y, row) = (0, y + row, 0);
+        }
+        if x + width > ATLAS_SIDE || y + height > ATLAS_SIDE {
+            break;
+        }
+        sprites.push(IRect::from_xywh(x, y, width, height));
+        x += width;
+        row = row.max(height);
+    }
+    let fitting = sprites.len().max(1);
+    (sprites, fitting)
+}
+
+/// How many of `images`, from the first, one atlas holds -- see
+/// [`packed_sprites`].
+fn fits(images: &[(Image, IPoint)]) -> usize {
+    packed_sprites(images).1
+}
+
+/// What a run's atlas is kept by: the unique ids of the glyph images it
+/// holds, in the order its sprites hold them. A kept glyph image is kept
+/// until every one goes at once, and its id is taken by no other image in
+/// the process, so the ids name the pixels.
+type AtlasKey = Box<[u32]>;
+
+/// Run atlases by [`AtlasKey`], each with the rectangles its sprites take,
+/// and how many bytes they hold together.
+type KeptAtlases = (CacheMap<AtlasKey, (Image, Rc<[Rect]>)>, usize);
+
+thread_local! {
+    /// The atlases [`atlas`] made, and how many bytes they hold.
+    static ATLASES: RefCell<KeptAtlases> =
+        RefCell::new((CacheMap::default(), 0));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many atlases [`atlas`] has made on this thread.
+    static ATLASES_MADE: Cell<usize> = const { Cell::new(0) };
+    /// How many atlases [`ColourRun::draw_atlas`] has drawn from on this
+    /// thread.
+    static ATLAS_DRAWS: Cell<usize> = const { Cell::new(0) };
+    /// Whether [`ColourRun::draw_atlas`] declines, so that the tests can
+    /// draw the same glyphs an image at a time to hold the two alike.
+    static ONE_BY_ONE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Drops every atlas this thread keeps.
+fn drop_atlases() {
+    ATLASES.with_borrow_mut(|(atlases, held)| {
+        atlases.clear();
+        *held = 0;
+    });
+}
+
+/// `images`, glyph images [`glyph_image`] keeps, copied into one image in
+/// `format`, and the rectangle each takes in it, made once for that list of
+/// images in that order and kept within [`ATLAS_BYTES_KEPT`]; `None` where
+/// they do not all fit in one -- see [`packed_sprites`] -- or a raster
+/// cannot be had. Copied, not drawn: each image's pixels are the atlas's
+/// pixels in its rectangle, byte for byte, and transparent around them. A
+/// single image is its own atlas.
+fn atlas(
+    images: &[(Image, IPoint)],
+    format: &Format,
+) -> Option<(Image, Rc<[Rect]>)> {
+    if let [(image, _)] = images {
+        let whole = Rect::from_iwh(image.width(), image.height());
+        return Some((image.clone(), Rc::from([whole])));
+    }
+    let key: AtlasKey =
+        images.iter().map(|(image, _)| image.unique_id()).collect();
+    if let Some(made) =
+        ATLASES.with_borrow(|(atlases, _)| atlases.get(&key).cloned())
+    {
+        return Some(made);
+    }
+    let (sprites, _) = packed_sprites(images);
+    if sprites.len() < images.len() {
+        return None;
+    }
+    let size = sprites.iter().fold(ISize::new(0, 0), |size, sprite| {
+        ISize::new(size.width.max(sprite.right), size.height.max(sprite.bottom))
+    });
+    let info = format.image_info(size);
+    let mut surface = started::raster(&info, None, None)?;
+    let canvas = surface.canvas();
+    canvas.clear(Color::TRANSPARENT);
+    let mut copy = Paint::default();
+    copy.set_blend_mode(BlendMode::Src);
+    for ((image, _), sprite) in zip(images, &sprites) {
+        canvas.draw_image(
+            image,
+            (sprite.left as f32, sprite.top as f32),
+            Some(&copy),
+        );
+    }
+    let made: (Image, Rc<[Rect]>) = (
+        surface.image_snapshot(),
+        sprites.iter().map(|&sprite| Rect::from(sprite)).collect(),
+    );
+    #[cfg(test)]
+    ATLASES_MADE.set(ATLASES_MADE.get() + 1);
+    let bytes = info.compute_min_byte_size();
+    ATLASES.with_borrow_mut(|(atlases, held)| {
+        if *held + bytes > ATLAS_BYTES_KEPT {
+            atlases.clear();
+            *held = 0;
+            release_textures();
+        }
+        atlases.insert(key, made.clone());
+        *held += bytes;
+    });
+    Some(made)
 }
 
 /// `image`, whose top left lies `offset` from the glyph's origin on the
@@ -689,12 +1032,12 @@ type ImageKey = (u32, [u32; 4], i32, u64);
 
 /// Glyph images by [`ImageKey`], each with where its top left lands from
 /// the glyph's origin, and how many bytes they hold together.
-type KeptImages = (HashMap<ImageKey, (Image, IPoint)>, usize);
+type KeptImages = (CacheMap<ImageKey, (Image, IPoint)>, usize);
 
 thread_local! {
     /// The glyph images [`glyph_image`] made, and how many bytes they hold.
     static GLYPH_IMAGES: RefCell<KeptImages> =
-        RefCell::new((HashMap::new(), 0));
+        RefCell::new((CacheMap::default(), 0));
 }
 
 #[cfg(test)]
@@ -720,7 +1063,7 @@ thread_local! {
 /// [`glyph_image`] keeps. A thread draws on one or two contexts -- its own
 /// and a window's -- so they are found by looking.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-type Textures = Vec<(DirectContextId, HashMap<u32, Image>)>;
+type Textures = Vec<(DirectContextId, CacheMap<u32, Image>)>;
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 thread_local! {
@@ -765,7 +1108,7 @@ fn resident(canvas: &Canvas, image: Image) -> Image {
         let at = match held.iter().position(|(id, _)| *id == of) {
             Some(at) => at,
             None => {
-                held.push((of, HashMap::new()));
+                held.push((of, CacheMap::default()));
                 held.len() - 1
             }
         };
@@ -866,6 +1209,7 @@ fn glyph_image(
             if *held + bytes > GLYPH_IMAGE_BYTES_KEPT {
                 images.clear();
                 *held = 0;
+                drop_atlases();
                 release_textures();
             }
             images.insert(key, made.clone());
@@ -1824,13 +2168,19 @@ mod tests {
                 .to_image_data(None, &crate::pixels::ImageDataExport::default())
                 .expect("pixels");
         };
-        // What a page made textures of, and what it drew from the CPU.
+        // What a page made textures of, what it drew from the CPU, and what
+        // atlases it made.
         let uploads = |draw: &dyn Fn()| {
-            let before = (TEXTURES_MADE.get(), RASTERS_ON_GPU.get());
+            let before = (
+                TEXTURES_MADE.get(),
+                RASTERS_ON_GPU.get(),
+                ATLASES_MADE.get(),
+            );
             draw();
             (
                 TEXTURES_MADE.get() - before.0,
                 RASTERS_ON_GPU.get() - before.1,
+                ATLASES_MADE.get() - before.2,
             )
         };
         let first = uploads(&page);
@@ -1842,6 +2192,323 @@ mod tests {
         });
         assert!(first.0 > 0, "the first page made no texture");
         assert_eq!(first.1, 0, "the first page drew glyphs from the CPU");
-        assert_eq!(later, [(0, 0); 3], "later pages uploaded glyphs again");
+        assert!(first.2 > 0, "the first page made no atlas");
+        assert_eq!(later, [(0, 0, 0); 3], "later pages uploaded glyphs again");
+    }
+
+    /// The pixels of `scene` drawn on a canvas, on the GPU where `gpu`, with
+    /// two lines of the test font's code points in it -- the colour glyphs
+    /// among them broken by those it gives no colour paint -- and how many
+    /// atlases were drawn from; each colour glyph drawn as an image of its
+    /// own where `one_by_one`.
+    fn atlas_scene(
+        gpu: bool,
+        one_by_one: bool,
+        scene: &AtlasScene,
+    ) -> (Vec<u8>, usize) {
+        let mut canvas = crate::canvas::Canvas::new(600.0, 240.0);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(200 120 60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 600.0, 240.0);
+        ctx.set_fill_style_css("rgb(40 90 160)").expect("a colour");
+        assert!(ctx.set_font_css("32px AtlasColr"));
+        scene(ctx);
+        ONE_BY_ONE.set(one_by_one);
+        let before = ATLAS_DRAWS.get();
+        let pixels = canvas
+            .to_image_data(None, &crate::pixels::ImageDataExport::default())
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        ONE_BY_ONE.set(false);
+        (pixels, ATLAS_DRAWS.get() - before)
+    }
+
+    /// `count` of the test font's code points from `first`, as text.
+    fn code_points(first: u32, count: u32) -> String {
+        (first..first + count).filter_map(char::from_u32).collect()
+    }
+
+    /// What a test draws on a canvas [`atlas_scene`] sets up.
+    type AtlasScene = dyn Fn(&mut crate::context2d::Context2D);
+
+    /// Two lines of 16 of the test font's colour glyphs.
+    fn atlas_lines(ctx: &mut crate::context2d::Context2D) {
+        ctx.fill_text(&code_points(0xf0100, 16), 4.0, 40.0, None);
+        ctx.fill_text(&code_points(0xf0200, 16), 4.0, 90.0, None);
+    }
+
+    /// The scenes the atlas is held to drawing one by one with: each named,
+    /// with whether its glyphs are drawn from an atlas.
+    fn atlas_scenes() -> Vec<(&'static str, bool, Box<AtlasScene>)> {
+        use crate::{filter::ColorFilter, prelude::*};
+        let with =
+            |set: fn(&mut crate::context2d::Context2D)| -> Box<AtlasScene> {
+                Box::new(move |ctx| {
+                    set(ctx);
+                    atlas_lines(ctx);
+                })
+            };
+        vec![
+            ("plain", true, with(|_| {})),
+            (
+                "overlapping",
+                true,
+                with(|ctx| ctx.set_letter_spacing(-14.0)),
+            ),
+            (
+                "overlapping at half alpha",
+                true,
+                with(|ctx| {
+                    ctx.set_letter_spacing(-14.0);
+                    ctx.set_global_alpha(0.5);
+                }),
+            ),
+            (
+                "multiplied",
+                false,
+                with(|ctx| {
+                    ctx.set_global_composite_operation(BlendMode::Multiply);
+                }),
+            ),
+            (
+                "copied",
+                true,
+                with(|ctx| ctx.set_global_composite_operation(BlendMode::Copy)),
+            ),
+            (
+                "source-in",
+                true,
+                with(|ctx| {
+                    ctx.set_global_composite_operation(BlendMode::SourceIn);
+                }),
+            ),
+            (
+                "lighter",
+                true,
+                with(|ctx| {
+                    ctx.set_global_composite_operation(BlendMode::Lighter);
+                }),
+            ),
+            (
+                "through a colour matrix",
+                true,
+                with(|ctx| {
+                    // Sepia's.
+                    let filter = ColorFilter::matrix([
+                        0.393, 0.769, 0.189, 0.0, 0.0, 0.349, 0.686, 0.168,
+                        0.0, 0.0, 0.272, 0.534, 0.131, 0.0, 0.0, 0.0, 0.0, 0.0,
+                        1.0, 0.0,
+                    ])
+                    .expect("a matrix");
+                    ctx.set_color_filter(Some(&filter));
+                }),
+            ),
+            (
+                "rotated",
+                true,
+                with(|ctx| {
+                    ctx.translate(60.0, 0.0);
+                    ctx.rotate(0.4);
+                }),
+            ),
+            (
+                "clipped",
+                true,
+                with(|ctx| {
+                    ctx.begin_path();
+                    ctx.rect(30.0, 20.0, 300.0, 50.0);
+                    ctx.clip(FillRule::NonZero);
+                }),
+            ),
+            (
+                "in reverse after in order",
+                true,
+                Box::new(|ctx| {
+                    let text = code_points(0xf0100, 16);
+                    let reversed: String = text.chars().rev().collect();
+                    ctx.fill_text(&text, 4.0, 40.0, None);
+                    ctx.fill_text(&reversed, 4.0, 90.0, None);
+                }),
+            ),
+            (
+                "past one atlas",
+                true,
+                Box::new(|ctx| {
+                    // Forty of one glyph 180 pixels across, overlapping, in
+                    // atlases that hold 30.
+                    ctx.scale(7.0, 7.0);
+                    ctx.set_letter_spacing(-34.0);
+                    let text = code_points(0xf0100, 1).repeat(40);
+                    ctx.fill_text(&text, 0.0, 30.0, None);
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn glyphs_drawn_from_an_atlas_are_the_glyphs_drawn_one_by_one() {
+        // On the GPU a run's colour glyphs are copied into an atlas and
+        // drawn from it with one drawAtlas; each must land, blend and clip
+        // exactly as its own image drawn on its own did. The CPU canvas
+        // draws each image on its own.
+        use crate::{gpu::RenderingEngine, prelude::*};
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        for (name, _, scene) in atlas_scenes() {
+            let (_, from_atlases) = atlas_scene(false, false, &scene);
+            assert_eq!(from_atlases, 0, "{name}: an atlas on the CPU");
+        }
+        if !RenderingEngine::GPU.selectable() {
+            if cfg!(target_os = "macos") {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for (name, atlased, scene) in atlas_scenes() {
+            let (drawn, from_atlases) = atlas_scene(true, false, &scene);
+            let (alone, none) = atlas_scene(true, true, &scene);
+            assert_eq!(none, 0, "{name}: drawn one by one");
+            match atlased {
+                true => assert!(from_atlases > 0, "{name}"),
+                false => assert_eq!(from_atlases, 0, "{name}"),
+            }
+            if name == "past one atlas" {
+                assert!(from_atlases > 1, "{name}: one atlas");
+            }
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart");
+        }
+    }
+
+    /// How far a channel of the GPU canvas may stand from the CPU canvas's
+    /// where colour glyph images overlap under any blend: the most measured
+    /// across every blend at an alpha of 1 and of 0.5 but the four a layer
+    /// composites, drawn from atlases or one by one. Read from a copy of the
+    /// page taken before the glyph beneath landed, an overlap stood 11 to
+    /// 197 levels off.
+    const OVERLAP_LEVELS: u8 = 2;
+
+    #[test]
+    fn overlapping_colour_glyphs_blend_on_the_gpu_as_on_the_cpu() {
+        // Four of the test font's colour glyphs drawn into one another.
+        // Under a blend that reads the page in the shader, the GPU reads one
+        // copy of it for each draw, so the glyphs of one atlas drew over a
+        // page without the glyphs before them.
+        use crate::{gpu::RenderingEngine, paint::BlendMode::*, prelude::*};
+        if !RenderingEngine::GPU.selectable() {
+            if cfg!(target_os = "macos") {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let every = [
+            SourceOver,
+            SourceIn,
+            SourceOut,
+            SourceAtop,
+            DestinationOver,
+            DestinationIn,
+            DestinationOut,
+            DestinationAtop,
+            Copy,
+            Xor,
+            Multiply,
+            Screen,
+            Overlay,
+            Darken,
+            Lighten,
+            ColorDodge,
+            ColorBurn,
+            HardLight,
+            SoftLight,
+            Difference,
+            Exclusion,
+            Hue,
+            Saturation,
+            Color,
+            Luminosity,
+            Lighter,
+            Clear,
+        ];
+        for blend in every {
+            for alpha in [1.0, 0.5] {
+                // A layer composites these through the alpha, apart from
+                // the CPU canvas whether the glyphs overlap or not, and for
+                // text of any font: a separate defect.
+                let layered = [SourceIn, Copy, DestinationIn, DestinationAtop];
+                if alpha < 1.0 && layered.contains(&blend) {
+                    continue;
+                }
+                let scene = move |ctx: &mut crate::context2d::Context2D| {
+                    ctx.set_global_composite_operation(blend);
+                    ctx.set_global_alpha(alpha);
+                    ctx.set_letter_spacing(-18.0);
+                    ctx.fill_text(&code_points(0xf0100, 4), 4.0, 40.0, None);
+                };
+                let (cpu, _) = atlas_scene(false, false, &scene);
+                let (gpu, _) = atlas_scene(true, false, &scene);
+                let most = zip(&cpu, &gpu).map(|(a, b)| a.abs_diff(*b)).max();
+                assert!(
+                    most <= Some(OVERLAP_LEVELS),
+                    "{blend:?} at {alpha}: {most:?} levels apart"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_glyph_clipped_at_a_fraction_on_the_gpu_stands_from_the_cpu_as_unclipped()
+     {
+        // Drawn as an image of its own under a clip edge at a fraction of a
+        // pixel, a glyph on the GPU canvas stood up to 22 levels from the
+        // CPU canvas, and 11 at half alpha; drawn from an atlas it stands no
+        // further from it than unclipped, at either alpha.
+        use crate::{gpu::RenderingEngine, prelude::*};
+        if !RenderingEngine::GPU.selectable() {
+            if cfg!(target_os = "macos") {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let furthest = |scene: &AtlasScene| {
+            let (cpu, _) = atlas_scene(false, false, scene);
+            let (gpu, _) = atlas_scene(true, false, scene);
+            zip(&cpu, &gpu).map(|(a, b)| a.abs_diff(*b)).max()
+        };
+        let unclipped = furthest(&|ctx| atlas_lines(ctx));
+        let clipped = furthest(&|ctx| {
+            ctx.begin_path();
+            ctx.rect(30.5, 20.0, 300.0, 50.25);
+            ctx.clip(FillRule::NonZero);
+            atlas_lines(ctx);
+        });
+        assert!(clipped <= unclipped, "{clipped:?} past {unclipped:?}");
+        let half = furthest(&|ctx| {
+            ctx.set_global_alpha(0.5);
+            atlas_lines(ctx);
+        });
+        let half_clipped = furthest(&|ctx| {
+            ctx.set_global_alpha(0.5);
+            ctx.begin_path();
+            ctx.rect(30.5, 20.0, 300.0, 50.25);
+            ctx.clip(FillRule::NonZero);
+            atlas_lines(ctx);
+        });
+        assert!(half_clipped <= half, "{half_clipped:?} past {half:?}");
     }
 }

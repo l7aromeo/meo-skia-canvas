@@ -2131,8 +2131,9 @@ pub(crate) fn draws_colour_glyphs(font: &Font) -> bool {
 /// drawn nothing, where the face has no such table.
 ///
 /// The glyphs are drawn in order, the plain ones between two colour glyphs
-/// as one blob, so that where they overlap the later one lies on top as it
-/// would in one blob.
+/// as one blob and the colour ones between two plain glyphs together, so
+/// that where they overlap the later one lies on top as it would in one
+/// blob.
 pub(crate) fn draw_colour_run(
     canvas: &Canvas,
     font: &Font,
@@ -2168,15 +2169,23 @@ pub(crate) fn draw_colour_run(
             canvas.draw_text_blob(&blob, origin, paint);
         }
     };
+    // The colour glyphs since the last plain one, drawn together before
+    // the next plain ones -- see `ColourRun::draw_all`.
+    let mut colours = Vec::new();
     let mut from = 0;
     for (index, (&glyph, &at)) in zip(glyphs, moved.iter()).enumerate() {
         let Some(colour) = run.glyph(glyph) else {
             continue;
         };
-        plain(from, index);
-        run.draw(canvas, &colour, origin + at, paint);
+        if from < index {
+            run.draw_all(canvas, &colours, paint);
+            colours.clear();
+            plain(from, index);
+        }
+        colours.push((colour, origin + at));
         from = index + 1;
     }
+    run.draw_all(canvas, &colours, paint);
     plain(from, glyphs.len());
     true
 }
