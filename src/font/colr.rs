@@ -1192,10 +1192,11 @@ pub(crate) fn release_textures() {
 }
 
 /// Lets go of the glyph textures this thread holds on `context`, which hold
-/// it: called by a window's renderer as it abandons its context.
-#[cfg(all(
-    any(feature = "metal", feature = "vulkan"),
-    any(feature = "window", test)
+/// it: called by a window's renderer as it abandons its context, and by the
+/// test that draws on two Metal contexts.
+#[cfg(any(
+    all(any(feature = "metal", feature = "vulkan"), feature = "window"),
+    all(test, feature = "metal", target_os = "macos")
 ))]
 pub(crate) fn release_textures_of(context: DirectContextId) {
     TEXTURES.with_borrow_mut(|held| held.retain(|(id, _)| *id != context));
