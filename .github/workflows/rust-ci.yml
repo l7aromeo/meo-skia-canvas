@@ -323,6 +323,38 @@ jobs:
           node scripts/check-cargo-lock.mjs
           git diff --exit-code
 
+  # TEMPORARY: the COLR tests on the macOS the runners carry, whose CoreText
+  # draws a COLRv1 glyph as nothing. Dropped before merge.
+  colr-macos:
+    needs: [changes, skia-source]
+    if: needs.changes.outputs.native == 'true'
+    name: TEMPORARY COLR on macos-latest
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - name: Install Skia build dependencies (macOS)
+        run: brew install ninja
+      - id: skia
+        uses: ./.github/actions/skia-source
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ steps.skia.outputs.key }}-colr-macos
+          save-if: false
+      - name: The runner's macOS
+        run: sw_vers
+      - name: The crate's COLR tests
+        run: |
+          cargo test --no-default-features --features "metal,window,fetch" \
+            --test colour_fonts -- --nocapture
+      - name: The colour-font route test
+        run: |
+          cargo test --no-default-features --features "metal,window,fetch" \
+            --lib -- a_colour_font_keeps_its_own_colours_run_by_run --nocapture
+
   # Runs the doctests too, so a change to the Markdown they are compiled from
   # runs it without the native jobs. `skia-source` is then skipped, and is
   # not needed: it only primes the cache, and the action below prepares the
@@ -961,6 +993,7 @@ jobs:
         skia-source,
         clippy,
         graphite-bindings,
+        colr-macos,
         test,
         binding,
         release-tests,

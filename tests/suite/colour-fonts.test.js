@@ -15,8 +15,10 @@ const REFERENCES = path.join(__dirname, "..", "assets", "images", "colr");
  * Elsewhere FreeType draws the glyph, with its own anti-aliasing and
  * placement.
  */
+// TEMPORARY: MEO_COLR_OWN_ROUTE runs the comparisons with the own painter
+// on another platform. Dropped before merge.
 const CHROME_MEASURED_HERE =
-  process.platform === "darwin"
+  process.platform === "darwin" || process.env.MEO_COLR_OWN_ROUTE
     ? false
     : "Chrome 158's COLR glyphs were drawn on macOS, against this library's own painter there";
 

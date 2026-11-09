@@ -162,6 +162,13 @@ jobs:
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: bun run test:suite
 
+      - name: TEMPORARY COLR glyphs against Chrome's references
+        env:
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
+        run: |
+          sw_vers
+          node .github/scripts/colr-measure.cjs
+
       - name: Add to release
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
         env:
@@ -288,6 +295,19 @@ jobs:
           # The binary this job built, for the reason the macOS job gives.
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: bun run test:suite
+
+      - name: TEMPORARY COLR glyphs against Chrome's references, DirectWrite
+        env:
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
+        run: node .github/scripts/colr-measure.cjs
+
+      - name: TEMPORARY COLR glyphs against Chrome's references, own painter
+        env:
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
+          MEO_COLR_OWN_ROUTE: "1"
+        run: |
+          node .github/scripts/colr-measure.cjs
+          node --test tests/suite/colour-fonts.test.js
 
       - name: Add to release
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
