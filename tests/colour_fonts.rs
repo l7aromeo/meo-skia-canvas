@@ -29,6 +29,7 @@ const GPU_COMPOSITE_TIE_LEVELS: f64 = 0.18;
 
 /// How far a pixel's red must stand above its blue to count as red: well
 /// past where anti-aliasing a blue glyph on white puts any pixel.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const RED_OVER_BLUE: u8 = 60;
 
 /// The reach of a colour's spread across its channels past which a pixel
