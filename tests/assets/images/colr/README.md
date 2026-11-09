@@ -1,6 +1,6 @@
 # COLR references
 
-What Chrome 158.0.8127.18 (`chrome-headless-shell`, macOS, Apple Silicon) draws for the COLR test fonts, against which `tests/suite/colour-fonts.test.js` holds the glyphs this library draws itself on macOS. Chrome makes a COLR web font through Fontations on Apple platforms (`WebFontTypefaceFactory`, `web_font_typeface_factory.cc`), never CoreText, so these are not CoreText's pixels.
+What Chrome 158.0.8127.18 (`chrome-headless-shell`, macOS, Apple Silicon) draws for the COLR test fonts, against which `tests/suite/colour-fonts.test.js` holds the glyphs this library draws itself on macOS and Windows. Chrome makes a COLR web font through Fontations on Apple platforms (`WebFontTypefaceFactory`, `web_font_typeface_factory.cc`), never CoreText, so these are not CoreText's pixels.
 
 Each `.png` is lossless. Each `.json` beside it says how it was drawn: the font, the size, the colour, the grid, and the code point in each cell. A cell's glyph is drawn at `x` from the cell's left and on a baseline `baseline` pixels from its top. The two test-glyph layouts also list, under `withoutColourPaint`, the code points whose glyph the font's `COLR` table gives no paint, read from the font with skrifa: the platform draws those, not this library's painter, so the comparisons leave their cells out.
 

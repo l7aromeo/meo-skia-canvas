@@ -6,10 +6,11 @@
 //! it draws a COLRv0 face's glyphs as nothing. Chrome hands neither to
 //! CoreText: `WebFontTypefaceFactory` in Blink (`web_font_typeface_factory.cc`)
 //! makes every COLR web font, of either version, through Fontations on Apple
-//! platforms. So on macOS this module walks a glyph's paint graph with skrifa,
-//! Fontations' own reader, and records it as a [`Picture`], and the text
-//! routes draw that picture in place of the platform's glyph -- see
-//! `node::typography::draw_colour_run`.
+//! platforms. On Windows DirectWrite draws the COLRv1 test glyphs up to 215
+//! levels inside them from Chrome's. So on macOS and Windows this module
+//! walks a glyph's paint graph with skrifa, Fontations' own reader, and
+//! records it as a [`Picture`], and the text routes draw that picture in
+//! place of the platform's glyph -- see `node::typography::draw_colour_run`.
 //!
 //! What each callback draws follows Skia's painter for Fontations
 //! (`ColorPainter` in `skia/src/ports/SkTypeface_fontations.cpp` under the

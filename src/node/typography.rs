@@ -2073,12 +2073,14 @@ pub(crate) fn draw_glyphs(
 /// table, of either version, itself -- see [`ColourRun`]: on macOS, whose
 /// CoreText draws a version 1 glyph as nothing on macOS 26 and 15 and a
 /// version 0 glyph as nothing on 27.2, and which Chrome never asks to draw
-/// either.
+/// either; and on Windows, whose DirectWrite drew the COLRv1 test glyphs
+/// up to 215 levels inside them from Chrome's, where this painter draws
+/// them within one.
 ///
 /// TEMPORARY: `MEO_COLR_OWN_ROUTE` turns it on elsewhere, so that CI can
-/// measure the route on Windows beside DirectWrite. Dropped before merge.
+/// measure the route on Linux beside FreeType. Dropped before merge.
 fn draws_colour_glyphs_here() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", target_os = "windows"))
         || std::env::var_os("MEO_COLR_OWN_ROUTE").is_some()
 }
 

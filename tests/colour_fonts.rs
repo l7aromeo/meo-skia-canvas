@@ -1,20 +1,22 @@
 //! Text set in a font with a `COLR` table, of version 0 or 1, drawn in its
-//! own colours -- and on macOS, where this crate draws such a glyph from its
-//! paint graph rather than through CoreText, drawn as Chrome draws it. The
-//! references are Chrome 158's, described in `tests/assets/images/colr`.
+//! own colours -- and on macOS and Windows, where this crate draws such a
+//! glyph from its paint graph rather than through the platform, drawn as
+//! Chrome draws it. The references are Chrome 158's, described in
+//! `tests/assets/images/colr`.
 
 use meo_skia_canvas::prelude::*;
 
 const COLR_V1: &str =
     "tests/assets/fonts/color-fonts/test_glyphs-glyf_colr_1_variable.ttf";
 const COLR_V0: &str = "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf";
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const REFERENCES: &str = "tests/assets/images/colr";
 
 /// How far a channel of a colour glyph may stand from Chrome's at any pixel,
 /// edges included. Measured at 3, at one pixel of the test glyphs and with
 /// their axes varied alike, and past 1 at ten: both draw the same paint graph
 /// through Skia's CPU raster.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const COLOUR_GLYPH_TOLERANCE: u8 = 3;
 
 /// The reach of a colour's spread across its channels past which a pixel
@@ -67,7 +69,7 @@ fn a_colr_version_0_font_inks_in_its_palettes_colours() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod against_chrome {
     use super::*;
 
