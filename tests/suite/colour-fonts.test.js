@@ -250,6 +250,51 @@ describe("COLR colour fonts", () => {
   );
 
   test(
+    "a GPU canvas draws colour glyphs as the CPU canvas does",
+    { skip: CHROME_MEASURED_HERE },
+    (t) => {
+      // Each colour glyph is an image made on the CPU, which the GPU canvas
+      // composites as the CPU canvas does: byte for byte where no glyph
+      // lands on another, so the cells are spread to twice the layout's.
+      fonts();
+      const probe = new Canvas(1, 1);
+      if (probe.engine.renderer != "GPU") return t.skip("no GPU here");
+      const spec = layout("chrome-test-glyphs-48px"),
+        spread = { ...spec, cell: spec.cell * 2, x: spec.x + spec.cell / 2 };
+      spread.baseline = spec.baseline + spec.cell / 2;
+      spread.width = spec.columns * spread.cell;
+      spread.height =
+        Math.ceil(spec.codepoints.length / spec.columns) * spread.cell;
+      const sheet = (gpu) => {
+        const canvas = new Canvas(spread.width, spread.height);
+        canvas.gpu = gpu;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = spread.background;
+        ctx.fillRect(0, 0, spread.width, spread.height);
+        ctx.font = `${spread.size}px ColrGlyphs`;
+        ctx.fillStyle = spread.fillStyle;
+        spread.codepoints.forEach((hex, i) =>
+          ctx.fillText(
+            String.fromCodePoint(parseInt(hex, 16)),
+            (i % spread.columns) * spread.cell + spread.x,
+            Math.floor(i / spread.columns) * spread.cell + spread.baseline,
+          ),
+        );
+        return ctx.getImageData(0, 0, spread.width, spread.height).data;
+      };
+      assert.equal(
+        largestDifference(
+          sheet(true),
+          sheet(false),
+          spread.width,
+          plainCells(spread),
+        ),
+        0,
+      );
+    },
+  );
+
+  test(
     "strokeText draws a colour glyph filled, in the stroke's colour",
     { skip: CHROME_MEASURED_HERE },
     () => {

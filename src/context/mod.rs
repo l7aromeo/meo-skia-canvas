@@ -1247,53 +1247,146 @@ impl Context2D {
                 }
             };
 
-        match covers_beyond_the_draw(self.state.global_composite_operation) {
+        let beyond =
+            covers_beyond_the_draw(self.state.global_composite_operation);
+        // The draw into one recording, under the canvas's transform: for
+        // blend modes that affect regions of the canvas outside of the
+        // bounds of the object being drawn, through an intermediate picture,
+        // one for each recording, each with that recording's paint.
+        let draw = |canvas: &SkCanvas, recording: Recording| match beyond {
             true => {
-                // for blend modes that affect regions of the canvas outside of
-                // the bounds of the object being drawn, create
-                // an intermediate picture before drawing to the canvas, one
-                // for each recording, each with that recording's paint
-                self.append_draw(features, alike, |canvas, recording| {
-                    let mut layer_paint = paint_for(recording).clone();
-                    layer_paint.set_blend_mode(BlendMode::SrcOver);
-                    let mut layer_recorder = PictureRecorder::new();
-                    layer_recorder.begin_recording(self.bounds, true);
-                    if let Some(layer) = layer_recorder.recording_canvas() {
-                        // draw the dropshadow (if applicable)
-                        render_shadow(layer, &layer_paint, recording);
-                        // draw normally
-                        layer.set_matrix(&self.state.matrix.into());
-                        f(layer, &layer_paint, Pass::Draw);
-                    }
+                let mut layer_paint = paint_for(recording).clone();
+                layer_paint.set_blend_mode(BlendMode::SrcOver);
+                let mut layer_recorder = PictureRecorder::new();
+                layer_recorder.begin_recording(self.bounds, true);
+                if let Some(layer) = layer_recorder.recording_canvas() {
+                    // draw the dropshadow (if applicable)
+                    render_shadow(layer, &layer_paint, recording);
+                    // draw normally
+                    layer.set_matrix(&self.state.matrix.into());
+                    f(layer, &layer_paint, Pass::Draw);
+                }
 
-                    // transfer the picture contents to the canvas in a
-                    // single operation, applying the blend mode to the
-                    // whole canvas (regardless of the bounds of the
-                    // text/path being drawn)
-                    if let Some(pict) =
-                        layer_recorder.finish_recording_as_picture(None)
-                    {
-                        canvas.save();
-                        canvas.set_matrix(&Matrix::new_identity().into());
-                        let mut blend_paint = Paint::default();
-                        blend_paint.set_anti_alias(true);
-                        blend_paint.set_blend_mode(
-                            self.state.global_composite_operation,
-                        );
-                        canvas.draw_picture(&pict, None, Some(&blend_paint));
-                        canvas.restore();
-                    }
-                });
+                // transfer the picture contents to the canvas in a single
+                // operation, applying the blend mode to the whole canvas
+                // (regardless of the bounds of the text/path being drawn)
+                if let Some(pict) =
+                    layer_recorder.finish_recording_as_picture(None)
+                {
+                    canvas.save();
+                    canvas.set_matrix(&Matrix::new_identity().into());
+                    let mut blend_paint = Paint::default();
+                    blend_paint.set_anti_alias(true);
+                    blend_paint
+                        .set_blend_mode(self.state.global_composite_operation);
+                    canvas.draw_picture(&pict, None, Some(&blend_paint));
+                    canvas.restore();
+                }
             }
             false => {
-                self.append_draw(features, alike, |canvas, recording| {
-                    // draw the dropshadow (if applicable)
-                    render_shadow(canvas, paint, recording);
-                    // draw with the normal paint
-                    f(canvas, paint_for(recording), Pass::Draw);
-                });
+                // draw the dropshadow (if applicable)
+                render_shadow(canvas, paint, recording);
+                // draw with the normal paint
+                f(canvas, paint_for(recording), Pass::Draw);
             }
         };
+        if let Some(run) = text.as_ref().and_then(|text| text.colour.clone())
+            && self
+                .files_as_colour_text(paint, exact, features, run, lines, &draw)
+        {
+            return;
+        }
+        self.append_draw(features, alike, draw);
+    }
+
+    /// Files a run of text holding colour glyphs as a
+    /// [`ColourText`](layer::ColourText), which draws the run again where
+    /// the page is played back on pixels, its colour glyphs made there for
+    /// those pixels: `run`, the run kept whole, with its shadow and through
+    /// the blend that covers beyond it, as `draw` -- the run's draw into one
+    /// recording, as `render_to_canvas` records it -- draws them. Recorded
+    /// as well, by `draw`, into each recording the page keeps, for a
+    /// document and for the run's bounds. `false`, filing nothing, where
+    /// Skia records nothing.
+    fn files_as_colour_text<D>(
+        &self,
+        paint: &Paint,
+        exact: Option<&Paint>,
+        features: VectorFeatures,
+        run: Replay,
+        lines: bool,
+        draw: &D,
+    ) -> bool
+    where
+        D: Fn(&SkCanvas, Recording),
+    {
+        let record = |recording: Recording| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            draw(canvas, recording);
+            recorder.finish_recording_as_picture(None)
+        };
+        let dual = self.records_pixels_apart();
+        let pixels = match dual {
+            true => Recording::Pixels,
+            false => Recording::Shared,
+        };
+        let Some(recorded) = record(pixels) else {
+            return false;
+        };
+        let document = match dual {
+            true => match record(Recording::Document) {
+                Some(document) => Some(document),
+                None => return false,
+            },
+            false => None,
+        };
+        // The paints `draw` draws the run's pixels in -- see
+        // `render_to_canvas`: through a layer the blend composites where it
+        // covers beyond the draw, the run's own over it there.
+        let blend = self.state.global_composite_operation;
+        let beyond = covers_beyond_the_draw(blend);
+        let mut drawn = match pixels {
+            Recording::Pixels => exact.unwrap_or(paint).clone(),
+            _ => paint.clone(),
+        };
+        if beyond {
+            drawn.set_blend_mode(BlendMode::SrcOver);
+        }
+        let cast_from = if beyond { &drawn } else { paint };
+        let shadow = self.paint_for_shadow_in(cast_from, pixels, lines).map(
+            |(shadow, pass)| {
+                let replay = match pass {
+                    Pass::Draw => run.clone(),
+                    Pass::AlphaInShadow => run.opaque(),
+                };
+                layer::ColourShadow {
+                    paint: shadow,
+                    replay,
+                    offset: self.state.shadow_offset,
+                }
+            },
+        );
+        let text = Arc::new(layer::ColourText {
+            matrix: self.state.matrix,
+            replay: Some(run),
+            paint: drawn,
+            inked: Rect::new_empty(),
+            shadow,
+            blend: beyond.then_some(blend),
+            recorded,
+            document,
+            clip: None,
+        });
+        self.with_recorder(|mut recorder| {
+            recorder.append_colour_text(
+                text,
+                self.state.clip.as_ref(),
+                features,
+            );
+        });
+        true
     }
 
     /// Files a draw dyed by a canvas's pattern as a
@@ -1654,32 +1747,53 @@ impl Context2D {
             false => paint,
             true => exact.unwrap_or(paint),
         };
+        let colour_entry = |run: Replay, recorded_as: Picture, document| {
+            Layer::ColourText(Arc::new(layer::ColourText {
+                matrix: self.state.matrix,
+                replay: Some(run),
+                paint: recorded(pixels_paint),
+                inked: Rect::new_empty(),
+                shadow: None,
+                blend: None,
+                recorded: recorded_as,
+                document,
+                clip: None,
+            }))
+        };
         // A kept run is filed as the draw it is, and recorded when a target
         // first plays it -- see `layer::DeferredPicture` -- with what it can
         // ink worked out now: in the paint its pixels are recorded in, and on
         // a page that keeps a recording for each kind of target in its own
         // paint for a document too, the reach the two join to.
-        let deferred = text.and_then(|text| text.defer).and_then(|defer| {
-            let (pixels, mut reach) = defer(&recorded(pixels_paint))?;
-            let document = match dual {
-                false => None,
-                true => {
-                    let (document, document_reach) = defer(&recorded(paint))?;
-                    reach = reach.zip(document_reach).map(|(mut a, b)| {
-                        a.join(b);
-                        a
-                    });
-                    Some(document)
-                }
-            };
-            let deferred = Arc::new(DeferredPicture::new(
-                pixels,
-                document,
-                bounds,
-                self.state.matrix,
-            ));
-            Some((Layer::Deferred(deferred), reach))
-        });
+        // A run holding colour glyphs is drawn again where the chain plays
+        // it, its colour glyphs made for those pixels -- see
+        // `layer::ColourText` -- and is never deferred.
+        let colour = text.and_then(|text| text.colour.clone());
+        let deferred = text
+            .and_then(|text| text.defer)
+            .filter(|_| colour.is_none())
+            .and_then(|defer| {
+                let (pixels, mut reach) = defer(&recorded(pixels_paint))?;
+                let document = match dual {
+                    false => None,
+                    true => {
+                        let (document, document_reach) =
+                            defer(&recorded(paint))?;
+                        reach = reach.zip(document_reach).map(|(mut a, b)| {
+                            a.join(b);
+                            a
+                        });
+                        Some(document)
+                    }
+                };
+                let deferred = Arc::new(DeferredPicture::new(
+                    pixels,
+                    document,
+                    bounds,
+                    self.state.matrix,
+                ));
+                Some((Layer::Deferred(deferred), reach))
+            });
         let (entry, reach) = match dual {
             _ if deferred.is_some() => deferred,
             false => record(paint)
@@ -1697,6 +1811,16 @@ impl Context2D {
         }
         .unzip();
         let reach = reach.flatten();
+        let entry = match (entry, colour) {
+            (Some(Layer::Picture(recorded)), Some(run)) => {
+                Some(colour_entry(run, recorded, None))
+            }
+            (Some(Layer::Targeted(pair)), Some(run)) => {
+                let (recorded, document) = Arc::unwrap_or_clone(pair);
+                Some(colour_entry(run, recorded, Some(document)))
+            }
+            (entry, _) => entry,
+        };
         // A run of text in one flat colour that the coverage route could
         // play is drawn once more, in its colour opaque, through the paint
         // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
@@ -1718,10 +1842,15 @@ impl Context2D {
             }
             _ => None,
         };
+        // A run in one flat colour is what the coverage route paints; one
+        // holding colour glyphs is not, and drawn there came out in the
+        // run's colour, its glyphs' own colours gone.
+        let holds_colour = matches!(entry, Some(Layer::ColourText(_)));
         let coverage = match exact {
             Some(exact)
                 if reached.is_some()
                     && !lines
+                    && !holds_colour
                     && paint.shader().is_none()
                     && matches!(
                         self.state.dye(paint.style()),
@@ -1908,9 +2037,25 @@ impl Context2D {
     {
         let alpha = self.state.global_alpha as f32;
         let blend = self.state.global_composite_operation;
+        // A draw holding colour glyphs this build draws itself -- every one
+        // composites through a layer of its own -- is rasterized on the CPU
+        // where it is played on pixels -- see `layer::ColourText`.
+        let colour = features
+            .refused_by(VectorFeatures::LAYER)
+            .then(|| self.colour_recording(&f))
+            .flatten();
 
         if alpha == 1.0 && blend == BlendMode::SrcOver {
-            self.append_draw(features, false, f);
+            match colour {
+                Some(text) => self.with_recorder(|mut recorder| {
+                    recorder.append_colour_text(
+                        text,
+                        self.state.clip.as_ref(),
+                        features,
+                    );
+                }),
+                None => self.append_draw(features, false, f),
+            }
             return;
         }
 
@@ -1933,9 +2078,10 @@ impl Context2D {
         };
         // Once for each recording the page keeps, as every draw is: the
         // pixels' first, as `Layer::Targeted` holds them.
-        let entry = match self.recorder.borrow().dual() {
-            false => record(Recording::Shared).map(Layer::Picture),
-            true => record(Recording::Pixels)
+        let entry = match (colour, self.recorder.borrow().dual()) {
+            (Some(text), _) => Some(Layer::ColourText(text)),
+            (None, false) => record(Recording::Shared).map(Layer::Picture),
+            (None, true) => record(Recording::Pixels)
                 .zip(record(Recording::Document))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
@@ -1956,6 +2102,49 @@ impl Context2D {
                 Point::default(),
             );
         });
+    }
+
+    /// The draw `f` makes as a [`ColourText`](layer::ColourText) with no
+    /// replay, rasterized on the CPU where it is played on pixels: recorded
+    /// under the canvas's transform into each recording the page keeps, and
+    /// bounded by what it inks -- see [`layer::inked_by`]. `None` where
+    /// Skia records nothing.
+    fn colour_recording<F>(&self, f: &F) -> Option<Arc<layer::ColourText>>
+    where
+        F: Fn(&SkCanvas, Recording),
+    {
+        let record = |recording: Recording| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            f(canvas, recording);
+            recorder.finish_recording_as_picture(None)
+        };
+        let dual = self.recorder.borrow().dual();
+        let pixels = match dual {
+            true => Recording::Pixels,
+            false => Recording::Shared,
+        };
+        let recorded = record(pixels)?;
+        let document = match dual {
+            true => Some(record(Recording::Document)?),
+            false => None,
+        };
+        let inked =
+            layer::inked_by(self.bounds, &self.state.matrix, |canvas| {
+                f(canvas, pixels);
+            });
+        Some(Arc::new(layer::ColourText {
+            matrix: self.state.matrix,
+            replay: None,
+            paint: Paint::default(),
+            inked,
+            shadow: None,
+            blend: None,
+            recorded,
+            document,
+            clip: None,
+        }))
     }
 
     /// Records a paragraph that casts text shadows: what lies beneath them,
@@ -3471,13 +3660,29 @@ impl Context2D {
             let kept = typesetter.laid_out();
             // What the colour glyphs this build draws itself ask for, beside
             // what the paint does -- see `typography::colour_features`.
+            let colour = match &kept {
+                Some(kept) => kept.colour_features(&paint),
+                None => typesetter.colour_features(&paint),
+            };
             let features =
-                self.vector_features(&paint, Some(style)).with(match &kept {
-                    Some(kept) => kept.colour_features(&paint),
-                    None => typesetter.colour_features(&paint),
-                });
+                self.vector_features(&paint, Some(style)).with(colour);
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
+            // The run kept whole, where it holds colour glyphs, to draw them
+            // where the page is played back -- see `layer::ColourText`.
+            // Every colour glyph composites through a layer of its own.
+            let colour = colour.refused_by(VectorFeatures::LAYER).then(|| {
+                let (run, offset, condensation) =
+                    typesetter.replayed(kept.as_deref());
+                Replay::Text {
+                    run,
+                    at: origin,
+                    offset,
+                    condensation,
+                    global_alpha,
+                    faint,
+                }
+            });
             // On a page that keeps a recording for pixels, text there takes
             // its colour exactly through a dye -- see `exact_text_paint` --
             // rather than the shader a fill takes: Skia sets a glyph mask's
@@ -3559,6 +3764,7 @@ impl Context2D {
                         },
                     ),
                     defer: Some(&defer),
+                    colour,
                 }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
@@ -4065,6 +4271,10 @@ pub struct TextRun<'a> {
     /// on -- see `layer::DeferredPicture`. `None`, or answering `None`,
     /// where the run is recorded as it is drawn.
     pub(crate) defer: Option<&'a Defer<'a>>,
+    /// The run kept whole where it holds colour glyphs this build draws
+    /// itself, to draw them where the page is played back -- see
+    /// [`Context2D::files_as_colour_text`].
+    pub colour: Option<Replay>,
 }
 
 /// The transform a run anchored at `origin` is drawn from -- see

@@ -1361,6 +1361,38 @@ platform here and by Fontations' outlines in Chrome, and stand up to 215 apart
 on macOS. Elsewhere Skia's font backend draws the glyph, which was not
 measured against Chrome.
 
+**On a GPU canvas a COLR colour glyph is an image made on the CPU, as Skia
+draws a colour glyph from the image its scaler context makes, so that the GPU
+canvas composites the bytes the CPU canvas does.** Composited through a layer
+of its own on the GPU, a glyph's gradients were drawn by Ganesh, which places
+a conic gradient's hard stops apart from the CPU's (#667), and the test glyphs
+stood up to 255 levels from the CPU canvas. The image is made where the page
+is played back, at the scale and in the pixel format it is played onto, so
+that an export at a density, a canvas drawn into another and a canvas pattern
+draw the glyph as drawing it there would. A shadow's filter is applied to
+the glyph image on the CPU, as the CPU canvas applied it to the glyph's layer
+(`layer::ColourText`). On the GPU canvas the four test glyphs, standing
+apart, are the CPU canvas's bytes under a shadow, a blur filter,
+`source-in` and a rotation, and through a `Paragraph`.
+
+Where the GPU blends a glyph image with what lies beneath it at an alpha --
+a translucent glyph over another, over its own shadow, or under a
+`globalAlpha` -- it blends at half precision, as it blends any image, and
+parts from the exact composite only within 0.18 of a tie (see the eight-bit
+composite entry above): 11 of 320 overlapping bytes on the test sheet, and
+674 of 5,697 channels of the four test glyphs at a `globalAlpha` of 0.5, a
+level from the CPU at most. The CPU canvas composites a glyph image through
+the `globalAlpha` as Chrome's CPU canvas does, byte for byte over
+`rgb(200 120 60)` at 0.5 and at 0.3 under `multiply`. Applying the alpha to
+the image on the CPU first would have made the GPU canvas the CPU's there,
+but stood a level from Chrome in 2,326 of 118,800 channels at 0.5 and was
+not closer to the exact composite in every case: it missed it in 600 of
+5,697 channels at 0.5 against Chrome's 2,436, and in 1,130 under
+`multiply` against 1,117. A
+`Paragraph`'s colour glyphs are rasterized on the CPU from its recording, so
+they keep the device pixel they were snapped to where the paragraph was
+drawn, where a canvas's own text is snapped again wherever it is played.
+
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
 `luminosity` divide exactly on the CPU, the same bytes on every machine, and
 Chrome's CPU canvas divides through an estimate.** Skia's raster pipeline

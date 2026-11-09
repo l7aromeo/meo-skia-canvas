@@ -22,14 +22,20 @@
 //! own in the paint it is drawn with. The code is this crate's; the behaviour
 //! is Fontations', so that the two draw the same glyph alike.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use crate::export::{VectorFeatures, blend_features};
+use crate::{
+    export::{VectorFeatures, blend_features},
+    started,
+};
 
 use skia_safe::{
-    Canvas, ClipOp, Color, Color4f, Data, GlyphId, Matrix, Paint, Path,
-    PathBuilder, Picture, PictureRecorder, Point, Rect, Shader, TileMode,
-    Typeface,
+    AlphaType, BlendMode, Canvas, ClipOp, Color, Color4f, ColorSpace,
+    ColorType, Data, GlyphId, IPoint, IRect, ISize, Image, ImageFilter,
+    ImageInfo, Matrix, Paint, Path, PathBuilder, Picture, PictureRecorder,
+    Point, Rect, RoundOut, Shader, TileMode, Typeface,
     canvas::SaveLayerRec,
     gradient::{
         Colors as GradientColors, Gradient, Interpolation, interpolation,
@@ -73,6 +79,22 @@ const FACES_KEPT: usize = 64;
 /// kilobytes; the key holds a foreground colour, which can be any colour,
 /// so text whose colour animates would add one a frame.
 const GLYPHS_KEPT: usize = 2048;
+
+/// How many bytes of glyph images a thread keeps before it drops them all
+/// and makes them again -- see [`glyph_image`]. Skia's own glyph cache keeps
+/// 2 MiB by default (`SK_DEFAULT_FONT_CACHE_LIMIT` in
+/// `skia/src/core/SkGraphics.cpp`); colour glyphs are four bytes a pixel
+/// where a mask is one, so this keeps four times that.
+const GLYPH_IMAGE_BYTES_KEPT: usize = 8 << 20;
+
+/// The longest side, in device pixels, of the text a colour glyph is kept
+/// as an image for: past it, or under perspective, Skia draws a glyph as a
+/// path or a drawable rather than from its glyph cache -- "a self-imposed
+/// maximum, just to limit memory-usage" (`SkStrikeSpec::ShouldDrawAsPath` in
+/// `skia/src/core/SkStrikeSpec.cpp`). A larger one is made as an image all
+/// the same, so that it is drawn on the CPU wherever pixels are made, but
+/// not kept.
+const LARGEST_KEPT_TEXT: f32 = 256.0;
 
 /// The tables a face's paint graphs and the outlines they clip to are read
 /// from, where the platform cannot hand the font's own file back -- see
@@ -313,6 +335,10 @@ fn packed(colour: Color) -> u32 {
 pub(crate) fn forget() {
     FACES.with_borrow_mut(HashMap::clear);
     GLYPHS.with_borrow_mut(HashMap::clear);
+    GLYPH_IMAGES.with_borrow_mut(|(images, held)| {
+        images.clear();
+        *held = 0;
+    });
 }
 
 thread_local! {
@@ -407,7 +433,10 @@ impl ColourRun {
     /// operation and a filter apply to the glyph whole, and the glyph's own
     /// composite modes see none of the page beneath it. That isolation is
     /// not cosmetic: drawn straight onto the page, the test font's glyphs
-    /// come out up to 207 levels apart on a transparent one.
+    /// come out up to 207 levels apart on a transparent one. While an
+    /// [`ImageRoute`] is open the layer's contents are an image made on the
+    /// CPU instead -- see [`Self::draw_image`] -- composited as the layer
+    /// would be.
     pub(crate) fn draw(
         &self,
         canvas: &Canvas,
@@ -421,6 +450,11 @@ impl ColourRun {
         };
         let mut placed = Matrix::translate(snapped(canvas, at));
         placed.pre_concat(&self.to_run);
+        if let Some(format) = ROUTE.with_borrow(Clone::clone)
+            && self.draw_image(canvas, picture, bounds, &placed, paint, &format)
+        {
+            return;
+        }
         canvas.save_layer(
             &SaveLayerRec::default()
                 .bounds(&placed.map_rect(bounds).0)
@@ -429,6 +463,295 @@ impl ColourRun {
         canvas.draw_picture(picture, Some(&placed), None);
         canvas.restore();
     }
+
+    /// Draws the glyph `picture` records, inking within `bounds`, under
+    /// `placed` as an image made on the CPU in `format`, at the transform
+    /// `canvas` carries -- see [`ImageRoute`]. `false`, having drawn
+    /// nothing, under a perspective, which an image cannot follow.
+    ///
+    /// The image is composited as the glyph's layer would be, at the whole
+    /// device pixel the layer would have landed on, through `paint`'s alpha,
+    /// colour filter and blend; a paint with an image filter, a shadow's, is
+    /// applied to the image on the CPU first, under the transform the glyph
+    /// is drawn under -- see [`filtered`].
+    fn draw_image(
+        &self,
+        canvas: &Canvas,
+        picture: &Picture,
+        bounds: Rect,
+        placed: &Matrix,
+        paint: &Paint,
+        format: &Format,
+    ) -> bool {
+        let mut device = canvas.local_to_device_as_3x3();
+        if device.has_perspective() {
+            return false;
+        }
+        // The space a paint's filter is given in: the canvas's, as the
+        // glyph's layer has it, less where on the device it lands.
+        let mut canvas_shape = device;
+        canvas_shape.set_translate_x(0.0).set_translate_y(0.0);
+        device.pre_concat(placed);
+        // The origin `snapped` placed on a whole device pixel.
+        let origin = IPoint::new(
+            device.translate_x().round() as i32,
+            device.translate_y().round() as i32,
+        );
+        let mut shape = device;
+        shape.set_translate_x(0.0).set_translate_y(0.0);
+        let largest = (shape.scale_x().hypot(shape.skew_y()))
+            .max(shape.skew_x().hypot(shape.scale_y()))
+            * self.face.upem;
+        let Some((image, offset)) = glyph_image(
+            picture,
+            bounds,
+            &shape,
+            format,
+            largest <= LARGEST_KEPT_TEXT,
+        ) else {
+            return true;
+        };
+        let mut composite = Paint::default();
+        composite.set_blend_mode(paint.blend_mode_or(BlendMode::SrcOver));
+        let (image, offset) = match paint.image_filter() {
+            Some(filter) => {
+                match filtered(image, offset, &canvas_shape, paint, &filter) {
+                    Some(filtered) => filtered,
+                    None => return true,
+                }
+            }
+            None => {
+                composite.set_alpha(paint.alpha());
+                if let Some(filter) = paint.color_filter() {
+                    composite.set_color_filter(filter);
+                }
+                (image, offset)
+            }
+        };
+        canvas.save();
+        canvas.reset_matrix();
+        canvas.draw_image(
+            &image,
+            ((origin.x + offset.x) as f32, (origin.y + offset.y) as f32),
+            Some(&composite),
+        );
+        canvas.restore();
+        true
+    }
+}
+
+/// `image`, whose top left lies `offset` from the glyph's origin on the
+/// device, composited through `paint`'s alpha and colour filter and its
+/// image filter `filter` onto nothing, on the CPU, the filter under `shape`
+/// -- the canvas's transform less its translation, which the glyph's layer
+/// is opened under -- and where the result's top left lies.
+///
+/// A shadow's paint carries a filter, which a glyph's layer evaluated on
+/// the CPU canvas through Skia's raster pipeline, and the GPU in Ganesh: a
+/// glyph's sharp shadow stood up to a level from the CPU canvas in 65 bytes
+/// of the four test glyphs, and a blurred one up to six in 8,193. Applied
+/// here, it leaves the CPU canvas's bytes as the layer left them, and an
+/// image that composites as any image does, through the paint's blend
+/// alone.
+///
+/// A paint without a filter is not applied here: its alpha and colour
+/// filter composite the image as the glyph's layer did, which is what
+/// Chrome's CPU canvas does byte for byte. Applied on the CPU instead, the
+/// GPU canvas would draw the CPU canvas's bytes under a `globalAlpha`, and
+/// the CPU canvas would stand a level from Chrome's in 2,326 of 118,800
+/// channels at 0.5 -- closer to the exact composite there, and further
+/// from it under `multiply`.
+fn filtered(
+    image: Image,
+    offset: IPoint,
+    shape: &Matrix,
+    paint: &Paint,
+    filter: &ImageFilter,
+) -> Option<(Image, IPoint)> {
+    let drawn =
+        IRect::from_xywh(offset.x, offset.y, image.width(), image.height());
+    // Where the filter can draw, in the canvas's units and back: the
+    // filter's reach is given in them.
+    let area = match shape.invert() {
+        Some(inverse) => {
+            let local = inverse.map_rect(Rect::from(drawn)).0;
+            let mut reach = shape.map_rect(filter.compute_fast_bounds(local)).0;
+            reach.join(Rect::from(drawn));
+            reach.round_out()
+        }
+        None => drawn,
+    };
+    if area.is_empty() {
+        return None;
+    }
+    let info = image.image_info().with_dimensions(area.size());
+    let mut surface = started::raster(&info, None, None)?;
+    let canvas = surface.canvas();
+    canvas.translate((-area.left as f32, -area.top as f32));
+    canvas.concat(shape);
+    let mut through = Paint::default();
+    through.set_alpha(paint.alpha());
+    if let Some(colours) = paint.color_filter() {
+        through.set_color_filter(colours);
+    }
+    through.set_image_filter(filter.clone());
+    canvas.save_layer(&SaveLayerRec::default().paint(&through));
+    canvas.reset_matrix();
+    canvas.draw_image(
+        &image,
+        ((offset.x - area.left) as f32, (offset.y - area.top) as f32),
+        None,
+    );
+    canvas.restore();
+    Some((surface.image_snapshot(), IPoint::new(area.left, area.top)))
+}
+
+/// The pixel format a glyph image is made in: the colour type and colour
+/// space of the pixels it is drawn for.
+#[derive(Clone, Debug)]
+pub(crate) struct Format {
+    color_type: ColorType,
+    color_space: Option<ColorSpace>,
+}
+
+impl Format {
+    /// Pixels of `size` in this format, premultiplied.
+    pub(crate) fn image_info(&self, size: ISize) -> ImageInfo {
+        ImageInfo::new(
+            size,
+            self.color_type,
+            AlphaType::Premul,
+            self.color_space.clone(),
+        )
+    }
+
+    /// The format of the pixels `canvas` draws onto, or `None` where it
+    /// draws onto none: a recording, or a document.
+    pub(crate) fn of(canvas: &Canvas) -> Option<Self> {
+        let info = canvas.image_info();
+        (info.color_type() != ColorType::Unknown).then(|| Format {
+            color_type: info.color_type(),
+            color_space: info.color_space(),
+        })
+    }
+}
+
+thread_local! {
+    /// The format colour glyphs are drawn as images in while an
+    /// [`ImageRoute`] is open on this thread, and `None`, the layer route,
+    /// otherwise.
+    static ROUTE: RefCell<Option<Format>> = const { RefCell::new(None) };
+}
+
+/// While it lives, colour glyphs drawn on this thread are drawn as images
+/// made on the CPU in its format, at the transform of the canvas they are
+/// drawn on, rather than composited through a layer from their paint
+/// graphs: the route a run of text takes where a page is played onto pixels
+/// -- see `layer::ColourText`. Skia draws a colour glyph the same way, from
+/// an image its scaler context made on the CPU (`generateImage` in
+/// `skia/src/ports/SkTypeface_fontations.cpp`), on a raster device and a GPU
+/// one alike.
+pub(crate) struct ImageRoute(Option<Format>);
+
+impl ImageRoute {
+    /// Opens the image route in `format` until the guard is dropped.
+    pub(crate) fn open(format: Format) -> Self {
+        ImageRoute(ROUTE.replace(Some(format)))
+    }
+}
+
+impl Drop for ImageRoute {
+    fn drop(&mut self) {
+        ROUTE.set(self.0.take());
+    }
+}
+
+/// What a glyph image is kept by: the glyph's recording -- its typeface,
+/// which carries the place on the font's axes, its glyph and its foreground
+/// colour, as [`colr_glyph`] keys it -- the device transform it is drawn
+/// under, without its translation, and the pixel format. The palette is not
+/// in the key: every glyph is drawn in [`DEFAULT_PALETTE`], since no canvas
+/// API selects a `CPAL` palette today; a `font-palette` feature would add
+/// it here.
+type ImageKey = (u32, [u32; 4], i32, u64);
+
+/// Glyph images by [`ImageKey`], each with where its top left lands from
+/// the glyph's origin, and how many bytes they hold together.
+type KeptImages = (HashMap<ImageKey, (Image, IPoint)>, usize);
+
+thread_local! {
+    /// The glyph images [`glyph_image`] made, and how many bytes they hold.
+    static GLYPH_IMAGES: RefCell<KeptImages> =
+        RefCell::new((HashMap::new(), 0));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many glyph images [`glyph_image`] has made on this thread, for the
+    /// tests to tell a kept image from a remade one.
+    static IMAGES_MADE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The glyph `picture` records, inking within `bounds`, as an image under
+/// `shape`, a device transform with no translation, in `format`, and where
+/// the image's top left lands from the glyph's origin. Kept for the next ask
+/// on this thread where `keep`, within [`GLYPH_IMAGE_BYTES_KEPT`]; `None`
+/// where it inks no pixel or a surface could not be made.
+fn glyph_image(
+    picture: &Picture,
+    bounds: Rect,
+    shape: &Matrix,
+    format: &Format,
+    keep: bool,
+) -> Option<(Image, IPoint)> {
+    let key = (
+        picture.unique_id(),
+        [
+            shape.scale_x().to_bits(),
+            shape.skew_x().to_bits(),
+            shape.skew_y().to_bits(),
+            shape.scale_y().to_bits(),
+        ],
+        format.color_type as i32,
+        format.color_space.as_ref().map_or(0, ColorSpace::hash),
+    );
+    if keep
+        && let Some(made) =
+            GLYPH_IMAGES.with_borrow(|(images, _)| images.get(&key).cloned())
+    {
+        return Some(made);
+    }
+    let reach = shape.map_rect(bounds).0;
+    let area = IRect::from_ltrb(
+        reach.left.floor() as i32,
+        reach.top.floor() as i32,
+        reach.right.ceil() as i32,
+        reach.bottom.ceil() as i32,
+    );
+    if area.is_empty() {
+        return None;
+    }
+    let info = format.image_info(area.size());
+    let mut surface = started::raster(&info, None, None)?;
+    let canvas = surface.canvas();
+    canvas.translate((-area.left as f32, -area.top as f32));
+    canvas.concat(shape);
+    canvas.draw_picture(picture, None, None);
+    let made = (surface.image_snapshot(), IPoint::new(area.left, area.top));
+    #[cfg(test)]
+    IMAGES_MADE.set(IMAGES_MADE.get() + 1);
+    if keep {
+        let bytes = info.compute_min_byte_size();
+        GLYPH_IMAGES.with_borrow_mut(|(images, held)| {
+            if *held + bytes > GLYPH_IMAGE_BYTES_KEPT {
+                images.clear();
+                *held = 0;
+            }
+            images.insert(key, made.clone());
+            *held += bytes;
+        });
+    }
+    Some(made)
 }
 
 /// Where Chrome places a COLR glyph whose origin is `at` under `canvas`'s
@@ -1011,8 +1334,8 @@ impl OutlinePen for Pen {
 /// Blending Level 1 operators that Skia's blend modes implement. A mode the
 /// table does not define is Skia's destination, as Fontations'
 /// `ToSkBlendMode` leaves it: drawing nothing over what is there.
-fn blend_mode(mode: CompositeMode) -> skia_safe::BlendMode {
-    use skia_safe::BlendMode as B;
+fn blend_mode(mode: CompositeMode) -> BlendMode {
+    use BlendMode as B;
     match mode {
         CompositeMode::Clear => B::Clear,
         CompositeMode::Src => B::Src,
@@ -1051,7 +1374,7 @@ mod tests {
     use std::fs;
 
     use skia_safe::{
-        FontArguments, FontMgr, FourByteTag,
+        Font, FontArguments, FontMgr, FourByteTag,
         font_arguments::{VariationPosition, variation_position::Coordinate},
     };
 
@@ -1135,5 +1458,129 @@ mod tests {
             "the axes move nothing, so this cannot tell the files apart",
         );
         assert!(from_file == from_tables, "the recordings differ");
+    }
+
+    /// The format of an eight-bit sRGB page.
+    fn srgb() -> Format {
+        Format {
+            color_type: ColorType::RGBA8888,
+            color_space: Some(ColorSpace::new_srgb()),
+        }
+    }
+
+    /// A picture filling `side` units square, as a glyph's recording does.
+    fn square(side: f32) -> (Picture, Rect) {
+        let bounds = Rect::from_wh(side, side);
+        let mut recorder = PictureRecorder::new();
+        let canvas = recorder.begin_recording(bounds, false);
+        canvas.draw_rect(bounds, &Paint::default());
+        let picture = recorder
+            .finish_recording_as_picture(None)
+            .expect("a picture");
+        (picture, bounds)
+    }
+
+    /// How many glyph images `make` made on this thread.
+    fn images_made(make: impl FnOnce()) -> usize {
+        let before = IMAGES_MADE.get();
+        make();
+        IMAGES_MADE.get() - before
+    }
+
+    #[test]
+    fn a_glyph_image_is_kept_for_its_transform_and_format() {
+        forget();
+        let (picture, bounds) = square(16.0);
+        let at = |scale: f32, keep: bool| {
+            glyph_image(
+                &picture,
+                bounds,
+                &Matrix::scale((scale, scale)),
+                &srgb(),
+                keep,
+            )
+            .expect("an image");
+        };
+        assert_eq!(images_made(|| at(1.0, true)), 1);
+        assert_eq!(images_made(|| at(1.0, true)), 0, "kept");
+        assert_eq!(images_made(|| at(2.0, true)), 1, "another transform");
+        assert_eq!(images_made(|| at(2.0, true)), 0, "kept as well");
+        let wide = Format {
+            color_type: ColorType::RGBAF16,
+            color_space: Some(ColorSpace::new_srgb()),
+        };
+        let made = images_made(|| {
+            glyph_image(&picture, bounds, &Matrix::new_identity(), &wide, true)
+                .expect("an image");
+        });
+        assert_eq!(made, 1, "another format");
+        assert_eq!(images_made(|| at(1.0, false)), 1, "not kept");
+        assert_eq!(images_made(|| at(1.0, false)), 1, "nor reused");
+    }
+
+    #[test]
+    fn the_glyph_images_kept_stay_within_their_budget() {
+        // Each image takes two fifths of the budget, so the third drops the
+        // two before it, which are then made again when asked for.
+        forget();
+        let side = ((GLYPH_IMAGE_BYTES_KEPT * 2 / 5 / 4) as f32).sqrt().floor();
+        let squares: Vec<_> = (0..3).map(|_| square(side)).collect();
+        let ask = |which: usize| {
+            let (picture, bounds) = &squares[which];
+            images_made(|| {
+                glyph_image(
+                    picture,
+                    *bounds,
+                    &Matrix::new_identity(),
+                    &srgb(),
+                    true,
+                )
+                .expect("an image");
+            })
+        };
+        assert_eq!((ask(0), ask(1), ask(0)), (1, 1, 0), "two fit");
+        assert_eq!(ask(2), 1);
+        let held = GLYPH_IMAGES.with_borrow(|(_, held)| *held);
+        assert!(held <= GLYPH_IMAGE_BYTES_KEPT, "{held} bytes kept");
+        assert_eq!(
+            (ask(2), ask(0)),
+            (0, 1),
+            "the third kept, the first dropped"
+        );
+    }
+
+    #[test]
+    fn colour_text_past_skias_largest_kept_size_is_made_each_time() {
+        // Drawn twice through the image route, a glyph at 48px is made once
+        // and kept; one past `LARGEST_KEPT_TEXT` is made each time.
+        forget();
+        let face = face();
+        let glyph = face.unichar_to_glyph(0xf0200);
+        let draws_made = |size: f32| {
+            let font = Font::from_typeface(&face, size);
+            let paint = Paint::default();
+            let run = ColourRun::of(&font, &paint).expect("a colour face");
+            let colour = run.glyph(glyph).expect("a colour glyph");
+            let side = (size * 2.0) as i32;
+            let mut surface = started::raster(
+                &srgb().image_info((side, side).into()),
+                None,
+                None,
+            )
+            .expect("a surface");
+            let _route = ImageRoute::open(srgb());
+            [0, 1].map(|_| {
+                images_made(|| {
+                    run.draw(
+                        surface.canvas(),
+                        &colour,
+                        Point::new(0.0, size),
+                        &paint,
+                    );
+                })
+            })
+        };
+        assert_eq!(draws_made(48.0), [1, 0]);
+        assert_eq!(draws_made(LARGEST_KEPT_TEXT + 44.0), [1, 1]);
     }
 }

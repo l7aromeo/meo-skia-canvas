@@ -44,9 +44,10 @@ use crate::{
         chain::pool::{LayerScope, PlaneScope},
         faint::composited,
         layer::{
-            BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Entries, Group, Layer, LayerRec, PatternDraw, Target, TileScope,
-            holds_a_cut, in_document_space, play_entries, tiles_exactly,
+            BlurDraw, BlurOp, ClipData, Clipped, ColourText, Composite,
+            Coverage, CutOp, Entries, Group, Layer, LayerRec, PatternDraw,
+            Target, TileScope, holds_a_cut, in_document_space, play_entries,
+            tiles_exactly,
         },
     },
     encode::{
@@ -2122,6 +2123,54 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.append_under_clip(
+            |clip| match clip {
+                None => Layer::Pattern(tile),
+                Some(clip) => {
+                    let mut tile = Arc::unwrap_or_clone(tile);
+                    tile.clip = Some(clip);
+                    Layer::Pattern(Arc::new(tile))
+                }
+            },
+            clip,
+            features,
+        );
+    }
+
+    /// Files `text`, a run of text holding colour glyphs -- see
+    /// [`ColourText`] -- under `clip`, the frame's clip, as a tile is filed
+    /// by [`Self::append_tile`].
+    pub fn append_colour_text(
+        &mut self,
+        text: Arc<ColourText>,
+        clip: Option<&Path>,
+        features: VectorFeatures,
+    ) {
+        self.append_under_clip(
+            |clip| match clip {
+                None => Layer::ColourText(text),
+                Some(clip) => {
+                    let mut text = Arc::unwrap_or_clone(text);
+                    text.clip = Some(clip);
+                    Layer::ColourText(Arc::new(text))
+                }
+            },
+            clip,
+            features,
+        );
+    }
+
+    /// Files the entry `entry` makes, under `clip`, the frame's clip: a
+    /// piece of the frame's run where one is open, which applies the clip,
+    /// the entry made with no clip of its own; and made holding the clip,
+    /// serialized, where none is. Inside an open `saveLayer` it is filed
+    /// among the layer's entries.
+    fn append_under_clip(
+        &mut self,
+        entry: impl FnOnce(Option<Data>) -> Layer,
+        clip: Option<&Path>,
+        features: VectorFeatures,
+    ) {
         if self.isolated.is_some() {
             self.flush();
         }
@@ -2131,14 +2180,11 @@ impl PageRecorder {
             Some(run) => {
                 let (id, shape) = (run.id, run.shape());
                 self.split_run();
-                let tile = Layer::Pattern(tile);
-                Layer::Clipped(Arc::new(Clipped::new(id, &shape, tile)))
+                Layer::Clipped(Arc::new(Clipped::new(id, &shape, entry(None))))
             }
             None => {
                 self.file_current();
-                let mut tile = Arc::unwrap_or_clone(tile);
-                tile.clip = clip.map(Path::serialize);
-                Layer::Pattern(Arc::new(tile))
+                entry(clip.map(Path::serialize))
             }
         };
         self.file_entry(entry, features);
@@ -10329,6 +10375,7 @@ mod tests {
                     Layer::Clipped(_) => "clipped",
                     Layer::Pattern(_) => "tile",
                     Layer::Deferred(_) => "deferred",
+                    Layer::ColourText(_) => "colour text",
                 })
                 .collect();
             kinds.join(" ")
