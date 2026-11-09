@@ -335,7 +335,10 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   measures `Hamburgefonstiv` in `16px NoSuchFamilyAnywhere` at 111.70, as in
   `16px Times` and `16px serif`, in a canvas and in an `OffscreenCanvas`
   alike; here it measures 120.95, as in `16px sans-serif`. A quoted
-  `"serif"` with no family of that name is such a list. `new_font_collection`
+  `"serif"` with no family of that name is such a list. A character the named
+  face lacks takes the same default: the COLR test font has no space, so a
+  space in `32px colr` is `sans-serif`'s here, 8.891 px, and Times' in Chrome,
+  8.000, as it is here under `32px colr, serif`. `new_font_collection`
   in `src/node/font_library.rs` sets the default. On Linux a family the
   machine lacks but fontconfig binds strongly or as "same" -- Times New Roman
   to Liberation Serif or Tinos, by its metric aliases -- resolves to that
