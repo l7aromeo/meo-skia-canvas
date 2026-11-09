@@ -233,5 +233,27 @@
   "fe006",
   "fe007"
  ],
- "fontVariationSettings": "\"SWPS\" 45, \"SWPE\" -30, \"GRX0\" 200, \"GRR0\" 300, \"COL1\" 0.5, \"ROTA\" 90, \"TRDX\" 100, \"SKXA\" 20, \"CLXI\" 100, \"APH1\" -0.5"
+ "fontVariationSettings": "\"SWPS\" 45, \"SWPE\" -30, \"GRX0\" 200, \"GRR0\" 300, \"COL1\" 0.5, \"ROTA\" 90, \"TRDX\" 100, \"SKXA\" 20, \"CLXI\" 100, \"APH1\" -0.5",
+ "withoutColourPaint": [
+  "f0c05",
+  "f0c06",
+  "f0c07",
+  "f0c08",
+  "f0c09",
+  "f0f00",
+  "f0f01",
+  "f0f02",
+  "f0f03",
+  "f0f04",
+  "f0f05",
+  "f0f06",
+  "fe000",
+  "fe001",
+  "fe002",
+  "fe003",
+  "fe004",
+  "fe005",
+  "fe006",
+  "fe007"
+ ]
 }

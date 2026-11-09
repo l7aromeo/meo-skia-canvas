@@ -733,18 +733,6 @@ This is the clearest case of
 choosing correctness over the baseline, and the reasoning is written out because that is
 what makes it a decision rather than a bug.
 
-**A conic gradient's hard stop can hold the colour on its other side in a
-pixel whose centre lies on the stop, where Chrome's holds this side's.** Drawn
-as plain canvas gradients -- no font involved -- the repeated sweeps of the COLR
-test font's glyphs, each written out as stops with a hard stop at every wrap
-and filling a 64px square at 48px's scale, come out of Chrome 158 and this
-library alike within five levels but for 63 of 57,344 pixels, each on a wrap,
-holding the period's last colour in one and its first in the other. The radial
-and linear gradients of the same glyphs, written the same way, agree within
-two levels everywhere. Which of the two places the pixel on the right side is
-not established: the pixel centres lie on the stop to within the arithmetic,
-and Chrome's Skia is two milestones past this library's.
-
 **A relative `lch()` or `oklch()` over a neutral origin reads a hue of zero,
 and Chrome reads one off its rounding. Ours is the specification's answer.**
 CSS Color 4 makes the hue powerless near the neutral axis -- section 9.3:
@@ -1351,32 +1339,22 @@ device transform, which no sample interpolated from a distance field
 reproduces, so this library keeps it whatever Chrome's GPU canvas does.
 
 **A COLR colour glyph on macOS is drawn here from its paint graph, as Chrome
-draws it, and its anti-aliased edges differ from Chrome's as a plain shape's
-do.** CoreText draws a COLRv1 glyph as nothing on macOS 26 and 15, and a COLRv0
-glyph as nothing on 27.2. Chrome draws every COLR web font on Apple platforms
-through Fontations, so this library reads the `COLR` table with `skrifa`,
-Fontations' reader, and draws the paint graph in its own code (`font::colr`),
-each glyph composited through a layer of its own as Skia composites a drawable
-glyph. A glyph's origin is placed as Chrome places it: floored to the device
-pixel after adding 1/8 across and 1/2 down. Against Chrome 158's CPU canvas on
-macOS 27.2, the 221 glyphs of `test_glyphs-glyf_colr_1_variable.ttf` at 48px
-agree within one level in each of the 764,234 pixels whose 3 by 3 neighbourhood
-is flat in both images, and 33 pixels stand more than 81 levels apart; with ten
-of its axes varied, one level and 53 pixels. 81 is how far a circle and a
-triangle filled with no font involved come out apart at their edges. Of the 33,
-17 lie on the wrap of a repeated sweep and differ the same way when the same
-gradient is drawn as a plain conic gradient -- see below. 8 lie on a wrap so
-closely that two equivalent ways of building the gradient here already
-disagree there; for the six that are sweeps, writing the sweep out over the
-whole turn instead of as Skia's sweep between its two angles, as Fontations
-writes it, agrees with Chrome at those six and disagrees at 23 others. The last
-8 are edges: the outlines of nested rings and of a nested clip, and the glyphs
-of the font that have no colour paint, which CoreText draws here and Chrome
-draws from Fontations' outlines. COLRv0 glyphs at 30 and 100px are
-Chrome's byte for byte; at 16 and 48px one edge row differs, the baseline
-placement of #142 (`colour_fonts` in the crate's tests, `colour-fonts.test.js`
-in the JavaScript suite). Elsewhere Skia's font backend draws the glyph, which
-was not measured against Chrome.
+draws it -- on the CPU, to within three levels.** CoreText draws a COLRv1 glyph
+as nothing on macOS 26 and 15, and a COLRv0 glyph as nothing on 27.2. Chrome
+draws every COLR web font on Apple platforms through Fontations, so this library
+reads the `COLR` table with `skrifa`, Fontations' reader, and draws the paint
+graph in its own code (`font::colr`), each glyph composited through a layer of
+its own as Skia composites a drawable glyph. A glyph's origin is placed as
+Chrome places it: floored to the device pixel after adding 1/8 across and 1/2
+down. On a CPU canvas against Chrome 158's on macOS 27.2, every pixel of every
+glyph with colour paint among the 221 of `test_glyphs-glyf_colr_1_variable.ttf`
+at 48px is within three levels, edges included, one pixel at three and ten past
+one; with ten of its axes varied, one at three and eight past one. The COLRv0
+test font is Chrome's byte for byte at 16, 30, 48 and 100px (`colour_fonts` in
+the crate's tests, `colour-fonts.test.js` in the JavaScript suite). The font's
+20 code points with no colour paint are drawn by CoreText here and by
+Fontations' outlines in Chrome, and stand up to 215 apart. Elsewhere Skia's font
+backend draws the glyph, which was not measured against Chrome.
 
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
 `luminosity` divide exactly on the CPU, the same bytes on every machine, and

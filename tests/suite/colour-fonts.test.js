@@ -23,20 +23,12 @@ const CHROME_MEASURED_HERE =
     : "Chrome 158's COLR glyphs were drawn on macOS, against this library's own painter there";
 
 /**
- * How far a channel may stand from Chrome's where neither image changes
- * within a pixel of it -- inside a fill or a gradient, away from any edge.
- * Measured at 1 over 764,234 such pixels of the 221 test glyphs, and over
- * 764,523 with their axes varied: a gradient's rounding.
+ * How far a channel of a colour glyph may stand from Chrome's at any pixel,
+ * edges included. Measured at 3, at one pixel of the test glyphs and with
+ * their axes varied alike, and past 1 at ten: both draw the same paint graph
+ * through Skia's CPU raster.
  */
-const INTERIOR_TOLERANCE = 1;
-
-/**
- * How far an anti-aliased edge pixel may stand from Chrome's before it is
- * counted. A circle and a triangle filled on a 2D canvas, no font involved,
- * come out of Chrome 158 and this library up to 81 apart at their edges, so
- * an edge further apart than that is not the rasterizer's difference.
- */
-const EDGE_ENVELOPE = 81;
+const COLOUR_GLYPH_TOLERANCE = 3;
 
 /** The test fonts, registered once. */
 const fonts = (() => {
@@ -59,10 +51,20 @@ const fonts = (() => {
 const layout = (name) =>
   JSON.parse(fs.readFileSync(path.join(REFERENCES, `${name}.json`), "utf8"));
 
+/**
+ * A canvas drawing on the CPU, as Chrome drew the references -- see
+ * `tests/assets/images/colr/README.md`.
+ */
+const cpuCanvas = (width, height) => {
+  const canvas = new Canvas(width, height);
+  canvas.gpu = false;
+  return canvas;
+};
+
 /** A reference's pixels, read as RGBA. */
 const reference = async (spec) => {
   const image = await loadImage(path.join(REFERENCES, spec.reference)),
-    canvas = new Canvas(spec.width, spec.height),
+    canvas = cpuCanvas(spec.width, spec.height),
     ctx = canvas.getContext("2d");
   ctx.drawImage(image, 0, 0);
   return ctx.getImageData(0, 0, spec.width, spec.height).data;
@@ -73,7 +75,7 @@ const reference = async (spec) => {
  * moved across by `shift` pixels.
  */
 const glyphSheet = (spec, shift = 0) => {
-  const canvas = new Canvas(spec.width, spec.height),
+  const canvas = cpuCanvas(spec.width, spec.height),
     ctx = canvas.getContext("2d");
   ctx.fillStyle = spec.background;
   ctx.fillRect(0, 0, spec.width, spec.height);
@@ -93,7 +95,7 @@ const glyphSheet = (spec, shift = 0) => {
 
 /** The COLR version 0 cases as the reference `spec` lays them out. */
 const v0Sheet = (spec) => {
-  const canvas = new Canvas(spec.width, spec.height),
+  const canvas = cpuCanvas(spec.width, spec.height),
     ctx = canvas.getContext("2d");
   ctx.fillStyle = spec.background;
   ctx.fillRect(0, 0, spec.width, spec.height);
@@ -115,39 +117,17 @@ const v0Sheet = (spec) => {
 };
 
 /**
- * `ours` against `chrome`, both `width` wide: the largest difference among
- * interior pixels -- those whose 3x3 neighbourhood is flat in both images to
- * within 2 levels -- and how many pixels stand further than
- * [`EDGE_ENVELOPE`] from Chrome's anywhere, leaving out the cells `skip`
- * names by index in a grid of `cell`-sized squares `columns` wide.
+ * The largest difference between `ours` and `chrome`, both `width` wide, in
+ * any channel of any pixel `skip` does not name.
  */
-const compare = (ours, chrome, width, height, skip = () => false) => {
-  const flat = (px, x, y) => {
-    const at = (y * width + x) * 4;
-    for (let dy = -1; dy <= 1; dy++)
-      for (let dx = -1; dx <= 1; dx++) {
-        const k = ((y + dy) * width + x + dx) * 4;
-        for (let c = 0; c < 3; c++)
-          if (Math.abs(px[k + c] - px[at + c]) > 2) return false;
-      }
-    return true;
-  };
-  let interior = 0,
-    pastEnvelope = 0;
-  for (let y = 1; y < height - 1; y++)
-    for (let x = 1; x < width - 1; x++) {
-      if (skip(x, y)) continue;
-      const k = (y * width + x) * 4;
-      const d = Math.max(
-        Math.abs(ours[k] - chrome[k]),
-        Math.abs(ours[k + 1] - chrome[k + 1]),
-        Math.abs(ours[k + 2] - chrome[k + 2]),
-      );
-      if (d > EDGE_ENVELOPE) pastEnvelope++;
-      if (flat(ours, x, y) && flat(chrome, x, y))
-        interior = Math.max(interior, d);
-    }
-  return { interior, pastEnvelope };
+const largestDifference = (ours, chrome, width, skip = () => false) => {
+  let largest = 0;
+  for (let k = 0; k < ours.length; k++) {
+    const pixel = k >> 2;
+    if (skip(pixel % width, Math.floor(pixel / width))) continue;
+    largest = Math.max(largest, Math.abs(ours[k] - chrome[k]));
+  }
+  return largest;
 };
 
 /** How many pixels of `px` hold a colour rather than a grey. */
@@ -164,15 +144,18 @@ const coloured = (px) => {
 };
 
 /**
- * The cell a test glyph sheet puts glyph 0 in: U+FE000, which the font maps
- * to `.notdef`, and which Chrome draws as nothing at all. That is the missing
- * glyph, not a colour one, and is left out here.
+ * The cells a test glyph sheet puts the glyphs with no colour paint in -- the
+ * code points its layout lists under `withoutColourPaint`, `.notdef` among
+ * them -- which the platform draws rather than this library's painter.
  */
-const notdefCell = (spec) => {
-  const index = spec.codepoints.indexOf("fe000");
+const plainCells = (spec) => {
+  const plain = new Set(
+    spec.withoutColourPaint.map((hex) => spec.codepoints.indexOf(hex)),
+  );
   return (x, y) =>
-    Math.floor(y / spec.cell) * spec.columns + Math.floor(x / spec.cell) ===
-    index;
+    plain.has(
+      Math.floor(y / spec.cell) * spec.columns + Math.floor(x / spec.cell),
+    );
 };
 
 describe("COLR colour fonts", () => {
@@ -198,20 +181,16 @@ describe("COLR colour fonts", () => {
     async () => {
       fonts();
       const spec = layout("chrome-test-glyphs-48px");
-      const { interior, pastEnvelope } = compare(
+      const largest = largestDifference(
         glyphSheet(spec),
         await reference(spec),
         spec.width,
-        spec.height,
-        notdefCell(spec),
+        plainCells(spec),
       );
       assert.ok(
-        interior <= INTERIOR_TOLERANCE,
-        `interior pixels stand ${interior} from Chrome's`,
+        largest <= COLOUR_GLYPH_TOLERANCE,
+        `a colour glyph stands ${largest} from Chrome's`,
       );
-      // 33 measured: pixels on the hard stops and wraps of repeated
-      // gradients, and edges -- see docs/browser-differences.md.
-      assert.ok(pastEnvelope <= 40, `${pastEnvelope} edge pixels past 81`);
     },
   );
 
@@ -221,19 +200,16 @@ describe("COLR colour fonts", () => {
     async () => {
       fonts();
       const spec = layout("chrome-test-glyphs-48px-varied");
-      const { interior, pastEnvelope } = compare(
+      const largest = largestDifference(
         glyphSheet(spec),
         await reference(spec),
         spec.width,
-        spec.height,
-        notdefCell(spec),
+        plainCells(spec),
       );
       assert.ok(
-        interior <= INTERIOR_TOLERANCE,
-        `interior pixels stand ${interior} from Chrome's`,
+        largest <= COLOUR_GLYPH_TOLERANCE,
+        `a colour glyph stands ${largest} from Chrome's`,
       );
-      // 53 measured.
-      assert.ok(pastEnvelope <= 64, `${pastEnvelope} edge pixels past 81`);
     },
   );
 
@@ -243,17 +219,11 @@ describe("COLR colour fonts", () => {
     async () => {
       fonts();
       const spec = layout("chrome-colr-v0");
-      const { interior, pastEnvelope } = compare(
-        v0Sheet(spec),
-        await reference(spec),
-        spec.width,
-        spec.height,
+      // Byte for byte, at every size.
+      assert.equal(
+        largestDifference(v0Sheet(spec), await reference(spec), spec.width),
+        0,
       );
-      assert.ok(
-        interior <= INTERIOR_TOLERANCE,
-        `interior pixels stand ${interior} from Chrome's`,
-      );
-      assert.equal(pastEnvelope, 0);
     },
   );
 
@@ -261,19 +231,20 @@ describe("COLR colour fonts", () => {
     "the comparison refuses glyphs drawn a pixel off Chrome's",
     { skip: CHROME_MEASURED_HERE },
     async () => {
-      // The control for the two above: a sheet moved a pixel across has
-      // every glyph's edges past the envelope, which the tolerance must not
-      // pass.
+      // The control for the comparisons above: a sheet moved a pixel across
+      // stands further from Chrome's than the tolerance passes.
       fonts();
       const spec = layout("chrome-test-glyphs-48px");
-      const { pastEnvelope } = compare(
+      const largest = largestDifference(
         glyphSheet(spec, 1),
         await reference(spec),
         spec.width,
-        spec.height,
-        notdefCell(spec),
+        plainCells(spec),
       );
-      assert.ok(pastEnvelope > 40, `only ${pastEnvelope} past the envelope`);
+      assert.ok(
+        largest > COLOUR_GLYPH_TOLERANCE,
+        `a sheet a pixel off stands only ${largest} from Chrome's`,
+      );
     },
   );
 

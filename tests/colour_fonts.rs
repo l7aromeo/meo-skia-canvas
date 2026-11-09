@@ -10,17 +10,12 @@ const COLR_V1: &str =
 const COLR_V0: &str = "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf";
 const REFERENCES: &str = "tests/assets/images/colr";
 
-/// How far a channel may stand from Chrome's where neither image changes
-/// within a pixel of it. Measured at 1 over 764,234 such pixels of the 221
-/// test glyphs: a gradient's rounding.
+/// How far a channel of a colour glyph may stand from Chrome's at any pixel,
+/// edges included. Measured at 3, at one pixel of the test glyphs and with
+/// their axes varied alike, and past 1 at ten: both draw the same paint graph
+/// through Skia's CPU raster.
 #[cfg(target_os = "macos")]
-const INTERIOR_TOLERANCE: u8 = 1;
-
-/// How far an edge pixel may stand from Chrome's before it is counted: a
-/// circle and a triangle filled on a 2D canvas, no font involved, come out of
-/// Chrome 158 and this crate up to 81 apart at their edges.
-#[cfg(target_os = "macos")]
-const EDGE_ENVELOPE: u8 = 81;
+const COLOUR_GLYPH_TOLERANCE: u8 = 3;
 
 /// The reach of a colour's spread across its channels past which a pixel
 /// counts as coloured rather than grey.
@@ -92,8 +87,7 @@ mod against_chrome {
         let file = spec["reference"].as_str().expect("a reference");
         let bytes = std::fs::read(format!("{REFERENCES}/{file}")).expect("PNG");
         let image = Image::from_encoded(&bytes).expect("decodes");
-        let mut canvas =
-            Canvas::new(number(spec, "width"), number(spec, "height"));
+        let mut canvas = cpu_canvas(spec);
         canvas.context().draw_image(&image, 0.0, 0.0);
         pixels(&mut canvas)
     }
@@ -101,10 +95,9 @@ mod against_chrome {
     /// The grid of test glyphs as `spec` lays it out, drawn here, moved
     /// across by `shift` pixels.
     fn glyph_sheet(spec: &serde_json::Value, shift: f32) -> Vec<u8> {
-        let (width, height) = (number(spec, "width"), number(spec, "height"));
         let (columns, cell) =
             (number(spec, "columns") as usize, number(spec, "cell"));
-        let mut canvas = Canvas::new(width, height);
+        let mut canvas = cpu_canvas(spec);
         let ctx = canvas.context();
         backed(ctx, spec);
         assert!(
@@ -141,6 +134,15 @@ mod against_chrome {
         pixels(&mut canvas)
     }
 
+    /// A canvas of `spec`'s size drawing on the CPU, as Chrome drew the
+    /// references -- see `tests/assets/images/colr/README.md`.
+    fn cpu_canvas(spec: &serde_json::Value) -> Canvas {
+        let mut canvas =
+            Canvas::new(number(spec, "width"), number(spec, "height"));
+        canvas.set_gpu(false);
+        canvas
+    }
+
     /// The page `spec` draws on, painted in its background.
     fn backed(ctx: &mut Context2D, spec: &serde_json::Value) {
         let background = spec["background"].as_str().expect("a background");
@@ -151,8 +153,7 @@ mod against_chrome {
     /// The COLR version 0 cases as `spec` lays them out, each clipped to
     /// its cell.
     fn v0_sheet(spec: &serde_json::Value) -> Vec<u8> {
-        let mut canvas =
-            Canvas::new(number(spec, "width"), number(spec, "height"));
+        let mut canvas = cpu_canvas(spec);
         let ctx = canvas.context();
         backed(ctx, spec);
         let columns = number(spec, "columns") as usize;
@@ -183,118 +184,86 @@ mod against_chrome {
         pixels(&mut canvas)
     }
 
-    /// The largest difference among interior pixels -- whose 3x3
-    /// neighbourhood is flat in both images to within 2 levels -- and how
-    /// many pixels stand past [`EDGE_ENVELOPE`], leaving out what `skip`
-    /// names.
-    fn compare(
+    /// The largest difference between `ours` and `chrome`, both `width`
+    /// wide, in any channel of any pixel `skip` does not name.
+    fn largest_difference(
         ours: &[u8],
         chrome: &[u8],
         width: usize,
-        height: usize,
         skip: impl Fn(usize, usize) -> bool,
-    ) -> (u8, usize) {
-        let flat = |px: &[u8], x: usize, y: usize| {
-            let at = (y * width + x) * 4;
-            (y - 1..=y + 1).all(|yy| {
-                (x - 1..=x + 1).all(|xx| {
-                    let k = (yy * width + xx) * 4;
-                    (0..3).all(|c| px[k + c].abs_diff(px[at + c]) <= 2)
-                })
-            })
-        };
-        let (mut interior, mut past) = (0, 0);
-        for y in 1..height - 1 {
-            for x in 1..width - 1 {
-                if skip(x, y) {
-                    continue;
-                }
-                let k = (y * width + x) * 4;
-                let d = (0..3)
-                    .map(|c| ours[k + c].abs_diff(chrome[k + c]))
-                    .max()
-                    .unwrap_or(0);
-                if d > EDGE_ENVELOPE {
-                    past += 1;
-                }
-                if flat(ours, x, y) && flat(chrome, x, y) {
-                    interior = interior.max(d);
-                }
-            }
-        }
-        (interior, past)
+    ) -> u8 {
+        ours.iter()
+            .zip(chrome)
+            .enumerate()
+            .filter(|(k, _)| !skip((k / 4) % width, (k / 4) / width))
+            .map(|(_, (a, b))| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0)
     }
 
-    /// The cell the sheet puts U+FE000 in, which the font maps to
-    /// `.notdef` and Chrome draws as nothing: the missing glyph, not a colour
-    /// one.
-    fn notdef(spec: &serde_json::Value) -> impl Fn(usize, usize) -> bool {
+    /// The cells the sheet puts the glyphs with no colour paint in -- the
+    /// code points its layout lists under `withoutColourPaint`, `.notdef`
+    /// among them -- which the platform draws rather than this crate's
+    /// painter.
+    fn plain_cells(spec: &serde_json::Value) -> impl Fn(usize, usize) -> bool {
         let codepoints = spec["codepoints"].as_array().expect("code points");
-        let index = codepoints.iter().position(|cp| cp == "fe000");
+        let plain: Vec<usize> = spec["withoutColourPaint"]
+            .as_array()
+            .expect("the cells left out")
+            .iter()
+            .filter_map(|hex| codepoints.iter().position(|cp| cp == hex))
+            .collect();
         let (columns, cell) = (
             number(spec, "columns") as usize,
             number(spec, "cell") as usize,
         );
-        move |x, y| Some((y / cell) * columns + x / cell) == index
+        move |x, y| plain.contains(&((y / cell) * columns + x / cell))
     }
 
-    fn checked(name: &str, shift: f32) -> (u8, usize) {
+    /// The largest difference between the sheet `name` lays out, drawn here
+    /// and moved across by `shift`, and Chrome's, in its colour glyphs.
+    fn checked(name: &str, shift: f32) -> u8 {
         register();
         let spec = layout(name);
-        let (width, height) = (
-            number(&spec, "width") as usize,
-            number(&spec, "height") as usize,
-        );
-        compare(
+        largest_difference(
             &glyph_sheet(&spec, shift),
             &reference(&spec),
-            width,
-            height,
-            notdef(&spec),
+            number(&spec, "width") as usize,
+            plain_cells(&spec),
         )
     }
 
     #[test]
     fn colrv1_glyphs_draw_as_chrome_draws_them() {
-        let (interior, past) = checked("chrome-test-glyphs-48px", 0.0);
-        assert!(interior <= INTERIOR_TOLERANCE, "interior off by {interior}");
-        // 33 measured: pixels on the hard stops and wraps of repeated
-        // gradients, and edges -- see docs/browser-differences.md.
-        assert!(past <= 40, "{past} edge pixels past the envelope");
+        let largest = checked("chrome-test-glyphs-48px", 0.0);
+        assert!(largest <= COLOUR_GLYPH_TOLERANCE, "off by {largest}");
     }
 
     #[test]
     fn colrv1_glyphs_with_their_axes_varied_draw_as_chrome_draws_them() {
-        let (interior, past) = checked("chrome-test-glyphs-48px-varied", 0.0);
-        assert!(interior <= INTERIOR_TOLERANCE, "interior off by {interior}");
-        // 53 measured.
-        assert!(past <= 64, "{past} edge pixels past the envelope");
+        let largest = checked("chrome-test-glyphs-48px-varied", 0.0);
+        assert!(largest <= COLOUR_GLYPH_TOLERANCE, "off by {largest}");
     }
 
     #[test]
     fn colr_version_0_glyphs_draw_as_chrome_draws_them() {
         register();
         let spec = layout("chrome-colr-v0");
-        let (width, height) = (
-            number(&spec, "width") as usize,
-            number(&spec, "height") as usize,
-        );
-        let (interior, past) = compare(
+        // Byte for byte, at every size.
+        let largest = largest_difference(
             &v0_sheet(&spec),
             &reference(&spec),
-            width,
-            height,
+            number(&spec, "width") as usize,
             |_, _| false,
         );
-        assert!(interior <= INTERIOR_TOLERANCE, "interior off by {interior}");
-        assert_eq!(past, 0, "{past} edge pixels past the envelope");
+        assert_eq!(largest, 0);
     }
 
     #[test]
     fn the_comparison_refuses_glyphs_drawn_a_pixel_off() {
         // The control for the comparisons above: a sheet moved a pixel
-        // across has every glyph's edges past the envelope.
-        let (_, past) = checked("chrome-test-glyphs-48px", 1.0);
-        assert!(past > 40, "only {past} edge pixels past the envelope");
+        // across stands further from Chrome's than the tolerance passes.
+        let largest = checked("chrome-test-glyphs-48px", 1.0);
+        assert!(largest > COLOUR_GLYPH_TOLERANCE, "only {largest}");
     }
 }
