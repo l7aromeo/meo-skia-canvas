@@ -8439,8 +8439,9 @@ mod colour_recording_tests {
         paint::BlendMode,
         pixels::{ImageDataExport, PixelExportOptions},
         prelude::*,
+        started,
     };
-    use skia_safe::{Color, surfaces};
+    use skia_safe::Color;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -8606,7 +8607,7 @@ mod colour_recording_tests {
             .flat_map(|run| [run.recorded(), run.recorded_for_document()])
             .map(|recorded| {
                 let mut surface =
-                    surfaces::raster_n32_premul((SIDE.0 as i32, SIDE.1 as i32))
+                    started::raster_n32_premul((SIDE.0 as i32, SIDE.1 as i32))
                         .expect("a raster");
                 surface.canvas().clear(Color::WHITE);
                 recorded.expect("a recording").playback(surface.canvas());
