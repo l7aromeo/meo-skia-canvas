@@ -1405,7 +1405,7 @@ fn glyph_boxes(
         }
         *boxed = outlined.with_outset((reach, reach));
     }
-    // A colour glyph this build draws from its paint graph inks what the
+    // A colour glyph this library draws from its paint graph inks what the
     // graph inks, filled whatever the paint's style, as Chrome draws one
     // under `strokeText`; the platform's box for it is no bound, and on
     // macOS 26 CoreText gives none.
@@ -2069,33 +2069,14 @@ pub(crate) fn draw_glyphs(
     }
 }
 
-/// Whether this build draws the colour glyphs of a face with a `COLR`
-/// table, of either version, itself -- see [`ColourRun`]: on macOS, whose
-/// CoreText draws a version 1 glyph as nothing on macOS 26 and 15 and a
-/// version 0 glyph as nothing on 27.2, and which Chrome never asks to draw
-/// either; and on Windows, whose DirectWrite drew the COLRv1 test glyphs
-/// up to 215 levels inside them from Chrome's, where this painter draws
-/// them within one.
-///
-/// TEMPORARY: `MEO_COLR_OWN_ROUTE` turns it on elsewhere, so that CI can
-/// measure the route on Linux beside FreeType. Dropped before merge.
-fn draws_colour_glyphs_here() -> bool {
-    cfg!(any(target_os = "macos", target_os = "windows"))
-        || std::env::var_os("MEO_COLR_OWN_ROUTE").is_some()
-}
-
 /// What the colour glyphs among `runs`, each a font and its glyphs, ask of a
 /// vector backend when drawn in `paint` -- see `font::colr::ColourRun::
 /// features` -- so that a document a backend cannot write them into embeds
-/// them as pixels. Nothing where this build leaves colour glyphs to the
-/// platform.
+/// them as pixels.
 pub(crate) fn colour_features<'a>(
     runs: impl IntoIterator<Item = (&'a Font, &'a [GlyphId])>,
     paint: &Paint,
 ) -> VectorFeatures {
-    if !draws_colour_glyphs_here() {
-        return VectorFeatures::PLAIN;
-    }
     runs.into_iter()
         .filter_map(|(font, glyphs)| {
             let run = ColourRun::of(font, paint)?;
@@ -2125,30 +2106,29 @@ pub(crate) fn paragraph_colour_features(
     )
 }
 
-/// Whether `paragraph` sets a run in a face whose colour glyphs this build
+/// Whether `paragraph` sets a run in a face whose colour glyphs this library
 /// draws itself -- see [`draw_colour_run`] -- so that `Paragraph::paint`,
 /// which leaves them to the platform, must not draw it. Read from the fonts
 /// SkParagraph reports for its runs, without visiting them.
 pub(crate) fn holds_colour_runs(paragraph: &Paragraph) -> bool {
-    draws_colour_glyphs_here()
-        && paragraph
-            .get_fonts()
-            .iter()
-            .any(|info| draws_colour_glyphs(&info.font))
+    paragraph
+        .get_fonts()
+        .iter()
+        .any(|info| draws_colour_glyphs(&info.font))
 }
 
-/// Whether this build draws `font`'s colour glyphs itself -- see
-/// [`draw_colour_run`] -- rather than as Skia's glyph masks.
+/// Whether this library draws `font`'s colour glyphs itself -- see
+/// [`draw_colour_run`] -- rather than as Skia's glyph masks: those of a
+/// face with a `COLR` table, on every platform.
 pub(crate) fn draws_colour_glyphs(font: &Font) -> bool {
-    draws_colour_glyphs_here() && colr_face(&font.typeface()).is_some()
+    colr_face(&font.typeface()).is_some()
 }
 
 /// Draws `glyphs` in `font` at `positions` from `origin`, sheared by
 /// `shear`, in `paint`, as [`sheared_blob`]'s glyphs are drawn but for each
 /// colour glyph of a face with a `COLR` table, which is drawn from its paint
-/// graph -- see [`ColourRun`]. Returns whether it drew: `false`,
-/// having drawn nothing, where this build leaves such glyphs to the platform
-/// or the face has no such table.
+/// graph -- see [`ColourRun`]. Returns whether it drew: `false`, having
+/// drawn nothing, where the face has no such table.
 ///
 /// The glyphs are drawn in order, the plain ones between two colour glyphs
 /// as one blob, so that where they overlap the later one lies on top as it
@@ -2162,9 +2142,6 @@ pub(crate) fn draw_colour_run(
     origin: Point,
     paint: &Paint,
 ) -> bool {
-    if !draws_colour_glyphs_here() {
-        return false;
-    }
     let (sheared, moved): (Cow<'_, Font>, Cow<'_, [Point]>) = match shear {
         Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions)),
         Shear::By(shear) => {
@@ -2647,9 +2624,6 @@ impl<'a> Typesetter<'a> {
     /// three thousand strings each drawn once; a text whose characters its
     /// own faces hold, none of them colour faces, holds no colour glyph.
     pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
-        if !draws_colour_glyphs_here() {
-            return VectorFeatures::PLAIN;
-        }
         let style = self.char_style();
         let named = style.font_families();
         let families: Vec<&str> = named.iter().collect();

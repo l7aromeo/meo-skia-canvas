@@ -7,10 +7,13 @@
 //! CoreText: `WebFontTypefaceFactory` in Blink (`web_font_typeface_factory.cc`)
 //! makes every COLR web font, of either version, through Fontations on Apple
 //! platforms. On Windows DirectWrite draws the COLRv1 test glyphs up to 215
-//! levels inside them from Chrome's. So on macOS and Windows this module
-//! walks a glyph's paint graph with skrifa, Fontations' own reader, and
-//! records it as a [`Picture`], and the text routes draw that picture in
-//! place of the platform's glyph -- see `node::typography::draw_colour_run`.
+//! levels inside them from Chrome's. On Linux FreeType draws them, with
+//! their axes varied, up to 179 levels inside, and inks 412 pixels of the
+//! COLRv0 test sheet more than 81 levels from Chrome's, where this painter
+//! inks none more than 8 from it. So on every platform this module walks a
+//! glyph's paint graph with skrifa, Fontations' own reader, and records it
+//! as a [`Picture`], and the text routes draw that picture in place of the
+//! platform's glyph -- see `node::typography::draw_colour_run`.
 //!
 //! What each callback draws follows Skia's painter for Fontations
 //! (`ColorPainter` in `skia/src/ports/SkTypeface_fontations.cpp` under the

@@ -2054,7 +2054,7 @@ impl Context2D {
     /// there is nothing to apply, so the common case costs no offscreen.
     ///
     /// `features` is what the paragraph's own drawing asks of a vector
-    /// backend -- its colour glyphs, which this build draws through layers
+    /// backend -- its colour glyphs, which this library draws through layers
     /// of their own -- see `typography::paragraph_colour_features`.
     pub fn with_composited_canvas<F>(&self, features: VectorFeatures, f: F)
     where
@@ -2062,7 +2062,7 @@ impl Context2D {
     {
         let alpha = self.state.global_alpha as f32;
         let blend = self.state.global_composite_operation;
-        // A draw holding colour glyphs this build draws itself -- every one
+        // A draw holding colour glyphs this library draws itself -- every one
         // composites through a layer of its own -- is rasterized on the CPU
         // where it is played on pixels -- see `layer::ColourText`.
         let colour = features
@@ -3686,7 +3686,7 @@ impl Context2D {
             self.draw_path(Some(typesetter.path(origin)), style, None);
         } else {
             let kept = typesetter.laid_out();
-            // What the colour glyphs this build draws itself ask for, beside
+            // What the colour glyphs this library draws itself ask for, beside
             // what the paint does -- see `typography::colour_features`.
             let colour = match &kept {
                 Some(kept) => kept.colour_features(&paint),
@@ -4299,7 +4299,7 @@ pub struct TextRun<'a> {
     /// on -- see `layer::DeferredPicture`. `None`, or answering `None`,
     /// where the run is recorded as it is drawn.
     pub(crate) defer: Option<&'a Defer<'a>>,
-    /// The run kept whole where it holds colour glyphs this build draws
+    /// The run kept whole where it holds colour glyphs this library draws
     /// itself, to draw them where the page is played back -- see
     /// [`Context2D::files_as_colour_text`].
     pub colour: Option<Replay>,
@@ -8423,7 +8423,7 @@ mod text_reach_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg(test)]
 mod colour_recording_tests {
     //! A run holding colour glyphs is recorded for pixels only when first
     //! asked for, and the recording is the one made as it was drawn -- see

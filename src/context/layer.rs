@@ -1536,7 +1536,7 @@ impl Replay {
     }
 }
 
-/// A run of text holding colour glyphs this build draws itself -- see
+/// A run of text holding colour glyphs this library draws itself -- see
 /// `font::colr::ColourRun` -- drawn again where it is played back, so that
 /// its colour glyphs are made for the pixels they land on.
 ///

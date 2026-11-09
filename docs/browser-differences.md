@@ -1341,8 +1341,8 @@ rasterized on the GPU at all. A direct mask is the glyph's coverage at the
 device transform, which no sample interpolated from a distance field
 reproduces, so this library keeps it whatever Chrome's GPU canvas does.
 
-**A COLR colour glyph on macOS and Windows is drawn here from its paint
-graph, as Chrome draws it -- on the CPU, to within three levels.** CoreText
+**A COLR colour glyph is drawn here from its paint graph on every platform,
+as Chrome draws it -- on the CPU, to within three levels.** CoreText
 draws a COLRv1 glyph as nothing on macOS 26 and 15, and a COLRv0 glyph as
 nothing on 27.2. Chrome draws every COLR web font on Apple platforms through
 Fontations, so this library reads the `COLR` table with `skrifa`, Fontations'
@@ -1359,10 +1359,13 @@ byte at 16, 30, 48 and 100px (`colour_fonts` in the crate's tests,
 references, DirectWrite drew the COLRv1 glyphs up to 215 levels inside them
 and 6,034 pixels past 81, and this library's painter within one inside them
 and 8 past 81, so Windows takes the same route; the COLRv0 font was the same
-either way. The font's 20 code points with no colour paint are drawn by the
-platform here and by Fontations' outlines in Chrome, and stand up to 215 apart
-on macOS. Elsewhere Skia's font backend draws the glyph, which was not
-measured against Chrome.
+either way. On Linux FreeType drew the COLRv1 glyphs with ten axes varied up
+to 179 levels inside them and 768 pixels past 81, and the COLRv0 font with
+412 pixels past 81; this library's painter drew both sheets of COLRv1 glyphs
+within one inside them and 58 past 81, and the COLRv0 font with none past 8,
+so Linux takes it too. The font's 20 code points with no colour paint are
+drawn by the platform here and by Fontations' outlines in Chrome, and stand
+up to 215 apart on macOS.
 
 **On a GPU canvas a COLR colour glyph is an image made on the CPU, as Skia
 draws a colour glyph from the image its scaler context makes, so that the GPU

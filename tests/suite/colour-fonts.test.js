@@ -10,20 +10,6 @@ const { assert, describe, test } = require("../runner"),
 const REFERENCES = path.join(__dirname, "..", "assets", "images", "colr");
 
 /**
- * Where this library draws a COLR glyph from its paint graph as Chrome draws
- * it through Fontations: macOS and Windows. Elsewhere FreeType draws the
- * glyph, with its own anti-aliasing and placement.
- */
-// TEMPORARY: MEO_COLR_OWN_ROUTE runs the comparisons with the own painter
-// on another platform. Dropped before merge.
-const CHROME_MEASURED_HERE =
-  process.platform === "darwin" ||
-  process.platform === "win32" ||
-  process.env.MEO_COLR_OWN_ROUTE
-    ? false
-    : "Chrome 158's COLR glyphs are compared where this library draws them with its own painter";
-
-/**
  * How far a channel of a colour glyph may stand from Chrome's at any pixel,
  * edges included. Measured at 3, at one pixel of the test glyphs and with
  * their axes varied alike, and past 1 at ten: both draw the same paint graph
@@ -184,163 +170,135 @@ describe("COLR colour fonts", () => {
     );
   });
 
-  test(
-    "COLRv1 glyphs draw as Chrome draws them",
-    { skip: CHROME_MEASURED_HERE },
-    async () => {
-      fonts();
-      const spec = layout("chrome-test-glyphs-48px");
-      const largest = largestDifference(
-        glyphSheet(spec),
-        await reference(spec),
-        spec.width,
-        plainCells(spec),
-      );
-      assert.ok(
-        largest <= COLOUR_GLYPH_TOLERANCE,
-        `a colour glyph stands ${largest} from Chrome's`,
-      );
-    },
-  );
+  test("COLRv1 glyphs draw as Chrome draws them", async () => {
+    fonts();
+    const spec = layout("chrome-test-glyphs-48px");
+    const largest = largestDifference(
+      glyphSheet(spec),
+      await reference(spec),
+      spec.width,
+      plainCells(spec),
+    );
+    assert.ok(
+      largest <= COLOUR_GLYPH_TOLERANCE,
+      `a colour glyph stands ${largest} from Chrome's`,
+    );
+  });
 
-  test(
-    "COLRv1 glyphs with their axes varied draw as Chrome draws them",
-    { skip: CHROME_MEASURED_HERE },
-    async () => {
-      fonts();
-      const spec = layout("chrome-test-glyphs-48px-varied");
-      const largest = largestDifference(
-        glyphSheet(spec),
-        await reference(spec),
-        spec.width,
-        plainCells(spec),
-      );
-      assert.ok(
-        largest <= COLOUR_GLYPH_TOLERANCE,
-        `a colour glyph stands ${largest} from Chrome's`,
-      );
-    },
-  );
+  test("COLRv1 glyphs with their axes varied draw as Chrome draws them", async () => {
+    fonts();
+    const spec = layout("chrome-test-glyphs-48px-varied");
+    const largest = largestDifference(
+      glyphSheet(spec),
+      await reference(spec),
+      spec.width,
+      plainCells(spec),
+    );
+    assert.ok(
+      largest <= COLOUR_GLYPH_TOLERANCE,
+      `a colour glyph stands ${largest} from Chrome's`,
+    );
+  });
 
-  test(
-    "COLR version 0 glyphs draw as Chrome draws them",
-    { skip: CHROME_MEASURED_HERE },
-    async () => {
-      fonts();
-      const spec = layout("chrome-colr-v0");
-      // Byte for byte, at every size.
-      assert.equal(
-        largestDifference(v0Sheet(spec), await reference(spec), spec.width),
-        0,
-      );
-    },
-  );
+  test("COLR version 0 glyphs draw as Chrome draws them", async () => {
+    fonts();
+    const spec = layout("chrome-colr-v0");
+    // Byte for byte, at every size.
+    assert.equal(
+      largestDifference(v0Sheet(spec), await reference(spec), spec.width),
+      0,
+    );
+  });
 
-  test(
-    "the comparison refuses glyphs drawn a pixel off Chrome's",
-    { skip: CHROME_MEASURED_HERE },
-    async () => {
-      // The control for the comparisons above: a sheet moved a pixel across
-      // stands further from Chrome's than the tolerance passes.
-      fonts();
-      const spec = layout("chrome-test-glyphs-48px");
-      const largest = largestDifference(
-        glyphSheet(spec, 1),
-        await reference(spec),
-        spec.width,
-        plainCells(spec),
-      );
-      assert.ok(
-        largest > COLOUR_GLYPH_TOLERANCE,
-        `a sheet a pixel off stands only ${largest} from Chrome's`,
-      );
-    },
-  );
+  test("the comparison refuses glyphs drawn a pixel off Chrome's", async () => {
+    // The control for the comparisons above: a sheet moved a pixel across
+    // stands further from Chrome's than the tolerance passes.
+    fonts();
+    const spec = layout("chrome-test-glyphs-48px");
+    const largest = largestDifference(
+      glyphSheet(spec, 1),
+      await reference(spec),
+      spec.width,
+      plainCells(spec),
+    );
+    assert.ok(
+      largest > COLOUR_GLYPH_TOLERANCE,
+      `a sheet a pixel off stands only ${largest} from Chrome's`,
+    );
+  });
 
-  test(
-    "a GPU canvas draws colour glyphs as the CPU canvas does",
-    { skip: CHROME_MEASURED_HERE },
-    (t) => {
-      // Each colour glyph is an image made on the CPU, which the GPU canvas
-      // composites as the CPU canvas does: byte for byte where no glyph
-      // lands on another, so the cells are spread to twice the layout's.
-      fonts();
-      const probe = new Canvas(1, 1);
-      if (probe.engine.renderer != "GPU") return t.skip("no GPU here");
-      const spec = layout("chrome-test-glyphs-48px"),
-        spread = { ...spec, cell: spec.cell * 2, x: spec.x + spec.cell / 2 };
-      spread.baseline = spec.baseline + spec.cell / 2;
-      spread.width = spec.columns * spread.cell;
-      spread.height =
-        Math.ceil(spec.codepoints.length / spec.columns) * spread.cell;
-      const sheet = (gpu) => {
-        const canvas = new Canvas(spread.width, spread.height);
-        canvas.gpu = gpu;
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = spread.background;
-        ctx.fillRect(0, 0, spread.width, spread.height);
-        ctx.font = `${spread.size}px ColrGlyphs`;
-        ctx.fillStyle = spread.fillStyle;
-        spread.codepoints.forEach((hex, i) =>
-          ctx.fillText(
-            String.fromCodePoint(parseInt(hex, 16)),
-            (i % spread.columns) * spread.cell + spread.x,
-            Math.floor(i / spread.columns) * spread.cell + spread.baseline,
-          ),
-        );
-        return ctx.getImageData(0, 0, spread.width, spread.height).data;
-      };
-      assert.equal(
-        largestDifference(
-          sheet(true),
-          sheet(false),
-          spread.width,
-          plainCells(spread),
+  test("a GPU canvas draws colour glyphs as the CPU canvas does", (t) => {
+    // Each colour glyph is an image made on the CPU, which the GPU canvas
+    // composites as the CPU canvas does: byte for byte where no glyph
+    // lands on another, so the cells are spread to twice the layout's.
+    fonts();
+    const probe = new Canvas(1, 1);
+    if (probe.engine.renderer != "GPU") return t.skip("no GPU here");
+    const spec = layout("chrome-test-glyphs-48px"),
+      spread = { ...spec, cell: spec.cell * 2, x: spec.x + spec.cell / 2 };
+    spread.baseline = spec.baseline + spec.cell / 2;
+    spread.width = spec.columns * spread.cell;
+    spread.height =
+      Math.ceil(spec.codepoints.length / spec.columns) * spread.cell;
+    const sheet = (gpu) => {
+      const canvas = new Canvas(spread.width, spread.height);
+      canvas.gpu = gpu;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = spread.background;
+      ctx.fillRect(0, 0, spread.width, spread.height);
+      ctx.font = `${spread.size}px ColrGlyphs`;
+      ctx.fillStyle = spread.fillStyle;
+      spread.codepoints.forEach((hex, i) =>
+        ctx.fillText(
+          String.fromCodePoint(parseInt(hex, 16)),
+          (i % spread.columns) * spread.cell + spread.x,
+          Math.floor(i / spread.columns) * spread.cell + spread.baseline,
         ),
-        0,
       );
-    },
-  );
+      return ctx.getImageData(0, 0, spread.width, spread.height).data;
+    };
+    assert.equal(
+      largestDifference(
+        sheet(true),
+        sheet(false),
+        spread.width,
+        plainCells(spread),
+      ),
+      0,
+    );
+  });
 
-  test(
-    "strokeText draws a colour glyph filled, in the stroke's colour",
-    { skip: CHROME_MEASURED_HERE },
-    () => {
-      // As Chrome draws one: the glyph's paint graph fills it, and the
-      // stroke style is the colour its foreground paints take.
-      fonts();
-      const draw = (stroke) => {
-        const canvas = new Canvas(100, 100),
-          ctx = canvas.getContext("2d");
-        ctx.font = "72px ColrGlyphs";
-        ctx.lineWidth = 3;
-        if (stroke) {
-          ctx.strokeStyle = "green";
-          ctx.strokeText("\u{f0b06}", 10, 85);
-        } else {
-          ctx.fillStyle = "green";
-          ctx.fillText("\u{f0b06}", 10, 85);
-        }
-        return ctx.getImageData(0, 0, 100, 100).data;
-      };
-      assert.deepEqual(draw(true), draw(false));
-    },
-  );
-
-  test(
-    "an SVG export embeds a colour glyph as pixels",
-    { skip: CHROME_MEASURED_HERE },
-    () => {
-      // A colour glyph is composited through a layer of its own, which an
-      // SVG has no way to write: without asking for it, the export wrote
-      // nothing of the glyph at all.
-      fonts();
-      const canvas = new Canvas(120, 100),
+  test("strokeText draws a colour glyph filled, in the stroke's colour", () => {
+    // As Chrome draws one: the glyph's paint graph fills it, and the
+    // stroke style is the colour its foreground paints take.
+    fonts();
+    const draw = (stroke) => {
+      const canvas = new Canvas(100, 100),
         ctx = canvas.getContext("2d");
       ctx.font = "72px ColrGlyphs";
-      ctx.fillText("\u{f0200}", 10, 85);
-      const svg = canvas.toBufferSync("svg").toString();
-      assert.match(svg, /<image/);
-    },
-  );
+      ctx.lineWidth = 3;
+      if (stroke) {
+        ctx.strokeStyle = "green";
+        ctx.strokeText("\u{f0b06}", 10, 85);
+      } else {
+        ctx.fillStyle = "green";
+        ctx.fillText("\u{f0b06}", 10, 85);
+      }
+      return ctx.getImageData(0, 0, 100, 100).data;
+    };
+    assert.deepEqual(draw(true), draw(false));
+  });
+
+  test("an SVG export embeds a colour glyph as pixels", () => {
+    // A colour glyph is composited through a layer of its own, which an
+    // SVG has no way to write: without asking for it, the export wrote
+    // nothing of the glyph at all.
+    fonts();
+    const canvas = new Canvas(120, 100),
+      ctx = canvas.getContext("2d");
+    ctx.font = "72px ColrGlyphs";
+    ctx.fillText("\u{f0200}", 10, 85);
+    const svg = canvas.toBufferSync("svg").toString();
+    assert.match(svg, /<image/);
+  });
 });

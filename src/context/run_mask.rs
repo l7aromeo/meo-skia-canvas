@@ -287,7 +287,7 @@ fn placement(
             Shear::Flat => continue,
             Shear::By(_) => return None,
         }
-        // A colour glyph this build draws from its paint graph is no mask,
+        // A colour glyph this library draws from its paint graph is no mask,
         // and is placed by its own rule -- see `font::colr::ColourRun`.
         if draws_colour_glyphs(font) {
             return None;

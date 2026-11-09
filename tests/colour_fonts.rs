@@ -1,6 +1,5 @@
 //! Text set in a font with a `COLR` table, of version 0 or 1, drawn in its
-//! own colours -- and on macOS and Windows, where this crate draws such a
-//! glyph from its paint graph rather than through the platform, drawn as
+//! own colours, from its paint graph rather than through the platform, as
 //! Chrome draws it. The references are Chrome 158's, described in
 //! `tests/assets/images/colr`.
 
@@ -9,14 +8,12 @@ use meo_skia_canvas::prelude::*;
 const COLR_V1: &str =
     "tests/assets/fonts/color-fonts/test_glyphs-glyf_colr_1_variable.ttf";
 const COLR_V0: &str = "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf";
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 const REFERENCES: &str = "tests/assets/images/colr";
 
 /// How far a channel of a colour glyph may stand from Chrome's at any pixel,
 /// edges included. Measured at 3, at one pixel of the test glyphs and with
 /// their axes varied alike, and past 1 at ten: both draw the same paint graph
 /// through Skia's CPU raster.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 const COLOUR_GLYPH_TOLERANCE: u8 = 3;
 
 /// How far from a tie, in levels, the exact composite of a translucent
@@ -24,12 +21,10 @@ const COLOUR_GLYPH_TOLERANCE: u8 = 3;
 /// an image at half precision, and every such miss of an image or a layer
 /// lies within this of a tie -- see the eight-bit composite entry in
 /// `docs/browser-differences.md`.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 const GPU_COMPOSITE_TIE_LEVELS: f64 = 0.18;
 
 /// How far a pixel's red must stand above its blue to count as red: well
 /// past where anti-aliasing a blue glyph on white puts any pixel.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 const RED_OVER_BLUE: u8 = 60;
 
 /// The reach of a colour's spread across its channels past which a pixel
@@ -82,7 +77,6 @@ fn a_colr_version_0_font_inks_in_its_palettes_colours() {
     );
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod against_chrome {
     use super::*;
 
@@ -515,7 +509,6 @@ mod against_chrome {
 /// Colour glyphs drawn where a page is played back at another scale or
 /// place than it was recorded at: each glyph is made for the pixels it
 /// lands on there, as it would have been drawn there directly.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod played_back {
     use super::*;
 
@@ -657,7 +650,6 @@ mod played_back {
 /// to the CPU canvas's bytes. The glyphs stand apart, so that no glyph's
 /// image composites over another's -- see
 /// `against_chrome::an_overlapping_colour_glyph_parts_from_the_cpu_only_near_a_tie`.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod on_the_gpu {
     use super::*;
 
