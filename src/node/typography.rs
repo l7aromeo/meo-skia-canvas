@@ -2633,16 +2633,6 @@ impl<'a> Typesetter<'a> {
         })
     }
 
-    /// The run kept for drawing what this typesetter lays out: the one kept
-    /// already, or one laid out now and kept where the run has been drawn
-    /// before -- see [`LaidOut`] and [`LAID_OUT`]. `None` the first time,
-    /// for the draw to lay the run out for its own paint with
-    /// [`Typesetter::drawn_once`].
-    ///
-    /// Not on the first draw, because keeping a run costs more than drawing
-    /// it once: laid out with no paint, its runs read back and its blobs
-    /// built. A page of strings each drawn once took a fifth longer kept
-    /// than drawn plainly, and holds nothing anyone draws again.
     /// What the run's colour glyphs ask of a vector backend when drawn in
     /// `paint` -- see [`colour_features`] -- for a run not kept.
     ///
@@ -2683,6 +2673,16 @@ impl<'a> Typesetter<'a> {
         )
     }
 
+    /// The run kept for drawing what this typesetter lays out: the one kept
+    /// already, or one laid out now and kept where the run has been drawn
+    /// before -- see [`LaidOut`] and [`LAID_OUT`]. `None` the first time,
+    /// for the draw to lay the run out for its own paint with
+    /// [`Typesetter::drawn_once`].
+    ///
+    /// Not on the first draw, because keeping a run costs more than drawing
+    /// it once: laid out with no paint, its runs read back and its blobs
+    /// built. A page of strings each drawn once took a fifth longer kept
+    /// than drawn plainly, and holds nothing anyone draws again.
     pub fn laid_out(&self) -> Option<Rc<LaidOut>> {
         let found = LAID_OUT.with(|cache| {
             let mut cache = cache.borrow_mut();
