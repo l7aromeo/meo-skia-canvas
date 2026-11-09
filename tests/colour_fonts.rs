@@ -258,7 +258,8 @@ mod against_chrome {
     fn colrv1_glyphs_draw_as_chrome_draws_them() {
         let (interior, past) = checked("chrome-test-glyphs-48px", 0.0);
         assert!(interior <= INTERIOR_TOLERANCE, "interior off by {interior}");
-        // 33 measured, at the centres of repeated sweeps.
+        // 33 measured: pixels on the hard stops and wraps of repeated
+        // gradients, and edges -- see docs/browser-differences.md.
         assert!(past <= 40, "{past} edge pixels past the envelope");
     }
 

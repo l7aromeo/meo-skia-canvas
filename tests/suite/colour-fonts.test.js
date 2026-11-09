@@ -209,8 +209,8 @@ describe("COLR colour fonts", () => {
         interior <= INTERIOR_TOLERANCE,
         `interior pixels stand ${interior} from Chrome's`,
       );
-      // 33 measured, at the centres of repeated sweeps, where a pixel holds
-      // many hard seams.
+      // 33 measured: pixels on the hard stops and wraps of repeated
+      // gradients, and edges -- see docs/browser-differences.md.
       assert.ok(pastEnvelope <= 40, `${pastEnvelope} edge pixels past 81`);
     },
   );
