@@ -31,6 +31,10 @@ use crate::{
     started,
 };
 
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+use skia_safe::gpu::{
+    Budgeted, DirectContextId, Mipmapped, images::texture_from_image,
+};
 use skia_safe::{
     AlphaType, BlendMode, Canvas, ClipOp, Color, Color4f, ColorSpace,
     ColorType, Data, GlyphId, IPoint, IRect, ISize, Image, ImageFilter,
@@ -339,6 +343,7 @@ pub(crate) fn forget() {
         images.clear();
         *held = 0;
     });
+    release_textures();
 }
 
 thread_local! {
@@ -502,13 +507,10 @@ impl ColourRun {
         let largest = (shape.scale_x().hypot(shape.skew_y()))
             .max(shape.skew_x().hypot(shape.scale_y()))
             * self.face.upem;
-        let Some((image, offset)) = glyph_image(
-            picture,
-            bounds,
-            &shape,
-            format,
-            largest <= LARGEST_KEPT_TEXT,
-        ) else {
+        let keep = largest <= LARGEST_KEPT_TEXT;
+        let Some((image, offset)) =
+            glyph_image(picture, bounds, &shape, format, keep)
+        else {
             return true;
         };
         let mut composite = Paint::default();
@@ -525,9 +527,16 @@ impl ColourRun {
                 if let Some(filter) = paint.color_filter() {
                     composite.set_color_filter(filter);
                 }
-                (image, offset)
+                match keep {
+                    true => (resident(canvas, image), offset),
+                    false => (image, offset),
+                }
             }
         };
+        #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
+        if canvas.direct_context().is_some() && !image.is_texture_backed() {
+            RASTERS_ON_GPU.set(RASTERS_ON_GPU.get() + 1);
+        }
         canvas.save();
         canvas.reset_matrix();
         canvas.draw_image(
@@ -692,6 +701,92 @@ thread_local! {
     static IMAGES_MADE: Cell<usize> = const { Cell::new(0) };
 }
 
+#[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
+thread_local! {
+    /// How many glyph images [`resident`] has made textures of on this
+    /// thread, for the tests to count uploads.
+    static TEXTURES_MADE: Cell<usize> = const { Cell::new(0) };
+    /// How many raster glyph images [`ColrFace::draw_image`] has drawn on a
+    /// GPU canvas on this thread, each of which Skia uploads unless it still
+    /// holds the texture, for the tests to count the draws that could.
+    static RASTERS_ON_GPU: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The textures this thread has made of kept glyph images on a GPU
+/// canvas: the id of the context they belong to, and each texture by the
+/// unique id of the image [`glyph_image`] keeps.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+type Textures = Option<(DirectContextId, HashMap<u32, Image>)>;
+
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+thread_local! {
+    /// The textures [`resident`] made.
+    static TEXTURES: RefCell<Textures> = const { RefCell::new(None) };
+}
+
+/// `image`, a glyph image [`glyph_image`] keeps, as a texture on the GPU
+/// context `canvas` draws to, made once and kept beside the image; `image`
+/// itself on a canvas with no GPU context, or where the texture could not
+/// be made.
+///
+/// A raster image drawn on a GPU canvas is uploaded into a texture that
+/// Ganesh keys by the image's pixels (`GrMakeCachedBitmapProxyView` in
+/// `skia/src/gpu/ganesh/SkGr.cpp`), and that texture is the context's to
+/// free once no draw holds it: at once while the context's cache is over
+/// its budget (`GrResourceCache::notifyARefCntReachedZero` in
+/// `skia/src/gpu/ganesh/GrResourceCache.cpp`), and whenever the GPU
+/// engine's sweep frees the context's resources. Canvases on a thread share
+/// that thread's context, so the surfaces of pages not yet freed put the
+/// next page's glyphs over budget, and each playback would upload every
+/// glyph again. A texture held here is not the cache's to free.
+///
+/// The textures go when the images they were made of go, so they are held
+/// within [`GLYPH_IMAGE_BYTES_KEPT`] as the images are. One context's are
+/// kept at a time: a canvas drawing on another context on the same thread,
+/// a window's, lets them go.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn resident(canvas: &Canvas, image: Image) -> Image {
+    let Some(mut context) = canvas.direct_context() else {
+        return image;
+    };
+    let of = context.id();
+    TEXTURES.with_borrow_mut(|held| {
+        let textures = match held {
+            Some((id, textures)) if *id == of => textures,
+            _ => &mut held.insert((of, HashMap::new())).1,
+        };
+        if let Some(texture) = textures.get(&image.unique_id()) {
+            return texture.clone();
+        }
+        let Some(texture) = texture_from_image(
+            &mut context,
+            &image,
+            Mipmapped::No,
+            Budgeted::Yes,
+        ) else {
+            return image;
+        };
+        #[cfg(test)]
+        TEXTURES_MADE.set(TEXTURES_MADE.get() + 1);
+        textures.insert(image.unique_id(), texture.clone());
+        texture
+    })
+}
+
+/// `image` itself: without a GPU engine, every canvas is drawn on the CPU.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+fn resident(_canvas: &Canvas, image: Image) -> Image {
+    image
+}
+
+/// Lets go of the glyph textures this thread holds, which hold their
+/// context: called as the glyph images they were made of go, and by a GPU
+/// engine before it frees or drops an idle context.
+pub(crate) fn release_textures() {
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    TEXTURES.set(None);
+}
+
 /// The glyph `picture` records, inking within `bounds`, as an image under
 /// `shape`, a device transform with no translation, in `format`, and where
 /// the image's top left lands from the glyph's origin. Kept for the next ask
@@ -746,6 +841,7 @@ fn glyph_image(
             if *held + bytes > GLYPH_IMAGE_BYTES_KEPT {
                 images.clear();
                 *held = 0;
+                release_textures();
             }
             images.insert(key, made.clone());
             *held += bytes;
@@ -1582,5 +1678,71 @@ mod tests {
         };
         assert_eq!(draws_made(48.0), [1, 0]);
         assert_eq!(draws_made(LARGEST_KEPT_TEXT + 44.0), [1, 1]);
+    }
+
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    #[test]
+    fn a_glyph_texture_stays_on_the_gpu_from_page_to_page() {
+        // A GPU canvas whose context is over its resource budget -- a
+        // process holding canvases it has not yet freed -- releases a
+        // texture Skia keyed for one of these images when its draw ends, and
+        // uploaded every glyph again for each new page. Held here, a glyph
+        // is uploaded once for its context.
+        use crate::{gpu::RenderingEngine, prelude::*};
+        if !RenderingEngine::GPU.selectable() {
+            // A Mac always has Metal, so there a missing GPU is a failure;
+            // elsewhere -- CI's Linux runners -- the test says it did not
+            // run.
+            if cfg!(target_os = "macos") {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        forget();
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("ResidentColr"), [VARIABLE])
+            .expect("the font registers");
+        let mut limit = 0;
+        RenderingEngine::GPU.with_direct_context(|context| {
+            let context = context.expect("a GPU context");
+            limit = context.resource_cache_limit();
+            context.set_resource_cache_limit(1);
+        });
+        let page = || {
+            let mut canvas = crate::canvas::Canvas::new(400.0, 200.0);
+            canvas.set_gpu(true);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css("32px ResidentColr"));
+            for line in 0..4u32 {
+                let text: String = (0..16)
+                    .filter_map(|i| char::from_u32(0xf0100 + line * 16 + i))
+                    .collect();
+                ctx.fill_text(&text, 4.0, 40.0 + line as f32 * 40.0, None);
+            }
+            canvas
+                .to_image_data(None, &crate::pixels::ImageDataExport::default())
+                .expect("pixels");
+        };
+        // What a page made textures of, and what it drew from the CPU.
+        let uploads = |draw: &dyn Fn()| {
+            let before = (TEXTURES_MADE.get(), RASTERS_ON_GPU.get());
+            draw();
+            (
+                TEXTURES_MADE.get() - before.0,
+                RASTERS_ON_GPU.get() - before.1,
+            )
+        };
+        let first = uploads(&page);
+        let later: Vec<_> = (0..3).map(|_| uploads(&page)).collect();
+        RenderingEngine::GPU.with_direct_context(|context| {
+            if let Some(context) = context {
+                context.set_resource_cache_limit(limit);
+            }
+        });
+        assert!(first.0 > 0, "the first page made no texture");
+        assert_eq!(first.1, 0, "the first page drew glyphs from the CPU");
+        assert_eq!(later, [(0, 0); 3], "later pages uploaded glyphs again");
     }
 }

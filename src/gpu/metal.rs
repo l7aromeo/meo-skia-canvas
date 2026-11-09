@@ -19,6 +19,7 @@ use std::{
 
 use crate::{
     context::{chain, page::ExportOptions},
+    font::colr,
     gpu::{ThreadBound, graphite},
 };
 
@@ -139,10 +140,11 @@ impl MetalEngine {
             cell.take_if(|engine| {
                 engine.cleanup(); // it's unclear how effective this is...
                 let idle = engine.last_use.elapsed() > MTL_CONTEXT_LIFESPAN;
-                // The chain layers this thread keeps are the context's, and
-                // go before it does.
+                // The chain layers and glyph textures this thread keeps are
+                // the context's, and go before it does.
                 if idle {
                     chain::pool::release();
+                    colr::release_textures();
                 }
                 idle
             });
