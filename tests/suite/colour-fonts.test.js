@@ -31,6 +31,14 @@ const CHROME_MEASURED_HERE =
  */
 const COLOUR_GLYPH_TOLERANCE = 3;
 
+/**
+ * The family a character the test fonts lack falls back to in the Chrome
+ * comparisons, named so that both engines take the same one: a list nothing
+ * answers falls back to Chrome's standard font, Times, and to this
+ * library's `sans-serif` -- see docs/browser-differences.md.
+ */
+const FALLBACK = "serif";
+
 /** The test fonts, registered once. */
 const fonts = (() => {
   let registered = false;
@@ -80,7 +88,7 @@ const glyphSheet = (spec, shift = 0) => {
     ctx = canvas.getContext("2d");
   ctx.fillStyle = spec.background;
   ctx.fillRect(0, 0, spec.width, spec.height);
-  ctx.font = `${spec.size}px ColrGlyphs`;
+  ctx.font = `${spec.size}px ColrGlyphs, ${FALLBACK}`;
   if (spec.fontVariationSettings)
     ctx.fontVariationSettings = spec.fontVariationSettings;
   ctx.fillStyle = spec.fillStyle;
@@ -109,7 +117,7 @@ const v0Sheet = (spec) => {
     ctx.beginPath();
     ctx.rect(0, 0, spec.cellWidth, spec.cellHeight);
     ctx.clip();
-    ctx.font = `${size}px ColrV0`;
+    ctx.font = `${size}px ColrV0, ${FALLBACK}`;
     ctx.fillStyle = spec.fillStyle;
     ctx.fillText(text, spec.x, spec.baselineAbove + size);
     ctx.restore();

@@ -85,6 +85,12 @@ fn a_colr_version_0_font_inks_in_its_palettes_colours() {
 mod against_chrome {
     use super::*;
 
+    /// The family a character the test fonts lack falls back to in the
+    /// Chrome comparisons, named so that both engines take the same one: a
+    /// list nothing answers falls back to Chrome's standard font, Times, and
+    /// to this crate's `sans-serif` -- see `docs/browser-differences.md`.
+    const FALLBACK: &str = "serif";
+
     /// A reference's layout, from the `.json` beside its image.
     fn layout(name: &str) -> serde_json::Value {
         let text = std::fs::read_to_string(format!("{REFERENCES}/{name}.json"))
@@ -179,7 +185,7 @@ mod against_chrome {
                 ctx.fill_rect(0.0, 0.0, width, height);
             }
             assert!(ctx.set_font_css(&format!(
-                "{}px ColrGlyphs",
+                "{}px ColrGlyphs, {FALLBACK}",
                 number(spec, "size")
             )));
             if let Some(settings) = spec["fontVariationSettings"].as_str() {
@@ -268,7 +274,7 @@ mod against_chrome {
             ctx.begin_path();
             ctx.rect(0.0, 0.0, cell_width, cell_height);
             ctx.clip(FillRule::NonZero);
-            assert!(ctx.set_font_css(&format!("{size}px ColrV0")));
+            assert!(ctx.set_font_css(&format!("{size}px ColrV0, {FALLBACK}")));
             ctx.set_fill_style_css(spec["fillStyle"].as_str().expect("a fill"))
                 .expect("a colour");
             ctx.fill_text(
