@@ -11,9 +11,11 @@ use crate::{
         typesetting::{Typography, forget_typographies},
     },
     css::{FontUnits, is_font_relative, parse_length, without_comments},
+    export::VectorFeatures,
     font::{
-        FontFamily, ObliqueAngle, designed_style, leans_as_asked,
-        typo_ascent_share, variation_axes,
+        FontFamily, ObliqueAngle,
+        colr::{ColourRun, colr_face},
+        designed_style, leans_as_asked, typo_ascent_share, variation_axes,
     },
     font_library::{FontEpoch, FontLibrary, base_face},
     node::{
@@ -507,6 +509,18 @@ pub struct RunPaint {
 }
 
 impl LaidOut {
+    /// What the run's colour glyphs ask of a vector backend when drawn in
+    /// `paint` -- see [`colour_features`].
+    pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
+        colour_features(
+            self.drawn
+                .runs
+                .iter()
+                .map(|run| (&run.font, &run.glyphs[..])),
+            paint,
+        )
+    }
+
     fn new(
         mut layout: TextLayout,
         decoration: Option<decorate::Decoration>,
@@ -757,6 +771,17 @@ impl RunPaint {
                 continue;
             };
             let at = origin + run.origin;
+            if draw_colour_run(
+                canvas,
+                &run.font,
+                &run.glyphs,
+                &run.positions,
+                shear,
+                at,
+                &paint,
+            ) {
+                continue;
+            }
             match drawn_as_outlines(canvas, &run.font, shear) {
                 true => draw_outlines(
                     canvas,
@@ -1368,7 +1393,7 @@ fn glyph_boxes(
     boxes: &mut [Rect],
 ) {
     font.get_bounds(glyphs, boxes, Some(paint));
-    for (glyph, boxed) in zip(glyphs, boxes) {
+    for (glyph, boxed) in zip(glyphs, boxes.iter_mut()) {
         let Some(outline) = font.get_path(*glyph) else {
             continue;
         };
@@ -1379,6 +1404,19 @@ fn glyph_boxes(
             continue;
         }
         *boxed = outlined.with_outset((reach, reach));
+    }
+    // A colour glyph this build draws from its paint graph inks what the
+    // graph inks, filled whatever the paint's style, as Chrome draws one
+    // under `strokeText`; the platform's box for it is no bound, and on
+    // macOS 26 CoreText gives none.
+    if draws_colour_glyphs(font)
+        && let Some(run) = ColourRun::of(font, paint)
+    {
+        for (&glyph, boxed) in zip(glyphs, boxes) {
+            if let Some(ink) = run.ink(glyph) {
+                *boxed = ink;
+            }
+        }
     }
 }
 
@@ -2021,11 +2059,141 @@ pub(crate) fn draw_glyphs(
     origin: Point,
     paint: &Paint,
 ) {
+    if draw_colour_run(canvas, font, glyphs, positions, shear, origin, paint) {
+        return;
+    }
     if drawn_as_outlines(canvas, font, shear) {
         draw_outlines(canvas, font, glyphs, positions, shear, origin, paint);
     } else if let Some(blob) = sheared_blob(font, glyphs, positions, *shear) {
         canvas.draw_text_blob(&blob, origin, paint);
     }
+}
+
+/// Whether this build draws the colour glyphs of a face with a `COLR`
+/// table, of either version, itself -- see [`ColourRun`]: on macOS, whose
+/// CoreText draws a version 1 glyph as nothing on macOS 26 and 15 and a
+/// version 0 glyph as nothing on 27.2, and which Chrome never asks to draw
+/// either.
+const DRAWS_COLOUR_GLYPHS: bool = cfg!(target_os = "macos");
+
+/// What the colour glyphs among `runs`, each a font and its glyphs, ask of a
+/// vector backend when drawn in `paint` -- see `font::colr::ColourRun::
+/// features` -- so that a document a backend cannot write them into embeds
+/// them as pixels. Nothing where this build leaves colour glyphs to the
+/// platform.
+pub(crate) fn colour_features<'a>(
+    runs: impl IntoIterator<Item = (&'a Font, &'a [GlyphId])>,
+    paint: &Paint,
+) -> VectorFeatures {
+    if !DRAWS_COLOUR_GLYPHS {
+        return VectorFeatures::PLAIN;
+    }
+    runs.into_iter()
+        .filter_map(|(font, glyphs)| {
+            let run = ColourRun::of(font, paint)?;
+            Some(
+                glyphs
+                    .iter()
+                    .filter_map(|&glyph| run.features(glyph))
+                    .fold(VectorFeatures::PLAIN, VectorFeatures::with),
+            )
+        })
+        .fold(VectorFeatures::PLAIN, VectorFeatures::with)
+}
+
+/// What the colour glyphs `paragraph` sets ask of a vector backend -- see
+/// [`colour_features`]. Its runs are read only where SkParagraph reports a
+/// face that has them.
+pub(crate) fn paragraph_colour_features(
+    paragraph: &mut Paragraph,
+) -> VectorFeatures {
+    if !holds_colour_runs(paragraph) {
+        return VectorFeatures::PLAIN;
+    }
+    let runs = glyph_runs(paragraph);
+    colour_features(
+        runs.iter().map(|run| (&run.font, &run.glyphs[..])),
+        &Paint::default(),
+    )
+}
+
+/// Whether `paragraph` sets a run in a face whose colour glyphs this build
+/// draws itself -- see [`draw_colour_run`] -- so that `Paragraph::paint`,
+/// which leaves them to the platform, must not draw it. Read from the fonts
+/// SkParagraph reports for its runs, without visiting them.
+pub(crate) fn holds_colour_runs(paragraph: &Paragraph) -> bool {
+    DRAWS_COLOUR_GLYPHS
+        && paragraph
+            .get_fonts()
+            .iter()
+            .any(|info| draws_colour_glyphs(&info.font))
+}
+
+/// Whether this build draws `font`'s colour glyphs itself -- see
+/// [`draw_colour_run`] -- rather than as Skia's glyph masks.
+pub(crate) fn draws_colour_glyphs(font: &Font) -> bool {
+    DRAWS_COLOUR_GLYPHS && colr_face(&font.typeface()).is_some()
+}
+
+/// Draws `glyphs` in `font` at `positions` from `origin`, sheared by
+/// `shear`, in `paint`, as [`sheared_blob`]'s glyphs are drawn but for each
+/// colour glyph of a face with a `COLR` table, which is drawn from its paint
+/// graph -- see [`ColourRun`]. Returns whether it drew: `false`,
+/// having drawn nothing, where this build leaves such glyphs to the platform
+/// or the face has no such table.
+///
+/// The glyphs are drawn in order, the plain ones between two colour glyphs
+/// as one blob, so that where they overlap the later one lies on top as it
+/// would in one blob.
+pub(crate) fn draw_colour_run(
+    canvas: &Canvas,
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Shear,
+    origin: Point,
+    paint: &Paint,
+) -> bool {
+    if !DRAWS_COLOUR_GLYPHS {
+        return false;
+    }
+    let (sheared, moved): (Cow<'_, Font>, Cow<'_, [Point]>) = match shear {
+        Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions)),
+        Shear::By(shear) => {
+            let mut sheared = font.clone();
+            sheared.set_skew_x(font.skew_x() + shear.skew_x());
+            let moved = positions.iter().map(|&at| map_affine(shear, at));
+            (Cow::Owned(sheared), Cow::Owned(moved.collect()))
+        }
+        // Drawn as nothing, colour glyphs and all.
+        Shear::Flat => return ColourRun::of(font, paint).is_some(),
+    };
+    let Some(run) = ColourRun::of(&sheared, paint) else {
+        return false;
+    };
+    let plain = |from: usize, to: usize| {
+        if from < to
+            && let Some(blob) = sheared_blob(
+                &sheared,
+                &glyphs[from..to],
+                &moved[from..to],
+                Shear::None,
+            )
+        {
+            canvas.draw_text_blob(&blob, origin, paint);
+        }
+    };
+    let mut from = 0;
+    for (index, (&glyph, &at)) in zip(glyphs, moved.iter()).enumerate() {
+        let Some(colour) = run.glyph(glyph) else {
+            continue;
+        };
+        plain(from, index);
+        run.draw(canvas, &colour, origin + at, paint);
+        from = index + 1;
+    }
+    plain(from, glyphs.len());
+    true
 }
 
 /// The angle at which a shear lays a glyph along its baseline, where its
@@ -2461,6 +2629,49 @@ impl<'a> Typesetter<'a> {
     /// it once: laid out with no paint, its runs read back and its blobs
     /// built. A page of strings each drawn once took a fifth longer kept
     /// than drawn plainly, and holds nothing anyone draws again.
+    /// What the run's colour glyphs ask of a vector backend when drawn in
+    /// `paint` -- see [`colour_features`] -- for a run not kept.
+    ///
+    /// Laid out to answer only where it can hold a colour glyph: where a
+    /// face its families resolve to has a `COLR` table, or where one of its
+    /// characters is in none of them and falls back to a face that might.
+    /// Laying every first draw out again to ask cost 35% more on a page of
+    /// three thousand strings each drawn once; a text whose characters its
+    /// own faces hold, none of them colour faces, holds no colour glyph.
+    pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
+        if !DRAWS_COLOUR_GLYPHS {
+            return VectorFeatures::PLAIN;
+        }
+        let style = self.char_style();
+        let named = style.font_families();
+        let families: Vec<&str> = named.iter().collect();
+        let faces = self
+            .typefaces
+            .clone()
+            .find_typefaces(&families, style.font_style());
+        let coloured = faces.iter().any(|face| colr_face(face).is_some());
+        let held = || {
+            self.text.chars().all(|c| {
+                c.is_whitespace()
+                    || faces
+                        .iter()
+                        .any(|face| face.unichar_to_glyph(c as i32) != 0)
+            })
+        };
+        if !coloured && held() {
+            return VectorFeatures::PLAIN;
+        }
+        let mut layout = self.layout(&Paint::default());
+        if !holds_colour_runs(&layout.paragraph) {
+            return VectorFeatures::PLAIN;
+        }
+        let runs = glyph_runs(&mut layout.paragraph);
+        colour_features(
+            runs.iter().map(|run| (&run.font, &run.glyphs[..])),
+            paint,
+        )
+    }
+
     pub fn laid_out(&self) -> Option<Rc<LaidOut>> {
         let found = LAID_OUT.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -2513,7 +2724,8 @@ impl<'a> Typesetter<'a> {
     /// FreeType draws -- see [`may_draw_outlines`].
     pub fn drawn_once(&self, paint: &Paint, canvas: &Canvas) -> DrawnRun {
         let layout = self.layout(paint);
-        let plain = !may_draw_outlines(canvas, FAKE_ITALIC_SKEW);
+        let plain = !may_draw_outlines(canvas, FAKE_ITALIC_SKEW)
+            && !holds_colour_runs(&layout.paragraph);
         match (self.decoration(1.0), self.oblique) {
             (None, None) if plain => DrawnRun::Plain(layout),
             (decoration, _) => {

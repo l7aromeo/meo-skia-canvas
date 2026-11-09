@@ -3261,15 +3261,19 @@ impl Context2D {
         // with -- see `Inner::paragraph_paint`.
         let resolved = self.inner.makes_paragraph_paints();
         let at = SkPoint::new(x, y);
-        self.inner.with_composited_canvas(|canvas, recording| {
-            match resolved {
-                true => layout.paint_resolved(canvas, at, &|paint, colour| {
-                    self.inner.paragraph_paint(paint, colour, recording)
-                }),
-                false => layout.paint(canvas, at),
-            }
-            reach_the_clip(canvas);
-        });
+        let features = layout.colour_features();
+        self.inner
+            .with_composited_canvas(features, |canvas, recording| {
+                match resolved {
+                    true => {
+                        layout.paint_resolved(canvas, at, &|paint, colour| {
+                            self.inner.paragraph_paint(paint, colour, recording)
+                        })
+                    }
+                    false => layout.paint(canvas, at),
+                }
+                reach_the_clip(canvas);
+            });
     }
 
     // -- Arcs and rounded shapes -------------------------------------------

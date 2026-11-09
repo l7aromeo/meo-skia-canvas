@@ -1898,7 +1898,11 @@ impl Context2D {
     /// is the Canvas2D semantic: `destination-out` has to erase where the
     /// glyphs land, not per-glyph against a blank layer. Skipped entirely when
     /// there is nothing to apply, so the common case costs no offscreen.
-    pub fn with_composited_canvas<F>(&self, f: F)
+    ///
+    /// `features` is what the paragraph's own drawing asks of a vector
+    /// backend -- its colour glyphs, which this build draws through layers
+    /// of their own -- see `typography::paragraph_colour_features`.
+    pub fn with_composited_canvas<F>(&self, features: VectorFeatures, f: F)
     where
         F: Fn(&SkCanvas, Recording),
     {
@@ -1906,7 +1910,7 @@ impl Context2D {
         let blend = self.state.global_composite_operation;
 
         if alpha == 1.0 && blend == BlendMode::SrcOver {
-            self.with_canvas(f);
+            self.append_draw(features, false, f);
             return;
         }
 
@@ -1935,8 +1939,10 @@ impl Context2D {
                 .zip(record(Recording::Document))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        // What it draws with its own paints, which ask for nothing.
-        let contents = Entries::plain(entry.into_iter().collect());
+        // What it draws with its own paints, which ask for what its colour
+        // glyphs do.
+        let contents: Entries =
+            entry.into_iter().map(|entry| (entry, features)).collect();
         self.with_recorder(|mut recorder| {
             recorder.append_group(
                 Composite::Layer(LayerRec {
@@ -1971,19 +1977,27 @@ impl Context2D {
     /// is none: each part is filed on the page as it stands, which a vector
     /// backend then takes part by part -- an SVG keeps the text and the
     /// sharp shadows as vectors, where it writes nothing of a layer.
-    pub(crate) fn draw_with_shadows<F>(&self, casts: &[ShadowCast], draw: F)
-    where
+    ///
+    /// `features` is what the paragraph's glyphs ask of a vector backend --
+    /// see [`Self::with_composited_canvas`] -- which the parts that draw them
+    /// ask for in turn.
+    pub(crate) fn draw_with_shadows<F>(
+        &self,
+        casts: &[ShadowCast],
+        features: VectorFeatures,
+        draw: F,
+    ) where
         F: Fn(&SkCanvas, ShadowPart, Recording),
     {
         if self.state.global_alpha == 1.0
             && self.state.global_composite_operation == BlendMode::SrcOver
         {
-            self.with_canvas(|canvas, recording| {
+            self.append_draw(features, false, |canvas, recording| {
                 draw(canvas, ShadowPart::Beneath, recording);
             });
             for (index, cast) in casts.iter().enumerate() {
                 if !cast.blurs() {
-                    self.with_canvas(|canvas, recording| {
+                    self.append_draw(features, false, |canvas, recording| {
                         draw(canvas, ShadowPart::Sharp(index), recording);
                     });
                 } else if let Some(group) =
@@ -1997,7 +2011,7 @@ impl Context2D {
                     });
                 }
             }
-            self.with_canvas(|canvas, recording| {
+            self.append_draw(features, false, |canvas, recording| {
                 draw(canvas, ShadowPart::Over, recording);
             });
             return;
@@ -2027,9 +2041,9 @@ impl Context2D {
                 .zip(record(part, document))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        // The parts drawn sharp ask for nothing, and a blurred shadow for
-        // its filter, as each does filed on the page.
-        let plain = |part| entry(part).map(|e| (e, VectorFeatures::PLAIN));
+        // The parts drawn sharp ask for what the glyphs do, and a blurred
+        // shadow for its filter, as each does filed on the page.
+        let plain = |part| entry(part).map(|e| (e, features));
         let mut contents: Vec<(Layer, VectorFeatures)> =
             Vec::with_capacity(casts.len() + 2);
         contents.extend(plain(ShadowPart::Beneath));
@@ -3454,8 +3468,14 @@ impl Context2D {
             // if dye is a texture, convert text to path first
             self.draw_path(Some(typesetter.path(origin)), style, None);
         } else {
-            let features = self.vector_features(&paint, Some(style));
             let kept = typesetter.laid_out();
+            // What the colour glyphs this build draws itself ask for, beside
+            // what the paint does -- see `typography::colour_features`.
+            let features =
+                self.vector_features(&paint, Some(style)).with(match &kept {
+                    Some(kept) => kept.colour_features(&paint),
+                    None => typesetter.colour_features(&paint),
+                });
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
             // On a page that keeps a recording for pixels, text there takes

@@ -1338,6 +1338,26 @@ rasterized on the GPU at all. A direct mask is the glyph's coverage at the
 device transform, which no sample interpolated from a distance field
 reproduces, so this library keeps it whatever Chrome's GPU canvas does.
 
+**A COLR colour glyph on macOS is drawn here from its paint graph, as Chrome
+draws it, and its anti-aliased edges differ from Chrome's as a plain shape's
+do.** CoreText draws a COLRv1 glyph as nothing on macOS 26 and 15, and a COLRv0
+glyph as nothing on 27.2. Chrome draws every COLR web font on Apple platforms
+through Fontations, so this library reads the `COLR` table with `skrifa`,
+Fontations' reader, and draws the paint graph in its own code (`font::colr`),
+each glyph composited through a layer of its own as Skia composites a drawable
+glyph. A glyph's origin is placed as Chrome places it: floored to the device
+pixel after adding 1/8 across and 1/2 down. Against Chrome 158's CPU canvas on
+macOS 27.2, the 221 glyphs of `test_glyphs-glyf_colr_1_variable.ttf` at 48px
+agree within one level in each of the 764,234 pixels whose 3 by 3 neighbourhood
+is flat in both images. 33 edge pixels stand more than 81 levels apart, most at
+the centres of repeated sweeps. With ten of its axes varied, the figures are one
+level and 53 pixels. 81 is how far a circle and a triangle filled with no font
+involved come out apart at their edges. COLRv0 glyphs at 30 and 100px are
+Chrome's byte for byte; at 16 and 48px one edge row differs, the baseline
+placement of #142 (`colour_fonts` in the crate's tests, `colour-fonts.test.js`
+in the JavaScript suite). Elsewhere Skia's font backend draws the glyph, which
+was not measured against Chrome.
+
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
 `luminosity` divide exactly on the CPU, the same bytes on every machine, and
 Chrome's CPU canvas divides through an estimate.** Skia's raster pipeline
@@ -1400,6 +1420,21 @@ CoreGraphics draws it, which poppler draws 3,833 pixels apart from on the same
 file. A masked blend on the page itself, and one in a group at a density of 1,
 stay vector, since CoreGraphics renders both as the canvas does: the
 reproduction at density 1 comes out within a level.
+
+**A gradient drawn inside a layer, a COLR colour glyph's among them, renders
+mirrored or cropped in CoreGraphics, and the PDF is the one the specification
+describes.** A layer is written as a transparency-group form drawn with `Do`
+under the page's y flip, and a gradient inside it as a pattern whose matrix
+maps to the space in force at that `Do`, flip included -- as PDF Reference
+1.7 section 4.6.1 requires and poppler reads. CoreGraphics anchors the pattern
+to the page's default space instead, so in Preview, Quick Look, Safari and
+`sips` a vertical gradient in `saveLayer()` comes out upside down, and a COLR
+glyph, each composited through a form of its own, paints its gradients off the
+glyph: cropped, or missing outside the shading's domain. On a PDF of the COLR
+test glyphs on macOS 27.2, 4,445 of 40,000 pixels stand more than 32 levels
+off the canvas in CoreGraphics and 409 in poppler. The glyphs stay vector, and
+writing the form so that both readers agree is a change to Skia's PDF backend,
+tracked as #664.
 
 **A canvas's pattern is written as PDF tiling where its tiles land on whole
 device pixels, and poppler draws seams between the tiles.** A draw dyed by a
