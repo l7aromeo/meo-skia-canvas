@@ -751,7 +751,9 @@ impl RunPaint {
     }
 
     /// Draws the runs in `range` from `blobs`, the blobs of every run, onto
-    /// pixels that do with a faint paint what `faint` says.
+    /// pixels that do with a faint paint what `faint` says. A run in a face
+    /// whose colour glyphs this library draws is drawn without its blob,
+    /// which may be `None` for it -- see [`Self::built_plain_blobs`].
     fn draw_runs(
         &self,
         canvas: &Canvas,
@@ -767,9 +769,6 @@ impl RunPaint {
             &blobs[range],
         );
         for ((run, shear), blob) in runs {
-            let Some(blob) = blob else {
-                continue;
-            };
             let at = origin + run.origin;
             if draw_colour_run(
                 canvas,
@@ -782,6 +781,9 @@ impl RunPaint {
             ) {
                 continue;
             }
+            let Some(blob) = blob else {
+                continue;
+            };
             match drawn_as_outlines(canvas, &run.font, shear) {
                 true => draw_outlines(
                     canvas,
@@ -925,8 +927,26 @@ impl RunPaint {
         global_alpha: f32,
         faint: Faint,
     ) {
-        let blobs = self.built_blobs();
+        let blobs = self.built_plain_blobs();
         self.paint_from(canvas, origin, paint, global_alpha, faint, &blobs);
+    }
+
+    /// [`Self::built_blobs`] for the runs a draw paints as glyph masks, and
+    /// `None` for the runs in a face whose colour glyphs this library draws
+    /// itself -- see [`draws_colour_glyphs`] -- which [`Self::draw_runs`]
+    /// draws without a blob: a page of 32 runs of COLR glyphs, played again
+    /// and again, built 32 blobs a playback for nothing.
+    fn built_plain_blobs(&self) -> Vec<Option<TextBlob>> {
+        #[cfg(test)]
+        BLOB_BUILDS.set(BLOB_BUILDS.get() + 1);
+        zip(&self.runs, &self.shears)
+            .map(|(run, &shear)| match draws_colour_glyphs(&run.font) {
+                true => None,
+                false => {
+                    sheared_blob(&run.font, &run.glyphs, &run.positions, shear)
+                }
+            })
+            .collect()
     }
 
     /// [`Self::paint`] from `blobs`, the blobs of every run, built by

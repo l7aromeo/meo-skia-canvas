@@ -495,7 +495,7 @@ impl ColourRun {
     /// under a paint that blends by coefficients -- see
     /// [`blends_by_coefficients`] -- and carries no image filter are drawn
     /// together: copied into one image, an atlas, and drawn from it with one
-    /// `drawAtlas` -- see [`Self::draw_atlas`]. Ganesh draws each image it is
+    /// `drawAtlas` -- see [`Self::draw_images`]. Ganesh draws each image it is
     /// handed as an operation of its own, which it cannot merge with the
     /// next where the two read different textures: drawn an image apiece, a
     /// page of 32 runs of 16 glyphs was 512 texture operations, and merging,
@@ -521,11 +521,11 @@ impl ColourRun {
         glyphs: &[(Rc<ColrGlyph>, Point)],
         paint: &Paint,
     ) {
-        if on_gpu(canvas)
-            && blends_by_coefficients(paint.blend_mode_or(BlendMode::SrcOver))
-            && paint.image_filter().is_none()
+        let atlased = on_gpu(canvas)
+            && blends_by_coefficients(paint.blend_mode_or(BlendMode::SrcOver));
+        if paint.image_filter().is_none()
             && let Some(format) = ROUTE.with_borrow(Clone::clone)
-            && self.draw_atlas(canvas, glyphs, paint, &format)
+            && self.draw_images(canvas, glyphs, paint, &format, atlased)
         {
             return;
         }
@@ -535,9 +535,12 @@ impl ColourRun {
     }
 
     /// Draws `glyphs`, each with its origin, as images made on the CPU in
-    /// `format`, from atlases they are copied into, onto `canvas` in
-    /// `paint`, which carries no image filter. `false`, having
-    /// drawn nothing, under a perspective, or where the glyphs are past
+    /// `format`, onto `canvas` in `paint`, which carries no image filter:
+    /// from atlases they are copied into where `atlased`, and each on its
+    /// own otherwise, all under one device transform rather than one set up
+    /// and torn down for each glyph -- which cost the CPU canvas about 0.045
+    /// milliseconds a page of 512 glyphs. `false`, having drawn nothing,
+    /// under a perspective, or where the glyphs are past
     /// [`LARGEST_KEPT_TEXT`] and their images are not kept.
     ///
     /// Each image is drawn as [`Self::draw_image`] draws it: at the whole
@@ -547,12 +550,13 @@ impl ColourRun {
     /// blend. An
     /// atlas's sprites are drawn in order, so where two glyphs overlap the
     /// later lies on top as it did drawn on its own.
-    fn draw_atlas(
+    fn draw_images(
         &self,
         canvas: &Canvas,
         glyphs: &[(Rc<ColrGlyph>, Point)],
         paint: &Paint,
         format: &Format,
+        atlased: bool,
     ) -> bool {
         #[cfg(test)]
         if ONE_BY_ONE.get() {
@@ -578,12 +582,7 @@ impl ColourRun {
                 else {
                     return None;
                 };
-                let origin = device.map_point(snapped(canvas, *at));
-                // The origin `snapped` placed on a whole device pixel.
-                let origin = IPoint::new(
-                    origin.x.round() as i32,
-                    origin.y.round() as i32,
-                );
+                let origin = snapped_on_device(&device, *at);
                 let (image, offset) =
                     glyph_image(picture, bounds, &shape, format, true)?;
                 Some((image, origin + offset))
@@ -601,6 +600,11 @@ impl ColourRun {
         };
         canvas.save();
         canvas.reset_matrix();
+        if !atlased {
+            placed.iter().for_each(|(image, at)| one(image, *at));
+            canvas.restore();
+            return true;
+        }
         let mut start = 0;
         while start < placed.len() {
             let end = start + fits(&placed[start..]);
@@ -844,10 +848,10 @@ thread_local! {
 thread_local! {
     /// How many atlases [`atlas`] has made on this thread.
     static ATLASES_MADE: Cell<usize> = const { Cell::new(0) };
-    /// How many atlases [`ColourRun::draw_atlas`] has drawn from on this
+    /// How many atlases [`ColourRun::draw_images`] has drawn from on this
     /// thread.
     static ATLAS_DRAWS: Cell<usize> = const { Cell::new(0) };
-    /// Whether [`ColourRun::draw_atlas`] declines, so that the tests can
+    /// Whether [`ColourRun::draw_images`] declines, so that the tests can
     /// draw the same glyphs an image at a time to hold the two alike.
     static ONE_BY_ONE: Cell<bool> = const { Cell::new(false) };
 }
@@ -993,9 +997,22 @@ fn filtered(
 pub(crate) struct Format {
     color_type: ColorType,
     color_space: Option<ColorSpace>,
+    /// `color_space`'s hash, 0 for none: part of every glyph image's key,
+    /// worked out once for the format rather than for each glyph.
+    space: u64,
 }
 
 impl Format {
+    /// The format of pixels of `color_type` in `color_space`.
+    fn new(color_type: ColorType, color_space: Option<ColorSpace>) -> Self {
+        let space = color_space.as_ref().map_or(0, ColorSpace::hash);
+        Format {
+            color_type,
+            color_space,
+            space,
+        }
+    }
+
     /// Pixels of `size` in this format, premultiplied.
     pub(crate) fn image_info(&self, size: ISize) -> ImageInfo {
         ImageInfo::new(
@@ -1010,10 +1027,8 @@ impl Format {
     /// draws onto none: a recording, or a document.
     pub(crate) fn of(canvas: &Canvas) -> Option<Self> {
         let info = canvas.image_info();
-        (info.color_type() != ColorType::Unknown).then(|| Format {
-            color_type: info.color_type(),
-            color_space: info.color_space(),
-        })
+        (info.color_type() != ColorType::Unknown)
+            .then(|| Format::new(info.color_type(), info.color_space()))
     }
 }
 
@@ -1202,7 +1217,7 @@ fn glyph_image(
             shape.scale_y().to_bits(),
         ],
         format.color_type as i32,
-        format.color_space.as_ref().map_or(0, ColorSpace::hash),
+        format.space,
     );
     if keep
         && let Some(made) =
@@ -1269,11 +1284,19 @@ fn snapped(canvas: &Canvas, at: Point) -> Point {
     let Some(inverse) = matrix.invert() else {
         return at;
     };
-    let device = matrix.map_point(at);
-    inverse.map_point(Point::new(
-        (device.x + SNAP_ACROSS).floor(),
-        (device.y + SNAP_DOWN).floor(),
-    ))
+    let pixel = snapped_on_device(&matrix, at);
+    inverse.map_point(Point::new(pixel.x as f32, pixel.y as f32))
+}
+
+/// The whole device pixel [`snapped`] places a glyph whose origin is `at`
+/// on, under `device`, the canvas's transform: worked out once on the
+/// device rather than there and back through the transform's inverse.
+fn snapped_on_device(device: &Matrix, at: Point) -> IPoint {
+    let on_device = device.map_point(at);
+    IPoint::new(
+        (on_device.x + SNAP_ACROSS).floor() as i32,
+        (on_device.y + SNAP_DOWN).floor() as i32,
+    )
 }
 
 /// What Skia adds to a glyph's device x before it floors it, for text laid
@@ -1953,10 +1976,7 @@ mod tests {
 
     /// The format of an eight-bit sRGB page.
     fn srgb() -> Format {
-        Format {
-            color_type: ColorType::RGBA8888,
-            color_space: Some(ColorSpace::new_srgb()),
-        }
+        Format::new(ColorType::RGBA8888, Some(ColorSpace::new_srgb()))
     }
 
     /// A picture filling `side` units square, as a glyph's recording does.
@@ -1996,10 +2016,8 @@ mod tests {
         assert_eq!(images_made(|| at(1.0, true)), 0, "kept");
         assert_eq!(images_made(|| at(2.0, true)), 1, "another transform");
         assert_eq!(images_made(|| at(2.0, true)), 0, "kept as well");
-        let wide = Format {
-            color_type: ColorType::RGBAF16,
-            color_space: Some(ColorSpace::new_srgb()),
-        };
+        let wide =
+            Format::new(ColorType::RGBAF16, Some(ColorSpace::new_srgb()));
         let made = images_made(|| {
             glyph_image(&picture, bounds, &Matrix::new_identity(), &wide, true)
                 .expect("an image");
@@ -2391,17 +2409,22 @@ mod tests {
     #[test]
     fn glyphs_drawn_from_an_atlas_are_the_glyphs_drawn_one_by_one() {
         // On the GPU a run's colour glyphs are copied into an atlas and
-        // drawn from it with one drawAtlas; each must land, blend and clip
-        // exactly as its own image drawn on its own did. The CPU canvas
-        // draws each image on its own.
+        // drawn from it with one drawAtlas, and on the CPU drawn under one
+        // transform; each must land, blend and clip exactly as its own
+        // image drawn on its own did.
         use crate::{gpu::RenderingEngine, prelude::*};
         let library = FontLibrary::new();
         library
             .use_paths(Some("AtlasColr"), [VARIABLE])
             .expect("the font registers");
         for (name, _, scene) in atlas_scenes() {
-            let (_, from_atlases) = atlas_scene(false, false, &scene);
+            // The CPU canvas draws a run's images under one transform, not
+            // from an atlas, as each glyph drawn on its own draws its image.
+            let (drawn, from_atlases) = atlas_scene(false, false, &scene);
+            let (alone, _) = atlas_scene(false, true, &scene);
             assert_eq!(from_atlases, 0, "{name}: an atlas on the CPU");
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart on the CPU");
         }
         if !RenderingEngine::GPU.selectable() {
             if cfg!(target_os = "macos") {
@@ -2648,6 +2671,62 @@ mod tests {
         }
         assert!(held > 10_000, "only {held} channels to hold");
         eprintln!("{held} channels held, {near} off the exact composite");
+    }
+
+    #[test]
+    fn plain_glyphs_in_a_run_of_colour_glyphs_are_drawn_where_it_is_played() {
+        // A run holding colour glyphs is drawn again where the page is
+        // played, and its runs in a plain face -- here letters the colour
+        // font lacks, falling back to the next family -- are drawn from
+        // their blobs there: drawn alone, the same letters land on the same
+        // bytes.
+        use crate::{gpu::RenderingEngine, prelude::*};
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        library
+            .use_paths(
+                Some("AtlasPlain"),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("the font registers");
+        let colour = code_points(0xf0200, 1);
+        let engines: &[bool] = match RenderingEngine::GPU.selectable() {
+            true => &[false, true],
+            false => &[false],
+        };
+        for &gpu in engines {
+            let page = |text: &str| {
+                let mut canvas = crate::canvas::Canvas::new(200.0, 60.0);
+                canvas.set_gpu(gpu);
+                let ctx = canvas.context();
+                assert!(ctx.set_font_css("32px AtlasColr, AtlasPlain"));
+                ctx.set_fill_style_css("rgb(40 90 160)").expect("a colour");
+                ctx.fill_text(text, 4.0, 40.0, None);
+                canvas
+                    .to_image_data(
+                        None,
+                        &crate::pixels::ImageDataExport::default(),
+                    )
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec()
+            };
+            let (mixed, alone) = (page(&format!("AB{colour}")), page("AB"));
+            // The letters' columns, left of where the colour glyph starts.
+            let letters = |pixels: &[u8]| -> Vec<u8> {
+                pixels
+                    .chunks(200 * 4)
+                    .flat_map(|row| row[..40 * 4].to_vec())
+                    .collect()
+            };
+            let inked = letters(&alone).chunks(4).filter(|p| p[3] > 0).count();
+            assert!(inked > 100, "gpu {gpu}: the letters ink {inked} pixels");
+            let (mixed, alone) = (letters(&mixed), letters(&alone));
+            let apart = zip(&mixed, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "gpu {gpu}: the letters' bytes apart");
+        }
     }
 
     #[test]
