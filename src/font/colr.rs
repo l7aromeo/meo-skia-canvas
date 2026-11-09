@@ -2876,6 +2876,75 @@ mod tests {
         }
     }
 
+    // TEMPORARY probe, reverted before merge: the COLR route drawn from an
+    // atlas against each glyph image drawn on its own, overlapping and not.
+    #[test]
+    #[ignore = "probe"]
+    fn probe_atlas_against_one_by_one_on_this_gpu() {
+        use crate::{gpu::RenderingEngine, paint::BlendMode::*, prelude::*};
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("PROBE no GPU");
+            return;
+        }
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        for (name, spacing, count) in [
+            ("overlapping", -18.0, 4),
+            ("apart", 12.0, 4),
+            ("one", 0.0, 1),
+        ] {
+            for blend in [SourceOver, Xor, Lighter] {
+                for alpha in [1.0, 0.5] {
+                    let scene = move |ctx: &mut crate::context2d::Context2D| {
+                        ctx.set_global_composite_operation(blend);
+                        ctx.set_global_alpha(alpha);
+                        ctx.set_letter_spacing(spacing);
+                        ctx.fill_text(
+                            &code_points(0xf0100, count),
+                            4.0,
+                            40.0,
+                            None,
+                        );
+                    };
+                    let (cpu, _) = atlas_scene(false, false, &scene);
+                    let (atlas, draws) = atlas_scene(true, false, &scene);
+                    let (alone, _) = atlas_scene(true, true, &scene);
+                    let compare = |a: &[u8], b: &[u8]| {
+                        let off = zip(a, b).filter(|(x, y)| x != y).count();
+                        let most = zip(a, b).map(|(x, y)| x.abs_diff(*y)).max();
+                        (off, most)
+                    };
+                    eprintln!(
+                        "PROBE C {name} {blend:?} alpha {alpha} (atlas draws \
+                         {draws}): atlas-cpu {:?} alone-cpu {:?} atlas-alone \
+                         {:?}",
+                        compare(&atlas, &cpu),
+                        compare(&alone, &cpu),
+                        compare(&atlas, &alone),
+                    );
+                    let mut shown = 0;
+                    for p in (0..cpu.len()).step_by(4) {
+                        if atlas[p..p + 4] == alone[p..p + 4] || shown == 4 {
+                            continue;
+                        }
+                        shown += 1;
+                        eprintln!(
+                            "PROBE C   pixel {} {}: cpu {:?} atlas {:?} \
+                             alone {:?}",
+                            p / 4 % 600,
+                            p / 4 / 600,
+                            &cpu[p..p + 4],
+                            &atlas[p..p + 4],
+                            &alone[p..p + 4],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn plain_glyphs_in_a_run_of_colour_glyphs_are_drawn_where_it_is_played() {
         // A run holding colour glyphs is drawn again where the page is

@@ -505,7 +505,7 @@ jobs:
           cargo test \
             --no-default-features \
             --features "node-addon,vulkan,window,freetype" \
-            --lib -- probe_overlapping_plain_images_on_this_gpu \
+            --lib -- probe_ \
             --ignored --nocapture
       - name: Test the engine against the same build
         env:
