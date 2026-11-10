@@ -2929,7 +2929,8 @@ mod tests {
         // Drawn as an image of its own under a clip edge at a fraction of a
         // pixel, a glyph on the GPU canvas stood up to 22 levels from the
         // CPU canvas, and 11 at half alpha; drawn from an atlas it stands no
-        // further from it than unclipped, at either alpha.
+        // further from it than unclipped, at either alpha, but for a level at
+        // the clip edge on llvmpipe.
         use crate::{gpu::RenderingEngine, prelude::*};
         if !RenderingEngine::GPU.selectable() {
             if cfg!(target_os = "macos") {
@@ -2954,7 +2955,14 @@ mod tests {
             ctx.clip(FillRule::NonZero);
             atlas_lines(ctx);
         });
-        assert!(clipped <= unclipped, "{clipped:?} past {unclipped:?}");
+        // A clip edge's coverage enters the blend as an alpha does, which
+        // llvmpipe blends at eight bits: a level from the CPU canvas there,
+        // whose composite at full alpha is the exact one rounded.
+        let edge = on_llvmpipe().then_some(1);
+        assert!(
+            clipped <= unclipped.max(edge),
+            "{clipped:?} past {unclipped:?}"
+        );
         let half = furthest(&|ctx| {
             ctx.set_global_alpha(0.5);
             atlas_lines(ctx);

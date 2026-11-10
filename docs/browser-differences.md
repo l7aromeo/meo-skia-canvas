@@ -1425,7 +1425,9 @@ and none lies a level from the exact composite. Blends the shader does --
 `multiply`, `darken`, `difference` -- are exact there. So on llvmpipe a
 channel lies within a level of the exact composite at any distance from a
 tie. Under a `globalAlpha` of 0.5 the GPU canvas stands up to two levels from
-the CPU canvas, where Metal stands one. Overlapping images under `exclusion`
+the CPU canvas, where Metal stands one. At a clip edge, whose coverage enters
+the blend as an alpha does, a colour glyph stands a level from the CPU canvas
+at full alpha. Overlapping images under `exclusion`
 stand up to three levels from the CPU canvas there, where Metal stands two,
 for COLR glyphs and plain images alike. llvmpipe is a software rasterizer
 used for testing, and Chrome was not compared on it.
