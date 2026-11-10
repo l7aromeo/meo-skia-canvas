@@ -29,6 +29,7 @@ use crate::{
 
 pub(crate) mod caseless;
 pub(crate) mod colr;
+pub(crate) mod platform_colour;
 pub(crate) mod quarantine;
 
 /// One entry in a font's family list: a family by name, or a generic family.

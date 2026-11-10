@@ -15,7 +15,9 @@ use crate::{
     font::{
         FontFamily, ObliqueAngle,
         colr::{ColourRun, colr_face},
-        designed_style, leans_as_asked, typo_ascent_share, variation_axes,
+        designed_style, leans_as_asked,
+        platform_colour::draws_own_colours,
+        typo_ascent_share, variation_axes,
     },
     font_library::{FontEpoch, FontLibrary, base_face},
     node::{
@@ -519,6 +521,15 @@ impl LaidOut {
                 .map(|run| (&run.font, &run.glyphs[..])),
             paint,
         )
+    }
+
+    /// Whether the run holds a glyph the platform draws in its own colours
+    /// -- see [`draws_own_colours`].
+    pub(crate) fn draws_own_colours(&self) -> bool {
+        self.drawn
+            .runs
+            .iter()
+            .any(|run| draws_own_colours(&run.font.typeface()))
     }
 
     fn new(
@@ -2643,23 +2654,7 @@ impl<'a> Typesetter<'a> {
     /// three thousand strings each drawn once; a text whose characters its
     /// own faces hold, none of them colour faces, holds no colour glyph.
     pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
-        let style = self.char_style();
-        let named = style.font_families();
-        let families: Vec<&str> = named.iter().collect();
-        let faces = self
-            .typefaces
-            .clone()
-            .find_typefaces(&families, style.font_style());
-        let coloured = faces.iter().any(|face| colr_face(face).is_some());
-        let held = || {
-            self.text.chars().all(|c| {
-                c.is_whitespace()
-                    || faces
-                        .iter()
-                        .any(|face| face.unichar_to_glyph(c as i32) != 0)
-            })
-        };
-        if !coloured && held() {
+        if !self.can_hold(|face| colr_face(face).is_some()) {
             return VectorFeatures::PLAIN;
         }
         let mut layout = self.layout(&Paint::default());
@@ -2671,6 +2666,39 @@ impl<'a> Typesetter<'a> {
             runs.iter().map(|run| (&run.font, &run.glyphs[..])),
             paint,
         )
+    }
+
+    /// Whether the run holds a glyph the platform draws in its own colours
+    /// -- see [`draws_own_colours`] -- for a run not kept. Laid out to
+    /// answer only where it can hold one, as [`Self::colour_features`] is.
+    pub(crate) fn draws_own_colours(&self) -> bool {
+        self.can_hold(draws_own_colours)
+            && self
+                .layout(&Paint::default())
+                .paragraph
+                .get_fonts()
+                .iter()
+                .any(|info| draws_own_colours(&info.font.typeface()))
+    }
+
+    /// Whether the run can set a glyph in a face `kind` picks out: where a
+    /// face its families resolve to is one, or where one of its characters
+    /// is in none of them and falls back to a face that might be.
+    fn can_hold(&self, kind: impl Fn(&Typeface) -> bool) -> bool {
+        let style = self.char_style();
+        let named = style.font_families();
+        let families: Vec<&str> = named.iter().collect();
+        let faces = self
+            .typefaces
+            .clone()
+            .find_typefaces(&families, style.font_style());
+        faces.iter().any(&kind)
+            || !self.text.chars().all(|c| {
+                c.is_whitespace()
+                    || faces
+                        .iter()
+                        .any(|face| face.unichar_to_glyph(c as i32) != 0)
+            })
     }
 
     /// The run kept for drawing what this typesetter lays out: the one kept

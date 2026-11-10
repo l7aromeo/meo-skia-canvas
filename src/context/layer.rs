@@ -5700,3 +5700,199 @@ mod coverage_run_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod colour_glyph_coverage_tests {
+    //! A run holding glyphs the platform draws in their own colours -- from
+    //! an `sbix`, `CBDT` or `SVG ` table -- is not one flat colour, and the
+    //! coverage route, which paints a blur of the run's coverage in the
+    //! run's colour -- see [`CoverageRun`] -- would draw it in that colour.
+
+    use super::COVERAGE_RUNS;
+    use crate::prelude::*;
+
+    /// Skia's own bitmap and SVG colour fonts, each with the text Skia
+    /// draws in it (`tools/fonts/FontToolUtils.cpp`, `EmojiSample`).
+    const FACES: [(&str, &str, &str); 3] = [
+        ("ColourGlyphsSbix", "sbix.ttf", "\u{1F600} \u{2662}"),
+        ("ColourGlyphsCbdt", "cbdt.ttf", "\u{1F600} \u{2662}"),
+        ("ColourGlyphsSvg", "SampleSVG.ttf", "abcdefghij"),
+    ];
+
+    /// The family Oswald is registered under, for a run of outlines.
+    const OSWALD: &str = "ColourGlyphsOswald";
+
+    /// Two fills, far apart in every channel, for a run whose pixels must
+    /// not depend on which one it is drawn in.
+    const FILLS: [&str; 2] = ["rgb(230, 20, 10)", "rgb(10, 60, 240)"];
+
+    /// `text` in `family` at 48px, filled with `fill` through `filter` on a
+    /// CPU canvas, as premultiplied pixels, and how many draws took the
+    /// coverage route.
+    fn drawn(
+        family: &str,
+        text: &str,
+        fill: &str,
+        filter: &str,
+    ) -> (Vec<u8>, usize) {
+        drawn_times(family, text, fill, filter, 1)
+    }
+
+    /// [`drawn`], the run filled `times` times over itself: from the second,
+    /// it is the run kept for drawing -- see `Typesetter::laid_out`.
+    fn drawn_times(
+        family: &str,
+        text: &str,
+        fill: &str,
+        filter: &str,
+        times: usize,
+    ) -> (Vec<u8>, usize) {
+        let library = FontLibrary::new();
+        registered();
+        library
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let mut canvas = Canvas::with_options(
+            480.0,
+            80.0,
+            CanvasOptions {
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("48px {family}")));
+        ctx.set_fill_style_css(fill).expect("a colour");
+        ctx.set_filter_css(filter).expect("a filter");
+        let before = COVERAGE_RUNS.with(|runs| runs.get());
+        (0..times).for_each(|_| ctx.fill_text(text, 10.0, 58.0, None));
+        let pixels = canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    pixels: PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        (pixels, COVERAGE_RUNS.with(|runs| runs.get()) - before)
+    }
+
+    /// The faces of [`FACES`] this platform can load, registered under
+    /// their families. CoreText refuses a face with no outlines, as
+    /// `cbdt.ttf` is.
+    fn registered() -> Vec<&'static str> {
+        let library = FontLibrary::new();
+        FACES
+            .iter()
+            .filter(|(name, file, _)| {
+                library
+                    .use_paths(
+                        Some(name),
+                        [format!("tests/assets/fonts/bitmap-colour/{file}")],
+                    )
+                    .is_ok()
+            })
+            .map(|(name, _, _)| *name)
+            .collect()
+    }
+
+    /// Whether `family` draws `text` in its own colours here: inked, and
+    /// the same bytes in either fill.
+    fn in_own_colours(family: &str, text: &str) -> bool {
+        if !registered().contains(&family) {
+            return false;
+        }
+        let [(a, _), (b, _)] =
+            FILLS.map(|fill| drawn(family, text, fill, "none"));
+        a.chunks(4).any(|p| p[3] != 0) && a == b
+    }
+
+    #[test]
+    fn a_platform_colour_glyph_keeps_its_colours_under_a_blur() {
+        let coloured: Vec<&str> = FACES
+            .iter()
+            .filter(|(family, _, text)| in_own_colours(family, text))
+            .map(|(family, _, _)| *family)
+            .collect();
+        eprintln!("drawn in their own colours here: {coloured:?}");
+        assert!(!coloured.is_empty(), "no colour face to test");
+        for (family, _, text) in FACES {
+            if !coloured.contains(&family) {
+                continue;
+            }
+            for filter in ["blur(0.5px)", "blur(2px)"] {
+                let [(a, routed), (b, _)] =
+                    FILLS.map(|fill| drawn(family, text, fill, filter));
+                assert_eq!(routed, 0, "{family} under {filter} took the route");
+                assert!(
+                    a == b,
+                    "{family} under {filter} took its colour from the fill"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_kept_run_of_colour_glyphs_keeps_their_colours_under_a_blur() {
+        // Drawn again, the run is the one kept for drawing, which answers
+        // for itself.
+        let Some((family, _, text)) = FACES
+            .iter()
+            .find(|(family, _, text)| in_own_colours(family, text))
+        else {
+            panic!("no colour face to test");
+        };
+        let [(a, routed), (b, _)] =
+            FILLS.map(|fill| drawn_times(family, text, fill, "blur(2px)", 3));
+        assert_eq!(routed, 0, "a kept run took the route");
+        assert!(a == b, "a kept run took its colour from the fill");
+    }
+
+    #[test]
+    fn a_run_of_outlines_beside_colour_glyphs_keeps_their_colours() {
+        // One draw, its outlines from Oswald and its colour glyph by
+        // fallback: the colour glyph's cell must not take the fill.
+        let Some((family, _, _)) = FACES
+            .iter()
+            .find(|(family, _, text)| in_own_colours(family, text))
+        else {
+            panic!("no colour face to test");
+        };
+        let fonts = format!("{OSWALD}, {family}");
+        let text = "H            \u{1F600}";
+        let [(a, routed), (b, _)] =
+            FILLS.map(|fill| drawn(&fonts, text, fill, "blur(2px)"));
+        assert_eq!(routed, 0, "the mixed run took the route");
+        // Past the H, which ends before x = 45 at 48px from x = 10, and its
+        // blur's tail: where the colour glyph lands.
+        const PAST_THE_H: usize = 80;
+        let right = |pixels: &[u8]| -> Vec<u8> {
+            pixels
+                .chunks(480 * 4)
+                .flat_map(|row| row[PAST_THE_H * 4..].to_vec())
+                .collect()
+        };
+        assert!(right(&a).chunks(4).any(|p| p[3] != 0), "nothing drawn");
+        assert!(right(&a) == right(&b), "the colour glyph took the fill");
+    }
+
+    #[test]
+    fn a_run_of_outlines_still_takes_the_route() {
+        // The control: the route stays for a run in one flat colour, whose
+        // blur takes the fill.
+        let [(a, routed), (b, _)] = FILLS
+            .map(|fill| drawn_times(OSWALD, "Hamburg", fill, "blur(2px)", 3));
+        assert_eq!(routed, 3, "the run of outlines left the route");
+        assert!(a != b);
+    }
+}
