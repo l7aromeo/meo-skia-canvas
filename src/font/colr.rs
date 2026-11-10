@@ -29,6 +29,8 @@
 use std::cell::Cell;
 use std::{cell::RefCell, iter::zip, rc::Rc};
 
+use parking_lot::Mutex;
+
 use crate::{
     cache_map::{CacheMap, CacheSet},
     export::{VectorFeatures, blend_features},
@@ -612,6 +614,7 @@ impl ColourRun {
             return true;
         }
         if let Some((image, sprites)) = sheet_sprites(&placed, format) {
+            let sheet = image.unique_id();
             let image = resident(canvas, image);
             noted(canvas, &image);
             let moved: Vec<RSXform> = placed
@@ -626,6 +629,7 @@ impl ColourRun {
                 ATLAS_DRAWS.set(ATLAS_DRAWS.get() + 1);
                 SHEET_DRAWS.set(SHEET_DRAWS.get() + 1);
             }
+            captured(sheet, &composite, &moved, &sprites);
             if let Some((moved, sprites)) =
                 held_back(canvas, &image, moved, sprites, &composite)
             {
@@ -947,8 +951,8 @@ thread_local! {
     /// How many generations of sheets [`grow_sheets`] has made on this
     /// thread.
     static SHEET_GENERATIONS: Cell<usize> = const { Cell::new(0) };
-    /// How many runs [`ColourRun::draw_images`] has drawn from a sheet on
-    /// this thread.
+    /// How many runs have been drawn from a sheet on this thread, by
+    /// [`ColourRun::draw_images`] or from a [`Placement`].
     static SHEET_DRAWS: Cell<usize> = const { Cell::new(0) };
     /// How many rows deep the tests let a sheet grow, where they set it.
     static SHEET_DEPTH: Cell<Option<i32>> = const { Cell::new(None) };
@@ -1100,10 +1104,13 @@ struct Pending {
 
 /// Where this thread's batch stands: the canvas a [`BatchScope`] is open on,
 /// by address, while one is and is not suspended, and what it holds back.
+/// `spare` holds the vectors of the last batch drawn, emptied, for the next
+/// to fill without growing them again from nothing.
 #[derive(Default)]
 struct Batch {
     canvas: Option<usize>,
     pending: Option<Pending>,
+    spare: (Vec<RSXform>, Vec<Rect>),
 }
 
 thread_local! {
@@ -1166,25 +1173,44 @@ impl Drop for BatchScope<'_> {
 }
 
 /// Draws onto `canvas` what a [`BatchScope`] open on it holds back: called
-/// before anything else draws onto it while one may be open.
+/// before anything else draws onto it while one may be open. A run being
+/// captured for a [`Placed`] that calls it has drawn something besides its
+/// glyphs from a sheet, and is not kept.
 pub(crate) fn flush_batch(canvas: &Canvas) {
+    CAPTURE.with_borrow_mut(|capture| {
+        if let Some(capture) = capture {
+            capture.spoiled = true;
+        }
+    });
+    draw_pending(canvas);
+}
+
+/// Draws what a [`BatchScope`] open on `canvas` holds back, and keeps its
+/// vectors for the next batch -- see [`Batch::spare`].
+fn draw_pending(canvas: &Canvas) {
     let pending = BATCH.with_borrow_mut(|batch| {
         match batch.canvas == Some(address(canvas)) {
             true => batch.pending.take(),
             false => None,
         }
     });
-    if let Some(pending) = pending {
-        draw_from_atlas(
-            canvas,
-            &pending.image,
-            &pending.moved,
-            &pending.sprites,
-            &pending.paint,
-        );
-        #[cfg(test)]
-        BATCH_DRAWS.set(BATCH_DRAWS.get() + 1);
-    }
+    let Some(mut pending) = pending else {
+        return;
+    };
+    draw_from_atlas(
+        canvas,
+        &pending.image,
+        &pending.moved,
+        &pending.sprites,
+        &pending.paint,
+    );
+    #[cfg(test)]
+    BATCH_DRAWS.set(BATCH_DRAWS.get() + 1);
+    pending.moved.clear();
+    pending.sprites.clear();
+    BATCH.with_borrow_mut(|batch| {
+        batch.spare = (pending.moved, pending.sprites);
+    });
 }
 
 /// Holds back the run `moved` and `sprites` place from `image` in `paint`
@@ -1203,15 +1229,7 @@ fn held_back(
     if !open {
         return Some((moved, sprites));
     }
-    let joins = BATCH.with_borrow(|batch| {
-        batch.pending.as_ref().is_some_and(|pending| {
-            pending.image.unique_id() == image.unique_id()
-                && pending.paint == *paint
-        })
-    });
-    if !joins {
-        flush_batch(canvas);
-    }
+    let joins = joins_pending(canvas, image, paint);
     BATCH.with_borrow_mut(|batch| match &mut batch.pending {
         Some(pending) if joins => {
             pending.moved.extend(moved);
@@ -1227,6 +1245,205 @@ fn held_back(
         }
     });
     None
+}
+
+/// Whether a run drawn from `image` in `paint` joins what the batch open on
+/// `canvas` holds back; where it does not, that is drawn first.
+fn joins_pending(canvas: &Canvas, image: &Image, paint: &Paint) -> bool {
+    let joins = BATCH.with_borrow(|batch| {
+        batch.pending.as_ref().is_some_and(|pending| {
+            pending.image.unique_id() == image.unique_id()
+                && pending.paint == *paint
+        })
+    });
+    if !joins {
+        draw_pending(canvas);
+    }
+    joins
+}
+
+/// [`held_back`] for a run kept by a [`Placed`], with a batch open on
+/// `canvas`: its sprites copied into the batch, into a spare vector where it
+/// starts one.
+fn hold_back_copies(
+    canvas: &Canvas,
+    image: &Image,
+    moved: &[RSXform],
+    sprites: &[Rect],
+    paint: &Paint,
+) {
+    let joins = joins_pending(canvas, image, paint);
+    BATCH.with_borrow_mut(|batch| match &mut batch.pending {
+        Some(pending) if joins => {
+            pending.moved.extend_from_slice(moved);
+            pending.sprites.extend_from_slice(sprites);
+        }
+        _ => {
+            let (mut kept_moved, mut kept_sprites) =
+                std::mem::take(&mut batch.spare);
+            kept_moved.extend_from_slice(moved);
+            kept_sprites.extend_from_slice(sprites);
+            batch.pending = Some(Pending {
+                image: image.clone(),
+                paint: paint.clone(),
+                moved: kept_moved,
+                sprites: kept_sprites,
+            });
+        }
+    });
+}
+
+/// What a run of text drew from a sheet the last time it was played onto a
+/// GPU canvas in a batch, and what that draw depended on: the device
+/// transform it was drawn under, the sheet generation, by the unique id of
+/// its image -- which names the pixel format too, a sheet holding one -- and
+/// `key`, the caller's own: where the run is drawn and in what paint. Drawn
+/// again with all of them unchanged, the run draws the same sprites to the same
+/// places, which are copied into the batch rather than worked out again from
+/// each glyph.
+///
+/// Kept only for a run whose every draw went to the sheet, in one paint:
+/// anything else it draws -- a plain glyph, a decoration, a glyph past the
+/// sheet -- flushes the batch first, which spoils the capture -- see
+/// [`flush_batch`].
+struct Placement<K> {
+    key: K,
+    device: Matrix,
+    sheet: u32,
+    paint: Paint,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+}
+
+/// The [`Placement`] a run of text keeps, once it has one -- see
+/// [`draw_placed`].
+pub(crate) struct Placed<K>(Mutex<Option<Placement<K>>>);
+
+impl<K> Default for Placed<K> {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
+/// A run's draws from a sheet as they are captured -- see [`Placed`].
+#[derive(Default)]
+struct Capture {
+    /// The sheet generation's image id and the paint, from the first draw.
+    sheet: Option<(u32, Paint)>,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+    /// Whether the run drew anything else, or from another generation or
+    /// in another paint.
+    spoiled: bool,
+}
+
+thread_local! {
+    /// The capture of the run being played, while one is.
+    static CAPTURE: RefCell<Option<Capture>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many runs have been drawn from a [`Placement`] on this thread.
+    static PLACED_DRAWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Notes a run's draw of `sprites` from the sheet generation whose image id
+/// is `sheet`, moved as `moved` says, in `paint`, where a capture is open.
+fn captured(sheet: u32, paint: &Paint, moved: &[RSXform], sprites: &[Rect]) {
+    CAPTURE.with_borrow_mut(|capture| {
+        let Some(capture) = capture else {
+            return;
+        };
+        match &capture.sheet {
+            Some((id, kept)) if *id != sheet || kept != paint => {
+                capture.spoiled = true;
+            }
+            Some(_) => {}
+            None => capture.sheet = Some((sheet, paint.clone())),
+        }
+        capture.moved.extend_from_slice(moved);
+        capture.sprites.extend_from_slice(sprites);
+    });
+}
+
+/// The image of the sheet of `format` as it stands, if it has one.
+fn current_sheet(format: &Format) -> Option<Image> {
+    SHEETS.with_borrow(|sheets| {
+        sheets
+            .iter()
+            .find(|sheet| {
+                sheet.format.color_type == format.color_type
+                    && sheet.format.space == format.space
+            })
+            .and_then(|sheet| sheet.image.clone())
+    })
+}
+
+/// Draws a run of text with `draw` onto `canvas` through what `placed`
+/// keeps of its last draw where that still holds for the key `key` makes --
+/// see [`Placement`] -- and otherwise by `draw`, capturing what it draws for
+/// the next. Only onto a GPU canvas with a batch open on it while an
+/// [`ImageRoute`] is: elsewhere nothing is drawn from a sheet, and the key is
+/// not made.
+pub(crate) fn draw_placed<K: PartialEq>(
+    canvas: &Canvas,
+    placed: &Placed<K>,
+    key: impl FnOnce() -> K,
+    draw: impl FnOnce(),
+) {
+    let open = BATCH.with_borrow(|batch| batch.canvas == Some(address(canvas)));
+    #[cfg(test)]
+    let open = open && !ONE_BY_ONE.get();
+    let format = ROUTE.with_borrow(Clone::clone);
+    let Some(format) = format.filter(|_| open && on_gpu(canvas)) else {
+        draw();
+        return;
+    };
+    let device = canvas.local_to_device_as_3x3();
+    let key = key();
+    {
+        let kept = placed.0.lock();
+        if let Some(placement) = kept.as_ref().filter(|placement| {
+            placement.device == device && placement.key == key
+        }) && let Some(sheet) = current_sheet(&format)
+            .filter(|sheet| sheet.unique_id() == placement.sheet)
+        {
+            let image = resident(canvas, sheet);
+            noted(canvas, &image);
+            #[cfg(test)]
+            {
+                ATLAS_DRAWS.set(ATLAS_DRAWS.get() + 1);
+                SHEET_DRAWS.set(SHEET_DRAWS.get() + 1);
+                PLACED_DRAWS.set(PLACED_DRAWS.get() + 1);
+            }
+            hold_back_copies(
+                canvas,
+                &image,
+                &placement.moved,
+                &placement.sprites,
+                &placement.paint,
+            );
+            return;
+        }
+    }
+    let outer = CAPTURE.replace(Some(Capture::default()));
+    draw();
+    let capture = CAPTURE.replace(outer);
+    *placed.0.lock() =
+        capture
+            .filter(|capture| !capture.spoiled)
+            .and_then(|capture| {
+                let (sheet, paint) = capture.sheet?;
+                Some(Placement {
+                    key,
+                    device,
+                    sheet,
+                    paint,
+                    moved: capture.moved,
+                    sprites: capture.sprites,
+                })
+            });
 }
 
 /// Draws the sprites of `image` that `sprites` names, each moved as `moved`
@@ -1276,8 +1493,8 @@ thread_local! {
 thread_local! {
     /// How many atlases [`atlas`] has made on this thread.
     static ATLASES_MADE: Cell<usize> = const { Cell::new(0) };
-    /// How many atlases [`ColourRun::draw_images`] has drawn from on this
-    /// thread.
+    /// How many atlases, a sheet among them, have been drawn from on this
+    /// thread, by [`ColourRun::draw_images`] or from a [`Placement`].
     static ATLAS_DRAWS: Cell<usize> = const { Cell::new(0) };
     /// Whether [`ColourRun::draw_images`] declines, so that the tests can
     /// draw the same glyphs an image at a time to hold the two alike.
@@ -3121,10 +3338,14 @@ mod tests {
         assert_eq!(counts[1], (0, 0, 0, 0), "the second page");
         assert_eq!(counts[2], (1, 4, 1, 0), "the third page");
         assert_eq!(counts[3..], [(0, 4, 0, 0); 2], "later pages");
-        // Its four runs, one after another, are drawn with one drawAtlas.
-        let before = BATCH_DRAWS.get();
-        sheet_page(&blue, false);
-        assert_eq!(BATCH_DRAWS.get() - before, 1, "the runs drawn apart");
+        // Its four runs, one after another, are drawn with one drawAtlas,
+        // each from where it was placed the last time.
+        let (batches, placed) = (BATCH_DRAWS.get(), PLACED_DRAWS.get());
+        let again = sheet_page(&blue, false);
+        assert_eq!(BATCH_DRAWS.get() - batches, 1, "the runs drawn apart");
+        assert_eq!(PLACED_DRAWS.get() - placed, 4, "runs placed again");
+        let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "placed again: bytes apart from one by one");
         for (at, (pixels, _)) in pages.iter().enumerate() {
             let apart = zip(pixels, &alone).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "page {at}: bytes apart from one by one");
@@ -3152,6 +3373,92 @@ mod tests {
             SHEETS.with_borrow(Vec::is_empty),
             "a sheet kept past forget"
         );
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_run_drawn_unlike_its_last_draw_is_placed_anew() {
+        // A run keeps where it last drew its glyphs from the sheet. Drawn
+        // again elsewhere, under another transform, in another colour, or
+        // once the sheet it drew from has gone, it must land as its glyphs
+        // drawn one by one there, not where it was.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let line = || code_points(0xf0200, 16);
+        let placed: Box<AtlasScene> =
+            Box::new(move |ctx| ctx.fill_text(&line(), 4.0, 40.0, None));
+        let others: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.fill_text(&code_points(0xf0210, 16), 4.0, 40.0, None);
+        });
+        let unlike: Vec<(&str, Box<AtlasScene>)> = vec![
+            (
+                "moved along the line",
+                Box::new(move |ctx| ctx.fill_text(&line(), 34.0, 40.0, None)),
+            ),
+            (
+                "under another transform",
+                Box::new(move |ctx| {
+                    ctx.translate(30.0, 0.0);
+                    ctx.fill_text(&line(), 4.0, 40.0, None);
+                }),
+            ),
+            (
+                "in another colour",
+                Box::new(move |ctx| {
+                    ctx.set_fill_style_css("rgb(160 40 90)").expect("a colour");
+                    ctx.fill_text(&line(), 4.0, 40.0, None);
+                }),
+            ),
+        ];
+        // Drawn from the sheet and placed once more, so that the next draw
+        // has a placement to refuse.
+        let placed_once = || {
+            forget();
+            (0..4).for_each(|_| _ = atlas_scene(true, false, &placed));
+            let before = PLACED_DRAWS.get();
+            atlas_scene(true, false, &placed);
+            assert_eq!(PLACED_DRAWS.get() - before, 1, "not placed");
+        };
+        for (name, scene) in unlike {
+            placed_once();
+            let (alone, _) = atlas_scene(true, true, &scene);
+            let before = PLACED_DRAWS.get();
+            let (drawn, _) = atlas_scene(true, false, &scene);
+            assert_eq!(PLACED_DRAWS.get() - before, 0, "{name}: placed");
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart");
+        }
+        // Wrapped onto lines, one draw is a run for each line, each drawn
+        // from the sheet on its own: the placement holds them all.
+        let wrapped: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.set_text_wrap(true);
+            let text = code_points(0xf0200, 32);
+            ctx.fill_text(&text, 4.0, 40.0, Some(300.0));
+        });
+        forget();
+        let (alone, _) = atlas_scene(true, true, &wrapped);
+        (0..4).for_each(|_| _ = atlas_scene(true, false, &wrapped));
+        let before = PLACED_DRAWS.get();
+        let (drawn, _) = atlas_scene(true, false, &wrapped);
+        assert_eq!(PLACED_DRAWS.get() - before, 1, "wrapped: not placed");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "wrapped: bytes apart");
+        // The sheet dropped, a new one holds other glyphs where the run's
+        // lay: the run's placement names a sheet that has gone.
+        placed_once();
+        forget();
+        (0..4).for_each(|_| _ = atlas_scene(true, false, &others));
+        let (alone, _) = atlas_scene(true, true, &placed);
+        let before = PLACED_DRAWS.get();
+        let (drawn, _) = atlas_scene(true, false, &placed);
+        assert_eq!(PLACED_DRAWS.get() - before, 0, "a new sheet: placed");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "a new sheet: bytes apart");
     }
 
     /// The unique id of the first sheet's current generation.
@@ -3224,6 +3531,9 @@ mod tests {
             }
             let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "{name}: bytes apart");
+            let (again, _) = atlas_scene(true, false, &scene);
+            let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: drawn again, bytes apart");
         }
     }
 
@@ -3366,6 +3676,11 @@ mod tests {
             assert!(BATCH_DRAWS.get() > batches, "{name}: not batched");
             let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "{name}: bytes apart");
+            // Drawn again, a run that drew only from the sheet is placed as
+            // it was, and one that drew anything else is drawn as before.
+            let (again, _) = atlas_scene(true, false, &scene);
+            let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: drawn again, bytes apart");
         }
     }
 
@@ -3400,10 +3715,13 @@ mod tests {
         let batches = BATCH_DRAWS.get();
         let (drawn, _) = atlas_scene(true, false, &scene);
         let batched = BATCH_DRAWS.get() - batches;
+        let (again, _) = atlas_scene(true, false, &scene);
         KEEPS_RUNS.set(true);
         assert!(batched > 0, "not batched");
         let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
         assert_eq!(apart, 0, "bytes apart");
+        let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "drawn again, bytes apart");
     }
 
     #[test]
@@ -3438,12 +3756,21 @@ mod tests {
         let from_atlases = ATLAS_DRAWS.get() - atlas_draws - from_sheet;
         let full =
             SHEETS.with_borrow(|sheets| sheets.iter().any(|sheet| sheet.full));
+        // Drawn again, the first line is placed as it was; the second, part
+        // of it drawn from its own atlas, is not kept, and is drawn as
+        // before.
+        let placed = PLACED_DRAWS.get();
+        let (again, _) = atlas_scene(true, false, &scene);
+        let placed = PLACED_DRAWS.get() - placed;
         SHEET_DEPTH.set(None);
         assert!(full, "the sheet never filled");
         assert!(from_sheet > 0, "nothing drawn from the sheet");
         assert!(from_atlases > 0, "nothing past the sheet");
+        assert_eq!(placed, 1, "lines placed again");
         let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
         assert_eq!(apart, 0, "bytes apart");
+        let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "drawn again, bytes apart");
     }
 
     /// How far a premultiplied channel of the GPU canvas may stand from the
