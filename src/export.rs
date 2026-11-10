@@ -1188,13 +1188,6 @@ impl Default for EncodeOptions {
 }
 
 impl EncodeOptions {
-    /// Lowers these settings onto the internal encoder's options.
-    ///
-    /// The text contrast and gamma the encoder also accepts are left at
-    /// their tuned defaults rather than surfaced: they trade glyph weight
-    /// against the rasterizer's gamma correction, and exposing them invites
-    /// output that differs from the Node binding for no stated reason.
-    ///
     /// Refuses a value this crate would otherwise quietly substitute for.
     ///
     /// Every check here is one the JavaScript binding has always made. This
@@ -1384,6 +1377,13 @@ impl EncodeOptions {
         Ok(range)
     }
 
+    /// Lowers these settings onto the internal encoder's options.
+    ///
+    /// The text contrast and gamma the encoder also accepts are left at
+    /// their tuned defaults rather than surfaced: they trade glyph weight
+    /// against the rasterizer's gamma correction, and exposing them invites
+    /// output that differs from the Node binding for no stated reason.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidExportOption`] for a value this crate will

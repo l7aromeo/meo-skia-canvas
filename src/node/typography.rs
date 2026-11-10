@@ -212,14 +212,6 @@ fn family_of(typeface: &Typeface) -> String {
     })
 }
 
-/// Forgets every family [`family_of`] remembered, called by
-/// `FontLibrary::invalidate` whenever the registered fonts change.
-///
-/// Skia never gives two typefaces the same id, so an entry for a face the
-/// library has let go of could only ever be asked for again by a
-/// measurement still holding that face, and the next one asks for it once
-/// more. Without this every registration of a font left one entry behind
-/// for good -- two hundred registrations kept two hundred.
 /// The maximum intrinsic width SkParagraph's `TextWrapper` starts from and
 /// reports for a paragraph whose every line is no wider than nothing:
 /// `std::numeric_limits<SkScalar>::min()`, the smallest positive normal
@@ -258,6 +250,14 @@ pub(crate) fn paragraph_style() -> ParagraphStyle {
     style
 }
 
+/// Forgets every family [`family_of`] remembered, called by
+/// `FontLibrary::invalidate` whenever the registered fonts change.
+///
+/// Skia never gives two typefaces the same id, so an entry for a face the
+/// library has let go of could only ever be asked for again by a
+/// measurement still holding that face, and the next one asks for it once
+/// more. Without this every registration of a font left one entry behind
+/// for good -- two hundred registrations kept two hundred.
 pub(crate) fn forget_families() {
     FAMILIES.with(|families| families.borrow_mut().clear());
 }

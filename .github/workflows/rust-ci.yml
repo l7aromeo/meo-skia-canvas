@@ -938,6 +938,8 @@ jobs:
           echo "range: $RANGE"
           node scripts/check-stacked-docs.mjs --self-test
           node scripts/check-stacked-docs.mjs --range "$RANGE"
+          node scripts/check-doc-attachment.mjs --self-test
+          node scripts/check-doc-attachment.mjs --range "$RANGE"
 
   # The one context this workflow offers a branch ruleset. It runs whatever the
   # jobs above did, so a pull request that skips all ten still reports rather

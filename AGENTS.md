@@ -508,14 +508,19 @@ Restating the name is worse than nothing, because it satisfies the lint while
 telling the reader the item was never really documented.
 
 **When you edit or delete an item's doc comment, read the item below it.** A doc
-block written above an existing one silently reattaches: rustdoc concatenates
-the two and renders both on the following item, leaving the item the first block
-described undocumented. Nothing catches it -- `missing_docs` is satisfied
-because a comment exists, rustdoc has no opinion about which item a comment
-describes, and the rendered page looks deliberate. Deleting an item leaves its
-comment behind to reattach the same way. This is a habit rather than a gate,
-because neither the gate nor a careful reading of the diff has proved
-sufficient.
+comment attaches to whatever item follows it, so one that loses its item
+silently reattaches: rustdoc renders it on the next item, joined to that item's
+own doc or standing in for it, and the item it described is left undocumented.
+`missing_docs` is satisfied because a comment exists, rustdoc has no opinion
+about which item a comment describes, and the rendered page looks deliberate.
+`just check-docs` gates two of the ways it happens. `check-doc-attachment.mjs`
+refuses a change that leaves a doc line it kept on a different item -- the item
+it was written for deleted, moved, or pushed down by an item inserted above
+it -- and decides that from the diff, not from the prose.
+`check-stacked-docs.mjs` catches a new block written above an existing one,
+where every kept line stays on its item, by the shape of the text: a heuristic,
+scoped to the diff for that reason. Neither sees a doc reworded until it
+describes an item it does not sit on, and that stays the habit above.
 
 ---
 

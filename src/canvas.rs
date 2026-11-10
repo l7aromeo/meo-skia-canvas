@@ -104,10 +104,6 @@ impl BackendInfo {
     }
 }
 
-/// The alphabet RFC 4648 assigns to standard base64, in index order.
-///
-/// Not the URL-safe variant: a `data:` URL carries base64 in its body,
-/// where `+` and `/` are legal.
 /// The text contrast a canvas rasterizes glyph coverage with unless asked
 /// for another: the value Chromium compiles into its Skia build for the
 /// platform, `SK_GAMMA_CONTRAST` in `skia/BUILD.gn`'s `config("skia_config")`
@@ -153,6 +149,10 @@ pub(crate) fn text_gamma_in_range(gamma: f32) -> bool {
         .contains(&gamma)
 }
 
+/// The alphabet RFC 4648 assigns to standard base64, in index order.
+///
+/// Not the URL-safe variant: a `data:` URL carries base64 in its body,
+/// where `+` and `/` are legal.
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
