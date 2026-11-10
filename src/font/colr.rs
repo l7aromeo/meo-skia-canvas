@@ -29,8 +29,10 @@
 use std::cell::Cell;
 use std::{cell::RefCell, iter::zip, rc::Rc};
 
+use parking_lot::Mutex;
+
 use crate::{
-    cache_map::CacheMap,
+    cache_map::{CacheMap, CacheSet},
     export::{VectorFeatures, blend_features},
     started,
 };
@@ -62,7 +64,10 @@ use skrifa::{
     },
     instance::{Location, LocationRef, Size},
     outline::{DrawSettings, OutlinePen},
-    raw::types::BoundingBox,
+    raw::{
+        TableDirectory, TableRecord,
+        types::{BoundingBox, FixedSize},
+    },
 };
 
 /// The palette a glyph is drawn in: the font's first, which CSS Fonts 4's
@@ -118,6 +123,11 @@ const ATLAS_SIDE: i32 = 1024;
 /// and makes them again -- see [`atlas`]: as many as the glyph images they
 /// are copied from, [`GLYPH_IMAGE_BYTES_KEPT`].
 const ATLAS_BYTES_KEPT: usize = GLYPH_IMAGE_BYTES_KEPT;
+
+/// How many bytes a pixel format's [`Sheet`] holds at most: as many as a
+/// thread's run atlases together, so that a sheet of a format eight bytes a
+/// pixel or more is shorter than it is wide.
+const SHEET_BYTES_KEPT: usize = ATLAS_BYTES_KEPT;
 
 /// The tables a face's paint graphs and the outlines they clip to are read
 /// from, where the platform cannot hand the font's own file back -- see
@@ -263,15 +273,6 @@ fn assembled(tables: &[(&[u8; 4], Data)]) -> Vec<u8> {
     /// The sfnt version of a font with TrueType or CFF outlines alike, as a
     /// reader takes it: `0x00010000`.
     const SFNT_VERSION: u32 = 0x0001_0000;
-    /// The bytes of the table directory before its table records:
-    /// `sfntVersion`, a `uint32`, then `numTables`, `searchRange`,
-    /// `entrySelector` and `rangeShift`, a `uint16` each -- OpenType 1.9,
-    /// "The OpenType font file", `TableDirectory`. Fixed by the format.
-    const OFFSET_TABLE: usize = 12;
-    /// The bytes of each table record: `tableTag`, `checksum`, `offset` and
-    /// `length`, four bytes each -- OpenType 1.9, "The OpenType font file",
-    /// `TableRecord`. Fixed by the format.
-    const RECORD: usize = 16;
     let mut sorted: Vec<&(&[u8; 4], Data)> = tables.iter().collect();
     sorted.sort_by_key(|(tag, _)| **tag);
     let count = sorted.len();
@@ -281,7 +282,9 @@ fn assembled(tables: &[(&[u8; 4], Data)]) -> Vec<u8> {
     // The search fields are hints for a binary search, which skrifa does not
     // make; zero is a valid table directory to it.
     file.extend_from_slice(&[0; 6]);
-    let mut at = OFFSET_TABLE + RECORD * count;
+    // The table directory before its records, then a record a table: their
+    // sizes as read-fonts reads them, fixed by the format.
+    let mut at = TableDirectory::MIN_SIZE + TableRecord::RAW_BYTE_LEN * count;
     for (tag, data) in &sorted {
         file.extend_from_slice(*tag);
         file.extend_from_slice(&0u32.to_be_bytes());
@@ -474,6 +477,7 @@ impl ColourRun {
         at: Point,
         paint: &Paint,
     ) {
+        flush_batch(canvas);
         let (Some(picture), Some(bounds)) = (&glyph.picture, glyph.bounds)
         else {
             return;
@@ -542,8 +546,9 @@ impl ColourRun {
 
     /// Draws `glyphs`, each with its origin, as images made on the CPU in
     /// `format`, onto `canvas` in `paint`, which carries no image filter:
-    /// from atlases they are copied into where `atlased`, and each on its
-    /// own otherwise, all under one device transform rather than one set up
+    /// where `atlased`, from the [`Sheet`] where every one of them lies on
+    /// it and otherwise from atlases they are copied into, and each on its
+    /// own where not, all under one device transform rather than one set up
     /// and torn down for each glyph -- which cost the CPU canvas about 0.045
     /// milliseconds a page of 512 glyphs. `false`, having drawn nothing,
     /// under a perspective, or where the glyphs are past
@@ -603,10 +608,36 @@ impl ColourRun {
         canvas.save();
         canvas.reset_matrix();
         if !atlased {
+            flush_batch(canvas);
             placed.iter().for_each(|(image, at)| one(image, *at));
             canvas.restore();
             return true;
         }
+        if let Some((image, sprites)) = sheet_sprites(&placed, format) {
+            let sheet = image.unique_id();
+            let image = resident(canvas, image);
+            noted(canvas, &image);
+            let moved: Vec<RSXform> = placed
+                .iter()
+                .map(|(_, at)| {
+                    RSXform::new(1.0, 0.0, (at.x as f32, at.y as f32))
+                })
+                .collect();
+            canvas.restore();
+            #[cfg(test)]
+            {
+                ATLAS_DRAWS.set(ATLAS_DRAWS.get() + 1);
+                SHEET_DRAWS.set(SHEET_DRAWS.get() + 1);
+            }
+            captured(sheet, &composite, &moved, &sprites);
+            if let Some((moved, sprites)) =
+                held_back(canvas, &image, moved, sprites, &composite)
+            {
+                draw_from_atlas(canvas, &image, &moved, &sprites, &composite);
+            }
+            return true;
+        }
+        flush_batch(canvas);
         let mut start = 0;
         while start < placed.len() {
             let end = start + fits(&placed[start..]);
@@ -877,6 +908,571 @@ fn fits(images: &[(Image, IPoint)]) -> usize {
     packed_sprites(images).1
 }
 
+/// The glyph images of one pixel format a thread has drawn on GPU canvases
+/// more than once, copied into one image, so that the runs drawn from it
+/// read one texture and Ganesh can merge their `drawAtlas` calls into one
+/// draw. Drawn from a run's own atlas instead, each run read a texture of
+/// its own, which a page of 32 runs encoded as 32 draws.
+///
+/// The image is never written once made: a texture that draws not yet
+/// executed read must not change under them. Adding glyphs makes a new
+/// generation, the last one copied and the new glyphs copied in, and the
+/// textures made of the last one are let go -- see [`grow_sheets`].
+struct Sheet {
+    /// The format the images on the sheet are in.
+    format: Format,
+    /// Where each image on the sheet lies, by its unique id.
+    at: CacheMap<u32, IRect>,
+    /// The current generation, `None` before the first glyph is added.
+    image: Option<Image>,
+    /// Where the next image goes, packed in rows from the top left as
+    /// [`packed_sprites`] packs a run's atlas, and how tall its row is.
+    next: IPoint,
+    row: i32,
+    /// Whether an image has failed to fit, after which none is added.
+    full: bool,
+    /// The images drawn once, by unique id, not on the sheet: an image
+    /// drawn again is added, so that a page whose glyphs are new every
+    /// time -- in a colour of their own on every line, say -- adds none.
+    seen: CacheSet<u32>,
+    /// The images drawn again while not on the sheet, in the order they
+    /// were drawn, to add at the next [`grow_sheets`], and their ids.
+    wanted: Vec<Image>,
+    wanted_ids: CacheSet<u32>,
+}
+
+thread_local! {
+    /// The sheet of each pixel format this thread has drawn in.
+    static SHEETS: RefCell<Vec<Sheet>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many generations of sheets [`grow_sheets`] has made on this
+    /// thread.
+    static SHEET_GENERATIONS: Cell<usize> = const { Cell::new(0) };
+    /// How many runs have been drawn from a sheet on this thread, by
+    /// [`ColourRun::draw_images`] or from a [`Placement`].
+    static SHEET_DRAWS: Cell<usize> = const { Cell::new(0) };
+    /// How many rows deep the tests let a sheet grow, where they set it.
+    static SHEET_DEPTH: Cell<Option<i32>> = const { Cell::new(None) };
+}
+
+/// The sheet `images` all lie on for `format`, and the rectangle each takes
+/// in it; `None` where one of them is not on it, which is noted so that an
+/// image drawn again is added at the next [`grow_sheets`].
+fn sheet_sprites(
+    images: &[(Image, IPoint)],
+    format: &Format,
+) -> Option<(Image, Vec<Rect>)> {
+    SHEETS.with_borrow_mut(|sheets| {
+        let at = match sheets.iter().position(|sheet| {
+            sheet.format.color_type == format.color_type
+                && sheet.format.space == format.space
+        }) {
+            Some(at) => at,
+            None => {
+                sheets.push(Sheet {
+                    format: format.clone(),
+                    at: CacheMap::default(),
+                    image: None,
+                    next: IPoint::new(0, 0),
+                    row: 0,
+                    full: false,
+                    seen: CacheSet::default(),
+                    wanted: Vec::new(),
+                    wanted_ids: CacheSet::default(),
+                });
+                sheets.len() - 1
+            }
+        };
+        let sheet = &mut sheets[at];
+        if let Some(image) = &sheet.image {
+            let sprites: Option<Vec<Rect>> = images
+                .iter()
+                .map(|(image, _)| sheet.at.get(&image.unique_id()).copied())
+                .map(|rect| rect.map(Rect::from))
+                .collect();
+            if let Some(sprites) = sprites {
+                return Some((image.clone(), sprites));
+            }
+        }
+        if !sheet.full {
+            for (image, _) in images {
+                let id = image.unique_id();
+                if sheet.at.contains_key(&id) || sheet.wanted_ids.contains(&id)
+                {
+                    continue;
+                }
+                if !sheet.seen.insert(id) {
+                    sheet.wanted_ids.insert(id);
+                    sheet.wanted.push(image.clone());
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Adds to each sheet the images drawn again since the last call, in one
+/// new generation -- see [`Sheet`]. Called where a list of entries starts
+/// to play on pixels, so that a page adds what it wants at most once, not
+/// once for each run: the first page that draws a glyph again adds every
+/// one it drew again, and the next draws them all from the sheet.
+///
+/// An image that does not fit leaves the sheet full: no more are added
+/// until the sheets are dropped with the atlases -- see [`drop_atlases`].
+pub(crate) fn grow_sheets() {
+    SHEETS.with_borrow_mut(|sheets| {
+        for sheet in sheets.iter_mut().filter(|sheet| !sheet.wanted.is_empty())
+        {
+            grow(sheet);
+        }
+    });
+}
+
+/// Adds `sheet`'s wanted images to it in a new generation -- see
+/// [`grow_sheets`].
+fn grow(sheet: &mut Sheet) {
+    let wanted = std::mem::take(&mut sheet.wanted);
+    sheet.wanted_ids.clear();
+    let pixel = sheet.format.image_info(ISize::new(1, 1)).bytes_per_pixel();
+    let deepest = (SHEET_BYTES_KEPT / (ATLAS_SIDE as usize * pixel))
+        .min(ATLAS_SIDE as usize) as i32;
+    #[cfg(test)]
+    let deepest = SHEET_DEPTH.get().unwrap_or(deepest);
+    let mut added = Vec::with_capacity(wanted.len());
+    for image in wanted {
+        let (width, height) = (image.width(), image.height());
+        let mut next = sheet.next;
+        let mut row = sheet.row;
+        if next.x + width > ATLAS_SIDE {
+            next = IPoint::new(0, next.y + row);
+            row = 0;
+        }
+        if next.x + width > ATLAS_SIDE || next.y + height > deepest {
+            sheet.full = true;
+            break;
+        }
+        let rect = IRect::from_xywh(next.x, next.y, width, height);
+        sheet.next = IPoint::new(next.x + width, next.y);
+        sheet.row = row.max(height);
+        added.push((image, rect));
+    }
+    if added.is_empty() {
+        return;
+    }
+    let size = ISize::new(ATLAS_SIDE, sheet.next.y + sheet.row);
+    let Some(mut surface) =
+        started::raster(&sheet.format.image_info(size), None, None)
+    else {
+        sheet.full = true;
+        return;
+    };
+    let canvas = surface.canvas();
+    canvas.clear(Color::TRANSPARENT);
+    let mut copy = Paint::default();
+    copy.set_blend_mode(BlendMode::Src);
+    if let Some(last) = &sheet.image {
+        canvas.draw_image(last, (0.0, 0.0), Some(&copy));
+    }
+    for (image, rect) in &added {
+        canvas.draw_image(
+            image,
+            (rect.left as f32, rect.top as f32),
+            Some(&copy),
+        );
+    }
+    if let Some(last) = sheet.image.replace(surface.image_snapshot()) {
+        release_texture_of(last.unique_id());
+    }
+    for (image, rect) in added {
+        sheet.at.insert(image.unique_id(), rect);
+    }
+    #[cfg(test)]
+    SHEET_GENERATIONS.set(SHEET_GENERATIONS.get() + 1);
+}
+
+/// The sheet draws a [`BatchScope`] holds back: runs drawn from one sheet
+/// generation through one composite paint, to draw with one `drawAtlas`.
+struct Pending {
+    image: Image,
+    paint: Paint,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+}
+
+/// Where this thread's batch stands: the canvas a [`BatchScope`] is open on,
+/// by address, while one is and is not suspended, and what it holds back.
+/// `spare` holds the vectors of the last batch drawn, emptied, for the next
+/// to fill without growing them again from nothing.
+#[derive(Default)]
+struct Batch {
+    canvas: Option<usize>,
+    pending: Option<Pending>,
+    spare: (Vec<RSXform>, Vec<Rect>),
+}
+
+thread_local! {
+    /// This thread's batch.
+    static BATCH: RefCell<Batch> = RefCell::new(Batch::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many `drawAtlas` calls batches have made on this thread, each
+    /// drawing one or more runs.
+    static BATCH_DRAWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The address `canvas` is known by while a [`BatchScope`] is open on it.
+fn address(canvas: &Canvas) -> usize {
+    std::ptr::from_ref(canvas) as usize
+}
+
+/// While it lives, runs drawn from a [`Sheet`] onto its canvas are held back
+/// and drawn together, consecutive runs from one generation in one paint
+/// with one `drawAtlas`, rather than one a run. Skia records each
+/// `drawAtlas` as an op of its own, building the paint's image shader and
+/// merging the op into the last one: about 45% of the time a page of 32
+/// runs of colour glyphs took to play on a GPU canvas.
+///
+/// Opened by `play_entries` around consecutive colour runs. Whatever else
+/// draws onto the canvas meanwhile draws what is held back first -- see
+/// [`flush_batch`] -- so nothing lands out of order, and what is held back
+/// is drawn when the scope closes.
+pub(crate) struct BatchScope<'a> {
+    canvas: &'a Canvas,
+    outer: Option<usize>,
+}
+
+impl<'a> BatchScope<'a> {
+    /// Opens a batch on `canvas` until the scope is dropped.
+    pub(crate) fn open(canvas: &'a Canvas) -> Self {
+        flush_batch(canvas);
+        let outer = BATCH
+            .with_borrow_mut(|batch| batch.canvas.replace(address(canvas)));
+        BatchScope { canvas, outer }
+    }
+
+    /// Suspends any batch on `canvas` until the scope is dropped, having
+    /// drawn what it held back: for a draw under a clip, a layer or a
+    /// shadow of its own, whose runs must land within it.
+    pub(crate) fn suspend(canvas: &'a Canvas) -> Self {
+        flush_batch(canvas);
+        let outer = BATCH.with_borrow_mut(|batch| batch.canvas.take());
+        BatchScope { canvas, outer }
+    }
+}
+
+impl Drop for BatchScope<'_> {
+    fn drop(&mut self) {
+        flush_batch(self.canvas);
+        BATCH.with_borrow_mut(|batch| batch.canvas = self.outer);
+    }
+}
+
+/// Draws onto `canvas` what a [`BatchScope`] open on it holds back: called
+/// before anything else draws onto it while one may be open. A run being
+/// captured for a [`Placed`] that calls it has drawn something besides its
+/// glyphs from a sheet, and is not kept.
+pub(crate) fn flush_batch(canvas: &Canvas) {
+    CAPTURE.with_borrow_mut(|capture| {
+        if let Some(capture) = capture {
+            capture.spoiled = true;
+        }
+    });
+    draw_pending(canvas);
+}
+
+/// Draws what a [`BatchScope`] open on `canvas` holds back, and keeps its
+/// vectors for the next batch -- see [`Batch::spare`].
+fn draw_pending(canvas: &Canvas) {
+    let pending = BATCH.with_borrow_mut(|batch| {
+        match batch.canvas == Some(address(canvas)) {
+            true => batch.pending.take(),
+            false => None,
+        }
+    });
+    let Some(mut pending) = pending else {
+        return;
+    };
+    draw_from_atlas(
+        canvas,
+        &pending.image,
+        &pending.moved,
+        &pending.sprites,
+        &pending.paint,
+    );
+    #[cfg(test)]
+    BATCH_DRAWS.set(BATCH_DRAWS.get() + 1);
+    pending.moved.clear();
+    pending.sprites.clear();
+    BATCH.with_borrow_mut(|batch| {
+        batch.spare = (pending.moved, pending.sprites);
+    });
+}
+
+/// Holds back the run `moved` and `sprites` place from `image` in `paint`
+/// where a [`BatchScope`] is open on `canvas`, after the runs held back
+/// already where they share the image and the paint, and in their place,
+/// drawn first, where they do not. Hands `moved` and `sprites` back, held
+/// back nowhere, where no scope is open on `canvas`.
+fn held_back(
+    canvas: &Canvas,
+    image: &Image,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+    paint: &Paint,
+) -> Option<(Vec<RSXform>, Vec<Rect>)> {
+    let open = BATCH.with_borrow(|batch| batch.canvas == Some(address(canvas)));
+    if !open {
+        return Some((moved, sprites));
+    }
+    let joins = joins_pending(canvas, image, paint);
+    BATCH.with_borrow_mut(|batch| match &mut batch.pending {
+        Some(pending) if joins => {
+            pending.moved.extend(moved);
+            pending.sprites.extend(sprites);
+        }
+        _ => {
+            batch.pending = Some(Pending {
+                image: image.clone(),
+                paint: paint.clone(),
+                moved,
+                sprites,
+            });
+        }
+    });
+    None
+}
+
+/// Whether a run drawn from `image` in `paint` joins what the batch open on
+/// `canvas` holds back; where it does not, that is drawn first.
+fn joins_pending(canvas: &Canvas, image: &Image, paint: &Paint) -> bool {
+    let joins = BATCH.with_borrow(|batch| {
+        batch.pending.as_ref().is_some_and(|pending| {
+            pending.image.unique_id() == image.unique_id()
+                && pending.paint == *paint
+        })
+    });
+    if !joins {
+        draw_pending(canvas);
+    }
+    joins
+}
+
+/// [`held_back`] for a run kept by a [`Placed`], with a batch open on
+/// `canvas`: its sprites copied into the batch, into a spare vector where it
+/// starts one.
+fn hold_back_copies(
+    canvas: &Canvas,
+    image: &Image,
+    moved: &[RSXform],
+    sprites: &[Rect],
+    paint: &Paint,
+) {
+    let joins = joins_pending(canvas, image, paint);
+    BATCH.with_borrow_mut(|batch| match &mut batch.pending {
+        Some(pending) if joins => {
+            pending.moved.extend_from_slice(moved);
+            pending.sprites.extend_from_slice(sprites);
+        }
+        _ => {
+            let (mut kept_moved, mut kept_sprites) =
+                std::mem::take(&mut batch.spare);
+            kept_moved.extend_from_slice(moved);
+            kept_sprites.extend_from_slice(sprites);
+            batch.pending = Some(Pending {
+                image: image.clone(),
+                paint: paint.clone(),
+                moved: kept_moved,
+                sprites: kept_sprites,
+            });
+        }
+    });
+}
+
+/// What a run of text drew from a sheet the last time it was played onto a
+/// GPU canvas in a batch, and what that draw depended on: the device
+/// transform it was drawn under, the sheet generation, by the unique id of
+/// its image -- which names the pixel format too, a sheet holding one -- and
+/// `key`, the caller's own: where the run is drawn and in what paint. Drawn
+/// again with all of them unchanged, the run draws the same sprites to the same
+/// places, which are copied into the batch rather than worked out again from
+/// each glyph.
+///
+/// Kept only for a run whose every draw went to the sheet, in one paint:
+/// anything else it draws -- a plain glyph, a decoration, a glyph past the
+/// sheet -- flushes the batch first, which spoils the capture -- see
+/// [`flush_batch`].
+struct Placement<K> {
+    key: K,
+    device: Matrix,
+    sheet: u32,
+    paint: Paint,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+}
+
+/// The [`Placement`] a run of text keeps, once it has one -- see
+/// [`draw_placed`].
+pub(crate) struct Placed<K>(Mutex<Option<Placement<K>>>);
+
+impl<K> Default for Placed<K> {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
+/// A run's draws from a sheet as they are captured -- see [`Placed`].
+#[derive(Default)]
+struct Capture {
+    /// The sheet generation's image id and the paint, from the first draw.
+    sheet: Option<(u32, Paint)>,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+    /// Whether the run drew anything else, or from another generation or
+    /// in another paint.
+    spoiled: bool,
+}
+
+thread_local! {
+    /// The capture of the run being played, while one is.
+    static CAPTURE: RefCell<Option<Capture>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many runs have been drawn from a [`Placement`] on this thread.
+    static PLACED_DRAWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Notes a run's draw of `sprites` from the sheet generation whose image id
+/// is `sheet`, moved as `moved` says, in `paint`, where a capture is open.
+fn captured(sheet: u32, paint: &Paint, moved: &[RSXform], sprites: &[Rect]) {
+    CAPTURE.with_borrow_mut(|capture| {
+        let Some(capture) = capture else {
+            return;
+        };
+        match &capture.sheet {
+            Some((id, kept)) if *id != sheet || kept != paint => {
+                capture.spoiled = true;
+            }
+            Some(_) => {}
+            None => capture.sheet = Some((sheet, paint.clone())),
+        }
+        capture.moved.extend_from_slice(moved);
+        capture.sprites.extend_from_slice(sprites);
+    });
+}
+
+/// The image of the sheet of `format` as it stands, if it has one.
+fn current_sheet(format: &Format) -> Option<Image> {
+    SHEETS.with_borrow(|sheets| {
+        sheets
+            .iter()
+            .find(|sheet| {
+                sheet.format.color_type == format.color_type
+                    && sheet.format.space == format.space
+            })
+            .and_then(|sheet| sheet.image.clone())
+    })
+}
+
+/// Draws a run of text with `draw` onto `canvas` through what `placed`
+/// keeps of its last draw where that still holds for the key `key` makes --
+/// see [`Placement`] -- and otherwise by `draw`, capturing what it draws for
+/// the next. Only onto a GPU canvas with a batch open on it while an
+/// [`ImageRoute`] is: elsewhere nothing is drawn from a sheet, and the key is
+/// not made.
+pub(crate) fn draw_placed<K: PartialEq>(
+    canvas: &Canvas,
+    placed: &Placed<K>,
+    key: impl FnOnce() -> K,
+    draw: impl FnOnce(),
+) {
+    let open = BATCH.with_borrow(|batch| batch.canvas == Some(address(canvas)));
+    #[cfg(test)]
+    let open = open && !ONE_BY_ONE.get();
+    let format = ROUTE.with_borrow(Clone::clone);
+    let Some(format) = format.filter(|_| open && on_gpu(canvas)) else {
+        draw();
+        return;
+    };
+    let device = canvas.local_to_device_as_3x3();
+    let key = key();
+    {
+        let kept = placed.0.lock();
+        if let Some(placement) = kept.as_ref().filter(|placement| {
+            placement.device == device && placement.key == key
+        }) && let Some(sheet) = current_sheet(&format)
+            .filter(|sheet| sheet.unique_id() == placement.sheet)
+        {
+            let image = resident(canvas, sheet);
+            noted(canvas, &image);
+            #[cfg(test)]
+            {
+                ATLAS_DRAWS.set(ATLAS_DRAWS.get() + 1);
+                SHEET_DRAWS.set(SHEET_DRAWS.get() + 1);
+                PLACED_DRAWS.set(PLACED_DRAWS.get() + 1);
+            }
+            hold_back_copies(
+                canvas,
+                &image,
+                &placement.moved,
+                &placement.sprites,
+                &placement.paint,
+            );
+            return;
+        }
+    }
+    let outer = CAPTURE.replace(Some(Capture::default()));
+    draw();
+    let capture = CAPTURE.replace(outer);
+    *placed.0.lock() =
+        capture
+            .filter(|capture| !capture.spoiled)
+            .and_then(|capture| {
+                let (sheet, paint) = capture.sheet?;
+                Some(Placement {
+                    key,
+                    device,
+                    sheet,
+                    paint,
+                    moved: capture.moved,
+                    sprites: capture.sprites,
+                })
+            });
+}
+
+/// Draws the sprites of `image` that `sprites` names, each moved as `moved`
+/// says, onto `canvas` in `paint` with one `drawAtlas`, under no transform:
+/// each sprite lands on whole device pixels, sampled at the nearest texel.
+fn draw_from_atlas(
+    canvas: &Canvas,
+    image: &Image,
+    moved: &[RSXform],
+    sprites: &[Rect],
+    paint: &Paint,
+) {
+    canvas.save();
+    canvas.reset_matrix();
+    // With no colours given, the blend mode `drawAtlas` takes for them is
+    // not read.
+    canvas.draw_atlas(
+        image,
+        moved,
+        sprites,
+        None,
+        BlendMode::Dst,
+        SamplingOptions::default(),
+        None,
+        paint,
+    );
+    canvas.restore();
+}
+
 /// What a run's atlas is kept by: the unique ids of the glyph images it
 /// holds, in the order its sprites hold them. A kept glyph image is kept
 /// until every one goes at once, and its id is taken by no other image in
@@ -897,20 +1493,21 @@ thread_local! {
 thread_local! {
     /// How many atlases [`atlas`] has made on this thread.
     static ATLASES_MADE: Cell<usize> = const { Cell::new(0) };
-    /// How many atlases [`ColourRun::draw_images`] has drawn from on this
-    /// thread.
+    /// How many atlases, a sheet among them, have been drawn from on this
+    /// thread, by [`ColourRun::draw_images`] or from a [`Placement`].
     static ATLAS_DRAWS: Cell<usize> = const { Cell::new(0) };
     /// Whether [`ColourRun::draw_images`] declines, so that the tests can
     /// draw the same glyphs an image at a time to hold the two alike.
     static ONE_BY_ONE: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Drops every atlas this thread keeps.
+/// Drops every atlas and [`Sheet`] this thread keeps.
 fn drop_atlases() {
     ATLASES.with_borrow_mut(|(atlases, held)| {
         atlases.clear();
         *held = 0;
     });
+    SHEETS.set(Vec::new());
 }
 
 /// `images`, glyph images [`glyph_image`] keeps, copied into one image in
@@ -1225,6 +1822,20 @@ fn resident(canvas: &Canvas, image: Image) -> Image {
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 fn resident(_canvas: &Canvas, image: Image) -> Image {
     image
+}
+
+/// Lets go of the textures this thread made of the image whose unique id
+/// is `id`, on every context: called as a [`Sheet`] generation is replaced.
+/// A draw not yet executed holds its own reference to the texture it reads.
+fn release_texture_of(id: u32) {
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    TEXTURES.with_borrow_mut(|held| {
+        held.iter_mut().for_each(|(_, textures)| {
+            textures.remove(&id);
+        });
+    });
+    #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+    let _ = id;
 }
 
 /// Lets go of the glyph textures this thread holds, which hold their
@@ -2397,7 +3008,7 @@ mod tests {
             )
         };
         let first = uploads(&page);
-        let later: Vec<_> = (0..3).map(|_| uploads(&page)).collect();
+        let later: Vec<_> = (0..4).map(|_| uploads(&page)).collect();
         RenderingEngine::GPU.with_direct_context(|context| {
             if let Some(context) = context {
                 context.set_resource_cache_limit(limit);
@@ -2406,7 +3017,14 @@ mod tests {
         assert!(first.0 > 0, "the first page made no texture");
         assert_eq!(first.1, 0, "the first page drew glyphs from the CPU");
         assert!(first.2 > 0, "the first page made no atlas");
-        assert_eq!(later, [(0, 0, 0); 3], "later pages uploaded glyphs again");
+        // The third page adds the glyphs the second drew again to the
+        // sheet, which is uploaded once -- see `grow_sheets` -- and draws
+        // from it; no page uploads a glyph again.
+        assert_eq!(
+            later,
+            [(0, 0, 0), (1, 0, 0), (0, 0, 0), (0, 0, 0)],
+            "later pages uploaded glyphs again"
+        );
     }
 
     /// The pixels of `scene` drawn on a canvas, on the GPU where `gpu`, with
@@ -2619,6 +3237,616 @@ mod tests {
             let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "{name}: bytes apart");
         }
+    }
+
+    /// Whether the GPU's [`RenderingEngine`](crate::gpu::RenderingEngine)
+    /// can be selected here, saying so where the test is skipped: a failure
+    /// on macOS built with Metal, which always has a GPU.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn gpu_or_skip() -> bool {
+        if crate::gpu::RenderingEngine::GPU.selectable() {
+            return true;
+        }
+        if cfg!(all(target_os = "macos", feature = "metal")) {
+            panic!("no GPU on macOS");
+        }
+        eprintln!("skipped: no GPU");
+        false
+    }
+
+    /// Four lines of 16 of the test font's colour glyphs on a GPU canvas,
+    /// each line in `colour(line)`, read back premultiplied; each glyph
+    /// drawn as an image of its own where `one_by_one`.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn sheet_page(colour: &dyn Fn(u32) -> String, one_by_one: bool) -> Vec<u8> {
+        let mut canvas = crate::canvas::Canvas::new(600.0, 200.0);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css("32px SheetColr"));
+        for line in 0..4u32 {
+            ctx.set_fill_style_css(&colour(line)).expect("a colour");
+            let text = code_points(0xf0200 + line * 16, 16);
+            ctx.fill_text(&text, 4.0, 40.0 + line as f32 * 44.0, None);
+        }
+        ONE_BY_ONE.set(one_by_one);
+        let export = crate::pixels::ImageDataExport {
+            pixels: crate::pixels::PixelExportOptions {
+                premultiplied: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pixels = canvas
+            .to_image_data(None, &export)
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        ONE_BY_ONE.set(false);
+        pixels
+    }
+
+    /// What `draw` returns, and what it added to the counts: sheet
+    /// generations made, runs drawn from a sheet, textures made and run
+    /// atlases made.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn sheet_counts<T>(
+        draw: impl FnOnce() -> T,
+    ) -> (T, (usize, usize, usize, usize)) {
+        let before = (
+            SHEET_GENERATIONS.get(),
+            SHEET_DRAWS.get(),
+            TEXTURES_MADE.get(),
+            ATLASES_MADE.get(),
+        );
+        let drawn = draw();
+        let counts = (
+            SHEET_GENERATIONS.get() - before.0,
+            SHEET_DRAWS.get() - before.1,
+            TEXTURES_MADE.get() - before.2,
+            ATLASES_MADE.get() - before.3,
+        );
+        (drawn, counts)
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_page_drawn_again_draws_its_glyphs_from_one_sheet() {
+        // Each run drawn from an atlas of its own read a texture of its
+        // own, and Ganesh drew a page of runs as that many draws. A page
+        // drawn again draws every run from one sheet: the first page that
+        // draws a glyph again adds it, once, and the pages after it upload
+        // nothing and make no atlas.
+        if !gpu_or_skip() {
+            return;
+        }
+        forget();
+        crate::prelude::FontLibrary::new()
+            .use_paths(Some("SheetColr"), [VARIABLE])
+            .expect("the font registers");
+        let blue = |_| "rgb(40 90 160)".to_string();
+        let alone = sheet_page(&blue, true);
+        forget();
+        let pages: Vec<_> = (0..5)
+            .map(|_| sheet_counts(|| sheet_page(&blue, false)))
+            .collect();
+        let counts: Vec<_> = pages.iter().map(|(_, counts)| *counts).collect();
+        // The first page makes the runs' atlases; the second draws them
+        // again and wants their glyphs; the third adds them in one
+        // generation, uploaded once, and draws all four runs from it.
+        assert_eq!(counts[0].0 + counts[0].1, 0, "a sheet on the first page");
+        assert!(counts[0].3 > 0, "the first page made no atlas");
+        assert_eq!(counts[1], (0, 0, 0, 0), "the second page");
+        assert_eq!(counts[2], (1, 4, 1, 0), "the third page");
+        assert_eq!(counts[3..], [(0, 4, 0, 0); 2], "later pages");
+        // Its four runs, one after another, are drawn with one drawAtlas,
+        // each from where it was placed the last time.
+        let (batches, placed) = (BATCH_DRAWS.get(), PLACED_DRAWS.get());
+        let again = sheet_page(&blue, false);
+        assert_eq!(BATCH_DRAWS.get() - batches, 1, "the runs drawn apart");
+        assert_eq!(PLACED_DRAWS.get() - placed, 4, "runs placed again");
+        let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "placed again: bytes apart from one by one");
+        for (at, (pixels, _)) in pages.iter().enumerate() {
+            let apart = zip(pixels, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "page {at}: bytes apart from one by one");
+        }
+        // A line in another colour makes new glyphs, which the next
+        // generation adds beside the first's, copied over; the first
+        // generation's texture is let go, and every glyph still lands as
+        // drawn one by one.
+        let first = sheet_image_id().expect("a sheet");
+        let mixed = |line| match line {
+            0 => "rgb(160 40 90)".to_string(),
+            _ => "rgb(40 90 160)".to_string(),
+        };
+        let alone = sheet_page(&mixed, true);
+        let pages: Vec<_> = (0..3)
+            .map(|_| sheet_counts(|| sheet_page(&mixed, false)))
+            .collect();
+        assert_eq!(pages[2].1, (1, 4, 1, 0), "the second generation's page");
+        assert!(held_texture_of(sheet_image_id().expect("a sheet")));
+        assert!(!held_texture_of(first), "the first generation kept");
+        let apart = zip(&pages[2].0, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "bytes apart from one by one");
+        forget();
+        assert!(
+            SHEETS.with_borrow(Vec::is_empty),
+            "a sheet kept past forget"
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_run_drawn_unlike_its_last_draw_is_placed_anew() {
+        // A run keeps where it last drew its glyphs from the sheet. Drawn
+        // again elsewhere, under another transform, in another colour, or
+        // once the sheet it drew from has gone, it must land as its glyphs
+        // drawn one by one there, not where it was.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let line = || code_points(0xf0200, 16);
+        let placed: Box<AtlasScene> =
+            Box::new(move |ctx| ctx.fill_text(&line(), 4.0, 40.0, None));
+        let others: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.fill_text(&code_points(0xf0210, 16), 4.0, 40.0, None);
+        });
+        let unlike: Vec<(&str, Box<AtlasScene>)> = vec![
+            (
+                "moved along the line",
+                Box::new(move |ctx| ctx.fill_text(&line(), 34.0, 40.0, None)),
+            ),
+            (
+                "under another transform",
+                Box::new(move |ctx| {
+                    ctx.translate(30.0, 0.0);
+                    ctx.fill_text(&line(), 4.0, 40.0, None);
+                }),
+            ),
+            (
+                "in another colour",
+                Box::new(move |ctx| {
+                    ctx.set_fill_style_css("rgb(160 40 90)").expect("a colour");
+                    ctx.fill_text(&line(), 4.0, 40.0, None);
+                }),
+            ),
+        ];
+        // Drawn from the sheet and placed once more, so that the next draw
+        // has a placement to refuse.
+        let placed_once = || {
+            forget();
+            (0..4).for_each(|_| _ = atlas_scene(true, false, &placed));
+            let before = PLACED_DRAWS.get();
+            atlas_scene(true, false, &placed);
+            assert_eq!(PLACED_DRAWS.get() - before, 1, "not placed");
+        };
+        for (name, scene) in unlike {
+            placed_once();
+            let (alone, _) = atlas_scene(true, true, &scene);
+            let before = PLACED_DRAWS.get();
+            let (drawn, _) = atlas_scene(true, false, &scene);
+            assert_eq!(PLACED_DRAWS.get() - before, 0, "{name}: placed");
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart");
+        }
+        // Wrapped onto lines, one draw is a run for each line, each drawn
+        // from the sheet on its own: the placement holds them all.
+        let wrapped: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.set_text_wrap(true);
+            let text = code_points(0xf0200, 32);
+            ctx.fill_text(&text, 4.0, 40.0, Some(300.0));
+        });
+        forget();
+        let (alone, _) = atlas_scene(true, true, &wrapped);
+        (0..4).for_each(|_| _ = atlas_scene(true, false, &wrapped));
+        let before = PLACED_DRAWS.get();
+        let (drawn, _) = atlas_scene(true, false, &wrapped);
+        assert_eq!(PLACED_DRAWS.get() - before, 1, "wrapped: not placed");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "wrapped: bytes apart");
+        // The sheet dropped, a new one holds other glyphs where the run's
+        // lay: the run's placement names a sheet that has gone.
+        placed_once();
+        forget();
+        (0..4).for_each(|_| _ = atlas_scene(true, false, &others));
+        let (alone, _) = atlas_scene(true, true, &placed);
+        let before = PLACED_DRAWS.get();
+        let (drawn, _) = atlas_scene(true, false, &placed);
+        assert_eq!(PLACED_DRAWS.get() - before, 0, "a new sheet: placed");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "a new sheet: bytes apart");
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn a_sheet_is_uploaded_once_for_each_context_and_let_go_on_each() {
+        // A window's renderer draws on a context of its own, on the thread
+        // whose sheets the offscreen canvases share: each context keeps the
+        // texture made of a sheet for it, and a new generation lets go of
+        // the last one's on both.
+        use crate::gpu::{RenderingEngine, another_context};
+        use skia_safe::gpu::{Budgeted, surfaces};
+        forget();
+        crate::prelude::FontLibrary::new()
+            .use_paths(Some("SheetColr"), [VARIABLE])
+            .expect("the font registers");
+        let blue = |_| "rgb(40 90 160)".to_string();
+        (0..3).for_each(|_| _ = sheet_page(&blue, false));
+        let first = SHEETS
+            .with_borrow(|sheets| sheets.first()?.image.clone())
+            .expect("a sheet");
+        let info = ImageInfo::new_n32_premul((64, 64), None);
+        let mut window = another_context().expect("a second context");
+        let mut window_page = surfaces::render_target(
+            &mut window,
+            Budgeted::Yes,
+            &info,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("a window's page");
+        let mut made = Vec::new();
+        RenderingEngine::GPU.with_direct_context(|context| {
+            let context = context.expect("the thread's context");
+            let mut page = surfaces::render_target(
+                context,
+                Budgeted::Yes,
+                &info,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a page");
+            for _ in 0..3 {
+                for surface in [&mut page, &mut window_page] {
+                    let before = TEXTURES_MADE.get();
+                    let texture = resident(surface.canvas(), first.clone());
+                    assert!(texture.is_texture_backed(), "drawn from the CPU");
+                    made.push(TEXTURES_MADE.get() - before);
+                }
+            }
+        });
+        // The thread's context made its texture as the third page drew.
+        assert_eq!(made, [0, 1, 0, 0, 0, 0], "textures made each turn");
+        let mixed = |line| match line {
+            0 => "rgb(160 40 90)".to_string(),
+            _ => "rgb(40 90 160)".to_string(),
+        };
+        (0..3).for_each(|_| _ = sheet_page(&mixed, false));
+        let next = sheet_image_id().expect("a sheet");
+        let window_id = window_page
+            .canvas()
+            .direct_context()
+            .expect("a context")
+            .id();
+        let held_on_window = TEXTURES.with_borrow(|held| {
+            held.iter()
+                .any(|(id, textures)| *id == window_id && !textures.is_empty())
+        });
+        release_textures();
+        assert_ne!(next, first.unique_id(), "no second generation");
+        assert!(!held_on_window, "the first generation kept on the window's");
+    }
+
+    /// The unique id of the first sheet's current generation.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn sheet_image_id() -> Option<u32> {
+        SHEETS.with_borrow(|sheets| {
+            sheets.first()?.image.as_ref().map(Image::unique_id)
+        })
+    }
+
+    /// Whether this thread holds a texture made of the image `id` names.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn held_texture_of(id: u32) -> bool {
+        TEXTURES.with_borrow(|held| {
+            held.iter().any(|(_, textures)| textures.contains_key(&id))
+        })
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn glyphs_new_on_every_page_add_nothing_to_a_sheet() {
+        // A line in a colour of its own on every page makes every glyph
+        // image new: none is drawn twice, so none is added, and no page
+        // pays for a generation.
+        if !gpu_or_skip() {
+            return;
+        }
+        forget();
+        crate::prelude::FontLibrary::new()
+            .use_paths(Some("SheetColr"), [VARIABLE])
+            .expect("the font registers");
+        let counts: Vec<_> = (0..4u32)
+            .map(|page| {
+                let colour = move |line: u32| {
+                    format!("rgb({} {} 160)", 10 + page * 40, 10 + line * 40)
+                };
+                sheet_counts(|| sheet_page(&colour, false)).1
+            })
+            .collect();
+        assert!(
+            counts.iter().all(|(made, drawn, _, _)| made + drawn == 0),
+            "a sheet for glyphs never drawn twice: {counts:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_sheet_draws_every_atlas_scene_as_its_glyphs_drawn_one_by_one() {
+        // Drawn three times, a scene's runs come from the sheet wherever
+        // they come from an atlas at all; each must land, blend and clip as
+        // its glyphs drawn one by one.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        for (name, atlased, scene) in atlas_scenes() {
+            forget();
+            let (alone, _) = atlas_scene(true, true, &scene);
+            atlas_scene(true, false, &scene);
+            atlas_scene(true, false, &scene);
+            let before = SHEET_DRAWS.get();
+            let (drawn, _) = atlas_scene(true, false, &scene);
+            let from_sheet = SHEET_DRAWS.get() - before;
+            match atlased {
+                true => assert!(from_sheet > 0, "{name}: not from the sheet"),
+                false => assert_eq!(from_sheet, 0, "{name}: from the sheet"),
+            }
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart");
+            let (again, _) = atlas_scene(true, false, &scene);
+            let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: drawn again, bytes apart");
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_batch_of_runs_lands_in_the_order_they_were_drawn() {
+        // Runs drawn from the sheet are held back to draw together, so
+        // whatever lies between them in the page -- a fill, a clip, another
+        // paint, a line through the text -- must still land between them.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let first = || code_points(0xf0200, 16);
+        let second = || code_points(0xf0210, 16);
+        let scenes: Vec<(&str, Box<AtlasScene>)> = vec![
+            (
+                "a fill between two runs",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_fill_style_css("rgb(10 160 90)").expect("a colour");
+                    ctx.fill_rect(20.0, 10.0, 300.0, 60.0);
+                    ctx.set_fill_style_css("rgb(40 90 160)").expect("a colour");
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                }),
+            ),
+            (
+                "a clip on the second run",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.save();
+                    ctx.begin_path();
+                    ctx.rect(60.0, 0.0, 200.0, 240.0);
+                    ctx.clip(FillRule::NonZero);
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                    ctx.restore();
+                    ctx.fill_text(&first(), 4.0, 100.0, None);
+                }),
+            ),
+            (
+                "an alpha on the second run",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_global_alpha(0.5);
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                    ctx.set_global_alpha(1.0);
+                    ctx.fill_text(&first(), 20.0, 60.0, None);
+                }),
+            ),
+            (
+                "a line through a run",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_text_decoration_css(
+                        "line-through 6px rgb(200 20 20)",
+                    )
+                    .expect("a decoration");
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                    ctx.set_text_decoration_css("none").expect("none");
+                    ctx.fill_text(&first(), 20.0, 60.0, None);
+                }),
+            ),
+            (
+                "an underline across the run before",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_text_decoration_css("underline 6px rgb(200 20 20)")
+                        .expect("a decoration");
+                    ctx.fill_text(&second(), 10.0, 22.0, None);
+                    ctx.set_text_decoration_css("none").expect("none");
+                }),
+            ),
+            (
+                "plain letters over colour glyphs",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_letter_spacing(-20.0);
+                    let mixed = format!("{}MMMM{}", second(), first());
+                    ctx.fill_text(&mixed, 4.0, 46.0, None);
+                }),
+            ),
+            (
+                "plain glyphs of the face over its colour glyphs",
+                Box::new(move |ctx| {
+                    // U+F0F00 to U+F0F06 are outlines the font paints in no
+                    // colour, drawn from a blob between the run's colour
+                    // glyphs.
+                    let plain: String =
+                        (0xf0f00..0xf0f07).filter_map(char::from_u32).collect();
+                    ctx.set_letter_spacing(-20.0);
+                    let mixed = format!("{}{plain}{}", first(), second());
+                    ctx.fill_text(&mixed, 4.0, 46.0, None);
+                }),
+            ),
+            (
+                "a multiplied run over the run before",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_global_composite_operation(BlendMode::Multiply);
+                    ctx.fill_text(&second(), 10.0, 46.0, None);
+                    ctx.set_global_composite_operation(BlendMode::SourceOver);
+                }),
+            ),
+            (
+                "a run new on every page over the run before",
+                Box::new({
+                    let page = Cell::new(0u32);
+                    move |ctx| {
+                        ctx.fill_text(&first(), 4.0, 40.0, None);
+                        page.set(page.get() + 1);
+                        let colour = format!("rgb({} 90 160)", page.get() * 40);
+                        ctx.set_fill_style_css(&colour).expect("a colour");
+                        ctx.fill_text(&second(), 10.0, 46.0, None);
+                    }
+                }),
+            ),
+            (
+                "a run too large to keep over the run before",
+                Box::new(move |ctx| {
+                    // Past `LARGEST_KEPT_TEXT`, each glyph is drawn through
+                    // its own layer rather than from an image kept.
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    assert!(ctx.set_font_css("300px AtlasColr"));
+                    ctx.fill_text(&code_points(0xf0210, 2), 0.0, 220.0, None);
+                    assert!(ctx.set_font_css("32px AtlasColr"));
+                }),
+            ),
+        ];
+        for (name, scene) in scenes {
+            forget();
+            let (alone, _) = atlas_scene(true, true, &scene);
+            atlas_scene(true, false, &scene);
+            atlas_scene(true, false, &scene);
+            let (sheets, batches) = (SHEET_DRAWS.get(), BATCH_DRAWS.get());
+            let (drawn, _) = atlas_scene(true, false, &scene);
+            assert!(SHEET_DRAWS.get() > sheets, "{name}: not from the sheet");
+            assert!(BATCH_DRAWS.get() > batches, "{name}: not batched");
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart");
+            // Drawn again, a run that drew only from the sheet is placed as
+            // it was, and one that drew anything else is drawn as before.
+            let (again, _) = atlas_scene(true, false, &scene);
+            let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: drawn again, bytes apart");
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_run_holding_its_own_clip_is_drawn_inside_it() {
+        // Where the page keeps no run for a clip, a run of colour text holds
+        // the clip itself and applies it as it plays: its glyphs must land
+        // inside it, not with the runs held back around it.
+        use crate::{context::page::KEEPS_RUNS, prelude::*};
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let scene: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.fill_text(&code_points(0xf0200, 16), 4.0, 40.0, None);
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(60.0, 0.0, 200.0, 240.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.fill_text(&code_points(0xf0210, 16), 30.0, 50.0, None);
+            ctx.restore();
+            ctx.fill_text(&code_points(0xf0200, 16), 4.0, 100.0, None);
+        });
+        KEEPS_RUNS.set(false);
+        forget();
+        let (alone, _) = atlas_scene(true, true, &scene);
+        atlas_scene(true, false, &scene);
+        atlas_scene(true, false, &scene);
+        let batches = BATCH_DRAWS.get();
+        let (drawn, _) = atlas_scene(true, false, &scene);
+        let batched = BATCH_DRAWS.get() - batches;
+        let (again, _) = atlas_scene(true, false, &scene);
+        KEEPS_RUNS.set(true);
+        assert!(batched > 0, "not batched");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "bytes apart");
+        let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "drawn again, bytes apart");
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_full_sheet_leaves_the_glyphs_past_it_to_their_runs_atlases() {
+        // A sheet two rows of glyphs deep holds the first line's glyphs and
+        // fills part way through the second's: that line keeps its own
+        // atlas, and both land as their glyphs drawn one by one.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let scene: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.scale(3.0, 3.0);
+            ctx.fill_text(&code_points(0xf0200, 16), 2.0, 30.0, None);
+            ctx.fill_text(&code_points(0xf0210, 16), 2.0, 70.0, None);
+        });
+        forget();
+        // The glyphs at three times are 68 pixels square, 15 to a row: the
+        // first line takes a row and one of the second, and the second line's
+        // last two would take a third.
+        SHEET_DEPTH.set(Some(136));
+        let (alone, _) = atlas_scene(true, true, &scene);
+        atlas_scene(true, false, &scene);
+        atlas_scene(true, false, &scene);
+        let (sheet_draws, atlas_draws) = (SHEET_DRAWS.get(), ATLAS_DRAWS.get());
+        let (drawn, _) = atlas_scene(true, false, &scene);
+        let from_sheet = SHEET_DRAWS.get() - sheet_draws;
+        let from_atlases = ATLAS_DRAWS.get() - atlas_draws - from_sheet;
+        let full =
+            SHEETS.with_borrow(|sheets| sheets.iter().any(|sheet| sheet.full));
+        // Drawn again, the first line is placed as it was; the second, part
+        // of it drawn from its own atlas, is not kept, and is drawn as
+        // before.
+        let placed = PLACED_DRAWS.get();
+        let (again, _) = atlas_scene(true, false, &scene);
+        let placed = PLACED_DRAWS.get() - placed;
+        SHEET_DEPTH.set(None);
+        assert!(full, "the sheet never filled");
+        assert!(from_sheet > 0, "nothing drawn from the sheet");
+        assert!(from_atlases > 0, "nothing past the sheet");
+        assert_eq!(placed, 1, "lines placed again");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "bytes apart");
+        let apart = zip(&again, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "drawn again, bytes apart");
     }
 
     /// How far a premultiplied channel of the GPU canvas may stand from the

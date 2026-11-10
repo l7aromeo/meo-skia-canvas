@@ -14,7 +14,7 @@ use crate::{
     export::VectorFeatures,
     font::{
         FontFamily, ObliqueAngle,
-        colr::{ColourRun, colr_face},
+        colr::{ColourRun, Placed, colr_face, draw_placed, flush_batch},
         designed_style, leans_as_asked,
         platform_colour::draws_own_colours,
         typo_ascent_share, variation_axes,
@@ -508,6 +508,19 @@ pub struct RunPaint {
     spans: Vec<decorate::Span>,
     /// How many lines the runs are on.
     lines: usize,
+    /// What the last draw onto a GPU canvas drew from a sheet, to draw again
+    /// from where the next is drawn alike -- see [`draw_placed`].
+    placed: Placed<DrawnAt>,
+}
+
+/// What a draw of a [`RunPaint`] depends on besides the canvas: the
+/// arguments to [`RunPaint::paint`] -- see [`Placed`].
+#[derive(PartialEq)]
+struct DrawnAt {
+    origin: Point,
+    paint: Paint,
+    global_alpha: f32,
+    faint: Faint,
 }
 
 impl LaidOut {
@@ -557,6 +570,7 @@ impl LaidOut {
                 decoration,
                 spans,
                 lines,
+                placed: Placed::default(),
             }),
             blobs: RefCell::new(Vec::new()),
             bytes: laid_out_bytes(glyphs),
@@ -795,6 +809,7 @@ impl RunPaint {
             let Some(blob) = blob else {
                 continue;
             };
+            flush_batch(canvas);
             match drawn_as_outlines(canvas, &run.font, shear) {
                 true => draw_outlines(
                     canvas,
@@ -938,8 +953,16 @@ impl RunPaint {
         global_alpha: f32,
         faint: Faint,
     ) {
-        let blobs = self.built_plain_blobs();
-        self.paint_from(canvas, origin, paint, global_alpha, faint, &blobs);
+        let drawn = || DrawnAt {
+            origin,
+            paint: paint.clone(),
+            global_alpha,
+            faint,
+        };
+        draw_placed(canvas, &self.placed, drawn, || {
+            let blobs = self.built_plain_blobs();
+            self.paint_from(canvas, origin, paint, global_alpha, faint, &blobs);
+        });
     }
 
     /// [`Self::built_blobs`] for the runs a draw paints as glyph masks, and
@@ -989,8 +1012,10 @@ impl RunPaint {
             let spans = decorate::on_line(&self.spans, line);
             let start = self.runs.partition_point(|run| run.line < line);
             let end = self.runs.partition_point(|run| run.line <= line);
+            flush_batch(canvas);
             decorate::paint(canvas, spans, &boxes, origin, Layer::Beneath, pen);
             self.draw_runs(canvas, origin, paint, start..end, blobs, faint);
+            flush_batch(canvas);
             decorate::paint(canvas, spans, &boxes, origin, Layer::Over, pen);
         }
     }
@@ -2197,6 +2222,7 @@ pub(crate) fn draw_colour_run(
                 Shear::None,
             )
         {
+            flush_batch(canvas);
             canvas.draw_text_blob(&blob, origin, paint);
         }
     };
