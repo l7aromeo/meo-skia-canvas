@@ -1057,8 +1057,16 @@ pub(crate) struct ImageRoute(Option<Format>);
 impl ImageRoute {
     /// Opens the image route in `format` until the guard is dropped.
     pub(crate) fn open(format: Format) -> Self {
+        #[cfg(test)]
+        ROUTE_SEEN.with_borrow_mut(|seen| seen.push(format.color_type));
         ImageRoute(ROUTE.replace(Some(format)))
     }
+}
+
+// TEMPORARY, with the probes: the colour types image routes opened in.
+#[cfg(test)]
+thread_local! {
+    static ROUTE_SEEN: RefCell<Vec<ColorType>> = const { RefCell::new(Vec::new()) };
 }
 
 impl Drop for ImageRoute {
@@ -1978,6 +1986,127 @@ mod tests {
             "the axes move nothing, so this cannot tell the files apart",
         );
         assert!(from_file == from_tables, "the recordings differ");
+    }
+
+    #[test]
+    #[ignore = "probe"]
+    fn probe_glyph_images_by_colour_type() {
+        let typeface = face();
+        let colr = colr_face(&typeface).expect("a COLR face");
+        let upem = typeface.units_per_em().expect("upem") as f32;
+        let read = |image: &Image| {
+            let info = ImageInfo::new(
+                image.dimensions(),
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                Some(ColorSpace::new_srgb()),
+            );
+            let mut out = vec![0u8; info.compute_min_byte_size()];
+            assert!(image.read_pixels(
+                &info,
+                &mut out,
+                info.min_row_bytes(),
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ));
+            out
+        };
+        for size in [32.0_f32, 48.0] {
+            let shape = Matrix::scale((size / upem, size / upem));
+            let (mut glyphs, mut differing, mut channels, mut most) =
+                (0, 0, 0, 0);
+            for glyph in 0..typeface.count_glyphs() as GlyphId {
+                let Some(recorded) = colr.record(glyph, Color::BLACK) else {
+                    continue;
+                };
+                let (Some(picture), Some(bounds)) =
+                    (&recorded.picture, recorded.bounds)
+                else {
+                    continue;
+                };
+                let make = |color_type| {
+                    glyph_image(
+                        picture,
+                        bounds,
+                        &shape,
+                        &Format::new(color_type, Some(ColorSpace::new_srgb())),
+                        false,
+                    )
+                    .expect("an image")
+                };
+                let (rgba, rgba_at) = make(ColorType::RGBA8888);
+                let (bgra, bgra_at) = make(ColorType::BGRA8888);
+                assert_eq!(rgba_at, bgra_at);
+                let (a, b) = (read(&rgba), read(&bgra));
+                glyphs += 1;
+                let off = zip(&a, &b).filter(|(x, y)| x != y).count();
+                if off > 0 {
+                    differing += 1;
+                    channels += off;
+                    most = most.max(
+                        zip(&a, &b)
+                            .map(|(x, y)| x.abs_diff(*y))
+                            .max()
+                            .unwrap_or(0),
+                    );
+                }
+            }
+            eprintln!(
+                "PROBE D {size}px: {glyphs} glyphs, {differing} differ \
+                 RGBA vs BGRA, {channels} channels, most {most}"
+            );
+        }
+    }
+
+    // TEMPORARY probe, reverted before merge: the colour type each engine's
+    // page opens the image route in, and the pixels one glyph lands on.
+    #[test]
+    #[ignore = "probe"]
+    fn probe_one_glyph_on_this_gpu() {
+        use crate::{gpu::RenderingEngine, prelude::*};
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("PROBE no GPU");
+            return;
+        }
+        eprintln!("PROBE E N32 is {:?}", ColorType::N32);
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let scene = |ctx: &mut crate::context2d::Context2D| {
+            ctx.fill_text(&code_points(0xf0100, 1), 4.0, 40.0, None);
+        };
+        let opened = |gpu| {
+            ROUTE_SEEN.with_borrow_mut(Vec::clear);
+            let (pixels, _) = atlas_scene(gpu, false, &scene);
+            let seen = ROUTE_SEEN.with_borrow(Clone::clone);
+            (pixels, seen)
+        };
+        let (cpu, cpu_seen) = opened(false);
+        let (gpu, gpu_seen) = opened(true);
+        eprintln!("PROBE E route opened in: cpu {cpu_seen:?} gpu {gpu_seen:?}");
+        let alone = overlap_page(false, true, &scene);
+        let mut shown = 0;
+        for p in (0..cpu.len()).step_by(4) {
+            if cpu[p..p + 4] == gpu[p..p + 4] || shown == 8 {
+                continue;
+            }
+            shown += 1;
+            let (x, y) = (p / 4 % 600, p / 4 / 600);
+            let source = (x < 120 && y < 60).then(|| {
+                alone[(y * 120 + x) * 4..(y * 120 + x) * 4 + 4].to_vec()
+            });
+            eprintln!(
+                "PROBE E pixel {x} {y}: cpu {:?} gpu {:?} glyph alone {:?}",
+                &cpu[p..p + 4],
+                &gpu[p..p + 4],
+                source,
+            );
+        }
+        eprintln!(
+            "PROBE E {} channels differ",
+            zip(&cpu, &gpu).filter(|(a, b)| a != b).count()
+        );
     }
 
     /// The format of an eight-bit sRGB page.
