@@ -9,6 +9,29 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
+## 📦 ⟩ [v7.0.2] (npm) ⟩ Unreleased
+
+**A patch release: nothing that worked changes.** Text in a COLR colour font
+draws as Chrome draws it on every platform: macOS drew it without colour or not
+at all, and Windows and Linux drew its gradients and composites apart from
+Chrome's. Colour emoji under a small `blur()` on a CPU canvas keep their own
+colours rather than drawing in the fill colour. Drawing under `blur()` costs
+less on the CPU: a small shape under `blur(3px)` takes 0.80 to 0.81 times what
+it took in 6.0.2, and a page of text under `blur(1px)` or `blur(3px)` 0.74 to
+0.89 times, as docs/performance.md times row by row. Not every radius: text
+under a blur of 5 device pixels or more takes a route this release's changes do
+not reach, and under `blur(10px)` still costs about 3.1 times what it did in
+6.0.2 (#660). Two fixes and one change; the sections below have each.
+
+### Fixed
+
+- **Colour emoji under a small `blur()` on a CPU canvas keep their own colours, where they drew in the fill colour.** ([#678](https://github.com/l7aromeo/meo-skia-canvas/pull/678), [#670](https://github.com/l7aromeo/meo-skia-canvas/issues/670))
+- **Text in a COLR colour font draws as Chrome draws it on every platform, where macOS drew it without colour or not at all and Windows and Linux drew its gradients and composites apart from Chrome's.** ([#665](https://github.com/l7aromeo/meo-skia-canvas/pull/665), [#662](https://github.com/l7aromeo/meo-skia-canvas/issues/662))
+
+### Changed
+
+- **Drawing under `blur()` costs less on the CPU.** ([#493](https://github.com/l7aromeo/meo-skia-canvas/issues/493), [#506](https://github.com/l7aromeo/meo-skia-canvas/issues/506), [#653](https://github.com/l7aromeo/meo-skia-canvas/pull/653), [#654](https://github.com/l7aromeo/meo-skia-canvas/pull/654))
+
 ## 📦 ⟩ [v7.0.1] (npm) ⟩ November 8, 2026
 
 **A patch release: nothing that worked changes.** Text drawn on the GPU now
