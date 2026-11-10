@@ -271,18 +271,31 @@ precommit: ensure-deps check-docs check-cargo-lock check-skia-patches
 # appends a known stacked pair to every tracked file and asserts the count
 # back. The scanner was blind in two of sixty files and said so with a green
 # tick, which is the one failure a tree-wide gate cannot survive.
-[doc("Fail on a stacked doc comment: staged or ranged Rust, all JavaScript and TypeScript.")]
+#
+# `check-doc-attachment.mjs` asks the other half of the question, and asks it
+# without reading prose: for every doc line a change keeps, whether the item it
+# attaches to is still the item it attached to before. That is the deletion,
+# the move and the item inserted between a doc and its item -- the shapes the
+# stacked check cannot see in principle, and the eleven on `main` at 815ca542
+# took. It reports each at the commit that made it, and refuses none of the
+# 150 commits on `main` before 815ca542 but the one among them that made one.
+# Same callers, same `base`; it reads both versions from git.
+[doc("Fail on a stacked or moved doc comment: staged or ranged Rust, all JavaScript and TypeScript.")]
 check-docs base="":
     #!/usr/bin/env bash
     set -euo pipefail
     node scripts/check-stacked-docs.mjs --self-test
+    node scripts/check-doc-attachment.mjs --self-test
     if [[ -z "{{ base }}" ]]; then
         node scripts/check-stacked-docs.mjs --cached
+        node scripts/check-doc-attachment.mjs --cached
     elif git rev-parse --verify --quiet "{{ base }}" >/dev/null; then
         node scripts/check-stacked-docs.mjs --range "{{ base }}...HEAD"
+        node scripts/check-doc-attachment.mjs --range "{{ base }}...HEAD"
     else
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
+        node scripts/check-doc-attachment.mjs --cached
     fi
 
 # `PATCHES` in scripts/skia-source.mjs is the only list of Skia patches: CI

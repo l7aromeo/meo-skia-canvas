@@ -1561,12 +1561,6 @@ mod tests {
         }
     }
 
-    /// `<color>? && <length>{2,3}` -- every spelling the grammar allows.
-    ///
-    /// The parser scanned lengths from the front and took the colour from a
-    /// fixed offset, so it accepted exactly one of these five. A refused
-    /// step rejects the whole chain, so the other four were errors here and
-    /// pictures in Chrome.
     /// A drop-shadow's colour is kept as it was named, as a fill's is: an
     /// alpha between bytes, and a colour outside sRGB. Both were rounded to
     /// eight bits of sRGB, the alpha of 0.3 to 77/255 and the green
@@ -1588,6 +1582,12 @@ mod tests {
         assert!(green.r < 0.0, "kept outside sRGB: {green:?}");
     }
 
+    /// `<color>? && <length>{2,3}` -- every spelling the grammar allows.
+    ///
+    /// The parser scanned lengths from the front and took the colour from a
+    /// fixed offset, so it accepted exactly one of these five. A refused
+    /// step rejects the whole chain, so the other four were errors here and
+    /// pictures in Chrome.
     #[test]
     fn a_drop_shadow_takes_its_colour_from_either_end() {
         let shadow = |css: &str| match parse_filter(css, &em()) {

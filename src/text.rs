@@ -2700,8 +2700,6 @@ fn fill_text_style(
     }
 }
 
-/// The colours of `style` that SkParagraph would hold in eight bits, as the
-/// style names them -- see `node::oblique::StyleColours`.
 /// `color` sRGB-encoded in `f64`, unpremultiplied, as a style's colours are
 /// handed to what draws them -- see [`StyleColours`].
 fn srgb(color: RgbaLinear) -> Color4f {
@@ -2726,6 +2724,8 @@ fn foreground_colour(style: &TextStyle) -> NamedColour {
     named(style.foreground_color.unwrap_or(style.color))
 }
 
+/// The colours of `style` that SkParagraph would hold in eight bits, as the
+/// style names them -- see `node::oblique::StyleColours`.
 fn style_colours(style: &TextStyle) -> StyleColours {
     StyleColours {
         foreground: Some(foreground_colour(style)),

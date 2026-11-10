@@ -36,7 +36,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheRoot, treeName } from "./skia-source.mjs";
 
@@ -95,26 +95,63 @@ function hostTarget() {
   return host[1];
 }
 
+/// The file in a macOS SDK directory that records the SDK's version, as its
+/// `Version` field.
+const SDK_SETTINGS = "SDKSettings.json";
+
+/// What an SDK's `Version` has to look like to name an entry: dotted
+/// numbers, so that the key cannot reach outside its directory.
+const SDK_VERSION = /^\d+(\.\d+)*$/;
+
 /**
- * The SDK skia-bindings compiles against on macOS, by its directory's name
- * (`MacOSX27.2.sdk`): `SDKROOT` where it is set, and otherwise the one xcrun
- * gives. Skia rebuilt against another SDK is another build. `none` elsewhere.
+ * The key naming the macOS SDK at `path` -- `{ sdk: "MacOSX27.2.sdk" }`, by
+ * the version the SDK records -- or `{ why }` where it records none.
+ *
+ * One SDK has several paths: `MacOSX.sdk`, `MacOSX27.2.sdk` and
+ * `MacOSX27.sdk` are symlinks to one another, and the Command Line Tools
+ * carry a copy of their own. `MacOSX.sdk` also names whichever SDK the
+ * installed Xcode carries, so a directory's name can match after an update
+ * that replaced what it names. The version is read from the SDK itself,
+ * through any symlinks, and never parsed from a name: `MacOSX27.sdk` is 27.2.
+ * `xcrun --sdk <path> --show-sdk-version` is not used: it cannot locate a
+ * Command Line Tools SDK while Xcode is the selected developer directory.
  */
-function currentSdk() {
-  if (process.platform !== "darwin") return "none";
-  const path =
-    process.env.SDKROOT ||
-    execFileSync("xcrun", ["--sdk", "macosx", "--show-sdk-path"], {
-      encoding: "utf8",
-    }).trim();
-  return basename(path);
+export function sdkKey(path) {
+  let version;
+  try {
+    ({ Version: version } = JSON.parse(
+      readFileSync(join(path, SDK_SETTINGS), "utf8"),
+    ));
+  } catch (error) {
+    return { why: `the SDK at ${path} records no version: ${error.message}` };
+  }
+  if (typeof version !== "string" || !SDK_VERSION.test(version))
+    return {
+      why: `the SDK at ${path} records no version: ${SDK_SETTINGS} gives Version ${JSON.stringify(version)}`,
+    };
+  return { sdk: `MacOSX${version}.sdk` };
+}
+
+/**
+ * The SDK skia-bindings compiles against on macOS, as `sdkKey` names it:
+ * `SDKROOT` where it is set, and otherwise the one xcrun gives. Skia rebuilt
+ * against another SDK is another build. `{ sdk: "none" }` elsewhere.
+ */
+export function currentSdk(env = process.env, platform = process.platform) {
+  if (platform !== "darwin") return { sdk: "none" };
+  return sdkKey(
+    env.SDKROOT ||
+      execFileSync("xcrun", ["--sdk", "macosx", "--show-sdk-path"], {
+        encoding: "utf8",
+      }).trim(),
+  );
 }
 
 /** The SDK a build's log says Skia was compiled against, as `currentSdk`. */
-function loggedSdk(log) {
-  if (process.platform !== "darwin") return "none";
+export function loggedSdk(log, platform = process.platform) {
+  if (platform !== "darwin") return { sdk: "none" };
   const sysroot = log.match(/--sysroot=([^",\s]+)/);
-  return sysroot ? basename(sysroot[1]) : null;
+  return sysroot ? sdkKey(sysroot[1]) : { why: "the log names no --sysroot" };
 }
 
 /// cargo's flags that choose features, and those that take a value.
@@ -242,13 +279,15 @@ export function keyFor(args, env = process.env, root = ROOT) {
   if (!env.SKIA_SOURCE_DIR) return { why: "SKIA_SOURCE_DIR is not set" };
   const read = readArgs(args);
   if (!read) return { why: "a cross target or another manifest" };
+  const { sdk, why } = currentSdk(env);
+  if (!sdk) return { why };
   const features = skiaFeatures(read.features, root);
   if (!features) return { why: "cargo tree could not resolve the features" };
   return {
     key: {
       tree: treeName(root),
       target: hostTarget(),
-      sdk: currentSdk(),
+      sdk,
       profile: read.profile,
       features,
     },
@@ -305,8 +344,8 @@ export function store(
     throw new Error(
       `skia-cache: ${buildDir} was not built from ${tree}, this worktree's tree`,
     );
-  const sdk = loggedSdk(log);
-  if (!sdk) throw new Error(`skia-cache: ${buildDir}'s log names no --sysroot`);
+  const { sdk, why: noSdk } = loggedSdk(log);
+  if (!sdk) throw new Error(`skia-cache: ${buildDir} is not stored: ${noSdk}`);
   const skia = join(buildDir, "out", "skia");
   const libraries = cachedLibraries(skia);
   if (!libraries.includes("libskia.a"))
