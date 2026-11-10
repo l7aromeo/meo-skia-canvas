@@ -14,7 +14,7 @@ use crate::{
     export::VectorFeatures,
     font::{
         FontFamily, ObliqueAngle,
-        colr::{ColourRun, colr_face},
+        colr::{ColourRun, colr_face, flush_batch},
         designed_style, leans_as_asked,
         platform_colour::draws_own_colours,
         typo_ascent_share, variation_axes,
@@ -795,6 +795,7 @@ impl RunPaint {
             let Some(blob) = blob else {
                 continue;
             };
+            flush_batch(canvas);
             match drawn_as_outlines(canvas, &run.font, shear) {
                 true => draw_outlines(
                     canvas,
@@ -989,8 +990,10 @@ impl RunPaint {
             let spans = decorate::on_line(&self.spans, line);
             let start = self.runs.partition_point(|run| run.line < line);
             let end = self.runs.partition_point(|run| run.line <= line);
+            flush_batch(canvas);
             decorate::paint(canvas, spans, &boxes, origin, Layer::Beneath, pen);
             self.draw_runs(canvas, origin, paint, start..end, blobs, faint);
+            flush_batch(canvas);
             decorate::paint(canvas, spans, &boxes, origin, Layer::Over, pen);
         }
     }
@@ -2197,6 +2200,7 @@ pub(crate) fn draw_colour_run(
                 Shear::None,
             )
         {
+            flush_batch(canvas);
             canvas.draw_text_blob(&blob, origin, paint);
         }
     };

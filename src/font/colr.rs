@@ -475,6 +475,7 @@ impl ColourRun {
         at: Point,
         paint: &Paint,
     ) {
+        flush_batch(canvas);
         let (Some(picture), Some(bounds)) = (&glyph.picture, glyph.bounds)
         else {
             return;
@@ -605,6 +606,7 @@ impl ColourRun {
         canvas.save();
         canvas.reset_matrix();
         if !atlased {
+            flush_batch(canvas);
             placed.iter().for_each(|(image, at)| one(image, *at));
             canvas.restore();
             return true;
@@ -618,24 +620,20 @@ impl ColourRun {
                     RSXform::new(1.0, 0.0, (at.x as f32, at.y as f32))
                 })
                 .collect();
-            canvas.draw_atlas(
-                &image,
-                &moved,
-                &sprites,
-                None,
-                BlendMode::Dst,
-                SamplingOptions::default(),
-                None,
-                &composite,
-            );
+            canvas.restore();
             #[cfg(test)]
             {
                 ATLAS_DRAWS.set(ATLAS_DRAWS.get() + 1);
                 SHEET_DRAWS.set(SHEET_DRAWS.get() + 1);
             }
-            canvas.restore();
+            if let Some((moved, sprites)) =
+                held_back(canvas, &image, moved, sprites, &composite)
+            {
+                draw_from_atlas(canvas, &image, &moved, &sprites, &composite);
+            }
             return true;
         }
+        flush_batch(canvas);
         let mut start = 0;
         while start < placed.len() {
             let end = start + fits(&placed[start..]);
@@ -1089,6 +1087,173 @@ fn grow(sheet: &mut Sheet) {
     }
     #[cfg(test)]
     SHEET_GENERATIONS.set(SHEET_GENERATIONS.get() + 1);
+}
+
+/// The sheet draws a [`BatchScope`] holds back: runs drawn from one sheet
+/// generation through one composite paint, to draw with one `drawAtlas`.
+struct Pending {
+    image: Image,
+    paint: Paint,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+}
+
+/// Where this thread's batch stands: the canvas a [`BatchScope`] is open on,
+/// by address, while one is and is not suspended, and what it holds back.
+#[derive(Default)]
+struct Batch {
+    canvas: Option<usize>,
+    pending: Option<Pending>,
+}
+
+thread_local! {
+    /// This thread's batch.
+    static BATCH: RefCell<Batch> = RefCell::new(Batch::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many `drawAtlas` calls batches have made on this thread, each
+    /// drawing one or more runs.
+    static BATCH_DRAWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The address `canvas` is known by while a [`BatchScope`] is open on it.
+fn address(canvas: &Canvas) -> usize {
+    std::ptr::from_ref(canvas) as usize
+}
+
+/// While it lives, runs drawn from a [`Sheet`] onto its canvas are held back
+/// and drawn together, consecutive runs from one generation in one paint
+/// with one `drawAtlas`, rather than one a run. Skia records each
+/// `drawAtlas` as an op of its own, building the paint's image shader and
+/// merging the op into the last one: about 45% of the time a page of 32
+/// runs of colour glyphs took to play on a GPU canvas.
+///
+/// Opened by `play_entries` around consecutive colour runs. Whatever else
+/// draws onto the canvas meanwhile draws what is held back first -- see
+/// [`flush_batch`] -- so nothing lands out of order, and what is held back
+/// is drawn when the scope closes.
+pub(crate) struct BatchScope<'a> {
+    canvas: &'a Canvas,
+    outer: Option<usize>,
+}
+
+impl<'a> BatchScope<'a> {
+    /// Opens a batch on `canvas` until the scope is dropped.
+    pub(crate) fn open(canvas: &'a Canvas) -> Self {
+        flush_batch(canvas);
+        let outer = BATCH
+            .with_borrow_mut(|batch| batch.canvas.replace(address(canvas)));
+        BatchScope { canvas, outer }
+    }
+
+    /// Suspends any batch on `canvas` until the scope is dropped, having
+    /// drawn what it held back: for a draw under a clip, a layer or a
+    /// shadow of its own, whose runs must land within it.
+    pub(crate) fn suspend(canvas: &'a Canvas) -> Self {
+        flush_batch(canvas);
+        let outer = BATCH.with_borrow_mut(|batch| batch.canvas.take());
+        BatchScope { canvas, outer }
+    }
+}
+
+impl Drop for BatchScope<'_> {
+    fn drop(&mut self) {
+        flush_batch(self.canvas);
+        BATCH.with_borrow_mut(|batch| batch.canvas = self.outer);
+    }
+}
+
+/// Draws onto `canvas` what a [`BatchScope`] open on it holds back: called
+/// before anything else draws onto it while one may be open.
+pub(crate) fn flush_batch(canvas: &Canvas) {
+    let pending = BATCH.with_borrow_mut(|batch| {
+        match batch.canvas == Some(address(canvas)) {
+            true => batch.pending.take(),
+            false => None,
+        }
+    });
+    if let Some(pending) = pending {
+        draw_from_atlas(
+            canvas,
+            &pending.image,
+            &pending.moved,
+            &pending.sprites,
+            &pending.paint,
+        );
+        #[cfg(test)]
+        BATCH_DRAWS.set(BATCH_DRAWS.get() + 1);
+    }
+}
+
+/// Holds back the run `moved` and `sprites` place from `image` in `paint`
+/// where a [`BatchScope`] is open on `canvas`, after the runs held back
+/// already where they share the image and the paint, and in their place,
+/// drawn first, where they do not. Hands `moved` and `sprites` back, held
+/// back nowhere, where no scope is open on `canvas`.
+fn held_back(
+    canvas: &Canvas,
+    image: &Image,
+    moved: Vec<RSXform>,
+    sprites: Vec<Rect>,
+    paint: &Paint,
+) -> Option<(Vec<RSXform>, Vec<Rect>)> {
+    let open = BATCH.with_borrow(|batch| batch.canvas == Some(address(canvas)));
+    if !open {
+        return Some((moved, sprites));
+    }
+    let joins = BATCH.with_borrow(|batch| {
+        batch.pending.as_ref().is_some_and(|pending| {
+            pending.image.unique_id() == image.unique_id()
+                && pending.paint == *paint
+        })
+    });
+    if !joins {
+        flush_batch(canvas);
+    }
+    BATCH.with_borrow_mut(|batch| match &mut batch.pending {
+        Some(pending) if joins => {
+            pending.moved.extend(moved);
+            pending.sprites.extend(sprites);
+        }
+        _ => {
+            batch.pending = Some(Pending {
+                image: image.clone(),
+                paint: paint.clone(),
+                moved,
+                sprites,
+            });
+        }
+    });
+    None
+}
+
+/// Draws the sprites of `image` that `sprites` names, each moved as `moved`
+/// says, onto `canvas` in `paint` with one `drawAtlas`, under no transform:
+/// each sprite lands on whole device pixels, sampled at the nearest texel.
+fn draw_from_atlas(
+    canvas: &Canvas,
+    image: &Image,
+    moved: &[RSXform],
+    sprites: &[Rect],
+    paint: &Paint,
+) {
+    canvas.save();
+    canvas.reset_matrix();
+    // With no colours given, the blend mode `drawAtlas` takes for them is
+    // not read.
+    canvas.draw_atlas(
+        image,
+        moved,
+        sprites,
+        None,
+        BlendMode::Dst,
+        SamplingOptions::default(),
+        None,
+        paint,
+    );
+    canvas.restore();
 }
 
 /// What a run's atlas is kept by: the unique ids of the glyph images it
@@ -2857,15 +3022,15 @@ mod tests {
         }
     }
 
-    /// The GPU's [`RenderingEngine`](crate::gpu::RenderingEngine), or
-    /// `None` where this machine has none -- a failure on macOS, which
-    /// always has Metal.
+    /// Whether the GPU's [`RenderingEngine`](crate::gpu::RenderingEngine)
+    /// can be selected here, saying so where the test is skipped: a failure
+    /// on macOS built with Metal, which always has a GPU.
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     fn gpu_or_skip() -> bool {
         if crate::gpu::RenderingEngine::GPU.selectable() {
             return true;
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(all(target_os = "macos", feature = "metal")) {
             panic!("no GPU on macOS");
         }
         eprintln!("skipped: no GPU");
@@ -2956,6 +3121,10 @@ mod tests {
         assert_eq!(counts[1], (0, 0, 0, 0), "the second page");
         assert_eq!(counts[2], (1, 4, 1, 0), "the third page");
         assert_eq!(counts[3..], [(0, 4, 0, 0); 2], "later pages");
+        // Its four runs, one after another, are drawn with one drawAtlas.
+        let before = BATCH_DRAWS.get();
+        sheet_page(&blue, false);
+        assert_eq!(BATCH_DRAWS.get() - before, 1, "the runs drawn apart");
         for (at, (pixels, _)) in pages.iter().enumerate() {
             let apart = zip(pixels, &alone).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "page {at}: bytes apart from one by one");
@@ -3056,6 +3225,185 @@ mod tests {
             let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "{name}: bytes apart");
         }
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_batch_of_runs_lands_in_the_order_they_were_drawn() {
+        // Runs drawn from the sheet are held back to draw together, so
+        // whatever lies between them in the page -- a fill, a clip, another
+        // paint, a line through the text -- must still land between them.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let first = || code_points(0xf0200, 16);
+        let second = || code_points(0xf0210, 16);
+        let scenes: Vec<(&str, Box<AtlasScene>)> = vec![
+            (
+                "a fill between two runs",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_fill_style_css("rgb(10 160 90)").expect("a colour");
+                    ctx.fill_rect(20.0, 10.0, 300.0, 60.0);
+                    ctx.set_fill_style_css("rgb(40 90 160)").expect("a colour");
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                }),
+            ),
+            (
+                "a clip on the second run",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.save();
+                    ctx.begin_path();
+                    ctx.rect(60.0, 0.0, 200.0, 240.0);
+                    ctx.clip(FillRule::NonZero);
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                    ctx.restore();
+                    ctx.fill_text(&first(), 4.0, 100.0, None);
+                }),
+            ),
+            (
+                "an alpha on the second run",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_global_alpha(0.5);
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                    ctx.set_global_alpha(1.0);
+                    ctx.fill_text(&first(), 20.0, 60.0, None);
+                }),
+            ),
+            (
+                "a line through a run",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_text_decoration_css(
+                        "line-through 6px rgb(200 20 20)",
+                    )
+                    .expect("a decoration");
+                    ctx.fill_text(&second(), 30.0, 50.0, None);
+                    ctx.set_text_decoration_css("none").expect("none");
+                    ctx.fill_text(&first(), 20.0, 60.0, None);
+                }),
+            ),
+            (
+                "an underline across the run before",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_text_decoration_css("underline 6px rgb(200 20 20)")
+                        .expect("a decoration");
+                    ctx.fill_text(&second(), 10.0, 22.0, None);
+                    ctx.set_text_decoration_css("none").expect("none");
+                }),
+            ),
+            (
+                "plain letters over colour glyphs",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_letter_spacing(-20.0);
+                    let mixed = format!("{}MMMM{}", second(), first());
+                    ctx.fill_text(&mixed, 4.0, 46.0, None);
+                }),
+            ),
+            (
+                "plain glyphs of the face over its colour glyphs",
+                Box::new(move |ctx| {
+                    // U+F0F00 to U+F0F06 are outlines the font paints in no
+                    // colour, drawn from a blob between the run's colour
+                    // glyphs.
+                    let plain: String =
+                        (0xf0f00..0xf0f07).filter_map(char::from_u32).collect();
+                    ctx.set_letter_spacing(-20.0);
+                    let mixed = format!("{}{plain}{}", first(), second());
+                    ctx.fill_text(&mixed, 4.0, 46.0, None);
+                }),
+            ),
+            (
+                "a multiplied run over the run before",
+                Box::new(move |ctx| {
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    ctx.set_global_composite_operation(BlendMode::Multiply);
+                    ctx.fill_text(&second(), 10.0, 46.0, None);
+                    ctx.set_global_composite_operation(BlendMode::SourceOver);
+                }),
+            ),
+            (
+                "a run new on every page over the run before",
+                Box::new({
+                    let page = Cell::new(0u32);
+                    move |ctx| {
+                        ctx.fill_text(&first(), 4.0, 40.0, None);
+                        page.set(page.get() + 1);
+                        let colour = format!("rgb({} 90 160)", page.get() * 40);
+                        ctx.set_fill_style_css(&colour).expect("a colour");
+                        ctx.fill_text(&second(), 10.0, 46.0, None);
+                    }
+                }),
+            ),
+            (
+                "a run too large to keep over the run before",
+                Box::new(move |ctx| {
+                    // Past `LARGEST_KEPT_TEXT`, each glyph is drawn through
+                    // its own layer rather than from an image kept.
+                    ctx.fill_text(&first(), 4.0, 40.0, None);
+                    assert!(ctx.set_font_css("300px AtlasColr"));
+                    ctx.fill_text(&code_points(0xf0210, 2), 0.0, 220.0, None);
+                    assert!(ctx.set_font_css("32px AtlasColr"));
+                }),
+            ),
+        ];
+        for (name, scene) in scenes {
+            forget();
+            let (alone, _) = atlas_scene(true, true, &scene);
+            atlas_scene(true, false, &scene);
+            atlas_scene(true, false, &scene);
+            let (sheets, batches) = (SHEET_DRAWS.get(), BATCH_DRAWS.get());
+            let (drawn, _) = atlas_scene(true, false, &scene);
+            assert!(SHEET_DRAWS.get() > sheets, "{name}: not from the sheet");
+            assert!(BATCH_DRAWS.get() > batches, "{name}: not batched");
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart");
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_run_holding_its_own_clip_is_drawn_inside_it() {
+        // Where the page keeps no run for a clip, a run of colour text holds
+        // the clip itself and applies it as it plays: its glyphs must land
+        // inside it, not with the runs held back around it.
+        use crate::{context::page::KEEPS_RUNS, prelude::*};
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let scene: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.fill_text(&code_points(0xf0200, 16), 4.0, 40.0, None);
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(60.0, 0.0, 200.0, 240.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.fill_text(&code_points(0xf0210, 16), 30.0, 50.0, None);
+            ctx.restore();
+            ctx.fill_text(&code_points(0xf0200, 16), 4.0, 100.0, None);
+        });
+        KEEPS_RUNS.set(false);
+        forget();
+        let (alone, _) = atlas_scene(true, true, &scene);
+        atlas_scene(true, false, &scene);
+        atlas_scene(true, false, &scene);
+        let batches = BATCH_DRAWS.get();
+        let (drawn, _) = atlas_scene(true, false, &scene);
+        let batched = BATCH_DRAWS.get() - batches;
+        KEEPS_RUNS.set(true);
+        assert!(batched > 0, "not batched");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "bytes apart");
     }
 
     #[test]

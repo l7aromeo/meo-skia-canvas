@@ -50,7 +50,7 @@ use crate::{
         run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
-    font::colr::{Format, ImageRoute, composite_onto, grow_sheets},
+    font::colr::{BatchScope, Format, ImageRoute, composite_onto, grow_sheets},
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
@@ -1654,6 +1654,16 @@ pub struct ColourShadow {
 
 impl ColourText {
     fn playback(&self, canvas: &SkCanvas, target: Target) {
+        // Its runs join a batch only where nothing of its own lies between
+        // them and the page: no clip, no layer for a blend, no shadow
+        // beneath, drawn again from its replay onto pixels -- see
+        // `BatchScope`.
+        let joins = self.clip.is_none()
+            && self.blend.is_none()
+            && self.shadow.is_none()
+            && self.replay.is_some()
+            && target == Target::Pixels;
+        let _suspended = (!joins).then(|| BatchScope::suspend(canvas));
         canvas.save();
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
@@ -3171,7 +3181,9 @@ impl Clipped {
 ///
 /// On pixels it first adds to the colour glyph sheets the glyph images the
 /// last playback drew again -- see [`grow_sheets`] -- so that a page adds
-/// them once, before any of its runs draws.
+/// them once, before any of its runs draws; and it holds consecutive runs of
+/// colour text open in one [`BatchScope`], so that those drawn from a sheet
+/// are drawn together, before the next entry of another kind plays.
 pub(crate) fn play_entries(
     entries: &[Layer],
     features: &[VectorFeatures],
@@ -3195,8 +3207,18 @@ pub(crate) fn play_entries(
     let shares_the_clip = |piece: &Clipped| {
         grouped && !(coverage && matches!(piece.entry, Layer::Cut(_)))
     };
+    // Consecutive runs of colour text drawn from one sheet are drawn
+    // together -- see `BatchScope` -- the batch drawn before any other
+    // entry plays.
+    let mut batch = None;
     let mut at = 0;
     while at < entries.len() {
+        match &entries[at] {
+            Layer::ColourText(_) if target == Target::Pixels => {
+                batch.get_or_insert_with(|| BatchScope::open(canvas));
+            }
+            _ => batch = None,
+        }
         if let Some(played) = play_shared_chains(
             &entries[at..],
             &features[at..],
