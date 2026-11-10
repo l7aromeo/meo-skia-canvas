@@ -857,6 +857,42 @@ fn composite_onto(canvas: &Canvas, image: &Image, at: IPoint, paint: &Paint) {
             canvas.draw_image(copy.image_snapshot(), point, Some(paint));
             return;
         }
+        10..=12 => {
+            let variant = CPU_DRAW.get();
+            let drawn = match variant {
+                11 => image.clone(),
+                _ => {
+                    let swizzled = match ColorType::N32 {
+                        ColorType::BGRA8888 => ColorType::RGBA8888,
+                        _ => ColorType::BGRA8888,
+                    };
+                    let info = image.image_info().with_color_type(swizzled);
+                    let mut copy = crate::started::raster(&info, None, None)
+                        .expect("a raster");
+                    let mut src = Paint::default();
+                    src.set_blend_mode(BlendMode::Src);
+                    copy.canvas().draw_image(image, (0, 0), Some(&src));
+                    copy.image_snapshot()
+                }
+            };
+            let sampling = match variant {
+                12 => SamplingOptions::default(),
+                _ => SamplingOptions::new(
+                    skia_safe::FilterMode::Linear,
+                    skia_safe::MipmapMode::Nearest,
+                ),
+            };
+            let whole =
+                Rect::from_wh(drawn.width() as f32, drawn.height() as f32);
+            canvas.draw_image_rect_with_sampling_options(
+                &drawn,
+                Some((&whole, skia_safe::canvas::SrcRectConstraint::Strict)),
+                rect,
+                sampling,
+                paint,
+            );
+            return;
+        }
         9 => {
             let mut filtered = paint.clone();
             let identity = [
@@ -2244,7 +2280,7 @@ mod tests {
         let background = [200u8, 120, 60, 255];
         for alpha in [1.0_f32, 0.5] {
             let mut first: Vec<Vec<u8>> = Vec::new();
-            for variant in 1..=9u8 {
+            for variant in 1..=12u8 {
                 CPU_DRAW.set(variant);
                 let (mut held, mut off, mut beyond, mut worst, mut moved) =
                     (0, 0, 0, 0.0_f64, 0);
@@ -2315,7 +2351,7 @@ mod tests {
             });
             let scale = if alpha == 1.0 { 1.0 } else { 128.0 / 255.0 };
             let mut reference = Vec::new();
-            for variant in 1..=9u8 {
+            for variant in 1..=12u8 {
                 CPU_DRAW.set(variant);
                 let (page, _) = atlas_scene(false, false, &scene);
                 let (mut held, mut off, mut beyond) = (0, 0, 0);
