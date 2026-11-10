@@ -649,33 +649,46 @@ jobs:
       # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
       # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
       # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
-      - name: Install Skia build dependencies (apt)
+      - name: Install build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
-            python3 libvulkan-dev
+            clang libfontconfig1-dev libssl-dev nasm yasm pkg-config libvulkan-dev
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: msrv-${{ steps.declared.outputs.version }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Skia as docs/rust.md tells a Linux consumer to get it: `patched-skia`
+      # and the line `skia-binaries.txt` holds, in a Cargo config's `[env]`.
+      # Without the URL a Linux build compiles crates.io's Skia, since rust-skia
+      # hosts none built with the FreeType the crate embeds there: about 13
+      # minutes cold, and a failed fetch of its sources fails the job.
+      # `patched-skia` stops skia-bindings compiling at all, so a missing
+      # archive fails here at once. crates.io's Skia is the `crate-consumer`
+      # job's macOS stock leg; what this job adds is the Rust version.
+      - name: Point the build at the archives
+        run: |
+          mkdir -p .cargo
+          printf '[env]\nSKIA_BINARIES_URL = "%s"\n' "$(sed -n 's/^url //p' skia-binaries.txt)" > .cargo/config.toml
+          cat .cargo/config.toml
       # The Linux feature set and `fetch`, so the cfg-gated code and the HTTP
       # client compile here rather than being skipped. `--all-targets` is
       # deliberately absent: the MSRV applies to the library a consumer builds,
       # not to this repo's dev-dependencies.
-      - run: cargo check --no-default-features --features "vulkan,window,fetch"
+      - run: cargo check --no-default-features --features "vulkan,window,fetch,patched-skia"
       # A build cache restored over a freshly extracted cargo registry, which
       # rust-cache restores on any exact hit: skia-bindings' build script does
-      # not run again, so the Skia tree it synced into its registry extraction
-      # is gone, and this crate's build script has to build without it. This
-      # job builds crates.io's Skia, as a consumer does, so it is the job to
-      # make that state every run. If skia-bindings compiles again, the state
-      # was not reached and the step proves nothing, so that fails too.
+      # not run again, and this crate's build script has to build from what
+      # the cache holds. No Skia source tree is in the registry extraction --
+      # a download never puts one there -- and the step removes one if a
+      # cache ever brought it, so that this crate's build script is held to
+      # needing none. If skia-bindings compiles again, the state was not
+      # reached and the step proves nothing, so that fails too.
       - name: Build again over skia-bindings' extraction without its Skia
         run: |
           set -euo pipefail
           rm -rf "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/skia-bindings-*/skia
           touch build.rs
-          cargo check --no-default-features --features "vulkan,window,fetch" 2>&1 | tee "$RUNNER_TEMP/again.log"
+          cargo check --no-default-features --features "vulkan,window,fetch,patched-skia" 2>&1 | tee "$RUNNER_TEMP/again.log"
           if grep -q "Compiling skia-bindings" "$RUNNER_TEMP/again.log"; then
             echo "::error::skia-bindings compiled again, so this build had its Skia tree"
             exit 1
@@ -941,6 +954,172 @@ jobs:
           node scripts/check-doc-attachment.mjs --self-test
           node scripts/check-doc-attachment.mjs --range "$RANGE"
 
+  # The crate as a crates.io consumer builds it, which no other job does:
+  # every other build here compiles Skia from this repository's patched tree,
+  # and a consumer's build downloads it. skia-bindings comes from the
+  # registry, so with SKIA_SOURCE_DIR unset it takes the download path a
+  # consumer's does -- from the release skia-binaries.txt names, where the
+  # `patched` legs point it with the line the docs show, and from
+  # rust-skia's own release in the `stock` leg, which sets nothing and must
+  # build and pass as on 0.17.1. That leg is macOS because rust-skia hosts
+  # the default feature set's archive there and not for Linux or Windows,
+  # where a consumer who sets nothing compiles crates.io's Skia, as on
+  # 0.17.1, for twenty minutes of a run. `skia-pack consumer` then refuses a
+  # build that fell back to compiling Skia, and one whose patch cfgs are not
+  # the ones its Skia carries; `tests/patched_skia.rs` holds `skia_patches()`
+  # to the manifest's tree, or to "" for stock.
+  #
+  # A `patched` leg needs the release complete, so it fails, saying so,
+  # until skia-binaries.yml has published these patches' archives: the order a
+  # patch change takes is in docs/internals/packaging.md. The Linux and macOS
+  # legs run the Rust suite -- macOS's is what `just test-rust` runs on the
+  # Apple Silicon machines this repository is developed on; the Windows leg
+  # builds every test and runs `patched_skia`, since no job here has ever run
+  # the suite on Windows and a first run is its own piece of work.
+  crate-consumer:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
+    name: crate consumer (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux, patched
+            os: ubuntu-latest
+            mode: patched
+            features: patched-skia,fetch
+            suite: all
+          - name: macOS, stock
+            os: macos-latest
+            mode: stock
+            features: ""
+            suite: all
+          - name: macOS, patched
+            os: macos-latest
+            mode: patched
+            features: patched-skia,metal,fetch
+            suite: all
+          - name: Windows, patched
+            os: windows-latest
+            mode: patched
+            features: patched-skia,fetch
+            suite: patched_skia
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      # The `test` job's packages, for the dependencies that build from C
+      # here as they do there; Skia is not among them. poppler for
+      # `tests/pdf_blend.rs`.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
+      - name: Install build dependencies (apt)
+        if: runner.os == 'Linux'
+        run: |
+          .github/scripts/apt-install.sh \
+            clang libfontconfig1-dev libssl-dev nasm yasm pkg-config poppler-utils
+      # A consumer's build needs the system fontconfig and no system FreeType
+      # headers:
+      # Skia embeds its own on Linux, and skia-bindings then probes no
+      # `freetype2`. libfontconfig1-dev depends on libfreetype-dev, so the
+      # headers and pkg-config file are moved aside instead, and the step
+      # fails unless they are gone -- `pkg-config fontconfig` then fails on its
+      # `Requires: freetype2` and skia-bindings falls back to `-lfontconfig`,
+      # which is what this leg holds a build to. The library stays, as it does
+      # on any system with fontconfig installed.
+      - name: Hide the system FreeType headers
+        if: matrix.name == 'Linux, patched'
+        run: |
+          set -euo pipefail
+          pc=$(pkg-config --variable=pcfiledir freetype2 || true)
+          for path in /usr/include/freetype2 "${pc:+$pc/freetype2.pc}"; do
+            # Out of the include tree and the pkg-config path, not renamed in
+            # place: a renamed directory still holds ft2build.h where a search
+            # finds it.
+            if [ -n "$path" ] && [ -e "$path" ]; then sudo mv "$path" "$RUNNER_TEMP/hidden-$(basename "$path")"; fi
+          done
+          if find /usr/include /usr/local/include -name ft2build.h 2>/dev/null | grep -q .; then
+            echo "::error::ft2build.h is still visible; the build would not show it needs none"
+            exit 1
+          fi
+          if pkg-config --exists freetype2; then
+            echo "::error::pkg-config still finds freetype2"
+            exit 1
+          fi
+          echo "no FreeType headers or freetype2.pc visible"
+      - name: Install build dependencies (brew)
+        if: runner.os == 'macOS'
+        run: brew install nasm poppler
+      - run: cargo fetch
+      # The feature with no URL, refused with the line to add, before the URL
+      # is set. This crate's build script runs after skia-bindings' (`links =
+      # "skia"`), so it speaks only where skia-bindings' download succeeded:
+      # here, from rust-skia's release, which has the macOS archive for this
+      # set and not the Linux or Windows one, where skia-bindings stops the
+      # build first. The other refusals -- a URL naming another of our
+      # releases, a target not hosted -- reach this script only once a
+      # download from that URL succeeds, which needs a second release to
+      # exist; build/skia_mode.rs's tests hold their messages.
+      - name: Refusals
+        if: matrix.name == 'macOS, patched'
+        run: |
+          set -uo pipefail
+          refused() {
+            local want=$1 log
+            shift
+            if log=$(cargo check --lib --keep-going "$@" 2>&1); then
+              echo "::error::the build was not refused: $*"
+              exit 1
+            fi
+            if ! grep -qF "$want" <<< "$log"; then
+              echo "$log" | tail -40
+              echo "::error::refused, but not with \"$want\": $*"
+              exit 1
+            fi
+            echo "refused, saying \"$want\": $*"
+          }
+          refused "the \`patched-skia\` feature links this repository's patched" \
+            --features patched-skia
+      # The line a consumer copies from docs/rust.md, in the same place:
+      # `[env]` in a Cargo config. `skia-pack manifest --check` holds the
+      # docs' line to the manifest's, so the manifest's is the docs'.
+      - name: Point the build at the archives
+        if: matrix.mode == 'patched'
+        run: |
+          mkdir -p .cargo
+          printf '[env]\nSKIA_BINARIES_URL = "%s"\n' "$(sed -n 's/^url //p' skia-binaries.txt)" > .cargo/config.toml
+          cat .cargo/config.toml
+      - name: The release holds every archive
+        if: matrix.mode == 'patched'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/skia-pack.mjs published
+      - name: Build the tests
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: cargo test --no-run ${FEATURES:+--features "$FEATURES"}
+      - name: The build linked the Skia it asked for
+        run: node scripts/skia-pack.mjs consumer target ${{ matrix.mode }}
+      - name: Test
+        env:
+          FEATURES: ${{ matrix.features }}
+          SUITE: ${{ matrix.suite }}
+        run: |
+          if [ "$SUITE" = all ]; then
+            cargo test ${FEATURES:+--features "$FEATURES"}
+          else
+            cargo test ${FEATURES:+--features "$FEATURES"} --test "$SUITE"
+          fi
+
   # The one context this workflow offers a branch ruleset. It runs whatever the
   # jobs above did, so a pull request that skips all ten still reports rather
   # than leaving a required check that never arrives.
@@ -974,6 +1153,7 @@ jobs:
         docs,
         doc-anchors,
         prune-caches,
+        crate-consumer,
       ]
     runs-on: ubuntu-latest
     timeout-minutes: 10

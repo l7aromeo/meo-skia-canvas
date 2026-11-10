@@ -247,6 +247,8 @@ Swap `metal` for `vulkan` on Linux and Windows.
 
 ### Metal and skia-bindings' prebuilt Skia
 
+Everything in this section describes a crate build of crates.io's Skia. A build with the patched archives -- see [Drawing what the npm package draws](#drawing-what-the-npm-package-draws) -- has none of it.
+
 On macOS, the Skia that skia-bindings 0.156.0 downloads waits at most one second for each Metal shader and pipeline it compiles, then drops the draw. On a loaded machine a process's first image draw, blend mode or gradient can come back missing, with only a line on stderr ("Compilation took longer than 1000 ms"). The npm package's macOS binary is built without that limit, but a crate build uses whatever Skia skia-bindings gives it.
 
 The same Skia's atlas path renderer can also move a pixel of an anti-aliased path's coverage a step up or down, about 50 of 255 levels of alpha, on Metal and on Vulkan alike: it does to a path it places at an atlas row of 512 or more, and where a path lands depends on everything else the same flush draws. The npm package's binaries cap the atlas at 512 by 512, so no path is placed there; a crate build does not.
@@ -260,6 +262,30 @@ On Windows, the same Skia takes a face's slant from DirectWrite alone, and Direc
 An SVG document's `italic` and `oblique` text in a family with no slanted face draws upright in a crate build. CSS Fonts 4 section 5.2 synthesises the slant, and the npm package's binaries do -- a quarter for `italic`, `tan(angle)` for `oblique <angle>` -- through `containers/skia-svg-synthetic-slant.patch`; crates.io's Skia never sets a skew on SVG text, and reads `oblique <angle>` as an unparseable `font-style`.
 
 A crate build can draw a family's upright face, or its face of another slant, for `italic` or `oblique` where the family has a face of the slant asked for but far from the weight asked for. CSS Fonts 4 section 5.2 narrows a family's faces by style before weight, and the npm package's binaries do through `containers/skia-font-match-slant-first.patch`; crates.io's Skia scores a face's weight so that it can outrank its slant, so `italic` in a family of an upright 400 face and an italic 900 one draws the upright face, skewed.
+
+### Drawing what the npm package draws
+
+A crate build links this repository's patched Skia, every patch above included, when it turns on the `patched-skia` feature and names the archives in `SKIA_BINARIES_URL`:
+
+```toml
+# Cargo.toml
+[dependencies]
+meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan", "patched-skia"] }
+```
+
+```toml
+# .cargo/config.toml
+[env]
+SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-3f566dd7198c/skia-binaries-{key}.tar.gz"
+```
+
+skia-bindings then downloads Skia built from `PATCHES` for that target and feature set instead of compiling crates.io's, and the crate draws what the npm package draws. `skia-binaries.txt`, in the crate, holds the URL for the crate version you have, and the targets the archives cover: npm's seven, from `lib/targets.json`, with either C runtime on Windows and musl, with and without `metal` or `vulkan`, whichever the target builds. A skia-safe feature added on top of the crate's has no archive.
+
+- The URL names the patch set, and a crate version is built against exactly one. A release that changes the patches changes the URL, says so under Breaking, and gives the new line. A build whose line names another set is refused with the line it needs, as is one on a target the archives do not cover.
+- `patched-skia` without the URL is refused, printing the line to add. The URL without `patched-skia` still works, but a download that fails then falls back to building crates.io's Skia from source -- tens of minutes -- before the link fails; with the feature it fails at once.
+- skia-bindings' build script runs before this crate's, so each refusal above comes after skia-bindings has downloaded something. Where it found nothing to download -- `patched-skia` with no URL on Linux or Windows, where crates.io's skia-bindings has no prebuilt Skia for the crate's features, or with the URL on a target the archives do not cover -- the build stops in skia-bindings instead, with "Refusing to full-build skia with no-compile feature" under the `FROM:` URL it tried.
+- A build that names the archives links against a marker only the patched Skia defines, so one that ended up with any other Skia fails to link, on `meo_skia_canvas_needs_its_patched_skia_see_SKIA_BINARIES_URL`, rather than drawing with it. `skia_patches()` returns the tree a build links, `skia-<skia-bindings version>-<patch digest>` as `skia-binaries.txt` names it for the build's target, or an empty string for crates.io's Skia.
+- A build that sets neither links crates.io's Skia, as before: downloaded where rust-skia hosts a prebuilt one for the build's features, and compiled from source where it does not. On Linux it never does, because the crate embeds FreeType there (`embed-freetype` and `freetype-woff2`) and rust-skia hosts no Skia built with it. Compiling fetches Skia's sources and their dependencies over the network and takes about 13 minutes on a GitHub-hosted runner, and a failed fetch fails the build. So on Linux, set the URL whether or not you want the patches.
 
 To build without them, compile Skia from source with this repository's patches, the ones `PATCHES` in `scripts/skia-source.mjs` names for your platform. `node scripts/skia-source.mjs prepare`, run in a checkout of this repository, fetches rust-skia at the matching tag, applies them and prints the directory to set as `SKIA_SOURCE_DIR` for your build. It is about 1 GB the first time; a later patch list for the same version is made from that tree without downloading anything. The build compiles Skia, which takes a few minutes.
 

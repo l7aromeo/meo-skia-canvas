@@ -20,6 +20,10 @@
 //   node scripts/skia-pack.mjs upload <archive> <release tag>
 //       upload an archive to the release, never replacing one it holds:
 //       a held name with the same bytes is left as it is, with others refused
+//   node scripts/skia-pack.mjs consumer <target-dir> patched|stock
+//       refuse a crate build in <target-dir> that did not link the Skia it
+//       was meant to: the archives and this crate's patch cfgs, or
+//       crates.io's Skia and none of them, both downloaded, never compiled
 //   node scripts/skia-pack.mjs origin
 //       print the skia-bindings version Cargo.lock names and the rust-skia
 //       commit its crates.io package was made from, space-separated
@@ -396,6 +400,39 @@ export function uploadDecision(name, digest, held) {
   return `skia-pack: the release already holds ${name} as ${held}; this build is ${digest}, and archives are never replaced`;
 }
 
+/// What skia-bindings prints when its download installed the archive, and
+/// when it fell back to building Skia instead (binary_cache/download.rs and
+/// build.rs).
+const DOWNLOADED = "DOWNLOAD AND INSTALL SUCCEEDED";
+const NOT_DOWNLOADED = ["DOWNLOAD AND INSTALL FAILED", "STARTING A FULL BUILD"];
+
+/**
+ * Why a crate build did not link what `mode` asks for, or `null`.
+ * `bindingsLogs` are skia-bindings' build-script outputs, `crateLogs` this
+ * crate's. A `patched` build downloaded and turned on `meo_skia_marker`,
+ * which only skia-binaries.txt's cfgs give a downloaded build, so the
+ * archive it linked was this repository's. A `stock` build downloaded too
+ * -- crates.io's Skia, as 0.17.1 did -- and turned on no patch cfg.
+ */
+export function consumerRefusal(bindingsLogs, crateLogs, mode) {
+  if (!bindingsLogs.length) return "no skia-bindings build ran";
+  if (!crateLogs.length) return "no meo-skia-canvas build script ran";
+  const fell = NOT_DOWNLOADED.find((line) =>
+    bindingsLogs.some((log) => log.includes(line)),
+  );
+  if (fell) return `skia-bindings printed "${fell}"`;
+  if (!bindingsLogs.some((log) => log.includes(DOWNLOADED)))
+    return `skia-bindings never printed "${DOWNLOADED}"`;
+  const cfgs = crateLogs.flatMap((log) =>
+    [...log.matchAll(/^cargo:rustc-cfg=(meo_\w+)$/gm)].map((m) => m[1]),
+  );
+  if (mode === "patched" && !cfgs.includes("meo_skia_marker"))
+    return "the build turned on no meo_skia_marker, so it did not take the archives' cfgs";
+  if (mode === "stock" && cfgs.length)
+    return `a stock build turned on ${cfgs.join(", ")}`;
+  return null;
+}
+
 /** The archive file names `cells` plan that `held` does not include. */
 export function missingArchives(cells, held) {
   return cells
@@ -453,6 +490,29 @@ export function manifestText(release, repository, treeFor, cfgsFor) {
     "",
   ].join("\n");
 }
+
+/**
+ * The `SKIA_BINARIES_URL = "..."` lines in `text` that name anything but
+ * `url`, or `null` where it has none, which for a doc that shows the line is
+ * as wrong as a stale one.
+ */
+export function staleDocLines(text, url) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("SKIA_BINARIES_URL = "));
+  if (!lines.length) return null;
+  return lines.filter((line) => line !== `SKIA_BINARIES_URL = "${url}"`);
+}
+
+/// The docs that show a consumer the `SKIA_BINARIES_URL` line, which
+/// `manifest --check` holds to the manifest's URL so a patch change cannot
+/// leave them naming the last tree.
+const DOCS_WITH_THE_LINE = [
+  "README.md",
+  "docs/readme/crate.md",
+  "docs/rust.md",
+];
 
 /** The self-test's cases, each `[what, accepted, run]`. */
 function cases(scratch) {
@@ -573,6 +633,13 @@ function cases(scratch) {
   };
   const linux = "x86_64-unknown-linux-gnu";
   const windows = "x86_64-pc-windows-msvc";
+  const docUrl =
+    "https://h/releases/download/skia-binaries-0.156.0-aaa/skia-binaries-{key}.tar.gz";
+  const docsAre = (text, expected) => () => {
+    const got = staleDocLines(text, docUrl);
+    if (JSON.stringify(got) !== JSON.stringify(expected))
+      throw new Error(`stale lines ${JSON.stringify(got)}`);
+  };
   const trees = {
     darwin: "skia-0.156.0-918bd4ffa80d",
     linux: "skia-0.156.0-732ea61409ba",
@@ -689,7 +756,59 @@ function cases(scratch) {
     if (JSON.stringify(got) !== JSON.stringify(expected(cells)))
       throw new Error(`missing ${got.length}: ${got.slice(0, 3)}`);
   };
+  const downloaded =
+    "TRYING TO DOWNLOAD AND INSTALL SKIA BINARIES: 0.156.0/k\nDOWNLOAD AND INSTALL SUCCEEDED\n";
+  const fellBack =
+    'TRYING TO DOWNLOAD AND INSTALL SKIA BINARIES: 0.156.0/k\nDOWNLOAD AND INSTALL FAILED: curl error code: "22"\nSTARTING A FULL BUILD\n';
+  const patchedCrate =
+    "cargo:rustc-check-cfg=cfg(meo_skia_marker)\ncargo:rustc-cfg=meo_atlas_size\ncargo:rustc-cfg=meo_skia_marker\n";
+  const stockCrate = "cargo:rustc-check-cfg=cfg(meo_skia_marker)\n";
+  const consumerIs = (bindings, crate, mode, expected) => () => {
+    const got = consumerRefusal(bindings, crate, mode);
+    if (expected === null ? got !== null : !got?.includes(expected))
+      throw new Error(`consumer refusal ${JSON.stringify(got)}`);
+  };
   return [
+    [
+      "a patched consumer build that downloaded and took the archives' cfgs",
+      true,
+      consumerIs([downloaded], [patchedCrate], "patched", null),
+    ],
+    [
+      "a stock consumer build that downloaded and took no patch cfg",
+      true,
+      consumerIs([downloaded, ""], [stockCrate], "stock", null),
+    ],
+    [
+      "a consumer build whose download fell back to a full build",
+      true,
+      consumerIs([fellBack], [patchedCrate], "patched", "INSTALL FAILED"),
+    ],
+    [
+      "a consumer build that never tried to download",
+      true,
+      consumerIs(
+        ["STARTING OFFLINE BUILD\n"],
+        [stockCrate],
+        "stock",
+        "never printed",
+      ),
+    ],
+    [
+      "a patched consumer build without the marker cfg",
+      true,
+      consumerIs([downloaded], [stockCrate], "patched", "meo_skia_marker"),
+    ],
+    [
+      "a stock consumer build with a patch cfg",
+      true,
+      consumerIs([downloaded], [patchedCrate], "stock", "meo_atlas_size"),
+    ],
+    [
+      "a consumer target with no skia-bindings build",
+      true,
+      consumerIs([], [stockCrate], "stock", "no skia-bindings"),
+    ],
     [
       "22 archives: every hosted target, feature set and consumer C runtime",
       true,
@@ -824,6 +943,19 @@ function cases(scratch) {
       manifestIs,
     ],
     ["the release moves with any one platform's tree", true, releaseMoves],
+    [
+      "a doc whose line names the manifest's URL",
+      true,
+      docsAre(`[env]\nSKIA_BINARIES_URL = "${docUrl}"\n`, []),
+    ],
+    [
+      "a doc whose line names another tree",
+      true,
+      docsAre(`SKIA_BINARIES_URL = "${docUrl.replace("aaa", "bbb")}"\n`, [
+        `SKIA_BINARIES_URL = "${docUrl.replace("aaa", "bbb")}"`,
+      ]),
+    ],
+    ["a doc with no line at all", true, docsAre("nothing here\n", null)],
     [
       "the base set's key on Linux",
       true,
@@ -1318,7 +1450,19 @@ if (main) {
           );
           process.exit(1);
         }
-        console.log(`skia-pack: ${MANIFEST} matches PATCHES and build.rs`);
+        const url = text.match(/^url (\S+)$/m)[1];
+        const docs = DOCS_WITH_THE_LINE.map((doc) => [
+          doc,
+          staleDocLines(readFileSync(join(ROOT, doc), "utf8"), url),
+        ]).filter(([, stale]) => stale === null || stale.length);
+        for (const [doc, stale] of docs)
+          console.error(
+            `skia-pack: ${doc} ${stale === null ? "shows no SKIA_BINARIES_URL line" : `names another URL: ${stale.join(" ")}`}; it should be\n  SKIA_BINARIES_URL = "${url}"`,
+          );
+        if (docs.length) process.exit(1);
+        console.log(
+          `skia-pack: ${MANIFEST} matches PATCHES and build.rs, and ${DOCS_WITH_THE_LINE.length} docs show its URL`,
+        );
       } else {
         writeFileSync(path, text);
         console.log(`skia-pack: wrote ${MANIFEST}`);
@@ -1346,6 +1490,33 @@ if (main) {
           "usage: GITHUB_REPOSITORY=<owner/name> GITHUB_TOKEN=<token> node scripts/skia-pack.mjs upload <archive> <release tag>",
         );
       console.log(await uploadArchive(archive, tag, repository, token));
+    } else if (command === "consumer") {
+      const [targetDir, mode] = args;
+      if (!targetDir || !["patched", "stock"].includes(mode))
+        throw new Error(
+          "usage: node scripts/skia-pack.mjs consumer <target-dir> patched|stock",
+        );
+      const logs = (prefix) =>
+        readdirSync(targetDir, { recursive: true })
+          .map(String)
+          .filter((path) => {
+            const parts = path.split(/[\\/]/);
+            return (
+              parts.at(-1) === "output" &&
+              parts.at(-3) === "build" &&
+              parts.at(-2).startsWith(prefix)
+            );
+          })
+          .map((path) => readFileSync(join(targetDir, path), "utf8"));
+      const why = consumerRefusal(
+        logs("skia-bindings-"),
+        logs("meo-skia-canvas-"),
+        mode,
+      );
+      if (why) throw new Error(`skia-pack: ${mode} crate build: ${why}`);
+      console.log(
+        `skia-pack: the ${mode} crate build linked what it asked for`,
+      );
     } else if (command === "origin") {
       const { version, commit } = packagedSkiaBindings();
       console.log(`${version} ${commit}`);
@@ -1429,7 +1600,7 @@ if (main) {
       console.log(packedReport(packed));
     } else {
       console.error(
-        "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static] | build [--expect <key>] <out-dir> <target> [cargo args] | plan | published | upload <archive> <release tag> | origin | manifest [--check] | --self-test",
+        "usage: node scripts/skia-pack.mjs pack <build-dir> <out-dir> <target> <features> [static] | build [--expect <key>] <out-dir> <target> [cargo args] | plan | published | upload <archive> <release tag> | consumer <target-dir> patched|stock | origin | manifest [--check] | --self-test",
       );
       process.exit(2);
     }

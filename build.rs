@@ -5,8 +5,11 @@ use std::{
 
 #[path = "build/brotli.rs"]
 mod brotli;
+#[path = "build/skia_mode.rs"]
+mod skia_mode;
 
-use brotli::{Inputs, Plan, VENDORED_BROTLI, VENDORED_FILES, left_out, plan};
+use brotli::{Plan, VENDORED_BROTLI, VENDORED_FILES, left_out, plan};
+use skia_mode::{Inputs, Mode, mode, parse_manifest};
 
 /// Where `vendor/brotli` is, under this crate's root.
 const VENDOR_BROTLI: &str = "vendor/brotli";
@@ -22,9 +25,52 @@ fn main() {
         cc::Build::new().file("src/bdf_stub.c").compile("bdf_stub");
     }
 
-    brotli_command_table();
+    let skia = skia_mode_of_build();
+    if let Mode::Refused(why) = &skia {
+        // A build that asked for this repository's archives and would get
+        // other Skia without being told: see `build/skia_mode.rs`.
+        panic!("{why}");
+    }
+    if skia != Mode::Docs && !matches!(skia, Mode::Binaries { .. }) {
+        brotli_command_table();
+    }
     graphite_bindings();
-    skia_patches();
+    skia_patches(&skia);
+}
+
+/// Which Skia this build links: see `build/skia_mode.rs`. A build that sets
+/// `SKIA_BINARIES_URL` to the URL `skia-binaries.txt` names, on a target it
+/// hosts, links this repository's patched Skia from the archives; one that
+/// sets nothing links crates.io's, as every crate build did before them.
+fn skia_mode_of_build() -> Mode {
+    for name in ["SKIA_BINARIES_URL", "DOCS_RS", "SKIA_SOURCE_DIR"] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
+    let path = manifest_dir.join("skia-binaries.txt");
+    println!("cargo:rerun-if-changed={}", path.display());
+    let manifest = fs::read_to_string(&path)
+        .map_err(|error| error.to_string())
+        .and_then(|text| parse_manifest(&text))
+        .unwrap_or_else(|why| {
+            // A package without it was not built by this repository's release.
+            panic!("meo-skia-canvas: {} cannot be read: {why}", path.display())
+        });
+    let source_dir = env::var("SKIA_SOURCE_DIR").ok();
+    let binaries_url = env::var("SKIA_BINARIES_URL").ok();
+    let target = env::var("TARGET").unwrap_or_default();
+    mode(
+        &Inputs {
+            docs_rs: env::var_os("DOCS_RS").is_some(),
+            source_dir: source_dir.as_deref(),
+            local: patched_skia_bindings(&manifest_dir).is_some(),
+            binaries_url: binaries_url.as_deref(),
+            patched_skia: env::var_os("CARGO_FEATURE_PATCHED_SKIA").is_some(),
+            target: &target,
+        },
+        &manifest,
+    )
 }
 
 /// One of this repository's patches to Skia, as a build can tell whether the
@@ -91,9 +137,10 @@ const SKIA_PATCHES: [SkiaPatch; 7] = [
         file: "src/opts/SkRasterPipeline_opts.h",
         marker: "(d*sa) / (sa - s)",
     },
-    // `containers/skia-patch-marker.patch`: no fix, one function only this
-    // repository's patched Skia defines, which the archives built from it
-    // carry for a crate build to link against.
+    // `containers/skia-patch-marker.patch`: no fix, one function a crate
+    // build that names the patched archives links against, so a build that
+    // fell back to crates.io's Skia fails to link -- see
+    // `src/patched_skia.rs`.
     SkiaPatch {
         cfg: "meo_skia_marker",
         file: "src/core/SkGraphics.cpp",
@@ -101,18 +148,29 @@ const SKIA_PATCHES: [SkiaPatch; 7] = [
     },
 ];
 
-/// Turns on each of [`SKIA_PATCHES`]'s cfgs where the Skia source this build
-/// compiled holds its marker.
+/// Turns on each of [`SKIA_PATCHES`]'s cfgs this build's Skia carries.
 ///
-/// This repository's own builds compile the patched source. A crate build
-/// compiles crates.io's, or links rust-skia's prebuilt archive, which is built
-/// from the same unpatched source; it names no tree for [`skia_tree`] to
-/// return, and gets none of them. Only tests read the cfgs: the crate draws
-/// and reads through Skia the same way on both, and what differs is what
-/// Skia does underneath.
-fn skia_patches() {
+/// From the archives, `skia-binaries.txt`'s list for the target, which the
+/// release generates from the same patch list the archives are built from.
+/// Otherwise each one whose marker the Skia source this build compiled holds:
+/// this repository's own builds compile the patched source, and a crate build
+/// that names no archives compiles crates.io's, or links rust-skia's prebuilt
+/// archive, which is built from the same unpatched source; it names no tree
+/// for [`skia_tree`] to return, and gets none of them. Only tests read the
+/// cfgs: the crate draws and reads through Skia the same way on all of them,
+/// and what differs is what Skia does underneath.
+fn skia_patches(skia: &Mode) {
     for patch in &SKIA_PATCHES {
         println!("cargo:rustc-check-cfg=cfg({})", patch.cfg);
+    }
+    if let Mode::Binaries { tree, cfgs } = skia {
+        for cfg in cfgs {
+            println!("cargo:rustc-cfg={cfg}");
+        }
+        if cfgs.iter().any(|cfg| cfg == SKIA_MARKER_CFG) {
+            println!("cargo:rustc-env=MEO_SKIA_TREE={tree}");
+        }
+        return;
     }
     println!("cargo:rerun-if-env-changed=SKIA_SOURCE_DIR");
     let Some(skia) = skia_tree() else {
@@ -128,8 +186,30 @@ fn skia_patches() {
         println!("cargo:rerun-if-changed={}", file.display());
         if source.contains(patch.marker) {
             println!("cargo:rustc-cfg={}", patch.cfg);
+            if patch.cfg == SKIA_MARKER_CFG {
+                println!(
+                    "cargo:rustc-env=MEO_SKIA_TREE={}",
+                    source_tree_name(&skia)
+                );
+            }
         }
     }
+}
+
+/// The cfg of `containers/skia-patch-marker.patch`, under which the crate
+/// links the marker and `skia_patches` names the tree.
+const SKIA_MARKER_CFG: &str = "meo_skia_marker";
+
+/// The name of the patched tree `skia` lies in -- the
+/// `skia-<skia-bindings version>-<patch digest>` directory
+/// `scripts/skia-source.mjs` prepares, above rust-skia's checkout -- or
+/// `local` for a rust-skia checkout of its own (`just use-local-skia`).
+fn source_tree_name(skia: &Path) -> String {
+    skia_mode::tree_name(
+        skia.ancestors().filter_map(|dir| dir.file_name()?.to_str()),
+    )
+    .unwrap_or("local")
+    .to_owned()
 }
 
 /// What this script prints where the patched Graphite bindings are in the
@@ -182,7 +262,7 @@ fn brotli_command_table() {
     {
         hold_vendored_brotli_to(tree);
     }
-    let sources = match plan(&Inputs {
+    let sources = match plan(&brotli::Inputs {
         target_os: &target_os,
         docs_rs,
         tree: tree_text.as_deref(),

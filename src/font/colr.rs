@@ -2596,7 +2596,10 @@ mod tests {
             assert_eq!(apart, 0, "{name}: bytes apart on the CPU");
         }
         if !RenderingEngine::GPU.selectable() {
-            if cfg!(target_os = "macos") {
+            // A Mac built with Metal always has a GPU, so there a missing one
+            // is a failure; a build without a GPU backend, or CI's Linux
+            // runners, say the GPU half did not run.
+            if cfg!(all(target_os = "macos", feature = "metal")) {
                 panic!("no GPU on macOS");
             }
             eprintln!("skipped: no GPU");
@@ -2663,7 +2666,10 @@ mod tests {
         // page without the glyphs before them.
         use crate::{gpu::RenderingEngine, paint::BlendMode::*, prelude::*};
         if !RenderingEngine::GPU.selectable() {
-            if cfg!(target_os = "macos") {
+            // A Mac built with Metal always has a GPU, so there a missing one
+            // is a failure; a build without a GPU backend, or CI's Linux
+            // runners, say the GPU half did not run.
+            if cfg!(all(target_os = "macos", feature = "metal")) {
                 panic!("no GPU on macOS");
             }
             eprintln!("skipped: no GPU");
@@ -2775,7 +2781,10 @@ mod tests {
         // `ColourRun::draw_all`.
         use crate::{gpu::RenderingEngine, paint::BlendMode::*, prelude::*};
         if !RenderingEngine::GPU.selectable() {
-            if cfg!(target_os = "macos") {
+            // A Mac built with Metal always has a GPU, so there a missing one
+            // is a failure; a build without a GPU backend, or CI's Linux
+            // runners, say the GPU half did not run.
+            if cfg!(all(target_os = "macos", feature = "metal")) {
                 panic!("no GPU on macOS");
             }
             eprintln!("skipped: no GPU");
@@ -2933,7 +2942,10 @@ mod tests {
         // the clip edge on llvmpipe.
         use crate::{gpu::RenderingEngine, prelude::*};
         if !RenderingEngine::GPU.selectable() {
-            if cfg!(target_os = "macos") {
+            // A Mac built with Metal always has a GPU, so there a missing one
+            // is a failure; a build without a GPU backend, or CI's Linux
+            // runners, say the GPU half did not run.
+            if cfg!(all(target_os = "macos", feature = "metal")) {
                 panic!("no GPU on macOS");
             }
             eprintln!("skipped: no GPU");
