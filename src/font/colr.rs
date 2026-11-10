@@ -597,11 +597,7 @@ impl ColourRun {
         let one = |image: &Image, at: IPoint| {
             let image = resident(canvas, image.clone());
             noted(canvas, &image);
-            canvas.draw_image(
-                &image,
-                (at.x as f32, at.y as f32),
-                Some(&composite),
-            );
+            composite_onto(canvas, &image, at, &composite);
         };
         canvas.save();
         canvas.reset_matrix();
@@ -719,11 +715,7 @@ impl ColourRun {
         noted(canvas, &image);
         canvas.save();
         canvas.reset_matrix();
-        canvas.draw_image(
-            &image,
-            ((origin.x + offset.x) as f32, (origin.y + offset.y) as f32),
-            Some(&composite),
-        );
+        composite_onto(canvas, &image, origin + offset, &composite);
         canvas.restore();
         true
     }
@@ -794,6 +786,72 @@ fn noted(canvas: &Canvas, image: &Image) {
 /// The paint a glyph image is composited onto the page in where `paint`
 /// carries no image filter: `paint`'s blend, alpha and colour filter, as
 /// the glyph's layer was composited through them.
+/// Composites `image` onto `canvas`, its top left at the whole device pixel
+/// `at`, through `paint`; the canvas's transform is the identity.
+fn composite_onto(canvas: &Canvas, image: &Image, at: IPoint, paint: &Paint) {
+    let point = (at.x as f32, at.y as f32);
+    let rect = Rect::from_xywh(
+        point.0,
+        point.1,
+        image.width() as f32,
+        image.height() as f32,
+    );
+    #[cfg(test)]
+    match CPU_DRAW.get() {
+        2 => {
+            canvas.draw_image_rect_with_sampling_options(
+                image,
+                None,
+                rect,
+                SamplingOptions::default(),
+                paint,
+            );
+            return;
+        }
+        3 => {
+            canvas.draw_image_rect_with_sampling_options(
+                image,
+                None,
+                rect,
+                SamplingOptions::from(skia_safe::FilterMode::Linear),
+                paint,
+            );
+            return;
+        }
+        4 => {
+            let mut dithered = paint.clone();
+            dithered.set_dither(true);
+            canvas.draw_image(image, point, Some(&dithered));
+            return;
+        }
+        5 => {
+            let mut shaded = paint.clone();
+            shaded.set_shader(image.to_shader(
+                (TileMode::Decal, TileMode::Decal),
+                SamplingOptions::default(),
+                &Matrix::translate(point),
+            ));
+            canvas.draw_rect(rect, &shaded);
+            return;
+        }
+        6 => {
+            let mut smooth = paint.clone();
+            smooth.set_anti_alias(true);
+            canvas.draw_image(image, point, Some(&smooth));
+            return;
+        }
+        _ => {}
+    }
+    let _ = rect;
+    canvas.draw_image(image, point, Some(paint));
+}
+
+// TEMPORARY, with the probes: which call `composite_onto` makes.
+#[cfg(test)]
+thread_local! {
+    static CPU_DRAW: Cell<u8> = const { Cell::new(1) };
+}
+
 fn composite(paint: &Paint) -> Paint {
     let mut composite = Paint::default();
     composite.set_blend_mode(paint.blend_mode_or(BlendMode::SrcOver));
@@ -2107,6 +2165,159 @@ mod tests {
             "PROBE E {} channels differ",
             zip(&cpu, &gpu).filter(|(a, b)| a != b).count()
         );
+    }
+
+    // TEMPORARY probe, reverted before merge: each call `composite_onto`
+    // can make, on this machine's CPU, against the exact composite.
+    #[test]
+    #[ignore = "probe"]
+    fn probe_cpu_composite_calls() {
+        use crate::{prelude::FontLibrary, started};
+        let typeface = face();
+        let colr = colr_face(&typeface).expect("a COLR face");
+        let upem = typeface.units_per_em().expect("upem") as f32;
+        let shape = Matrix::scale((32.0 / upem, 32.0 / upem));
+        let rgba = |image: &Image| {
+            let info = ImageInfo::new(
+                image.dimensions(),
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                Some(ColorSpace::new_srgb()),
+            );
+            let mut out = vec![0u8; info.compute_min_byte_size()];
+            assert!(image.read_pixels(
+                &info,
+                &mut out,
+                info.min_row_bytes(),
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ));
+            out
+        };
+        let format = Format::new(ColorType::N32, Some(ColorSpace::new_srgb()));
+        let images: Vec<Image> = (0..typeface.count_glyphs() as GlyphId)
+            .filter_map(|glyph| {
+                let recorded = colr.record(glyph, Color::BLACK)?;
+                let picture = recorded.picture.as_ref()?;
+                let bounds = recorded.bounds?;
+                glyph_image(picture, bounds, &shape, &format, false)
+                    .map(|(image, _)| image)
+            })
+            .collect();
+        eprintln!(
+            "PROBE F N32 {:?}, {} glyph images",
+            ColorType::N32,
+            images.len()
+        );
+        let background = [200u8, 120, 60, 255];
+        for alpha in [1.0_f32, 0.5] {
+            let mut first: Vec<Vec<u8>> = Vec::new();
+            for variant in 1..=6u8 {
+                CPU_DRAW.set(variant);
+                let (mut held, mut off, mut beyond, mut worst, mut moved) =
+                    (0, 0, 0, 0.0_f64, 0);
+                for (n, image) in images.iter().enumerate() {
+                    let (w, h) = (image.width() + 6, image.height() + 6);
+                    let mut surface =
+                        started::raster_n32_premul((w, h)).expect("a raster");
+                    let canvas = surface.canvas();
+                    canvas.clear(Color::from_argb(255, 200, 120, 60));
+                    let mut paint = Paint::default();
+                    paint.set_alpha_f(alpha);
+                    composite_onto(canvas, image, IPoint::new(3, 3), &paint);
+                    let got = rgba(&surface.image_snapshot());
+                    let source = rgba(image);
+                    let scale = f64::from(paint.alpha()) / 255.0;
+                    for y in 0..image.height() as usize {
+                        for x in 0..image.width() as usize {
+                            let si = (y * image.width() as usize + x) * 4;
+                            let gi = ((y + 3) * w as usize + x + 3) * 4;
+                            let a = f64::from(source[si + 3]) / 255.0 * scale;
+                            if a == 0.0 {
+                                continue;
+                            }
+                            for c in 0..4 {
+                                let s =
+                                    f64::from(source[si + c]) / 255.0 * scale;
+                                let d = f64::from(background[c]) / 255.0;
+                                let exact = (s + d * (1.0 - a)) * 255.0;
+                                let byte = f64::from(got[gi + c]);
+                                held += 1;
+                                if byte != exact.round() {
+                                    off += 1;
+                                }
+                                let miss = (byte - exact).abs();
+                                if miss >= 1.0 {
+                                    beyond += 1;
+                                }
+                                worst = worst.max(miss);
+                            }
+                        }
+                    }
+                    if variant == 1 {
+                        first.push(got);
+                    } else if first[n] != got {
+                        moved += 1;
+                    }
+                }
+                eprintln!(
+                    "PROBE F alpha {alpha} variant {variant}: held {held} off \
+                     {off} beyond {beyond} worst {worst:.4} images unlike \
+                     variant 1 {moved}"
+                );
+            }
+        }
+        CPU_DRAW.set(1);
+        // The route itself, one glyph on the CPU canvas.
+        let library = FontLibrary::new();
+        library
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        for alpha in [1.0_f32, 0.5] {
+            let scene = move |ctx: &mut crate::context2d::Context2D| {
+                ctx.set_global_alpha(alpha);
+                ctx.fill_text(&code_points(0xf0100, 2), 4.0, 40.0, None);
+            };
+            let alone = overlap_page(false, true, &|ctx| {
+                ctx.fill_text(&code_points(0xf0100, 2), 4.0, 40.0, None);
+            });
+            let scale = if alpha == 1.0 { 1.0 } else { 128.0 / 255.0 };
+            let mut reference = Vec::new();
+            for variant in 1..=6u8 {
+                CPU_DRAW.set(variant);
+                let (page, _) = atlas_scene(false, false, &scene);
+                let (mut held, mut off, mut beyond) = (0, 0, 0);
+                for y in 0..60 {
+                    for x in 0..120 {
+                        let ai = (y * 120 + x) * 4;
+                        let pi = (y * 600 + x) * 4;
+                        let a = f64::from(alone[ai + 3]) / 255.0 * scale;
+                        if a == 0.0 {
+                            continue;
+                        }
+                        for c in 0..3 {
+                            let s = f64::from(alone[ai + c]) / 255.0 * scale;
+                            let d = f64::from(background[c]) / 255.0;
+                            let exact = (s + d * (1.0 - a)) * 255.0;
+                            let byte = f64::from(page[pi + c]);
+                            held += 1;
+                            off += usize::from(byte != exact.round());
+                            beyond += usize::from((byte - exact).abs() >= 1.0);
+                        }
+                    }
+                }
+                if variant == 1 {
+                    reference = page.clone();
+                }
+                let unlike =
+                    zip(&page, &reference).filter(|(a, b)| a != b).count();
+                eprintln!(
+                    "PROBE G route alpha {alpha} variant {variant}: held {held} \
+                     off {off} beyond {beyond} channels unlike variant 1 {unlike}"
+                );
+            }
+        }
+        CPU_DRAW.set(1);
     }
 
     /// The format of an eight-bit sRGB page.
