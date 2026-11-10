@@ -31,6 +31,10 @@ configure time.
 meo-skia-canvas = { version = "0.17", default-features = false, features = ["vulkan"] }
 ```
 
+On Linux, set the `SKIA_BINARIES_URL` below even without the patches. The crate embeds FreeType
+there, rust-skia hosts no prebuilt Skia built with it, and without the URL skia-bindings compiles
+Skia from source over the network -- about 13 minutes on a GitHub-hosted runner.
+
 To draw what the npm package draws, with this repository's patched Skia rather than crates.io's, add
 `patched-skia` and name its archives:
 

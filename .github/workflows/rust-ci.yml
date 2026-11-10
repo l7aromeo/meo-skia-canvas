@@ -649,33 +649,46 @@ jobs:
       # because its probe greps `nasm -hf` for `-Ox` and nasm 3 moved that text.
       # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
       # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
-      - name: Install Skia build dependencies (apt)
+      - name: Install build dependencies (apt)
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config \
-            python3 libvulkan-dev
+            clang libfontconfig1-dev libssl-dev nasm yasm pkg-config libvulkan-dev
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: msrv-${{ steps.declared.outputs.version }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Skia as docs/rust.md tells a Linux consumer to get it: `patched-skia`
+      # and the line `skia-binaries.txt` holds, in a Cargo config's `[env]`.
+      # Without the URL a Linux build compiles crates.io's Skia, since rust-skia
+      # hosts none built with the FreeType the crate embeds there: about 13
+      # minutes cold, and a failed fetch of its sources fails the job.
+      # `patched-skia` stops skia-bindings compiling at all, so a missing
+      # archive fails here at once. crates.io's Skia is the `crate-consumer`
+      # job's macOS stock leg; what this job adds is the Rust version.
+      - name: Point the build at the archives
+        run: |
+          mkdir -p .cargo
+          printf '[env]\nSKIA_BINARIES_URL = "%s"\n' "$(sed -n 's/^url //p' skia-binaries.txt)" > .cargo/config.toml
+          cat .cargo/config.toml
       # The Linux feature set and `fetch`, so the cfg-gated code and the HTTP
       # client compile here rather than being skipped. `--all-targets` is
       # deliberately absent: the MSRV applies to the library a consumer builds,
       # not to this repo's dev-dependencies.
-      - run: cargo check --no-default-features --features "vulkan,window,fetch"
+      - run: cargo check --no-default-features --features "vulkan,window,fetch,patched-skia"
       # A build cache restored over a freshly extracted cargo registry, which
       # rust-cache restores on any exact hit: skia-bindings' build script does
-      # not run again, so the Skia tree it synced into its registry extraction
-      # is gone, and this crate's build script has to build without it. This
-      # job builds crates.io's Skia, as a consumer does, so it is the job to
-      # make that state every run. If skia-bindings compiles again, the state
-      # was not reached and the step proves nothing, so that fails too.
+      # not run again, and this crate's build script has to build from what
+      # the cache holds. No Skia source tree is in the registry extraction --
+      # a download never puts one there -- and the step removes one if a
+      # cache ever brought it, so that this crate's build script is held to
+      # needing none. If skia-bindings compiles again, the state was not
+      # reached and the step proves nothing, so that fails too.
       - name: Build again over skia-bindings' extraction without its Skia
         run: |
           set -euo pipefail
           rm -rf "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/skia-bindings-*/skia
           touch build.rs
-          cargo check --no-default-features --features "vulkan,window,fetch" 2>&1 | tee "$RUNNER_TEMP/again.log"
+          cargo check --no-default-features --features "vulkan,window,fetch,patched-skia" 2>&1 | tee "$RUNNER_TEMP/again.log"
           if grep -q "Compiling skia-bindings" "$RUNNER_TEMP/again.log"; then
             echo "::error::skia-bindings compiled again, so this build had its Skia tree"
             exit 1
