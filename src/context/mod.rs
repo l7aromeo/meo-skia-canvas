@@ -1869,7 +1869,9 @@ impl Context2D {
         };
         // A run in one flat colour is what the coverage route paints; one
         // holding colour glyphs is not, and drawn there came out in the
-        // run's colour, its glyphs' own colours gone.
+        // run's colour, its glyphs' own colours gone: those this library
+        // draws, and those the platform draws -- asked last, since a run
+        // not kept is laid out again to answer.
         let holds_colour = matches!(entry, Some(Layer::ColourText(_)));
         let coverage = match exact {
             Some(exact)
@@ -1880,7 +1882,8 @@ impl Context2D {
                     && matches!(
                         self.state.dye(paint.style()),
                         Dye::Color(..)
-                    ) =>
+                    )
+                    && !text.is_some_and(|text| (text.own_colours)()) =>
             {
                 self.exact_colour(paint.style())
                     .filter(|colour| {
@@ -3772,6 +3775,10 @@ impl Context2D {
                 reached.set(reach);
                 Some((drawn, reach))
             };
+            let own_colours = || match &kept {
+                Some(kept) => kept.draws_own_colours(),
+                None => typesetter.draws_own_colours(),
+            };
             self.render_to_canvas(
                 &paint,
                 dyed,
@@ -3793,6 +3800,7 @@ impl Context2D {
                     ),
                     defer: Some(&defer),
                     colour,
+                    own_colours: &own_colours,
                 }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
@@ -4303,6 +4311,10 @@ pub struct TextRun<'a> {
     /// itself, to draw them where the page is played back -- see
     /// [`Context2D::files_as_colour_text`].
     pub colour: Option<Replay>,
+    /// Whether the run holds a glyph the platform draws in its own colours
+    /// -- see `font::platform_colour` -- asked only where the coverage route
+    /// could otherwise take the run.
+    pub(crate) own_colours: &'a dyn Fn() -> bool,
 }
 
 /// The transform a run anchored at `origin` is drawn from -- see

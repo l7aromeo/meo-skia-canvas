@@ -324,3 +324,79 @@ describe("COLR colour fonts", () => {
     assert.match(svg, /<image/);
   });
 });
+
+describe("colour fonts the platform draws", () => {
+  /**
+   * Skia's own bitmap and SVG colour fonts, each with the text Skia draws in
+   * it (`tools/fonts/FontToolUtils.cpp`, `EmojiSample`), registered where the
+   * platform can load them: CoreText refuses `cbdt.ttf`, which has no
+   * outlines.
+   */
+  const faces = (() => {
+    /** @type {[string, string][] | undefined} */
+    let loaded;
+    return () => {
+      loaded ??= [
+        ["PlatformColourSbix", "sbix.ttf", "\u{1F600} \u{2662}"],
+        ["PlatformColourCbdt", "cbdt.ttf", "\u{1F600} \u{2662}"],
+        ["PlatformColourSvg", "SampleSVG.ttf", "abcdefghij"],
+      ].flatMap(([family, file, text]) => {
+        try {
+          FontLibrary.use(family, [
+            path.join(
+              __dirname,
+              "..",
+              "assets",
+              "fonts",
+              "bitmap-colour",
+              file,
+            ),
+          ]);
+          return [[family, text]];
+        } catch {
+          return [];
+        }
+      });
+      return loaded;
+    };
+  })();
+
+  /** `text` in `family`, filled with `fill` through `filter` on a CPU canvas. */
+  const drawn = (family, text, fill, filter) => {
+    const canvas = new Canvas(480, 80);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.font = `48px ${family}`;
+    ctx.fillStyle = fill;
+    ctx.filter = filter;
+    ctx.fillText(text, 10, 58);
+    return ctx.getImageData(0, 0, 480, 80).data;
+  };
+
+  const FILLS = ["rgb(230, 20, 10)", "rgb(10, 60, 240)"];
+
+  /** Whether two reads hold the same bytes. */
+  const same = (a, b) =>
+    Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(
+      Buffer.from(b.buffer, b.byteOffset, b.byteLength),
+    );
+
+  test("a colour glyph keeps its colours under a small blur", () => {
+    // The CPU canvas blurs a run in one flat colour from its coverage and
+    // paints the blur in that colour; a run of colour glyphs drawn that way
+    // came out in the fill.
+    const coloured = faces().filter(([family, text]) => {
+      const [a, b] = FILLS.map((fill) => drawn(family, text, fill, "none"));
+      return a.some((v, i) => i % 4 === 3 && v !== 0) && same(a, b);
+    });
+    assert.ok(coloured.length > 0, "no colour face to test");
+    for (const [family, text] of coloured)
+      for (const filter of ["blur(0.5px)", "blur(2px)"]) {
+        const [a, b] = FILLS.map((fill) => drawn(family, text, fill, filter));
+        assert.ok(
+          same(a, b),
+          `${family} under ${filter} took its colour from the fill`,
+        );
+      }
+  });
+});
