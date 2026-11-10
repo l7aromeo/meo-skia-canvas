@@ -2350,6 +2350,85 @@ mod tests {
             }
         }
         CPU_DRAW.set(1);
+        // Plain images and a canvas, no COLR route: the same two glyphs'
+        // pixels drawn with drawImage and drawCanvas on the CPU canvas.
+        let source = overlap_page(false, true, &|ctx| {
+            ctx.fill_text(&code_points(0xf0100, 2), 4.0, 40.0, None);
+        });
+        let n32: Vec<u8> = match ColorType::N32 == ColorType::BGRA8888 {
+            true => source
+                .chunks(4)
+                .flat_map(|p| [p[2], p[1], p[0], p[3]])
+                .collect(),
+            false => source.clone(),
+        };
+        let image = |bytes: &[u8], depth| {
+            crate::image::Image::from_pixels(
+                bytes,
+                120,
+                60,
+                480,
+                crate::pixels::PixelExportOptions {
+                    premultiplied: true,
+                    depth,
+                    ..Default::default()
+                },
+            )
+            .expect("an image")
+        };
+        let rgba_image = image(&source, crate::pixels::PixelDepth::Uint8);
+        let n32_image = image(&n32, crate::pixels::PixelDepth::N32);
+        for alpha in [1.0_f32, 0.5] {
+            let scale = if alpha == 1.0 { 1.0 } else { 128.0 / 255.0 };
+            let measure = |name: &str, page: Vec<u8>| {
+                let (mut held, mut off, mut beyond) = (0, 0, 0);
+                for p in (0..source.len()).step_by(4) {
+                    let a = f64::from(source[p + 3]) / 255.0 * scale;
+                    if a == 0.0 {
+                        continue;
+                    }
+                    for c in 0..3 {
+                        let s = f64::from(source[p + c]) / 255.0 * scale;
+                        let d = f64::from(background[c]) / 255.0;
+                        let exact = (s + d * (1.0 - a)) * 255.0;
+                        let byte = f64::from(page[p + c]);
+                        held += 1;
+                        off += usize::from(byte != exact.round());
+                        beyond += usize::from((byte - exact).abs() >= 1.0);
+                    }
+                }
+                eprintln!(
+                    "PROBE H {name} alpha {alpha}: held {held} off {off} \
+                     beyond {beyond}"
+                );
+            };
+            for (name, drawn) in
+                [("rgba image", &rgba_image), ("n32 image", &n32_image)]
+            {
+                let page = overlap_page(false, false, &|ctx| {
+                    ctx.set_global_alpha(alpha);
+                    ctx.draw_image(drawn, 0.0, 0.0);
+                });
+                measure(name, page);
+            }
+            let page = overlap_page(false, false, &|ctx| {
+                let mut from = crate::canvas::Canvas::new(120.0, 60.0);
+                from.set_gpu(false);
+                assert!(from.context().set_font_css("32px AtlasColr"));
+                from.context()
+                    .set_fill_style_css("rgb(40 90 160)")
+                    .expect("a colour");
+                from.context().fill_text(
+                    &code_points(0xf0100, 2),
+                    4.0,
+                    40.0,
+                    None,
+                );
+                ctx.set_global_alpha(alpha);
+                ctx.draw_canvas(&mut from, 0.0, 0.0);
+            });
+            measure("canvas", page);
+        }
     }
 
     /// The format of an eight-bit sRGB page.
