@@ -17,6 +17,62 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
+## 📦 ⟩ [v0.17.2] (crate) ⟩ Unreleased
+
+**A patch release.** A crate build from crates.io can now draw what the npm
+package draws. Turn on the `patched-skia` feature and add one line to
+`.cargo/config.toml`:
+
+```toml
+[env]
+SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-3f566dd7198c/skia-binaries-{key}.tar.gz"
+```
+
+skia-bindings then downloads this repository's patched Skia rather than its
+own, and the fixes 0.17.1 gave only a build from this repository reach it: GPU
+text that does not depend on what was drawn before it, and `ColorDodge`,
+`ColorBurn` and the four non-separable blend modes drawing the same bytes on
+every x86-64 machine. Every other difference docs/rust.md lists for a crate
+build goes with them. `skia_patches()` names the patches a build linked, and
+with `patched-skia` a build that would get other Skia stops and prints the
+line. A build that sets neither links crates.io's Skia, as before.
+
+**On Linux that build now compiles Skia from source**, fetching its sources
+over the network, about 13 minutes on a GitHub-hosted runner: the crate embeds
+FreeType there, as the npm package does, so text draws as it does from Node,
+and rust-skia hosts no Skia built with it. Set the line on Linux whether or not
+you want the patches. The `freetype` feature now does nothing.
+
+Text in a COLR colour font draws as Chrome draws it on every platform, and
+colour emoji under a small `blur()` on a CPU canvas keep their own colours.
+Drawing under a `blur()` filter costs less on the CPU, a small shape and text
+alike, as docs/performance.md times through the npm package; text under a blur
+of 5 device pixels or more takes a route these changes do not reach (#660). A
+Linux build no longer panics in its build script when a build cache is restored
+over a fresh cargo registry, and docs.rs no longer shows a private function's
+doc on `impl Font`. Five fixes, one addition, one change and one known issue;
+the sections below have each.
+
+### Fixed
+
+- **On docs.rs, `impl Font` no longer shows the doc of a private function written above it.** ([#679](https://github.com/l7aromeo/meo-skia-canvas/pull/679), [#675](https://github.com/l7aromeo/meo-skia-canvas/issues/675))
+- **Colour emoji under a small `blur()` on a CPU canvas keep their own colours, where they drew in the fill colour.** ([#678](https://github.com/l7aromeo/meo-skia-canvas/pull/678), [#670](https://github.com/l7aromeo/meo-skia-canvas/issues/670))
+- **Text in a COLR colour font draws as Chrome draws it on every platform, where macOS drew it without colour or not at all and Windows and Linux drew its gradients and composites apart from Chrome's.** ([#665](https://github.com/l7aromeo/meo-skia-canvas/pull/665), [#662](https://github.com/l7aromeo/meo-skia-canvas/issues/662))
+- **A Linux build no longer panics in the build script when a build cache is restored over a freshly extracted cargo registry.** ([#658](https://github.com/l7aromeo/meo-skia-canvas/pull/658), [#657](https://github.com/l7aromeo/meo-skia-canvas/issues/657))
+- **Linux builds draw text with the same embedded FreeType as the npm package rather than the system's; the `freetype` feature now does nothing on any target.** ([#652](https://github.com/l7aromeo/meo-skia-canvas/pull/652), [#649](https://github.com/l7aromeo/meo-skia-canvas/issues/649))
+
+### Added
+
+- **A crate build that sets `SKIA_BINARIES_URL` to the line in docs/rust.md links the patched Skia the npm package draws with, and the `patched-skia` feature refuses a build that would get other Skia.** ([#661](https://github.com/l7aromeo/meo-skia-canvas/pull/661), [#649](https://github.com/l7aromeo/meo-skia-canvas/issues/649))
+
+### Changed
+
+- **Drawing under a `blur()` filter costs less on the CPU.** ([#493](https://github.com/l7aromeo/meo-skia-canvas/issues/493), [#506](https://github.com/l7aromeo/meo-skia-canvas/issues/506), [#653](https://github.com/l7aromeo/meo-skia-canvas/pull/653), [#654](https://github.com/l7aromeo/meo-skia-canvas/pull/654))
+
+### Known, and not fixed here
+
+- **On Linux a build without `SKIA_BINARIES_URL` compiles Skia from source, about 13 minutes, because rust-skia hosts no Skia built with the FreeType the crate embeds there; set the URL to download it.** ([#661](https://github.com/l7aromeo/meo-skia-canvas/pull/661), [#649](https://github.com/l7aromeo/meo-skia-canvas/issues/649))
+
 ## 📦 ⟩ [v0.17.1] (crate) ⟩ November 8, 2026
 
 **A patch release, and nothing that worked changes.** It adds two readers,

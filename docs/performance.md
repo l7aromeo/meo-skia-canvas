@@ -256,3 +256,30 @@ buffer of their own:
 | draws and copy in one buffer | 724 µs      | 338 MHz (338–338)                      |
 | draws first                  | 684 µs      | 426 MHz (351–474)                      |
 | 6.0.2                        | 620 µs      | 672 MHz (482–763)                      |
+
+7.0.2 and 0.17.2 have one speed entry in each changelog, "Drawing under
+`blur()` costs less on the CPU", which links the PRs. Its figures are below,
+against 6.0.2: medians on an Apple M4 Pro, release builds of the npm package
+at 6.0.2 and at f86212f3. Six runs of each build, the order rotated, 11 rounds
+a run, each run a process of its own. A time is the median of the six runs'
+medians, and a ratio the ratio of those medians. The same build of f86212f3,
+run again as a third arm, came within 2.2% of the first on every row.
+
+| what                                                                   | per  | 6.0.2    | 7.0.2    | 7.0.2 / 6.0.2 |
+| ---------------------------------------------------------------------- | ---- | -------- | -------- | ------------- |
+| 50 15×12 ellipses under `blur(3px)`, black, 400×300, read once, CPU    | draw | 7.50 µs  | 6.10 µs  | 0.813×        |
+| 500 of them                                                            | draw | 3.76 µs  | 3.06 µs  | 0.814×        |
+| 50 in colour                                                           | draw | 7.57 µs  | 6.08 µs  | 0.803×        |
+| 500 in colour                                                          | draw | 3.79 µs  | 3.04 µs  | 0.802×        |
+| 50 `fillText` of 40px "Ag" under `blur(1px)`, 400×300, read whole, CPU | page | 248.4 µs | 193.6 µs | 0.779×        |
+| the same under `blur(3px)`                                             | page | 268.7 µs | 207.9 µs | 0.774×        |
+| 20px under `blur(3px)`                                                 | page | 246.1 µs | 181.5 µs | 0.738×        |
+| 80px under `blur(3px)`                                                 | page | 308.0 µs | 272.7 µs | 0.885×        |
+| 40px under `blur(3px)`, each draw moved by a fraction of a pixel       | page | 271.1 µs | 234.5 µs | 0.865×        |
+| 40px under `blur(10px)`                                                | page | 343.2 µs | 1,072 µs | 3.12×         |
+
+Text under a blur of 5 device pixels or more takes the filter chain rather
+than the coverage route the entry's changes reach, and costs about three times
+what it did in 6.0.2 ([#660]).
+
+[#660]: https://github.com/l7aromeo/meo-skia-canvas/issues/660
