@@ -220,6 +220,12 @@ target.
 
 **Which entry.** One per tree, target, SDK, profile and skia-bindings feature
 set, the features being what `cargo tree` resolves for a call's flags. The
+SDK is named by the version its `SDKSettings.json` records, as
+`MacOSX27.2.sdk`, so every path to one SDK -- `MacOSX.sdk`, the symlinks
+beside it, the Command Line Tools' copy -- finds one entry; an SDK that
+records no version is never cached. Xcode's and the Command Line Tools'
+copies of one version share an entry: measured on 27.2, they compile Skia's
+CoreText and Metal sources to the same bytes. The
 tree is `treeName`, so a change of patches misses the cache rather than
 linking a stale entry, and a superseded tree's entries are removed with the
 tree. Every cargo call in the justfile that builds skia-bindings goes through

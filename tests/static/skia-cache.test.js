@@ -116,3 +116,154 @@ describe("the refusal, case by case", async () => {
       else assert.match(why ?? "", refused);
     });
 });
+
+// An entry's key names the macOS SDK Skia was compiled against. One SDK has
+// several paths -- `MacOSX.sdk`, `MacOSX27.2.sdk` and `MacOSX27.sdk` are
+// symlinks to one another -- and `MacOSX.sdk` names whichever SDK the
+// installed Xcode carries, so the key is the version the SDK itself records,
+// read from the directory a path resolves to.
+describe("an entry's SDK is named by its version", async () => {
+  const { sdkKey, currentSdk, loggedSdk, entryDir, keyFor, store } =
+    await import(
+      pathToFileURL(join(__dirname, "..", "..", "scripts", "skia-binaries.mjs"))
+        .href
+    );
+  const { treeName } = await import(pathToFileURL(SOURCE).href);
+  const {
+    mkdirSync,
+    mkdtempSync,
+    realpathSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+  } = require("fs");
+  const { tmpdir } = require("os");
+
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "skia-cache-sdk-")));
+  process.on("exit", () => rmSync(root, { recursive: true, force: true }));
+
+  /**
+   * An SDK directory at `path` holding only `SDKSettings.json`, with
+   * `settings` as its contents.
+   * @param {string} path
+   * @param {unknown} settings
+   */
+  function sdk(path, settings) {
+    const dir = join(root, path);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "SDKSettings.json"),
+      typeof settings === "string" ? settings : JSON.stringify(settings),
+    );
+    return dir;
+  }
+
+  const xcode = sdk("Xcode/SDKs/MacOSX.sdk", { Version: "27.2" });
+  const versioned = join(root, "Xcode/SDKs/MacOSX27.2.sdk");
+  symlinkSync(xcode, versioned);
+  const tools = sdk("CommandLineTools/SDKs/MacOSX27.sdk", { Version: "27.2" });
+  const older = sdk("CommandLineTools/SDKs/MacOSX26.sdk", { Version: "26.5" });
+  const updated = sdk("XcodeNext/SDKs/MacOSX.sdk", { Version: "28.0" });
+
+  test("a directory and a symlink to it give the same key", () => {
+    assert.deepStrictEqual(sdkKey(versioned), sdkKey(xcode));
+    assert.deepStrictEqual(sdkKey(xcode), { sdk: "MacOSX27.2.sdk" });
+  });
+
+  test("two directories of one version under other names give one key", () => {
+    assert.deepStrictEqual(sdkKey(tools), sdkKey(xcode));
+  });
+
+  test("the version is read, not parsed from the name", () => {
+    assert.deepStrictEqual(sdkKey(older), { sdk: "MacOSX26.5.sdk" });
+  });
+
+  test("another version under the same name gives another key", () => {
+    assert.notDeepStrictEqual(sdkKey(updated), sdkKey(xcode));
+  });
+
+  /** @type {[string, string][]} */
+  const unreadable = [
+    [join(root, "missing/MacOSX.sdk"), "no directory there"],
+    [sdk("bare/MacOSX.sdk", {}), "no Version"],
+    [sdk("garbled/MacOSX.sdk", "{"), "SDKSettings.json is not JSON"],
+    [sdk("number/MacOSX.sdk", { Version: 27.2 }), "a Version that is a number"],
+    [
+      sdk("escape/MacOSX.sdk", { Version: "../27" }),
+      "a Version that is a path",
+    ],
+  ];
+  for (const [path, label] of unreadable)
+    test(`an SDK with no readable version gives no key: ${label}`, () => {
+      const key = sdkKey(path);
+      assert.strictEqual(key.sdk, undefined, JSON.stringify(key));
+      assert.ok(key.why?.includes(path), key.why);
+    });
+
+  test("a store and a lookup of one SDK spelled two ways find one entry", () => {
+    const log = `cargo:warning=clang --sysroot=${versioned} -c a.cpp`;
+    const stored = loggedSdk(log, "darwin");
+    const looked = currentSdk({ SDKROOT: xcode }, "darwin");
+    assert.deepStrictEqual(stored, { sdk: "MacOSX27.2.sdk" });
+    const key = { tree: "t", target: "aarch64-apple-darwin", profile: "dev" };
+    assert.strictEqual(
+      entryDir({ ...key, sdk: stored.sdk, features: [] }, root),
+      entryDir({ ...key, sdk: looked.sdk, features: [] }, root),
+    );
+  });
+
+  test("a store and a lookup refuse an SDK with no readable version", () => {
+    const bare = join(root, "bare/MacOSX.sdk");
+    assert.match(
+      loggedSdk(`--sysroot=${bare}`, "darwin").why ?? "",
+      /no version/,
+    );
+    assert.match(
+      currentSdk({ SDKROOT: bare }, "darwin").why ?? "",
+      /no version/,
+    );
+  });
+
+  // `keyFor` and `store` read the platform they run on, and off macOS reach
+  // cargo before the SDK matters.
+  const onMac = process.platform === "darwin";
+
+  test("a lookup with an unreadable SDK finds no entry, and says why", (t) => {
+    if (!onMac) return t.skip("the SDK is part of the key on macOS only");
+    const bare = join(root, "bare/MacOSX.sdk");
+    const { key, why } = keyFor(["build"], {
+      SKIA_SOURCE_DIR: "/tree",
+      SDKROOT: bare,
+    });
+    assert.strictEqual(key, undefined);
+    assert.match(why ?? "", /records no version/);
+  });
+
+  test("a build compiled against an unreadable SDK is not stored", (t) => {
+    if (!onMac) return t.skip("the SDK is part of the key on macOS only");
+    const cache = join(root, "cache");
+    const build = join(root, "build");
+    mkdirSync(build, { recursive: true });
+    const sysroot = join(root, "bare/MacOSX.sdk");
+    writeFileSync(
+      join(build, "output"),
+      `${join(cache, treeName())}/ninja\nclang --sysroot=${sysroot} -c a.cpp\n`,
+    );
+    assert.throws(
+      () =>
+        store(build, { profile: "dev", features: [] }, () => null, { cache }),
+      /is not stored: the SDK at .* records no version/,
+    );
+  });
+
+  test("a log naming no sysroot gives no key", () => {
+    assert.match(loggedSdk("clang -c a.cpp", "darwin").why ?? "", /--sysroot/);
+  });
+
+  test("off macOS the SDK is none", () => {
+    assert.deepStrictEqual(currentSdk({ SDKROOT: xcode }, "linux"), {
+      sdk: "none",
+    });
+    assert.deepStrictEqual(loggedSdk("", "linux"), { sdk: "none" });
+  });
+});
