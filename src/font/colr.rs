@@ -30,7 +30,7 @@ use std::cell::Cell;
 use std::{cell::RefCell, iter::zip, rc::Rc};
 
 use crate::{
-    cache_map::CacheMap,
+    cache_map::{CacheMap, CacheSet},
     export::{VectorFeatures, blend_features},
     started,
 };
@@ -121,6 +121,11 @@ const ATLAS_SIDE: i32 = 1024;
 /// and makes them again -- see [`atlas`]: as many as the glyph images they
 /// are copied from, [`GLYPH_IMAGE_BYTES_KEPT`].
 const ATLAS_BYTES_KEPT: usize = GLYPH_IMAGE_BYTES_KEPT;
+
+/// How many bytes a pixel format's [`Sheet`] holds at most: as many as a
+/// thread's run atlases together, so that a sheet of a format eight bytes a
+/// pixel or more is shorter than it is wide.
+const SHEET_BYTES_KEPT: usize = ATLAS_BYTES_KEPT;
 
 /// The tables a face's paint graphs and the outlines they clip to are read
 /// from, where the platform cannot hand the font's own file back -- see
@@ -538,8 +543,9 @@ impl ColourRun {
 
     /// Draws `glyphs`, each with its origin, as images made on the CPU in
     /// `format`, onto `canvas` in `paint`, which carries no image filter:
-    /// from atlases they are copied into where `atlased`, and each on its
-    /// own otherwise, all under one device transform rather than one set up
+    /// where `atlased`, from the [`Sheet`] where every one of them lies on
+    /// it and otherwise from atlases they are copied into, and each on its
+    /// own where not, all under one device transform rather than one set up
     /// and torn down for each glyph -- which cost the CPU canvas about 0.045
     /// milliseconds a page of 512 glyphs. `false`, having drawn nothing,
     /// under a perspective, or where the glyphs are past
@@ -600,6 +606,33 @@ impl ColourRun {
         canvas.reset_matrix();
         if !atlased {
             placed.iter().for_each(|(image, at)| one(image, *at));
+            canvas.restore();
+            return true;
+        }
+        if let Some((image, sprites)) = sheet_sprites(&placed, format) {
+            let image = resident(canvas, image);
+            noted(canvas, &image);
+            let moved: Vec<RSXform> = placed
+                .iter()
+                .map(|(_, at)| {
+                    RSXform::new(1.0, 0.0, (at.x as f32, at.y as f32))
+                })
+                .collect();
+            canvas.draw_atlas(
+                &image,
+                &moved,
+                &sprites,
+                None,
+                BlendMode::Dst,
+                SamplingOptions::default(),
+                None,
+                &composite,
+            );
+            #[cfg(test)]
+            {
+                ATLAS_DRAWS.set(ATLAS_DRAWS.get() + 1);
+                SHEET_DRAWS.set(SHEET_DRAWS.get() + 1);
+            }
             canvas.restore();
             return true;
         }
@@ -873,6 +906,191 @@ fn fits(images: &[(Image, IPoint)]) -> usize {
     packed_sprites(images).1
 }
 
+/// The glyph images of one pixel format a thread has drawn on GPU canvases
+/// more than once, copied into one image, so that the runs drawn from it
+/// read one texture and Ganesh can merge their `drawAtlas` calls into one
+/// draw. Drawn from a run's own atlas instead, each run read a texture of
+/// its own, which a page of 32 runs encoded as 32 draws.
+///
+/// The image is never written once made: a texture that draws not yet
+/// executed read must not change under them. Adding glyphs makes a new
+/// generation, the last one copied and the new glyphs copied in, and the
+/// textures made of the last one are let go -- see [`grow_sheets`].
+struct Sheet {
+    /// The format the images on the sheet are in.
+    format: Format,
+    /// Where each image on the sheet lies, by its unique id.
+    at: CacheMap<u32, IRect>,
+    /// The current generation, `None` before the first glyph is added.
+    image: Option<Image>,
+    /// Where the next image goes, packed in rows from the top left as
+    /// [`packed_sprites`] packs a run's atlas, and how tall its row is.
+    next: IPoint,
+    row: i32,
+    /// Whether an image has failed to fit, after which none is added.
+    full: bool,
+    /// The images drawn once, by unique id, not on the sheet: an image
+    /// drawn again is added, so that a page whose glyphs are new every
+    /// time -- in a colour of their own on every line, say -- adds none.
+    seen: CacheSet<u32>,
+    /// The images drawn again while not on the sheet, in the order they
+    /// were drawn, to add at the next [`grow_sheets`], and their ids.
+    wanted: Vec<Image>,
+    wanted_ids: CacheSet<u32>,
+}
+
+thread_local! {
+    /// The sheet of each pixel format this thread has drawn in.
+    static SHEETS: RefCell<Vec<Sheet>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many generations of sheets [`grow_sheets`] has made on this
+    /// thread.
+    static SHEET_GENERATIONS: Cell<usize> = const { Cell::new(0) };
+    /// How many runs [`ColourRun::draw_images`] has drawn from a sheet on
+    /// this thread.
+    static SHEET_DRAWS: Cell<usize> = const { Cell::new(0) };
+    /// How many rows deep the tests let a sheet grow, where they set it.
+    static SHEET_DEPTH: Cell<Option<i32>> = const { Cell::new(None) };
+}
+
+/// The sheet `images` all lie on for `format`, and the rectangle each takes
+/// in it; `None` where one of them is not on it, which is noted so that an
+/// image drawn again is added at the next [`grow_sheets`].
+fn sheet_sprites(
+    images: &[(Image, IPoint)],
+    format: &Format,
+) -> Option<(Image, Vec<Rect>)> {
+    SHEETS.with_borrow_mut(|sheets| {
+        let at = match sheets.iter().position(|sheet| {
+            sheet.format.color_type == format.color_type
+                && sheet.format.space == format.space
+        }) {
+            Some(at) => at,
+            None => {
+                sheets.push(Sheet {
+                    format: format.clone(),
+                    at: CacheMap::default(),
+                    image: None,
+                    next: IPoint::new(0, 0),
+                    row: 0,
+                    full: false,
+                    seen: CacheSet::default(),
+                    wanted: Vec::new(),
+                    wanted_ids: CacheSet::default(),
+                });
+                sheets.len() - 1
+            }
+        };
+        let sheet = &mut sheets[at];
+        if let Some(image) = &sheet.image {
+            let sprites: Option<Vec<Rect>> = images
+                .iter()
+                .map(|(image, _)| sheet.at.get(&image.unique_id()).copied())
+                .map(|rect| rect.map(Rect::from))
+                .collect();
+            if let Some(sprites) = sprites {
+                return Some((image.clone(), sprites));
+            }
+        }
+        if !sheet.full {
+            for (image, _) in images {
+                let id = image.unique_id();
+                if sheet.at.contains_key(&id) || sheet.wanted_ids.contains(&id)
+                {
+                    continue;
+                }
+                if !sheet.seen.insert(id) {
+                    sheet.wanted_ids.insert(id);
+                    sheet.wanted.push(image.clone());
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Adds to each sheet the images drawn again since the last call, in one
+/// new generation -- see [`Sheet`]. Called where a list of entries starts
+/// to play on pixels, so that a page adds what it wants at most once, not
+/// once for each run: the first page that draws a glyph again adds every
+/// one it drew again, and the next draws them all from the sheet.
+///
+/// An image that does not fit leaves the sheet full: no more are added
+/// until the sheets are dropped with the atlases -- see [`drop_atlases`].
+pub(crate) fn grow_sheets() {
+    SHEETS.with_borrow_mut(|sheets| {
+        for sheet in sheets.iter_mut().filter(|sheet| !sheet.wanted.is_empty())
+        {
+            grow(sheet);
+        }
+    });
+}
+
+/// Adds `sheet`'s wanted images to it in a new generation -- see
+/// [`grow_sheets`].
+fn grow(sheet: &mut Sheet) {
+    let wanted = std::mem::take(&mut sheet.wanted);
+    sheet.wanted_ids.clear();
+    let pixel = sheet.format.image_info(ISize::new(1, 1)).bytes_per_pixel();
+    let deepest = (SHEET_BYTES_KEPT / (ATLAS_SIDE as usize * pixel))
+        .min(ATLAS_SIDE as usize) as i32;
+    #[cfg(test)]
+    let deepest = SHEET_DEPTH.get().unwrap_or(deepest);
+    let mut added = Vec::with_capacity(wanted.len());
+    for image in wanted {
+        let (width, height) = (image.width(), image.height());
+        let mut next = sheet.next;
+        let mut row = sheet.row;
+        if next.x + width > ATLAS_SIDE {
+            next = IPoint::new(0, next.y + row);
+            row = 0;
+        }
+        if next.x + width > ATLAS_SIDE || next.y + height > deepest {
+            sheet.full = true;
+            break;
+        }
+        let rect = IRect::from_xywh(next.x, next.y, width, height);
+        sheet.next = IPoint::new(next.x + width, next.y);
+        sheet.row = row.max(height);
+        added.push((image, rect));
+    }
+    if added.is_empty() {
+        return;
+    }
+    let size = ISize::new(ATLAS_SIDE, sheet.next.y + sheet.row);
+    let Some(mut surface) =
+        started::raster(&sheet.format.image_info(size), None, None)
+    else {
+        sheet.full = true;
+        return;
+    };
+    let canvas = surface.canvas();
+    canvas.clear(Color::TRANSPARENT);
+    let mut copy = Paint::default();
+    copy.set_blend_mode(BlendMode::Src);
+    if let Some(last) = &sheet.image {
+        canvas.draw_image(last, (0.0, 0.0), Some(&copy));
+    }
+    for (image, rect) in &added {
+        canvas.draw_image(
+            image,
+            (rect.left as f32, rect.top as f32),
+            Some(&copy),
+        );
+    }
+    if let Some(last) = sheet.image.replace(surface.image_snapshot()) {
+        release_texture_of(last.unique_id());
+    }
+    for (image, rect) in added {
+        sheet.at.insert(image.unique_id(), rect);
+    }
+    #[cfg(test)]
+    SHEET_GENERATIONS.set(SHEET_GENERATIONS.get() + 1);
+}
+
 /// What a run's atlas is kept by: the unique ids of the glyph images it
 /// holds, in the order its sprites hold them. A kept glyph image is kept
 /// until every one goes at once, and its id is taken by no other image in
@@ -901,12 +1119,13 @@ thread_local! {
     static ONE_BY_ONE: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Drops every atlas this thread keeps.
+/// Drops every atlas and [`Sheet`] this thread keeps.
 fn drop_atlases() {
     ATLASES.with_borrow_mut(|(atlases, held)| {
         atlases.clear();
         *held = 0;
     });
+    SHEETS.set(Vec::new());
 }
 
 /// `images`, glyph images [`glyph_image`] keeps, copied into one image in
@@ -1221,6 +1440,20 @@ fn resident(canvas: &Canvas, image: Image) -> Image {
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 fn resident(_canvas: &Canvas, image: Image) -> Image {
     image
+}
+
+/// Lets go of the textures this thread made of the image whose unique id
+/// is `id`, on every context: called as a [`Sheet`] generation is replaced.
+/// A draw not yet executed holds its own reference to the texture it reads.
+fn release_texture_of(id: u32) {
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    TEXTURES.with_borrow_mut(|held| {
+        held.iter_mut().for_each(|(_, textures)| {
+            textures.remove(&id);
+        });
+    });
+    #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+    let _ = id;
 }
 
 /// Lets go of the glyph textures this thread holds, which hold their
@@ -2393,7 +2626,7 @@ mod tests {
             )
         };
         let first = uploads(&page);
-        let later: Vec<_> = (0..3).map(|_| uploads(&page)).collect();
+        let later: Vec<_> = (0..4).map(|_| uploads(&page)).collect();
         RenderingEngine::GPU.with_direct_context(|context| {
             if let Some(context) = context {
                 context.set_resource_cache_limit(limit);
@@ -2402,7 +2635,14 @@ mod tests {
         assert!(first.0 > 0, "the first page made no texture");
         assert_eq!(first.1, 0, "the first page drew glyphs from the CPU");
         assert!(first.2 > 0, "the first page made no atlas");
-        assert_eq!(later, [(0, 0, 0); 3], "later pages uploaded glyphs again");
+        // The third page adds the glyphs the second drew again to the
+        // sheet, which is uploaded once -- see `grow_sheets` -- and draws
+        // from it; no page uploads a glyph again.
+        assert_eq!(
+            later,
+            [(0, 0, 0), (1, 0, 0), (0, 0, 0), (0, 0, 0)],
+            "later pages uploaded glyphs again"
+        );
     }
 
     /// The pixels of `scene` drawn on a canvas, on the GPU where `gpu`, with
@@ -2615,6 +2855,247 @@ mod tests {
             let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "{name}: bytes apart");
         }
+    }
+
+    /// The GPU's [`RenderingEngine`](crate::gpu::RenderingEngine), or
+    /// `None` where this machine has none -- a failure on macOS, which
+    /// always has Metal.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn gpu_or_skip() -> bool {
+        if crate::gpu::RenderingEngine::GPU.selectable() {
+            return true;
+        }
+        if cfg!(target_os = "macos") {
+            panic!("no GPU on macOS");
+        }
+        eprintln!("skipped: no GPU");
+        false
+    }
+
+    /// Four lines of 16 of the test font's colour glyphs on a GPU canvas,
+    /// each line in `colour(line)`, read back premultiplied; each glyph
+    /// drawn as an image of its own where `one_by_one`.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn sheet_page(colour: &dyn Fn(u32) -> String, one_by_one: bool) -> Vec<u8> {
+        let mut canvas = crate::canvas::Canvas::new(600.0, 200.0);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css("32px SheetColr"));
+        for line in 0..4u32 {
+            ctx.set_fill_style_css(&colour(line)).expect("a colour");
+            let text = code_points(0xf0200 + line * 16, 16);
+            ctx.fill_text(&text, 4.0, 40.0 + line as f32 * 44.0, None);
+        }
+        ONE_BY_ONE.set(one_by_one);
+        let export = crate::pixels::ImageDataExport {
+            pixels: crate::pixels::PixelExportOptions {
+                premultiplied: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pixels = canvas
+            .to_image_data(None, &export)
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        ONE_BY_ONE.set(false);
+        pixels
+    }
+
+    /// What `draw` returns, and what it added to the counts: sheet
+    /// generations made, runs drawn from a sheet, textures made and run
+    /// atlases made.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn sheet_counts<T>(
+        draw: impl FnOnce() -> T,
+    ) -> (T, (usize, usize, usize, usize)) {
+        let before = (
+            SHEET_GENERATIONS.get(),
+            SHEET_DRAWS.get(),
+            TEXTURES_MADE.get(),
+            ATLASES_MADE.get(),
+        );
+        let drawn = draw();
+        let counts = (
+            SHEET_GENERATIONS.get() - before.0,
+            SHEET_DRAWS.get() - before.1,
+            TEXTURES_MADE.get() - before.2,
+            ATLASES_MADE.get() - before.3,
+        );
+        (drawn, counts)
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_page_drawn_again_draws_its_glyphs_from_one_sheet() {
+        // Each run drawn from an atlas of its own read a texture of its
+        // own, and Ganesh drew a page of runs as that many draws. A page
+        // drawn again draws every run from one sheet: the first page that
+        // draws a glyph again adds it, once, and the pages after it upload
+        // nothing and make no atlas.
+        if !gpu_or_skip() {
+            return;
+        }
+        forget();
+        crate::prelude::FontLibrary::new()
+            .use_paths(Some("SheetColr"), [VARIABLE])
+            .expect("the font registers");
+        let blue = |_| "rgb(40 90 160)".to_string();
+        let alone = sheet_page(&blue, true);
+        forget();
+        let pages: Vec<_> = (0..5)
+            .map(|_| sheet_counts(|| sheet_page(&blue, false)))
+            .collect();
+        let counts: Vec<_> = pages.iter().map(|(_, counts)| *counts).collect();
+        // The first page makes the runs' atlases; the second draws them
+        // again and wants their glyphs; the third adds them in one
+        // generation, uploaded once, and draws all four runs from it.
+        assert_eq!(counts[0].0 + counts[0].1, 0, "a sheet on the first page");
+        assert!(counts[0].3 > 0, "the first page made no atlas");
+        assert_eq!(counts[1], (0, 0, 0, 0), "the second page");
+        assert_eq!(counts[2], (1, 4, 1, 0), "the third page");
+        assert_eq!(counts[3..], [(0, 4, 0, 0); 2], "later pages");
+        for (at, (pixels, _)) in pages.iter().enumerate() {
+            let apart = zip(pixels, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "page {at}: bytes apart from one by one");
+        }
+        // A line in another colour makes new glyphs, which the next
+        // generation adds beside the first's, copied over; the first
+        // generation's texture is let go, and every glyph still lands as
+        // drawn one by one.
+        let first = sheet_image_id().expect("a sheet");
+        let mixed = |line| match line {
+            0 => "rgb(160 40 90)".to_string(),
+            _ => "rgb(40 90 160)".to_string(),
+        };
+        let alone = sheet_page(&mixed, true);
+        let pages: Vec<_> = (0..3)
+            .map(|_| sheet_counts(|| sheet_page(&mixed, false)))
+            .collect();
+        assert_eq!(pages[2].1, (1, 4, 1, 0), "the second generation's page");
+        assert!(held_texture_of(sheet_image_id().expect("a sheet")));
+        assert!(!held_texture_of(first), "the first generation kept");
+        let apart = zip(&pages[2].0, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "bytes apart from one by one");
+        forget();
+        assert!(
+            SHEETS.with_borrow(Vec::is_empty),
+            "a sheet kept past forget"
+        );
+    }
+
+    /// The unique id of the first sheet's current generation.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn sheet_image_id() -> Option<u32> {
+        SHEETS.with_borrow(|sheets| {
+            sheets.first()?.image.as_ref().map(Image::unique_id)
+        })
+    }
+
+    /// Whether this thread holds a texture made of the image `id` names.
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn held_texture_of(id: u32) -> bool {
+        TEXTURES.with_borrow(|held| {
+            held.iter().any(|(_, textures)| textures.contains_key(&id))
+        })
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn glyphs_new_on_every_page_add_nothing_to_a_sheet() {
+        // A line in a colour of its own on every page makes every glyph
+        // image new: none is drawn twice, so none is added, and no page
+        // pays for a generation.
+        if !gpu_or_skip() {
+            return;
+        }
+        forget();
+        crate::prelude::FontLibrary::new()
+            .use_paths(Some("SheetColr"), [VARIABLE])
+            .expect("the font registers");
+        let counts: Vec<_> = (0..4u32)
+            .map(|page| {
+                let colour = move |line: u32| {
+                    format!("rgb({} {} 160)", 10 + page * 40, 10 + line * 40)
+                };
+                sheet_counts(|| sheet_page(&colour, false)).1
+            })
+            .collect();
+        assert!(
+            counts.iter().all(|(made, drawn, _, _)| made + drawn == 0),
+            "a sheet for glyphs never drawn twice: {counts:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_sheet_draws_every_atlas_scene_as_its_glyphs_drawn_one_by_one() {
+        // Drawn three times, a scene's runs come from the sheet wherever
+        // they come from an atlas at all; each must land, blend and clip as
+        // its glyphs drawn one by one.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        for (name, atlased, scene) in atlas_scenes() {
+            forget();
+            let (alone, _) = atlas_scene(true, true, &scene);
+            atlas_scene(true, false, &scene);
+            atlas_scene(true, false, &scene);
+            let before = SHEET_DRAWS.get();
+            let (drawn, _) = atlas_scene(true, false, &scene);
+            let from_sheet = SHEET_DRAWS.get() - before;
+            match atlased {
+                true => assert!(from_sheet > 0, "{name}: not from the sheet"),
+                false => assert_eq!(from_sheet, 0, "{name}: from the sheet"),
+            }
+            let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{name}: bytes apart");
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    fn a_full_sheet_leaves_the_glyphs_past_it_to_their_runs_atlases() {
+        // A sheet two rows of glyphs deep holds the first line's glyphs and
+        // fills part way through the second's: that line keeps its own
+        // atlas, and both land as their glyphs drawn one by one.
+        use crate::prelude::*;
+        if !gpu_or_skip() {
+            return;
+        }
+        FontLibrary::new()
+            .use_paths(Some("AtlasColr"), [VARIABLE])
+            .expect("the font registers");
+        let scene: Box<AtlasScene> = Box::new(|ctx| {
+            ctx.scale(3.0, 3.0);
+            ctx.fill_text(&code_points(0xf0200, 16), 2.0, 30.0, None);
+            ctx.fill_text(&code_points(0xf0210, 16), 2.0, 70.0, None);
+        });
+        forget();
+        // The glyphs at three times are 68 pixels square, 15 to a row: the
+        // first line takes a row and one of the second, and the second line's
+        // last two would take a third.
+        SHEET_DEPTH.set(Some(136));
+        let (alone, _) = atlas_scene(true, true, &scene);
+        atlas_scene(true, false, &scene);
+        atlas_scene(true, false, &scene);
+        let (sheet_draws, atlas_draws) = (SHEET_DRAWS.get(), ATLAS_DRAWS.get());
+        let (drawn, _) = atlas_scene(true, false, &scene);
+        let from_sheet = SHEET_DRAWS.get() - sheet_draws;
+        let from_atlases = ATLAS_DRAWS.get() - atlas_draws - from_sheet;
+        let full =
+            SHEETS.with_borrow(|sheets| sheets.iter().any(|sheet| sheet.full));
+        SHEET_DEPTH.set(None);
+        assert!(full, "the sheet never filled");
+        assert!(from_sheet > 0, "nothing drawn from the sheet");
+        assert!(from_atlases > 0, "nothing past the sheet");
+        let apart = zip(&drawn, &alone).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "bytes apart");
     }
 
     /// How far a premultiplied channel of the GPU canvas may stand from the

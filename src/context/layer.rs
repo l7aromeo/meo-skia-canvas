@@ -50,7 +50,7 @@ use crate::{
         run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
-    font::colr::{Format, ImageRoute, composite_onto},
+    font::colr::{Format, ImageRoute, composite_onto, grow_sheets},
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
@@ -3168,6 +3168,10 @@ impl Clipped {
 /// clip. A document clips a cut draw by the path, among the run's pieces
 /// under their one clip. A raster or GPU canvas plays each piece under its
 /// own clip.
+///
+/// On pixels it first adds to the colour glyph sheets the glyph images the
+/// last playback drew again -- see [`grow_sheets`] -- so that a page adds
+/// them once, before any of its runs draws.
 pub(crate) fn play_entries(
     entries: &[Layer],
     features: &[VectorFeatures],
@@ -3175,6 +3179,9 @@ pub(crate) fn play_entries(
     target: Target,
 ) {
     debug_assert_eq!(entries.len(), features.len(), "one feature set a layer");
+    if target == Target::Pixels {
+        grow_sheets();
+    }
     let paced = target == Target::Pixels && blur_mask::on_gpu(canvas);
     let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
     let coverage = clips_by_coverage(canvas, target);
