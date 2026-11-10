@@ -46,6 +46,7 @@ use skia_safe::{
     Point, RSXform, Rect, RoundOut, SamplingOptions, Shader, TileMode,
     Typeface,
     canvas::SaveLayerRec,
+    color_filters,
     gradient::{
         Colors as GradientColors, Gradient, Interpolation, interpolation,
         shaders as gradient_shaders,
@@ -597,11 +598,7 @@ impl ColourRun {
         let one = |image: &Image, at: IPoint| {
             let image = resident(canvas, image.clone());
             noted(canvas, &image);
-            canvas.draw_image(
-                &image,
-                (at.x as f32, at.y as f32),
-                Some(&composite),
-            );
+            composite_onto(canvas, &image, at, &composite);
         };
         canvas.save();
         canvas.reset_matrix();
@@ -719,11 +716,7 @@ impl ColourRun {
         noted(canvas, &image);
         canvas.save();
         canvas.reset_matrix();
-        canvas.draw_image(
-            &image,
-            ((origin.x + offset.x) as f32, (origin.y + offset.y) as f32),
-            Some(&composite),
-        );
+        composite_onto(canvas, &image, origin + offset, &composite);
         canvas.restore();
         true
     }
@@ -802,6 +795,57 @@ fn composite(paint: &Paint) -> Paint {
         composite.set_color_filter(filter);
     }
     composite
+}
+
+/// Whether a glyph image composited onto a CPU canvas at full alpha goes
+/// through [`IDENTITY_MATRIX`], which moves Skia's composite off its eight-bit
+/// path onto its float pipeline. The eight-bit source-over rounds to nearest
+/// on aarch64 and truncates on x86-64: over the test font's 183 colour glyph
+/// images at 32px, an N32 image on an N32 page lands 14,573 of 282,272
+/// channels a level under the exact composite on x86-64 and none on an
+/// Apple M4 Pro, and through the identity matrix none on either. On aarch64
+/// the float pipeline changes no byte and costs a page of 512 colour glyphs
+/// about 0.55 ms, so it is left there.
+const ROUNDS_THROUGH_FLOAT: bool = cfg!(not(target_arch = "aarch64"));
+
+/// The identity colour matrix, row-major, as `color_filters::matrix_row_major`
+/// takes it: four rows of five, each passing one channel through unscaled
+/// and unbiased.
+const IDENTITY_MATRIX: [f32; 20] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0, 0.0, //
+];
+
+/// Composites `image` onto `canvas`, whose transform is the identity, with
+/// its top left at the whole device pixel `at`, through `paint`: the exact
+/// source-over rounded to nearest at full alpha on every architecture -- see
+/// [`ROUNDS_THROUGH_FLOAT`]. Under an alpha the composite is Skia's
+/// eight-bit one on the CPU, which is Chrome's CPU canvas's; a GPU canvas
+/// blends in its own precision either way.
+pub(crate) fn composite_onto(
+    canvas: &Canvas,
+    image: &Image,
+    at: IPoint,
+    paint: &Paint,
+) {
+    let point = (at.x as f32, at.y as f32);
+    // A paint with a colour filter is on the float pipeline already.
+    if ROUNDS_THROUGH_FLOAT
+        && !on_gpu(canvas)
+        && paint.alpha() == u8::MAX
+        && paint.color_filter().is_none()
+    {
+        let mut rounded = paint.clone();
+        rounded.set_color_filter(color_filters::matrix_row_major(
+            &IDENTITY_MATRIX,
+            color_filters::Clamp::Yes,
+        ));
+        canvas.draw_image(image, point, Some(&rounded));
+        return;
+    }
+    canvas.draw_image(image, point, Some(paint));
 }
 
 /// Where each of `images` lies in an atlas of them, packed into rows from
@@ -1978,6 +2022,125 @@ mod tests {
             "the axes move nothing, so this cannot tell the files apart",
         );
         assert!(from_file == from_tables, "the recordings differ");
+    }
+
+    /// Every colour glyph of the test font at 32px as the image the CPU
+    /// canvas composites, in N32.
+    fn glyph_images() -> Vec<Image> {
+        let typeface = face();
+        let colr = colr_face(&typeface).expect("a COLR face");
+        let upem = typeface.units_per_em().expect("upem") as f32;
+        let shape = Matrix::scale((32.0 / upem, 32.0 / upem));
+        let format = Format::new(ColorType::N32, Some(ColorSpace::new_srgb()));
+        (0..typeface.count_glyphs() as GlyphId)
+            .filter_map(|glyph| {
+                let recorded = colr.record(glyph, Color::BLACK)?;
+                let picture = recorded.picture.as_ref()?;
+                let bounds = recorded.bounds?;
+                glyph_image(picture, bounds, &shape, &format, false)
+                    .map(|(image, _)| image)
+            })
+            .collect()
+    }
+
+    /// `image`'s premultiplied pixels in RGBA order.
+    fn rgba(image: &Image) -> Vec<u8> {
+        let info = ImageInfo::new(
+            image.dimensions(),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            Some(ColorSpace::new_srgb()),
+        );
+        let mut pixels = vec![0; info.compute_min_byte_size()];
+        assert!(image.read_pixels(
+            &info,
+            &mut pixels,
+            info.min_row_bytes(),
+            (0, 0),
+            skia_safe::image::CachingHint::Allow,
+        ));
+        pixels
+    }
+
+    /// `image` composited at `alpha` by `draw` onto a CPU N32 page of
+    /// `rgb(200 120 60)`, three pixels in, and how many of its channels
+    /// miss the exact source-over rounded to nearest.
+    fn composited(
+        image: &Image,
+        alpha: f32,
+        draw: impl Fn(&Canvas, &Image, IPoint, &Paint),
+    ) -> (Vec<u8>, usize) {
+        const INSET: i32 = 3;
+        const PAGE: [u8; 4] = [200, 120, 60, 255];
+        let (width, height) =
+            (image.width() + 2 * INSET, image.height() + 2 * INSET);
+        let mut surface =
+            started::raster_n32_premul((width, height)).expect("a raster");
+        let canvas = surface.canvas();
+        canvas.clear(Color::from_argb(PAGE[3], PAGE[0], PAGE[1], PAGE[2]));
+        let mut paint = Paint::default();
+        paint.set_alpha_f(alpha);
+        draw(canvas, image, IPoint::new(INSET, INSET), &paint);
+        let page = rgba(&surface.image_snapshot());
+        let source = rgba(image);
+        let scale = f64::from(paint.alpha()) / 255.0;
+        let mut off = 0;
+        for y in 0..image.height() as usize {
+            for x in 0..image.width() as usize {
+                let s = (y * image.width() as usize + x) * 4;
+                let p = ((y + INSET as usize) * width as usize
+                    + x
+                    + INSET as usize)
+                    * 4;
+                let a = f64::from(source[s + 3]) / 255.0 * scale;
+                for c in 0..4 {
+                    let exact = f64::from(source[s + c]) * scale
+                        + f64::from(PAGE[c]) * (1.0 - a);
+                    off += usize::from(f64::from(page[p + c]) != exact.round());
+                }
+            }
+        }
+        (page, off)
+    }
+
+    #[test]
+    fn a_glyph_image_composites_at_full_alpha_as_the_exact_composite_rounded() {
+        // At full alpha the CPU canvas stores each glyph image's source-over
+        // rounded to nearest, on every architecture. Skia's eight-bit
+        // composite does on aarch64 and does not on x86-64 -- the control
+        // below -- so there the image goes through the float pipeline.
+        let images = glyph_images();
+        assert!(images.len() > 100, "only {} glyph images", images.len());
+        let eight_bit = |canvas: &Canvas,
+                         image: &Image,
+                         at: IPoint,
+                         paint: &Paint| {
+            canvas.draw_image(image, (at.x as f32, at.y as f32), Some(paint));
+        };
+        let (mut off, mut control) = (0, 0);
+        for image in &images {
+            off += composited(image, 1.0, composite_onto).1;
+            control += composited(image, 1.0, eight_bit).1;
+            // Under an alpha the composite is Skia's eight-bit one, as
+            // Chrome's CPU canvas has it, on every architecture.
+            assert!(
+                composited(image, 0.5, composite_onto).0
+                    == composited(image, 0.5, eight_bit).0,
+                "a glyph image under an alpha left Skia's composite"
+            );
+        }
+        assert_eq!(off, 0, "{off} channels off the exact composite rounded");
+        // The control: what the eight-bit composite does here.
+        if cfg!(target_arch = "x86_64") {
+            assert!(
+                control > 0,
+                "x86-64's eight-bit composite rounds to nearest"
+            );
+        }
+        if cfg!(target_arch = "aarch64") {
+            assert_eq!(control, 0, "aarch64's eight-bit composite truncates");
+        }
+        eprintln!("eight-bit composite: {control} channels off nearest");
     }
 
     /// The format of an eight-bit sRGB page.

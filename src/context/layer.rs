@@ -30,8 +30,8 @@ use std::{
 use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
-    ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IRect,
-    Image, ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap,
+    ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IPoint,
+    IRect, Image, ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap,
     PaintJoin, PaintStyle, Path, PathDirection, Picture, PictureRecorder,
     Point, Rect, RoundOut, RuntimeEffect, SamplingOptions, Shader, Surface,
     TileMode, Vector, canvas::SaveLayerRec, color_filters, image_filters,
@@ -50,7 +50,7 @@ use crate::{
         run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
-    font::colr::{Format, ImageRoute},
+    font::colr::{Format, ImageRoute, composite_onto},
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
@@ -1820,10 +1820,11 @@ impl ColourText {
         recorded.playback(raster);
         canvas.save();
         canvas.reset_matrix();
-        canvas.draw_image(
-            surface.image_snapshot(),
-            (area.left as f32, area.top as f32),
-            None,
+        composite_onto(
+            canvas,
+            &surface.image_snapshot(),
+            IPoint::new(area.left, area.top),
+            &Paint::default(),
         );
         canvas.restore();
     }
