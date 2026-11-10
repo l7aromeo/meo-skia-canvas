@@ -23,6 +23,23 @@ const COLOUR_GLYPH_TOLERANCE: u8 = 3;
 /// `docs/browser-differences.md`.
 const GPU_COMPOSITE_TIE_LEVELS: f64 = 0.18;
 
+/// How far the GPU canvas may stand from the CPU canvas under a
+/// `globalAlpha` of 0.5 on Mesa's llvmpipe, where each blends the alpha at
+/// eight bits and misses the exact composite its own way: two levels, as
+/// measured on the Linux binding job, where Metal stands one.
+const LLVMPIPE_ALPHA_LEVELS: u8 = 2;
+
+/// Whether this machine's GPU canvas is Mesa's llvmpipe, the software
+/// Vulkan the Linux binding job draws on. It blends a coefficient blend at
+/// eight bits in its fixed-function stage, as the CPU raster does: a level
+/// from the exact composite at any distance from a tie, never past it --
+/// see `docs/browser-differences.md`.
+fn on_llvmpipe() -> bool {
+    BackendInfo::query()
+        .device
+        .is_some_and(|device| device.contains("llvmpipe"))
+}
+
 /// How far a pixel's red must stand above its blue to count as red: well
 /// past where anti-aliasing a blue glyph on white puts any pixel.
 const RED_OVER_BLUE: u8 = 60;
@@ -456,7 +473,8 @@ mod against_chrome {
         // composite `s + d * (255 - a) / 255` of its premultiplied bytes
         // `s`, alpha `a`, over the page `d` its neighbours left: rounded to
         // nearest on the CPU, and on the GPU a level from that only within
-        // `GPU_COMPOSITE_TIE_LEVELS` of a tie.
+        // `GPU_COMPOSITE_TIE_LEVELS` of a tie -- on llvmpipe, which blends at
+        // eight bits, a level from it anywhere.
         if !has_gpu() {
             return;
         }
@@ -510,7 +528,8 @@ mod against_chrome {
                     near_ties += 1;
                     assert!(
                         (f64::from(got) - nearest).abs() <= 1.0
-                            && from_tie <= GPU_COMPOSITE_TIE_LEVELS,
+                            && (on_llvmpipe()
+                                || from_tie <= GPU_COMPOSITE_TIE_LEVELS),
                         "the GPU stores {got} for {exact}, {from_tie} from \
                          a tie, at byte {k}"
                     );
@@ -829,9 +848,11 @@ mod on_the_gpu {
     fn under_a_global_alpha_the_gpu_misses_the_exact_composite_only_near_a_tie()
     {
         // A glyph's image composites through the `globalAlpha` as its layer
-        // did, which is Chrome's CPU canvas byte for byte. The GPU blends it
-        // at half precision, as it blends any image under an alpha: a level
-        // from the CPU at most, and off the exact composite only near a tie.
+        // did, which is Chrome's CPU canvas byte for byte. Metal blends it at
+        // half precision, as it blends any image under an alpha: a level from
+        // the CPU at most, and off the exact composite only near a tie.
+        // llvmpipe blends it at eight bits: two levels from the CPU at most,
+        // and a level from the exact composite anywhere.
         // The exact composite is known where a glyph's bytes do not depend
         // on the fill, whose colour carries the alpha into the glyph's
         // foreground paint: the pixels drawn alike in two fills.
@@ -842,7 +863,12 @@ mod on_the_gpu {
         };
         let cpu = drawn(false, &half).expect("a CPU canvas");
         let apart = gpu.iter().zip(&cpu).map(|(a, b)| a.abs_diff(*b)).max();
-        assert!(apart <= Some(1), "the GPU stands {apart:?} from the CPU");
+        let eight_bit = on_llvmpipe();
+        let bound = if eight_bit { LLVMPIPE_ALPHA_LEVELS } else { 1 };
+        assert!(
+            apart <= Some(bound),
+            "the GPU stands {apart:?} from the CPU"
+        );
         let (blue, red) = (source("rgb(40,90,160)"), source("rgb(250,10,10)"));
         let alpha = f64::from(HALF_ALPHA) / 255.0;
         let (mut held, mut near) = (0, 0);
@@ -862,7 +888,7 @@ mod on_the_gpu {
                 let from_tie = (exact - exact.floor() - 0.5).abs();
                 assert!(
                     (f64::from(gpu[c]) - exact).abs() < 1.0
-                        && from_tie <= GPU_COMPOSITE_TIE_LEVELS,
+                        && (eight_bit || from_tie <= GPU_COMPOSITE_TIE_LEVELS),
                     "the GPU stores {} for {exact}, {from_tie} from a tie",
                     gpu[c]
                 );

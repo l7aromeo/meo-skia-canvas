@@ -2638,6 +2638,23 @@ mod tests {
     /// image.
     const GPU_TIE_LEVELS: f64 = 0.18;
 
+    /// [`OVERLAP_LEVELS`] on Mesa's llvmpipe: `Exclusion` stands three
+    /// levels from the CPU canvas there for colour glyphs and for plain
+    /// images alike, where Metal stands two -- see the llvmpipe entry in
+    /// `docs/browser-differences.md`.
+    const LLVMPIPE_OVERLAP_LEVELS: u8 = 3;
+
+    /// Whether this machine's GPU canvas is Mesa's llvmpipe, the software
+    /// Vulkan the Linux binding job draws on. It blends a coefficient blend
+    /// at eight bits in its fixed-function stage, as the CPU raster does:
+    /// a level from the exact composite at any distance from a tie, never
+    /// past it -- see `docs/browser-differences.md`.
+    fn on_llvmpipe() -> bool {
+        crate::canvas::BackendInfo::query()
+            .device
+            .is_some_and(|device| device.contains("llvmpipe"))
+    }
+
     #[test]
     fn overlapping_colour_glyphs_blend_on_the_gpu_as_on_the_cpu() {
         // Four of the test font's colour glyphs drawn into one another.
@@ -2696,8 +2713,12 @@ mod tests {
                 let (cpu, _) = atlas_scene(false, false, &scene);
                 let (gpu, _) = atlas_scene(true, false, &scene);
                 let most = zip(&cpu, &gpu).map(|(a, b)| a.abs_diff(*b)).max();
+                let bound = match on_llvmpipe() {
+                    true => LLVMPIPE_OVERLAP_LEVELS,
+                    false => OVERLAP_LEVELS,
+                };
                 assert!(
-                    most <= Some(OVERLAP_LEVELS),
+                    most <= Some(bound),
                     "{blend:?} at {alpha}: {most:?} levels apart"
                 );
             }
@@ -2747,7 +2768,8 @@ mod tests {
         // Two colour glyphs drawn as one run, the second over the first.
         // Each channel the second covers is the exact composite of its
         // premultiplied bytes, scaled by the alpha, over the page the first
-        // left, on the GPU a level from that only near a tie. Drawn from
+        // left, on the GPU a level from that only near a tie -- on llvmpipe,
+        // which blends at eight bits, a level from it anywhere. Drawn from
         // one atlas under a blend that reads the page in the shader, the
         // second read the page as it was before the first landed -- see
         // `ColourRun::draw_all`.
@@ -2793,6 +2815,9 @@ mod tests {
             (Xor, |s, sa, d, da, _| s * (1.0 - da) + d * (1.0 - sa)),
             (Lighter, |s, _, d, _, _| (s + d).min(1.0)),
         ];
+        // On llvmpipe a coefficient blend lands within a level of the
+        // exact composite at any distance from a tie.
+        let eight_bit = on_llvmpipe();
         let (mut held, mut near) = (0, 0);
         for (blend, composite) in blends {
             // A `globalAlpha` of 0.5 is an alpha byte of 128.
@@ -2830,7 +2855,7 @@ mod tests {
                         let from_tie = (exact - exact.floor() - 0.5).abs();
                         assert!(
                             (got - exact).abs() < 1.0
-                                && from_tie <= GPU_TIE_LEVELS,
+                                && (eight_bit || from_tie <= GPU_TIE_LEVELS),
                             "{blend:?} at {alpha}: the GPU stores {got} for \
                              {exact}, {from_tie} from a tie"
                         );

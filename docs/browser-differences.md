@@ -1383,7 +1383,7 @@ apart, are the CPU canvas's bytes under a shadow, a blur filter,
 
 Where the GPU blends a glyph image with what lies beneath it at an alpha --
 a translucent glyph over another, over its own shadow, or under a
-`globalAlpha` -- it blends at half precision, as it blends any image, and
+`globalAlpha` -- Metal blends at half precision, as it blends any image, and
 parts from the exact composite only within 0.18 of a tie (see the eight-bit
 composite entry above): 11 of 320 overlapping bytes on the test sheet, and
 674 of 5,697 channels of the four test glyphs at a `globalAlpha` of 0.5, a
@@ -1398,6 +1398,37 @@ not closer to the exact composite in every case: it missed it in 600 of
 `Paragraph`'s colour glyphs are rasterized on the CPU from its recording, so
 they keep the device pixel they were snapped to where the paragraph was
 drawn, where a canvas's own text is snapped again wherever it is played.
+
+**On a CPU canvas a COLR colour glyph's image composites at full alpha as
+the exact source-over rounded to nearest, on every architecture; Chrome's
+CPU canvas may not on x86-64.** Skia's eight-bit source-over rounds to
+nearest on aarch64 and truncates on x86-64. Over the 183 colour glyph images
+of `test_glyphs-glyf_colr_1_variable.ttf` at 32px, an image composited onto
+an N32 page lands a level under the exact composite in 14,573 of 282,272
+channels on x86-64, storing 109 for 109.706, and in none on an Apple M4 Pro.
+So off aarch64 this library composites a glyph image at full alpha through
+an identity colour matrix, which moves Skia onto its float pipeline, and no
+channel misses (`composite_onto` in `font::colr`). Under an alpha the
+composite is Skia's eight-bit one on every architecture, which is Chrome's
+CPU canvas's on macOS. What Chrome's CPU canvas stores on x86-64 was not
+measured; it draws through the same Skia code, so it may store the truncated
+bytes. Any other N32 image, and a canvas drawn with `drawCanvas`, still
+composite through the eight-bit path and truncate on x86-64: #676.
+
+**On Mesa's llvmpipe a GPU canvas blends at eight bits, so it stands further
+from the CPU canvas than Metal's does.** llvmpipe, the software Vulkan the
+Linux CI binding job draws on, blends a blend Skia does by coefficients in
+its fixed-function stage at eight bits, as the CPU raster does. Two plain
+images composited under `source-over` at a `globalAlpha` of 0.5 land on the
+CPU canvas's bytes. Of 2,392 channels, 117 lie more than 0.18 from a tie,
+and none lies a level from the exact composite. Blends the shader does --
+`multiply`, `darken`, `difference` -- are exact there. So on llvmpipe a
+channel lies within a level of the exact composite at any distance from a
+tie. Under a `globalAlpha` of 0.5 the GPU canvas stands up to two levels from
+the CPU canvas, where Metal stands one. Overlapping images under `exclusion`
+stand up to three levels from the CPU canvas there, where Metal stands two,
+for COLR glyphs and plain images alike. llvmpipe is a software rasterizer
+used for testing, and Chrome was not compared on it.
 
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
 `luminosity` divide exactly on the CPU, the same bytes on every machine, and
