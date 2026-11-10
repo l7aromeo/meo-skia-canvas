@@ -19,6 +19,7 @@ use std::{
 
 use crate::{
     context::{chain, page::ExportOptions},
+    font::colr,
     gpu::{ThreadBound, graphite},
 };
 
@@ -139,10 +140,11 @@ impl MetalEngine {
             cell.take_if(|engine| {
                 engine.cleanup(); // it's unclear how effective this is...
                 let idle = engine.last_use.elapsed() > MTL_CONTEXT_LIFESPAN;
-                // The chain layers this thread keeps are the context's, and
-                // go before it does.
+                // The chain layers and glyph textures this thread keeps are
+                // the context's, and go before it does.
                 if idle {
                     chain::pool::release();
+                    colr::release_textures();
                 }
                 idle
             });
@@ -213,6 +215,20 @@ pub(super) fn device_name(device: &ProtocolObject<dyn MTLDevice>) -> String {
 /// queue, which only its queue of ours goes on holding.
 fn handle_of<T>(object: &T) -> mtl::Handle {
     std::ptr::from_ref(object).cast()
+}
+
+/// A context of its own on this Mac's GPU, apart from the thread's, as a
+/// window's renderer makes one, for the tests that draw on two.
+#[cfg(test)]
+pub(crate) fn another_context() -> Option<DirectContext> {
+    let device = MTLCreateSystemDefaultDevice()?;
+    let queue = device.newCommandQueue()?;
+    // SAFETY: as in `MetalContext::new` -- `BackendContext::new` retains
+    // both handles, which are live `Retained` values for the call.
+    let backend = unsafe {
+        mtl::BackendContext::new(handle_of(&*device), handle_of(&*queue))
+    };
+    direct_contexts::make_metal(&backend, None)
 }
 
 pub struct MetalContext {
@@ -509,6 +525,8 @@ pub struct MetalBackend {
 #[cfg(feature = "window")]
 impl Drop for MetalBackend {
     fn drop(&mut self) {
+        // The glyph textures held for this context hold it as well.
+        colr::release_textures_of(self.skia_ctx.id());
         self.skia_ctx.abandon();
     }
 }

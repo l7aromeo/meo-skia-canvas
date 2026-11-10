@@ -335,7 +335,10 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   measures `Hamburgefonstiv` in `16px NoSuchFamilyAnywhere` at 111.70, as in
   `16px Times` and `16px serif`, in a canvas and in an `OffscreenCanvas`
   alike; here it measures 120.95, as in `16px sans-serif`. A quoted
-  `"serif"` with no family of that name is such a list. `new_font_collection`
+  `"serif"` with no family of that name is such a list. A character the named
+  face lacks takes the same default: the COLR test font has no space, so a
+  space in `32px colr` is `sans-serif`'s here, 8.891 px, and Times' in Chrome,
+  8.000, as it is here under `32px colr, serif`. `new_font_collection`
   in `src/node/font_library.rs` sets the default. On Linux a family the
   machine lacks but fontconfig binds strongly or as "same" -- Times New Roman
   to Liberation Serif or Tinos, by its metric aliases -- resolves to that
@@ -1338,6 +1341,97 @@ rasterized on the GPU at all. A direct mask is the glyph's coverage at the
 device transform, which no sample interpolated from a distance field
 reproduces, so this library keeps it whatever Chrome's GPU canvas does.
 
+**A COLR colour glyph is drawn here from its paint graph on every platform,
+as Chrome draws it -- on the CPU, to within three levels.** CoreText
+draws a COLRv1 glyph as nothing on macOS 26 and 15, and a COLRv0 glyph as
+nothing on 27.2. Chrome draws every COLR web font on Apple platforms through
+Fontations, so this library reads the `COLR` table with `skrifa`, Fontations'
+reader, and draws the paint graph in its own code (`font::colr`), each glyph
+composited through a layer of its own as Skia composites a drawable glyph. A
+glyph's origin is placed as Chrome places it: floored to the device pixel
+after adding 1/8 across and 1/2 down. On a CPU canvas against Chrome 158's on
+macOS 27.2, every pixel of every glyph with colour paint among the 221 of
+`test_glyphs-glyf_colr_1_variable.ttf` at 48px is within three levels, edges
+included, one pixel at three and ten past one; with ten of its axes varied,
+one at three and eight past one. The COLRv0 test font is Chrome's byte for
+byte at 16, 30, 48 and 100px (`colour_fonts` in the crate's tests,
+`colour-fonts.test.js` in the JavaScript suite). On Windows, against the same
+references, DirectWrite drew the COLRv1 glyphs up to 215 levels inside them
+and 6,034 pixels past 81, and this library's painter within one inside them
+and 8 past 81, so Windows takes the same route; the COLRv0 font was the same
+either way. On Linux FreeType drew the COLRv1 glyphs with ten axes varied up
+to 179 levels inside them and 768 pixels past 81, and the COLRv0 font with
+412 pixels past 81; this library's painter drew both sheets of COLRv1 glyphs
+within one inside them and 58 past 81, and the COLRv0 font with none past 8,
+so Linux takes it too. The font's 20 code points with no colour paint are
+drawn by the platform here and by Fontations' outlines in Chrome, and stand
+up to 215 apart on macOS.
+
+**On a GPU canvas a COLR colour glyph is an image made on the CPU, as Skia
+draws a colour glyph from the image its scaler context makes, so that the GPU
+canvas composites the bytes the CPU canvas does.** Composited through a layer
+of its own on the GPU, a glyph's gradients were drawn by Ganesh, which places
+a conic gradient's hard stops apart from the CPU's (#667), and the test glyphs
+stood up to 255 levels from the CPU canvas. The image is made where the page
+is played back, at the scale and in the pixel format it is played onto, so
+that an export at a density, a canvas drawn into another and a canvas pattern
+draw the glyph as drawing it there would. A shadow's filter is applied to
+the glyph image on the CPU, as the CPU canvas applied it to the glyph's layer
+(`layer::ColourText`). On the GPU canvas the four test glyphs, standing
+apart, are the CPU canvas's bytes under a shadow, a blur filter,
+`source-in` and a rotation, and through a `Paragraph`.
+
+Where the GPU blends a glyph image with what lies beneath it at an alpha --
+a translucent glyph over another, over its own shadow, or under a
+`globalAlpha` -- Metal blends at half precision, as it blends any image, and
+parts from the exact composite only within 0.18 of a tie (see the eight-bit
+composite entry above): 11 of 320 overlapping bytes on the test sheet, and
+674 of 5,697 channels of the four test glyphs at a `globalAlpha` of 0.5, a
+level from the CPU at most. The CPU canvas composites a glyph image through
+the `globalAlpha` as Chrome's CPU canvas does, byte for byte over
+`rgb(200 120 60)` at 0.5 and at 0.3 under `multiply`. Applying the alpha to
+the image on the CPU first would have made the GPU canvas the CPU's there,
+but stood a level from Chrome in 2,326 of 118,800 channels at 0.5 and was
+not closer to the exact composite in every case: it missed it in 600 of
+5,697 channels at 0.5 against Chrome's 2,436, and in 1,130 under
+`multiply` against 1,117. A
+`Paragraph`'s colour glyphs are rasterized on the CPU from its recording, so
+they keep the device pixel they were snapped to where the paragraph was
+drawn, where a canvas's own text is snapped again wherever it is played.
+
+**On a CPU canvas a COLR colour glyph's image composites at full alpha as
+the exact source-over rounded to nearest, on every architecture; Chrome's
+CPU canvas may not on x86-64.** Skia's eight-bit source-over rounds to
+nearest on aarch64 and truncates on x86-64. Over the 183 colour glyph images
+of `test_glyphs-glyf_colr_1_variable.ttf` at 32px, an image composited onto
+an N32 page lands a level under the exact composite in 14,573 of 282,272
+channels on x86-64, storing 109 for 109.706, and in none on an Apple M4 Pro.
+So off aarch64 this library composites a glyph image at full alpha through
+an identity colour matrix, which moves Skia onto its float pipeline, and no
+channel misses (`composite_onto` in `font::colr`). Under an alpha the
+composite is Skia's eight-bit one on every architecture, which is Chrome's
+CPU canvas's on macOS. What Chrome's CPU canvas stores on x86-64 was not
+measured; it draws through the same Skia code, so it may store the truncated
+bytes. Any other N32 image, and a canvas drawn with `drawCanvas`, still
+composite through the eight-bit path and truncate on x86-64: #676.
+
+**On Mesa's llvmpipe a GPU canvas blends at eight bits, so it stands further
+from the CPU canvas than Metal's does.** llvmpipe, the software Vulkan the
+Linux CI binding job draws on, blends a blend Skia does by coefficients in
+its fixed-function stage at eight bits, as the CPU raster does. Two plain
+images composited under `source-over` at a `globalAlpha` of 0.5 land on the
+CPU canvas's bytes. Of 2,392 channels, 117 lie more than 0.18 from a tie,
+and none lies a level from the exact composite. Blends the shader does --
+`multiply`, `darken`, `difference` -- are exact there. So on llvmpipe a
+channel lies within a level of the exact composite at any distance from a
+tie. Under a `globalAlpha` of 0.5 the GPU canvas stands up to two levels from
+the CPU canvas, where Metal stands one. At a clip edge, whose coverage enters
+the blend as an alpha does, a colour glyph stands a level from the CPU canvas
+at full alpha. Overlapping images under `exclusion`
+stand up to three levels from the CPU canvas there, where Metal stands two,
+for COLR glyphs and plain images alike. llvmpipe is a software rasterizer
+used for testing, and Chrome was not compared on it.
+
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
 `luminosity` divide exactly on the CPU, the same bytes on every machine, and
 Chrome's CPU canvas divides through an estimate.** Skia's raster pipeline
@@ -1400,6 +1494,21 @@ CoreGraphics draws it, which poppler draws 3,833 pixels apart from on the same
 file. A masked blend on the page itself, and one in a group at a density of 1,
 stay vector, since CoreGraphics renders both as the canvas does: the
 reproduction at density 1 comes out within a level.
+
+**A gradient drawn inside a layer, a COLR colour glyph's among them, renders
+mirrored or cropped in CoreGraphics, and the PDF is the one the specification
+describes.** A layer is written as a transparency-group form drawn with `Do`
+under the page's y flip, and a gradient inside it as a pattern whose matrix
+maps to the space in force at that `Do`, flip included -- as PDF Reference
+1.7 section 4.6.1 requires and poppler reads. CoreGraphics anchors the pattern
+to the page's default space instead, so in Preview, Quick Look, Safari and
+`sips` a vertical gradient in `saveLayer()` comes out upside down, and a COLR
+glyph, each composited through a form of its own, paints its gradients off the
+glyph: cropped, or missing outside the shading's domain. On a PDF of the COLR
+test glyphs on macOS 27.2, 4,445 of 40,000 pixels stand more than 32 levels
+off the canvas in CoreGraphics and 409 in poppler. The glyphs stay vector, and
+writing the form so that both readers agree is a change to Skia's PDF backend,
+tracked as #664.
 
 **A canvas's pattern is written as PDF tiling where its tiles land on whole
 device pixels, and poppler draws seams between the tiles.** A draw dyed by a

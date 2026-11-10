@@ -38,6 +38,7 @@ use crate::{
     context::Context2D as Inner,
     context2d::{FontStretch, TextDirection},
     css::NamedColour,
+    export::VectorFeatures,
     font::{
         FontAxisTag, FontFamily, FontLibrary, FontRegistry, FontVariation,
         InstancedPositions, KnownAxes, ObliqueAngle, optical_size,
@@ -54,7 +55,7 @@ use crate::{
             StyleColours, add_slnt, draw_shadowed, match_oblique, paint_glyphs,
             without_paragraph_cache,
         },
-        typography::paragraph_style,
+        typography::{paragraph_colour_features, paragraph_style},
         utils::color4f_to_srgb,
     },
 };
@@ -1732,6 +1733,12 @@ impl Paragraph {
     pub(crate) fn paint_run_by_run(&self, canvas: &SkCanvas, origin: SkPoint) {
         let same = |paint: &SkPaint, _: Option<&NamedColour>| paint.clone();
         self.paint_resolved(canvas, origin, &same);
+    }
+
+    /// What the paragraph's colour glyphs ask of a vector backend -- see
+    /// `node::typography::paragraph_colour_features`.
+    pub(crate) fn colour_features(&self) -> VectorFeatures {
+        paragraph_colour_features(&mut self.paragraph.borrow_mut())
     }
 
     /// Draws the paragraph onto `context` with its top-left corner at

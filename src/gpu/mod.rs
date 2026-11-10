@@ -64,6 +64,8 @@ mod metal;
 use crate::gpu::metal::MetalEngine as Engine;
 #[cfg(all(feature = "metal", feature = "window"))]
 pub use crate::gpu::metal::MetalRenderer as Renderer;
+#[cfg(all(test, feature = "metal"))]
+pub(crate) use crate::gpu::metal::another_context;
 
 // Metal takes precedence where both backends are enabled. Cargo features are
 // additive, so a binary depending on two crates that ask for different backends

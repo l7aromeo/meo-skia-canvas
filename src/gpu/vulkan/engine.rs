@@ -29,6 +29,7 @@ use vulkano::{
 use super::skia_max_api_version;
 use crate::{
     context::{chain, page::ExportOptions},
+    font::colr,
     gpu::ThreadBound,
 };
 
@@ -427,17 +428,20 @@ impl VulkanEngine {
     /// threads, so a broadcast cannot reach their thread-locals, and an
     /// owner's context would otherwise hold its resources until the process
     /// ended. Neither set of threads holds a surface across the gap but the
-    /// chain layers [`chain::pool`] keeps, which are let go here first: a
-    /// `RecordingSurface` keeps its `Surface` for the life of its canvas, and
-    /// the thread that built that one is swept by neither.
+    /// chain layers [`chain::pool`] keeps, nor a texture but the glyph
+    /// textures [`colr::release_textures`] names, which are let go here
+    /// first: a `RecordingSurface` keeps its `Surface` for the life of its
+    /// canvas, and the thread that built that one is swept by neither.
     pub fn release_idle_context() {
         VK_CONTEXT.with_borrow_mut(|cell| {
             if let Some(engine) = cell.as_mut()
                 && engine.last_use.elapsed() > VK_CONTEXT_LIFESPAN
             {
-                // The chain layers this thread keeps hold the context's
-                // memory as surfaces do, so they go with what it frees.
+                // The chain layers and glyph textures this thread keeps hold
+                // the context's memory as surfaces do, so they go with what
+                // it frees.
                 chain::pool::release();
+                colr::release_textures();
                 engine.cleanup();
             }
         });

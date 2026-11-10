@@ -29,8 +29,8 @@ use crate::{
     context2d::{Font, FontFields, FontKey},
     font::{
         FontFamily, GenericFamily, InstancedPositions, KnownAxes, caseless,
-        designed_oblique_angle, designed_style, hides_its_lean, optical_size,
-        quarantine::font_data,
+        colr, designed_oblique_angle, designed_style, hides_its_lean,
+        optical_size, quarantine::font_data,
     },
     image::x_height_ratio,
     memory::note_font_use,
@@ -2205,6 +2205,7 @@ impl FontLibrary {
             fonts: self.fonts.clone(),
         });
         decorate::forget();
+        colr::forget();
         self.collections = [None, None];
         self.collection_parts = None;
         self.collection_cache.clear();
@@ -2282,6 +2283,7 @@ impl FontLibrary {
         self.engine_names.clear();
         forget_kept_paragraphs();
         decorate::forget();
+        colr::forget();
         forget_laid_out();
     }
 

@@ -28,7 +28,9 @@ use crate::{
             StyleColours, add_slnt, draw_shadowed, match_oblique, paint_glyphs,
             set_coordinates, without_paragraph_cache,
         },
-        typography::{paragraph_style, with_style_axes},
+        typography::{
+            paragraph_colour_features, paragraph_style, with_style_axes,
+        },
     },
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
@@ -1726,12 +1728,15 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // to be applied around it or they are silently dropped.
     // In a cell because the draw is handed every recording the page keeps,
     // and painting a paragraph borrows it mutably each time.
+    // What the paragraph's colour glyphs ask of a vector backend, read
+    // before the cell takes it -- see `typography::paragraph_colour_features`.
+    let features = paragraph_colour_features(paragraph);
     let held = RefCell::new((paragraph, passes));
     // On a float page, and on one that keeps a recording for pixels, every
     // glyph is drawn run by run in a paint made for the page -- see
     // `Context2D::paragraph_paint`.
     let resolved = ctx.makes_paragraph_paints();
-    ctx.with_composited_canvas(|canvas, recording| {
+    ctx.with_composited_canvas(features, |canvas, recording| {
         let at = Point::new(x, y);
         let (paragraph, passes) = &mut *held.borrow_mut();
         let resolve = |paint: &Paint, colour: Option<&NamedColour>| {
