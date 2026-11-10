@@ -3461,6 +3461,82 @@ mod tests {
         assert_eq!(apart, 0, "a new sheet: bytes apart");
     }
 
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn a_sheet_is_uploaded_once_for_each_context_and_let_go_on_each() {
+        // A window's renderer draws on a context of its own, on the thread
+        // whose sheets the offscreen canvases share: each context keeps the
+        // texture made of a sheet for it, and a new generation lets go of
+        // the last one's on both.
+        use crate::gpu::{RenderingEngine, another_context};
+        use skia_safe::gpu::{Budgeted, surfaces};
+        forget();
+        crate::prelude::FontLibrary::new()
+            .use_paths(Some("SheetColr"), [VARIABLE])
+            .expect("the font registers");
+        let blue = |_| "rgb(40 90 160)".to_string();
+        (0..3).for_each(|_| _ = sheet_page(&blue, false));
+        let first = SHEETS
+            .with_borrow(|sheets| sheets.first()?.image.clone())
+            .expect("a sheet");
+        let info = ImageInfo::new_n32_premul((64, 64), None);
+        let mut window = another_context().expect("a second context");
+        let mut window_page = surfaces::render_target(
+            &mut window,
+            Budgeted::Yes,
+            &info,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("a window's page");
+        let mut made = Vec::new();
+        RenderingEngine::GPU.with_direct_context(|context| {
+            let context = context.expect("the thread's context");
+            let mut page = surfaces::render_target(
+                context,
+                Budgeted::Yes,
+                &info,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("a page");
+            for _ in 0..3 {
+                for surface in [&mut page, &mut window_page] {
+                    let before = TEXTURES_MADE.get();
+                    let texture = resident(surface.canvas(), first.clone());
+                    assert!(texture.is_texture_backed(), "drawn from the CPU");
+                    made.push(TEXTURES_MADE.get() - before);
+                }
+            }
+        });
+        // The thread's context made its texture as the third page drew.
+        assert_eq!(made, [0, 1, 0, 0, 0, 0], "textures made each turn");
+        let mixed = |line| match line {
+            0 => "rgb(160 40 90)".to_string(),
+            _ => "rgb(40 90 160)".to_string(),
+        };
+        (0..3).for_each(|_| _ = sheet_page(&mixed, false));
+        let next = sheet_image_id().expect("a sheet");
+        let window_id = window_page
+            .canvas()
+            .direct_context()
+            .expect("a context")
+            .id();
+        let held_on_window = TEXTURES.with_borrow(|held| {
+            held.iter()
+                .any(|(id, textures)| *id == window_id && !textures.is_empty())
+        });
+        release_textures();
+        assert_ne!(next, first.unique_id(), "no second generation");
+        assert!(!held_on_window, "the first generation kept on the window's");
+    }
+
     /// The unique id of the first sheet's current generation.
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     fn sheet_image_id() -> Option<u32> {
