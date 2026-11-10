@@ -951,6 +951,8 @@ jobs:
           echo "range: $RANGE"
           node scripts/check-stacked-docs.mjs --self-test
           node scripts/check-stacked-docs.mjs --range "$RANGE"
+          node scripts/check-doc-attachment.mjs --self-test
+          node scripts/check-doc-attachment.mjs --range "$RANGE"
 
   # The crate as a crates.io consumer builds it, which no other job does:
   # every other build here compiles Skia from this repository's patched tree,

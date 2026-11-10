@@ -6452,12 +6452,6 @@ mod tests {
         }
     }
 
-    /// No shorter spelling of a colour whose channels a conversion mixes.
-    /// The pinned rows are ones a search that shortened one channel at a
-    /// time, stopped at the first set of lengths that repaints, or never
-    /// widened its window, wrote longer; `oklab(from #990099 l a b)` is the
-    /// one that found a joint local search out, in 1,080 rows. The grid is a
-    /// sample of the 864 rows the search was measured over.
     /// [`declared_to_css`]'s search with every trial read through text and
     /// every level of figures tried to its end: slower, and what the search
     /// is held to.
@@ -6781,6 +6775,12 @@ mod tests {
         );
     }
 
+    /// No shorter spelling of a colour whose channels a conversion mixes.
+    /// The pinned rows are ones a search that shortened one channel at a
+    /// time, stopped at the first set of lengths that repaints, or never
+    /// widened its window, wrote longer; `oklab(from #990099 l a b)` is the
+    /// one that found a joint local search out, in 1,080 rows. The grid is a
+    /// sample of the 864 rows the search was measured over.
     #[test]
     fn a_mixed_colour_has_no_shorter_spelling() {
         for (css, written) in [

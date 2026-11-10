@@ -944,13 +944,6 @@ impl Font {
     }
 }
 
-/// A `<number>` as CSSOM section 6.7.2 serializes it: "in the shortest form
-/// possible ... rounding the value if necessary to not produce more than 6
-/// decimals". Shortest for the `f32` held, judged: `2cm` is 75.5905511...px
-/// exactly and held as the nearest `f32`, whose shortest form is `75.59055`,
-/// so it reads `75.59055px`, the same whether the font came from a string or
-/// a [`Font`]. `smaller` reads `8.333333px`. Zero is `0` whatever its sign,
-/// as is anything that rounds to it, since `0` is the shorter form.
 impl Font {
     /// The weight as CSS writes it: `fraction` where a shorthand gave one,
     /// as its shortest number, and the whole weight otherwise.
@@ -959,6 +952,13 @@ impl Font {
     }
 }
 
+/// A `<number>` as CSSOM section 6.7.2 serializes it: "in the shortest form
+/// possible ... rounding the value if necessary to not produce more than 6
+/// decimals". Shortest for the `f32` held, judged: `2cm` is 75.5905511...px
+/// exactly and held as the nearest `f32`, whose shortest form is `75.59055`,
+/// so it reads `75.59055px`, the same whether the font came from a string or
+/// a [`Font`]. `smaller` reads `8.333333px`. Zero is `0` whatever its sign,
+/// as is anything that rounds to it, since `0` is the shorter form.
 fn css_number(value: f32) -> String {
     if !value.is_finite() {
         return format!("{value}");
@@ -4387,10 +4387,6 @@ impl Context2D {
     }
 }
 
-/// Closes a canvas's recording and hands back its page as vectors.
-///
-/// `None` when the page recorded nothing, which is a blank canvas rather
-/// than a failure -- the callers treat it as nothing to draw.
 /// What [`capture`] resolved a source canvas to.
 struct Captured {
     content: Content,
@@ -4407,6 +4403,10 @@ struct Captured {
     entries: Option<Entries>,
 }
 
+/// Closes a canvas's recording and hands back its page as vectors.
+///
+/// `None` when the page recorded nothing, which is a blank canvas rather
+/// than a failure -- the callers treat it as nothing to draw.
 fn capture(source: &mut Canvas) -> Option<Captured> {
     let context = source.context();
     let size = context.inner.bounds.size();

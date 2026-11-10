@@ -1790,10 +1790,6 @@ pub fn css_filter_is_none(css: &str) -> Result<bool, Error> {
     Ok(read_filter(css, &parent_units())?.is_empty())
 }
 
-/// Every expectation here was read out of `lib/classes/color_matrix.js` by
-/// running it, not derived from the same algebra a second time -- the point
-/// is that the two surfaces agree, and a shared derivation would agree with
-/// itself while both were wrong.
 #[cfg(test)]
 mod sampling_tests {
     use crate::pixels::SamplingMode;
@@ -1834,6 +1830,10 @@ mod sampling_tests {
     }
 }
 
+/// Every expectation here was read out of `lib/classes/color_matrix.js` by
+/// running it, not derived from the same algebra a second time -- the point
+/// is that the two surfaces agree, and a shared derivation would agree with
+/// itself while both were wrong.
 #[cfg(test)]
 mod color_matrix_tests {
     use super::*;
