@@ -498,24 +498,6 @@ jobs:
       # skip and stop guarding them. The runner's own distribution package.
       - name: Install poppler (apt)
         run: .github/scripts/apt-install.sh poppler-utils
-      - name: TEMPORARY probe -- overlapping plain images on llvmpipe
-        env:
-          MEO_SKIA_CANVAS_REQUIRE_GPU: llvmpipe
-        run: |
-          cargo test \
-            --no-default-features \
-            --features "node-addon,vulkan,window,freetype" \
-            --lib -- probe_ \
-            --ignored --nocapture
-      - name: TEMPORARY probe -- colour_fonts.rs on llvmpipe
-        continue-on-error: true
-        env:
-          MEO_SKIA_CANVAS_REQUIRE_GPU: llvmpipe
-        run: |
-          cargo test \
-            --no-default-features \
-            --features "node-addon,vulkan,window,freetype" \
-            --test colour_fonts -- --nocapture
       - name: Test the engine against the same build
         env:
           MEO_SKIA_CANVAS_REQUIRE_GPU: llvmpipe
