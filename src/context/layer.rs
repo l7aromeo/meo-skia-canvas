@@ -30,11 +30,12 @@ use std::{
 use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
-    ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IRect,
-    Image, ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap,
+    ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IPoint,
+    IRect, Image, ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap,
     PaintJoin, PaintStyle, Path, PathDirection, Picture, PictureRecorder,
     Point, Rect, RoundOut, RuntimeEffect, SamplingOptions, Shader, Surface,
-    TileMode, canvas::SaveLayerRec, color_filters, image_filters, shaders,
+    TileMode, Vector, canvas::SaveLayerRec, color_filters, image_filters,
+    shaders,
 };
 
 use crate::{
@@ -49,6 +50,7 @@ use crate::{
         run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
+    font::colr::{Format, ImageRoute, composite_onto},
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
@@ -95,6 +97,9 @@ pub enum Layer {
     /// A run of text recorded the first time a target plays it -- see
     /// [`DeferredPicture`]: as a picture once recorded.
     Deferred(Arc<DeferredPicture>),
+    /// A run of text holding colour glyphs, drawn again where it is played
+    /// back on pixels -- see [`ColourText`].
+    ColourText(Arc<ColourText>),
 }
 
 impl Layer {
@@ -117,6 +122,7 @@ impl Layer {
                     picture.playback(canvas);
                 }
             }
+            Layer::ColourText(text) => text.playback(canvas, target),
         }
     }
 
@@ -145,6 +151,7 @@ impl Layer {
                     picture.cull_rect()
                 }),
             ),
+            Layer::ColourText(text) => Some(text.reach()),
         }
     }
 }
@@ -316,6 +323,31 @@ impl CoveragePicture {
     }
 }
 
+thread_local! {
+    /// Whether [`reach_the_clip`] records nothing on this thread, so that a
+    /// recording is bounded by what it inks -- see [`inked_by`].
+    static INKED_ONLY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// What `draw` inks, recorded onto a canvas over `bounds` under `matrix`:
+/// the bounds Skia gives the recording of it with [`reach_the_clip`]
+/// recording nothing, which a run of text is otherwise bounded by.
+pub(crate) fn inked_by(
+    bounds: Rect,
+    matrix: &Matrix,
+    draw: impl FnOnce(&SkCanvas),
+) -> Rect {
+    let mut recorder = PictureRecorder::new();
+    let canvas = recorder.begin_recording(bounds, true);
+    canvas.set_matrix(&(*matrix).into());
+    let was = INKED_ONLY.replace(true);
+    draw(canvas);
+    INKED_ONLY.set(was);
+    recorder
+        .finish_recording_as_picture(None)
+        .map_or_else(Rect::new_empty, |picture| picture.cull_rect())
+}
+
 /// The key of the annotation [`reach_the_clip`] records. No backend acts on
 /// it: raster and GPU devices draw no annotation, and a PDF or SVG writes
 /// only the ones whose keys it knows -- a link, a named destination.
@@ -336,6 +368,9 @@ const TEXT_REACH: &str = "meo-skia-canvas/text-reach";
 /// large as the clip, as every layer was before layers were confined. Draws
 /// that are not text keep their own bounds.
 pub(crate) fn reach_the_clip(canvas: &SkCanvas) {
+    if INKED_ONLY.get() {
+        return;
+    }
     let Some(clip) = canvas.device_clip_bounds() else {
         return;
     };
@@ -1460,6 +1495,359 @@ impl Replay {
         }
         replay
     }
+
+    /// Draws the draw onto `canvas` in `paint`, under `matrix`, the
+    /// transform it was made under, concatenated onto the one `canvas`
+    /// carries. Leaves `canvas` under that transform.
+    fn draw(&self, canvas: &SkCanvas, matrix: &Matrix, paint: &Paint) {
+        match self {
+            Replay::Path(path, faint) => {
+                let Some(path) = Path::deserialize(path) else {
+                    return;
+                };
+                canvas.concat(matrix);
+                canvas.draw_path(&path, &faint.drawable(paint));
+            }
+            Replay::Text {
+                run,
+                at,
+                offset,
+                condensation,
+                global_alpha,
+                faint,
+            } => {
+                canvas.concat(matrix);
+                // Squeezed as `draw_text` squeezes it: by a scale about the
+                // anchor, the pen with it.
+                if *condensation == 1.0 {
+                    run.paint(
+                        canvas,
+                        *at + *offset,
+                        paint,
+                        *global_alpha,
+                        *faint,
+                    );
+                } else {
+                    canvas.translate(*at).scale((*condensation, 1.0));
+                    run.paint(canvas, *offset, paint, *global_alpha, *faint);
+                }
+            }
+        }
+    }
+}
+
+/// A run of text holding colour glyphs this library draws itself -- see
+/// `font::colr::ColourRun` -- drawn again where it is played back, so that
+/// its colour glyphs are made for the pixels they land on.
+///
+/// On pixels each colour glyph is drawn as an image made on the CPU under
+/// the transform the run is played back under, in the format of those
+/// pixels -- see [`ImageRoute`] -- as Skia draws a colour glyph from the
+/// image its scaler context makes. A GPU canvas then composites the pixels
+/// the CPU canvas does: composited through a layer of its own on the GPU,
+/// a glyph's gradients were drawn by Ganesh, which places a conic
+/// gradient's hard stops apart from the CPU's (#667). Made at playback, the
+/// image is made at the scale an export's density, a canvas drawn into
+/// another or a pattern plays the run at, rather than resampled from the
+/// scale it was recorded at.
+///
+/// The run is drawn with the shadow it casts and through the blend that
+/// covers beyond it, as `Context2D::render_to_canvas` records them, so that
+/// every colour glyph of it reaches pixels as an image. A draw that cannot
+/// be kept whole, a paragraph's, keeps its recording only, rasterized on
+/// the CPU where it is played -- see [`Self::rasterized`].
+///
+/// A document takes the run as recorded, each colour glyph composited
+/// through its layer from its paint graph, which a vector backend writes as
+/// such; so do pixels played into a recording, which does not know the
+/// pixels it will be played onto.
+#[derive(Clone, Debug)]
+pub struct ColourText {
+    /// The transform the run was drawn under.
+    pub matrix: Matrix,
+    /// The run kept whole, to draw on pixels; `None` for a draw that cannot
+    /// be kept, a paragraph's, which pixels take as recorded, rasterized on
+    /// the CPU -- see [`Self::rasterized`].
+    pub replay: Option<Replay>,
+    /// What pixels draw the run in.
+    pub paint: Paint,
+    /// What the draw inks, under [`Self::matrix`]'s parent transform, where
+    /// it has no replay: the raster it is rasterized into.
+    pub inked: Rect,
+    /// The shadow the run casts on pixels, drawn beneath it.
+    pub shadow: Option<ColourShadow>,
+    /// The blend a layer holding the run and its shadow composites through,
+    /// where the blend covers beyond the draw -- see
+    /// `Context2D::render_to_canvas`.
+    pub blend: Option<BlendMode>,
+    /// The run as recorded for pixels, under [`Self::matrix`], once
+    /// something has asked for it -- see [`Self::recorded`]; its bounds are
+    /// what the run reaches.
+    pub recording: OnceLock<Option<Picture>>,
+    /// The bounds of the page the run is recorded over.
+    pub bounds: Rect,
+    /// The run as recorded for a document, on a page that keeps a recording
+    /// for each kind of target -- see `page::Recorders` -- where it differs.
+    pub document: Option<ColourRecording>,
+    /// The clip the run was drawn under, in device pixels of the recording,
+    /// where it is not a piece of a run that applies it -- see [`Clipped`].
+    pub clip: Option<Data>,
+    /// Where the thread that filed it counts the recordings
+    /// [`Self::recorded`] makes -- see [`COLOUR_WATCH`].
+    #[cfg(test)]
+    pub watch: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Where the colour runs filed on this thread count the recordings made
+    /// of them when first asked for, on whichever thread makes them -- see
+    /// [`ColourText::recorded`].
+    pub(crate) static COLOUR_WATCH: RefCell<
+        Option<Arc<std::sync::atomic::AtomicUsize>>,
+    > = const { RefCell::new(None) };
+}
+
+/// A [`ColourText`]'s recording for a document: the paints the run and its
+/// shadow are recorded in, and the picture once something has asked for it
+/// -- see [`ColourText::recorded`].
+#[derive(Clone, Debug)]
+pub struct ColourRecording {
+    /// What the run is recorded in.
+    pub paint: Paint,
+    /// The shadow recorded beneath the run.
+    pub shadow: Option<ColourShadow>,
+    /// The picture, once recorded.
+    pub picture: OnceLock<Option<Picture>>,
+}
+
+impl ColourRecording {
+    /// `picture`, recorded already.
+    pub(crate) fn recorded(picture: Picture) -> Self {
+        Self {
+            paint: Paint::default(),
+            shadow: None,
+            picture: OnceLock::from(Some(picture)),
+        }
+    }
+
+    /// The run in `paint`, `shadow` beneath it, recorded when first asked
+    /// for.
+    pub(crate) fn later(paint: Paint, shadow: Option<ColourShadow>) -> Self {
+        Self {
+            paint,
+            shadow,
+            picture: OnceLock::new(),
+        }
+    }
+}
+
+/// The shadow a [`ColourText`] casts: the run in the shadow's paint, which
+/// is the run's own at full alpha where the shadow's colour took the
+/// `globalAlpha`, moved by the shadow's offset in the page's own units.
+#[derive(Clone, Debug)]
+pub struct ColourShadow {
+    pub paint: Paint,
+    pub replay: Replay,
+    pub offset: Vector,
+}
+
+impl ColourText {
+    fn playback(&self, canvas: &SkCanvas, target: Target) {
+        canvas.save();
+        if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        match (target, Format::of(canvas)) {
+            (Target::Pixels, Some(format)) if self.replay.is_none() => {
+                self.rasterized(canvas, &format);
+            }
+            (Target::Pixels, Some(format)) => {
+                let _route = ImageRoute::open(format);
+                if let Some(blend) = self.blend {
+                    let mut through = Paint::default();
+                    through.set_anti_alias(true).set_blend_mode(blend);
+                    canvas.save_layer(&SaveLayerRec::default().paint(&through));
+                }
+                if let Some(shadow) = &self.shadow {
+                    canvas.save();
+                    canvas.translate(shadow.offset);
+                    shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
+                    canvas.restore();
+                }
+                if let Some(replay) = &self.replay {
+                    canvas.save();
+                    replay.draw(canvas, &self.matrix, &self.paint);
+                    canvas.restore();
+                }
+                if self.blend.is_some() {
+                    canvas.restore();
+                }
+            }
+            (Target::Pixels, None) => {
+                if let Some(recorded) = self.recorded() {
+                    recorded.playback(canvas);
+                }
+            }
+            (Target::Document, _) => {
+                if let Some(recorded) = self.recorded_for_document() {
+                    recorded.playback(canvas);
+                }
+            }
+        }
+        canvas.restore();
+    }
+
+    /// The run as recorded for pixels, recorded now if nothing has asked
+    /// for it yet. `None` where Skia records nothing.
+    ///
+    /// Pixels draw the run again from its replay and never ask, nor does an
+    /// SVG, which embeds a colour glyph as pixels; a canvas drawn into
+    /// another asks once, as does a PDF for [`Self::recorded_for_document`].
+    /// Recorded as each run was drawn, the pictures cost every `fillText`
+    /// of such a run a recording with a layer for each colour glyph, mostly
+    /// thrown away unplayed. Recorded here, each is
+    /// the picture `Context2D::render_to_canvas` records of the draw, in
+    /// the same paints: the run's shadow beneath it, each under the
+    /// transform the run was drawn under and reaching the clip as
+    /// `Context2D::draw_text` has it -- see [`reach_the_clip`] -- through a
+    /// picture the blend composites where the blend covers beyond the draw.
+    pub(crate) fn recorded(&self) -> Option<&Picture> {
+        self.recording
+            .get_or_init(|| self.record(&self.paint, self.shadow.as_ref()))
+            .as_ref()
+    }
+
+    /// The run as recorded for a document, recorded now if nothing has
+    /// asked for it yet: its own on a page that keeps a recording for each
+    /// kind of target, the pixels' otherwise -- see [`Self::recorded`].
+    pub(crate) fn recorded_for_document(&self) -> Option<&Picture> {
+        let Some(document) = &self.document else {
+            return self.recorded();
+        };
+        document
+            .picture
+            .get_or_init(|| {
+                self.record(&document.paint, document.shadow.as_ref())
+            })
+            .as_ref()
+    }
+
+    /// The run recorded in `paint`, `shadow` beneath it, for
+    /// [`Self::recorded`].
+    fn record(
+        &self,
+        paint: &Paint,
+        shadow: Option<&ColourShadow>,
+    ) -> Option<Picture> {
+        #[cfg(test)]
+        if let Some(watch) = &self.watch {
+            watch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let replay = self.replay.as_ref()?;
+        // Each draw reaches the clip, as it did where it was drawn, whatever
+        // this thread is working out -- see [`inked_by`].
+        let inked_only = INKED_ONLY.replace(false);
+        let record_run = |canvas: &SkCanvas| {
+            if let Some(shadow) = shadow {
+                canvas.save();
+                canvas.translate(shadow.offset);
+                shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
+                reach_the_clip(canvas);
+                canvas.restore();
+            }
+            canvas.save();
+            replay.draw(canvas, &self.matrix, paint);
+            reach_the_clip(canvas);
+            canvas.restore();
+        };
+        let mut recorder = PictureRecorder::new();
+        let canvas = recorder.begin_recording(self.bounds, true);
+        match self.blend {
+            Some(blend) => {
+                let mut layer = PictureRecorder::new();
+                record_run(layer.begin_recording(self.bounds, true));
+                if let Some(drawn) = layer.finish_recording_as_picture(None) {
+                    let mut through = Paint::default();
+                    through.set_anti_alias(true).set_blend_mode(blend);
+                    canvas.draw_picture(&drawn, None, Some(&through));
+                }
+            }
+            None => record_run(canvas),
+        }
+        INKED_ONLY.set(inked_only);
+        recorder.finish_recording_as_picture(None)
+    }
+
+    /// Draws the recording for pixels onto `canvas` through a raster made
+    /// on the CPU in `format`, under the transform `canvas` carries,
+    /// covering what the draw inks there, composited as an image at whole
+    /// device pixels: the same steps whichever engine `canvas` draws on, so
+    /// that a GPU canvas composites the pixels the CPU made, where playing
+    /// the recording drew each colour glyph's layer through Ganesh. Played
+    /// as recorded under a perspective, which a raster cannot follow.
+    ///
+    /// The draw's colour glyphs are placed as they were recorded, at the
+    /// transform the draw was made under; a run kept whole places them where
+    /// it is played -- see [`Replay`].
+    fn rasterized(&self, canvas: &SkCanvas, format: &Format) {
+        let Some(recorded) = self.recorded() else {
+            return;
+        };
+        let device = canvas.local_to_device_as_3x3();
+        if device.has_perspective() {
+            recorded.playback(canvas);
+            return;
+        }
+        let Some(clip) = canvas.device_clip_bounds() else {
+            return;
+        };
+        let inked = device
+            .map_rect(self.inked)
+            .0
+            .with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
+        let Some(area) = IRect::intersect(&inked.round_out(), &clip) else {
+            return;
+        };
+        let Some(mut surface) =
+            started::raster(&format.image_info(area.size()), None, None)
+        else {
+            return;
+        };
+        let raster = surface.canvas();
+        raster.translate((-area.left as f32, -area.top as f32));
+        raster.concat(&device);
+        recorded.playback(raster);
+        canvas.save();
+        canvas.reset_matrix();
+        composite_onto(
+            canvas,
+            &surface.image_snapshot(),
+            IPoint::new(area.left, area.top),
+            &Paint::default(),
+        );
+        canvas.restore();
+    }
+
+    /// What the run reaches, under the transform it is played back under:
+    /// its recording's cull rectangle -- see [`drawn_by`] -- known without
+    /// recording it where nothing has asked for it yet. Each draw of a run
+    /// reaches the clip it is recorded under -- see [`reach_the_clip`] --
+    /// and a run is recorded under no clip but the page's bounds, so its
+    /// recording reaches the whole pixels the bounds cover.
+    pub(crate) fn reach(&self) -> Rect {
+        match self.recording.get() {
+            Some(recorded) => recorded
+                .as_ref()
+                .map_or_else(Rect::new_empty, Picture::cull_rect),
+            None => Rect::from(RoundOut::<IRect>::round_out(&self.bounds)),
+        }
+    }
+
+    /// Whether this stands for a pair of recordings -- see [`holds_a_pair`].
+    pub(crate) fn is_pair(&self) -> bool {
+        self.document.is_some()
+    }
 }
 
 impl PatternDraw {
@@ -1548,39 +1936,7 @@ impl PatternDraw {
             return;
         };
         paint.set_shader(shader);
-        match &self.replay {
-            Replay::Path(path, faint) => {
-                let Some(path) = Path::deserialize(path) else {
-                    return;
-                };
-                canvas.concat(&self.matrix);
-                canvas.draw_path(&path, &faint.drawable(&paint));
-            }
-            Replay::Text {
-                run,
-                at,
-                offset,
-                condensation,
-                global_alpha,
-                faint,
-            } => {
-                canvas.concat(&self.matrix);
-                // Squeezed as `draw_text` squeezes it: by a scale about the
-                // anchor, the pen with it.
-                if *condensation == 1.0 {
-                    run.paint(
-                        canvas,
-                        *at + *offset,
-                        &paint,
-                        *global_alpha,
-                        *faint,
-                    );
-                } else {
-                    canvas.translate(*at).scale((*condensation, 1.0));
-                    run.paint(canvas, *offset, &paint, *global_alpha, *faint);
-                }
-            }
-        }
+        self.replay.draw(canvas, &self.matrix, &paint);
     }
 
     /// What the draw covers, under the transform it is played under.
@@ -2699,6 +3055,7 @@ impl Clipped {
                 Layer::Deferred(deferred) => {
                     deferred.picture().and_then(drawn_by)
                 }
+                Layer::ColourText(text) => Some(text.reach()),
                 entry => entry.reach(),
             }?;
             if !within.intersect(self.bounds) {
@@ -3174,6 +3531,8 @@ fn offscreen_layers(entry: &Layer, features: VectorFeatures) -> usize {
         Layer::Deferred(deferred) => deferred
             .picture()
             .map_or(0, |picture| picture.approximate_op_count_nested(true)),
+        // Pixels draw a run's shadow filtered on the CPU and its colour
+        // glyphs as images, so its recording's layers are never the GPU's.
         _ => 1,
     }
 }
@@ -3304,7 +3663,7 @@ fn clips_by_coverage(canvas: &SkCanvas, target: Target) -> bool {
 /// recording begun with a bounding hierarchy is trimmed to when it finishes
 /// (`SkPictureRecorder::finishRecordingAsPicture`), the draws replayed into
 /// one. A picture drawn inside it is bounded by its own cull rectangle.
-fn drawn_by(picture: &Picture) -> Option<Rect> {
+pub(crate) fn drawn_by(picture: &Picture) -> Option<Rect> {
     let mut recorder = PictureRecorder::new();
     let canvas = recorder.begin_recording(picture.cull_rect(), true);
     picture.playback(canvas);
@@ -3342,7 +3701,8 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         | Layer::Blur(_)
         | Layer::Targeted(_)
         | Layer::Pattern(_)
-        | Layer::Deferred(_) => false,
+        | Layer::Deferred(_)
+        | Layer::ColourText(_) => false,
     })
 }
 
@@ -3355,11 +3715,13 @@ pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
         Layer::Targeted(_) => true,
         Layer::Deferred(deferred) => deferred.is_pair(),
+        Layer::ColourText(text) => text.is_pair(),
         Layer::Cut(op) => op.documents.is_some(),
         Layer::Group(group) => holds_a_pair(&group.contents.layers),
         Layer::Clipped(piece) => match &piece.entry {
             Layer::Targeted(_) => true,
             Layer::Deferred(deferred) => deferred.is_pair(),
+            Layer::ColourText(text) => text.is_pair(),
             Layer::Cut(op) => op.documents.is_some(),
             _ => false,
         },

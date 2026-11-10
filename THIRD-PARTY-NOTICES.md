@@ -4,8 +4,8 @@ The published `skia.node` is a statically linked binary. Several of the projects
 require their copyright notices to travel with binary distributions, so those notices are collected
 here rather than left in the source trees they came from.
 
-Everything below is under a permissive licence, and no component is copyleft. Audited 2026-11-01
-with `just licenses` over the **243** crate versions that link into a released binary — the union
+Everything below is under a permissive licence, and no component is copyleft. Audited 2026-11-09
+with `just licenses` over the **252** crate versions that link into a released binary — the union
 across every target in `lib/targets.json`, normal dependencies only. The terms found were 0BSD,
 Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0,
 Unlicense and Zlib.
@@ -239,6 +239,41 @@ rest of the graph rather than through the image formats:
 Each ships its licence text with its source. The bolded `and`s are not a choice: both sets of terms
 apply at once, so the BSD notice travels even where MIT would otherwise have been enough.
 
+## Unicode-3.0 components
+
+`yoke` and `zerofrom`, with their derive macros, come from ICU4X and are licensed Unicode-3.0
+alone. `read-fonts`, which reads a colour glyph's `COLR` table for `skrifa`, uses them to borrow
+from a font file's bytes. The licence asks that its copyright and permission notice appear with
+copies of the software or in their documentation:
+
+> UNICODE LICENSE V3
+>
+> COPYRIGHT AND PERMISSION NOTICE
+>
+> Copyright © 2020-2024 Unicode, Inc.
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of data files and
+> any associated documentation (the "Data Files") or software and any associated documentation (the
+> "Software") to deal in the Data Files or Software without restriction, including without
+> limitation the rights to use, copy, modify, merge, publish, distribute, and/or sell copies of the
+> Data Files or Software, and to permit persons to whom the Data Files or Software are furnished to
+> do so, provided that either (a) this copyright and permission notice appear with all copies of the
+> Data Files or Software, or (b) this copyright and permission notice appear in associated
+> Documentation.
+>
+> THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+> PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
+>
+> IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE BE LIABLE FOR ANY CLAIM,
+> OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF
+> USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+> ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA FILES OR SOFTWARE.
+>
+> Except as contained in this notice, the name of a copyright holder shall not be used in
+> advertising or otherwise to promote the sale, use or other dealings in these Data Files or
+> Software without prior written authorization of the copyright holder.
+
 ## Apache-2.0 components
 
 Five crates offer Apache-2.0 alone, and one requires it alongside MIT. Apache-2.0 asks that
@@ -278,8 +313,8 @@ packages that actually link — which is the set this file describes, and not wh
 `cargo metadata` returns.
 
 The difference matters. `cargo metadata --all-features` reports every package Cargo knows about,
-including build and dev dependencies and every platform's targets, which is **362** against the
-**243** that link. Either number is defensible; quoting one and computing the other is how the count
+including build and dev dependencies and every platform's targets, which is **371** against the
+**252** that link. Either number is defensible; quoting one and computing the other is how the count
 in this file went stale without anyone noticing. `just licenses` now reads both numbers back out of
 this file and fails when what it counted disagrees, so the two cannot drift apart again silently.
 

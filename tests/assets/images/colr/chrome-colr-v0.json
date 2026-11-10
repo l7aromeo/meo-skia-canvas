@@ -1,0 +1,63 @@
+{
+ "reference": "chrome-colr-v0.png",
+ "font": "../../fonts/colr-v0/COLR-palettes-test-font.ttf",
+ "background": "white",
+ "fillStyle": "#000",
+ "width": 400,
+ "height": 450,
+ "columns": 4,
+ "cellWidth": 100,
+ "cellHeight": 150,
+ "x": 4,
+ "baselineAbove": 20,
+ "cases": [
+  {
+   "size": 16,
+   "text": "A"
+  },
+  {
+   "size": 16,
+   "text": "AB"
+  },
+  {
+   "size": 16,
+   "text": "ABC"
+  },
+  {
+   "size": 30,
+   "text": "A"
+  },
+  {
+   "size": 30,
+   "text": "AB"
+  },
+  {
+   "size": 30,
+   "text": "ABC"
+  },
+  {
+   "size": 48,
+   "text": "A"
+  },
+  {
+   "size": 48,
+   "text": "AB"
+  },
+  {
+   "size": 48,
+   "text": "ABC"
+  },
+  {
+   "size": 100,
+   "text": "A"
+  },
+  {
+   "size": 100,
+   "text": "AB"
+  },
+  {
+   "size": 100,
+   "text": "ABC"
+  }
+ ]
+}

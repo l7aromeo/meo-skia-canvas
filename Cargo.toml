@@ -196,6 +196,11 @@ ttf-parser = { version = "0.25", default-features = false, features = [
     "std",
     "variable-fonts",
 ] }
+# A COLR colour glyph's paint graph walked as Chrome walks it: skrifa is
+# Fontations' reader, which Blink draws every COLR web font through on
+# Apple platforms -- see `font::colr`. Without its autohinter's shaping,
+# which nothing here asks for.
+skrifa = { version = "0.49", default-features = false, features = ["std"] }
 
 # The formats Skia has no encoder for. Skia's encoder list is three modules
 # -- JPEG, PNG and WebP -- so anything else is encoded here,

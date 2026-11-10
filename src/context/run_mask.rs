@@ -52,7 +52,7 @@ use crate::{
         Outcome,
         coverage::{Coverage, Placement},
     },
-    node::typography::{RunPaint, Shear},
+    node::typography::{RunPaint, Shear, draws_colour_glyphs},
 };
 
 /// The bytes of kept runs, across every thread: a quarter of what the page
@@ -286,6 +286,11 @@ fn placement(
             // Drawn as nothing.
             Shear::Flat => continue,
             Shear::By(_) => return None,
+        }
+        // A colour glyph this library draws from its paint graph is no mask,
+        // and is placed by its own rule -- see `font::colr::ColourRun`.
+        if draws_colour_glyphs(font) {
+            return None;
         }
         // Unskewed under a transform that only scales and translates, no
         // run is drawn from its outlines -- see

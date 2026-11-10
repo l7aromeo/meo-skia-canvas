@@ -1,6 +1,7 @@
 use super::skia_max_api_version;
 use crate::{
     context::{layer::TileScope, page::Page},
+    font::colr,
     gpu::{RenderCache, RenderState::Resizing},
 };
 use ash::vk::Handle;
@@ -264,6 +265,8 @@ struct VulkanBackend {
 
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
+        // The glyph textures held for this context hold it as well.
+        colr::release_textures_of(self.skia_ctx.id());
         self.skia_ctx.release_resources_and_abandon();
     }
 }

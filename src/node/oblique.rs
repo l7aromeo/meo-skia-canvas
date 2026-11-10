@@ -49,9 +49,11 @@ use crate::{
         },
         font_library::FontEpoch,
         typography::{
-            FAKE_ITALIC_SKEW, GlyphRun, GlyphRunRef, SLNT, Shear, draw_glyphs,
-            draw_outlines, drawn_as_outlines, glyph_runs, may_draw_outlines,
-            run_shear, sheared_blob, visit_glyph_runs,
+            FAKE_ITALIC_SKEW, GlyphRun, GlyphRunRef, SLNT, Shear,
+            draw_colour_run, draw_glyphs, draw_outlines, drawn_as_outlines,
+            glyph_runs, holds_colour_runs, may_draw_outlines,
+            paragraph_colour_features, run_shear, sheared_blob,
+            visit_glyph_runs,
         },
     },
 };
@@ -2137,7 +2139,10 @@ pub(crate) fn paint_glyphs(
     paints: GlyphPaints<'_>,
 ) {
     let resolving = matches!(paints, GlyphPaints::Resolved { .. });
-    if !resolving && !may_draw_outlines(canvas, FAKE_ITALIC_SKEW) {
+    if !resolving
+        && !may_draw_outlines(canvas, FAKE_ITALIC_SKEW)
+        && !holds_colour_runs(paragraph)
+    {
         paragraph.paint(canvas, origin);
         return;
     }
@@ -2351,7 +2356,8 @@ pub(crate) fn draw_shadowed(
     // paint is made for the page, the shadows' and the backgrounds' as well
     // as the glyphs' -- see `Passes::paint`.
     let resolved = context.makes_paragraph_paints();
-    context.draw_with_shadows(&shadows, |canvas, part, recording| {
+    let features = paragraph_colour_features(paragraph);
+    context.draw_with_shadows(&shadows, features, |canvas, part, recording| {
         let page = |paint: &Paint, colour: Option<&NamedColour>| {
             context.paragraph_paint(paint, colour, recording)
         };
@@ -2492,6 +2498,17 @@ impl PaintedRun {
     /// its outlines where `canvas` shears it past what FreeType draws.
     fn draw(&self, canvas: &Canvas, origin: Point, paint: &Paint) {
         let at = origin + self.origin;
+        if draw_colour_run(
+            canvas,
+            &self.font,
+            &self.glyphs,
+            &self.positions,
+            &self.shear,
+            at,
+            paint,
+        ) {
+            return;
+        }
         match drawn_as_outlines(canvas, &self.font, &self.shear) {
             true => draw_outlines(
                 canvas,

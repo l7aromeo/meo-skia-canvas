@@ -1,6 +1,7 @@
 //! The maps a cache of this crate's own lookups keeps its answers in: the
-//! font, face and collection caches, keyed by what a style asks for, and the
-//! runs kept for drawing, filed by a hash of what they lay out; and
+//! font, face and collection caches, keyed by what a style asks for, the
+//! runs kept for drawing, filed by a hash of what they lay out, and the COLR
+//! faces, glyphs, glyph images and atlases `font::colr` keeps; and
 //! [`KeptSets`], a fixed number of answers for lookups whose keys repeat.
 //!
 //! They hash with foldhash rather than std's SipHash. A lookup in these caches
