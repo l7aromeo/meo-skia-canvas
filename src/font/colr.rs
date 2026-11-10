@@ -62,7 +62,10 @@ use skrifa::{
     },
     instance::{Location, LocationRef, Size},
     outline::{DrawSettings, OutlinePen},
-    raw::types::BoundingBox,
+    raw::{
+        TableDirectory, TableRecord,
+        types::{BoundingBox, FixedSize},
+    },
 };
 
 /// The palette a glyph is drawn in: the font's first, which CSS Fonts 4's
@@ -263,15 +266,6 @@ fn assembled(tables: &[(&[u8; 4], Data)]) -> Vec<u8> {
     /// The sfnt version of a font with TrueType or CFF outlines alike, as a
     /// reader takes it: `0x00010000`.
     const SFNT_VERSION: u32 = 0x0001_0000;
-    /// The bytes of the table directory before its table records:
-    /// `sfntVersion`, a `uint32`, then `numTables`, `searchRange`,
-    /// `entrySelector` and `rangeShift`, a `uint16` each -- OpenType 1.9,
-    /// "The OpenType font file", `TableDirectory`. Fixed by the format.
-    const OFFSET_TABLE: usize = 12;
-    /// The bytes of each table record: `tableTag`, `checksum`, `offset` and
-    /// `length`, four bytes each -- OpenType 1.9, "The OpenType font file",
-    /// `TableRecord`. Fixed by the format.
-    const RECORD: usize = 16;
     let mut sorted: Vec<&(&[u8; 4], Data)> = tables.iter().collect();
     sorted.sort_by_key(|(tag, _)| **tag);
     let count = sorted.len();
@@ -281,7 +275,9 @@ fn assembled(tables: &[(&[u8; 4], Data)]) -> Vec<u8> {
     // The search fields are hints for a binary search, which skrifa does not
     // make; zero is a valid table directory to it.
     file.extend_from_slice(&[0; 6]);
-    let mut at = OFFSET_TABLE + RECORD * count;
+    // The table directory before its records, then a record a table: their
+    // sizes as read-fonts reads them, fixed by the format.
+    let mut at = TableDirectory::MIN_SIZE + TableRecord::RAW_BYTE_LEN * count;
     for (tag, data) in &sorted {
         file.extend_from_slice(*tag);
         file.extend_from_slice(&0u32.to_be_bytes());
