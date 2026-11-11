@@ -15,7 +15,7 @@ description: The drawing API for a particular Canvas
 | [isPointInStroke()][isPointInStroke()] | [strokeText()][strokeText()] ⧸[🧪][drawText] | [createRadialGradient()][createRadialGradient()] | [**lineJoin**][lineJoin]                | [resetTransform()][resetTransform()]              | [conicCurveTo() 🧪][conicCurveTo]        | [**letterSpacing**][letterSpacing]                    | [**textWrap** 🧪][textwrap]                            | [putImageData()][putImageData()]                             | [**shadowColor**][shadowColor]                           |
 | [save()][save()]                       | [fill()][fill()]                             | [createPattern()][createPattern()]               | [**lineWidth**][lineWidth]              | [transform()][transform()] ⧸[🧪][transforms]      | [quadraticCurveTo()][quadraticCurveTo()] | [**wordSpacing**][wordSpacing]                        | [measureText()][measureText()] / [🧪][c2d_measuretext] | [drawCanvas() 🧪][drawcanvas]                                | [**shadowOffsetX**][shadowOffsetX]                       |
 | [restore()][restore()]                 | [stroke()][stroke()]                         | [createTexture() 🧪][createTexture()]            | [**miterLimit**][miterLimit]            | [translate()][translate()]                        | [arc()][arc()]                           | [**fontKerning**][fontKerning]                        | [outlineText() 🧪][outlineText()]                      | [drawImage()][drawImage()] / [🧪][drawimage]                 | [**shadowOffsetY**][shadowOffsetY]                       |
-| [reset()][reset()]                     |                                              |                                                  | [getLineDash()][getLineDash()]          | [rotate()][rotate()]                              | [ellipse()][ellipse()]                   | [**textRendering**][textRendering]                    |                                                        |                                                              |                                                          |
+| [reset()][reset()]                     |                                              |                                                  | [getLineDash()][getLineDash()]          | [rotate()][rotate()]                              | [ellipse()][ellipse()]                   | [**textRendering**][textRendering]                    | [fontMetrics() 🧪][fontMetrics()]                      |                                                              |                                                          |
 | [clip()][clip()]                       |                                              |                                                  | [setLineDash()][setLineDash()]          | [scale()][scale()]                                | [rect()][rect()]                         |                                                       |                                                        |                                                              |                                                          |
 |                                        |                                              |                                                  |                                         |                                                   | [roundRect()][roundRect()]               |                                                       |                                                        |                                                              |                                                          |
 | [saveLayer() 🧪][c2d_saveLayer]        |                                              |                                                  |                                         |                                                   |                                          |                                                       |                                                        |                                                              | [**dither** 🧪][c2d_dither]                              |
@@ -904,6 +904,24 @@ lineMetricsDemo();
 
 </details>
 
+### `fontMetrics()`
+
+```js returns="{ascent, descent, lineGap}"
+fontMetrics();
+```
+
+The `fontMetrics()` method returns the vertical metrics of the current font's first available face: how far it reaches above (`ascent`) and below (`descent`) the alphabetic baseline, and the gap it asks for between lines (`lineGap`). The values are in pixels at the font size, unrounded, as Skia reads them from the face: the `hhea` table's, or the `OS/2` table's typographic ones where the face sets `USE_TYPO_METRICS`. They depend on the font alone, not on a string or on [`.textBaseline`][textBaseline], where `fontBoundingBoxAscent` is measured from the baseline selected. A face whose tables state a negative line gap reports a `lineGap` of zero.
+
+These are what CSS `line-height: normal` is made of. Chrome rounds each of the three to whole pixels and adds them, so text laid out line by line matches a browser's spacing when its line height is built the same way:
+
+```js
+ctx.font = "16px Poppins";
+let { ascent, descent, lineGap } = ctx.fontMetrics();
+let normal = Math.round(ascent) + Math.round(descent) + Math.round(lineGap); // 25
+```
+
+The face is the first available font in the family list, the one `fontBoundingBoxAscent` and `fontBoundingBoxDescent` come from, whatever face a fallback draws a string's glyphs in. Where a fallback face draws part of a line, Chrome's line box also grows to fit that face, which these values do not include. Chrome on macOS also raises the ascent of faces whose family is Helvetica, Times or Courier; see [browser differences](../browser-differences.md).
+
 ### `outlineText()`
 
 ```js returns="Path2D"
@@ -1089,6 +1107,7 @@ Always `false`. Context loss is a GPU-compositor event — a browser reclaiming 
 [lineDashFit]: #linedashfit
 [lineDashMarker]: #linedashmarker
 [newPage]: https://www.jsdocs.io/package/meo-skia-canvas
+[fontMetrics()]: #fontmetrics
 [outlineText()]: #outlinetext
 [img_size]: https://www.jsdocs.io/package/meo-skia-canvas
 [imgdata_colortype]: ../../README.md#colour-and-precision

@@ -25,8 +25,8 @@ use crate::{
         lru::{Lru, LruId},
     },
     text::{
-        TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
-        TextMetricsLine, TextMetricsRun,
+        FontMetrics as CrateFontMetrics, TextAlign as CrateTextAlign,
+        TextBaseline as CrateTextBaseline, TextMetricsLine, TextMetricsRun,
     },
     utils::*,
 };
@@ -2578,6 +2578,13 @@ impl<'a> Typesetter<'a> {
         &self.typography.0
     }
 
+    /// The ascent, descent and line gap of the run's first available font,
+    /// at the alphabetic baseline: the face its font box is measured from.
+    /// See [`face_metrics`].
+    pub fn font_metrics(&self) -> CrateFontMetrics {
+        face_metrics(self.char_style())
+    }
+
     /// The paragraph style the run is laid out in.
     fn graf_style(&self) -> &ParagraphStyle {
         &self.typography.1
@@ -3747,8 +3754,7 @@ impl Baseline {
 
 /// How far `style`'s first available font reaches above and below the
 /// alphabetic baseline at its size, both positive: the face's own ascent and
-/// descent, as Skia reads them -- `hhea`'s, or the typographic ones where the
-/// face sets `USE_TYPO_METRICS` -- without the line gap.
+/// descent, as [`face_metrics`] reads them, without the line gap.
 ///
 /// Not `TextStyle::font_metrics`, which spreads half the line gap above the
 /// ascent and half below the descent for SkParagraph's line boxes, and adds
@@ -3756,6 +3762,25 @@ impl Baseline {
 /// whose `hhea` gap is 67 of 2048, reaches 90.53 and 21.19 rather than 92.16
 /// and 22.83.
 fn face_extent(style: &TextStyle) -> (f32, f32) {
+    let CrateFontMetrics {
+        ascent, descent, ..
+    } = face_metrics(style);
+    (ascent, descent)
+}
+
+/// The ascent, descent and line gap of `style`'s first available font at its
+/// size, in pixels, unrounded: `hhea`'s, or the typographic ones where the
+/// face sets `USE_TYPO_METRICS`, as Skia's scaler reads them.
+///
+/// Skia's figures are passed on rather than worked out from the tables,
+/// because Chrome rounds Skia's: CoreText gives a gap of 0.2 em at 12.5px as
+/// 2.49996, which Chrome's `line-height: normal` rounds to 2 where the
+/// table's 2.5 would round to 3.
+///
+/// A negative gap is reported as zero. Skia passes one through, -2 at 20px
+/// for an `hhea` line gap of -200 in 2000 units, and Chrome's
+/// `line-height: normal` adds nothing for it.
+pub fn face_metrics(style: &TextStyle) -> CrateFontMetrics {
     let mut font = match style.typeface() {
         Some(face) => Font::from_typeface(face, style.font_size()),
         None => Font::default()
@@ -3767,10 +3792,17 @@ fn face_extent(style: &TextStyle) -> (f32, f32) {
     let (
         _,
         FontMetrics {
-            ascent, descent, ..
+            ascent,
+            descent,
+            leading,
+            ..
         },
     ) = font.metrics();
-    (-ascent, descent)
+    CrateFontMetrics {
+        ascent: -ascent,
+        descent,
+        line_gap: leading.max(0.0),
+    }
 }
 
 /// How far the em square's top is above the alphabetic baseline, for

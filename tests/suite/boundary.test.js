@@ -725,6 +725,7 @@ describe("The JavaScript/Rust boundary", () => {
       "createImageData()": "answers now",
       "getImageData()": "answers now",
       "measureText()": "answers now",
+      "fontMetrics()": "answers now",
       "outlineText()": "answers now",
       "contains()": "answers now",
       "points()": "answers now",

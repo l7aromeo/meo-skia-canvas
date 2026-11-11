@@ -1838,6 +1838,119 @@ fn the_font_box_is_the_first_available_fonts_own() {
     );
 }
 
+/// Rounded and added, `font_metrics` gives Chrome's `line-height: normal`
+/// line box, for every row of `tests/assets/cases/line-height-normal.json`
+/// -- the table `tests/suite/text.test.js` reads too. Chrome builds that box
+/// as round(ascent) + round(descent) + round(line gap) from the first
+/// available face, with a negative gap counting as none.
+#[test]
+fn font_metrics_build_chromes_normal_line_height() {
+    let cases: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("tests/assets/cases/line-height-normal.json")
+            .expect("the case file is readable"),
+    )
+    .expect("the case file is JSON");
+    let family = |name: &str| format!("RustLineHeight{name}");
+    let library = FontLibrary::new();
+    for (name, spec) in cases["faces"].as_object().expect("a `faces` object") {
+        let from = spec["from"].as_str().expect("a source file");
+        let mut font = std::fs::read(format!("tests/assets/fonts/{from}"))
+            .expect("the source face is readable");
+        let field = |key: &str| spec[key].as_i64().map(|v| v as i16);
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        for entry in (0..tables).map(|i| 12 + 16 * i) {
+            let at = u32::from_be_bytes(
+                font[entry + 8..entry + 12].try_into().expect("an offset"),
+            ) as usize;
+            match &font[entry..entry + 4] {
+                b"hhea" => {
+                    if let Some(gap) = field("hheaLineGap") {
+                        font[at + 8..at + 10]
+                            .copy_from_slice(&gap.to_be_bytes())
+                    }
+                }
+                b"OS/2" => {
+                    if spec["useTypoMetrics"].as_bool() == Some(true) {
+                        font[at + 63] |= 0x80;
+                    }
+                    if let Some(gap) = field("typoLineGap") {
+                        font[at + 72..at + 74]
+                            .copy_from_slice(&gap.to_be_bytes())
+                    }
+                }
+                _ => {}
+            }
+        }
+        library
+            .register_font_from_data(&family(name), &font)
+            .expect("the made face registers");
+    }
+    let metrics = |css: &str, baseline: TextBaseline| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(css), "{css} is a font");
+        ctx.set_text_baseline(baseline);
+        (ctx.font_metrics(), ctx.measure_text("Hxg", None))
+    };
+
+    let wrong: Vec<String> = cases["rows"]
+        .as_array()
+        .expect("a `rows` array")
+        .iter()
+        .filter_map(|row| {
+            let name = row["family"].as_str().expect("a family");
+            let px = row["px"].as_f64().expect("a size");
+            let chrome = row["chrome"].as_f64().expect("Chrome's box") as f32;
+            let (m, _) = metrics(
+                &format!("{px}px {}", family(name)),
+                TextBaseline::Alphabetic,
+            );
+            let normal =
+                m.ascent.round() + m.descent.round() + m.line_gap.round();
+            (normal != chrome).then(|| {
+                format!("{name} {px}px: {normal} against Chrome's {chrome}")
+            })
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+
+    // A negative gap, from `hhea` or from the typographic metrics, is none.
+    for name in ["GapNegative", "GapNegativeTypo"] {
+        let (m, _) = metrics(
+            &format!("20px {}", family(name)),
+            TextBaseline::Alphabetic,
+        );
+        assert_eq!(m.line_gap, 0.0, "{name}");
+    }
+
+    // Ascent and descent are the font box at the alphabetic baseline, and
+    // no baseline moves them.
+    let font = format!("31px {}", family("GapHhea"));
+    let (alphabetic, box_) = metrics(&font, TextBaseline::Alphabetic);
+    assert_eq!(alphabetic.ascent, box_.font_bounding_box_ascent);
+    assert_eq!(alphabetic.descent, box_.font_bounding_box_descent);
+    for baseline in [
+        TextBaseline::Top,
+        TextBaseline::Hanging,
+        TextBaseline::Middle,
+        TextBaseline::Ideographic,
+        TextBaseline::Bottom,
+    ] {
+        assert_eq!(metrics(&font, baseline).0, alphabetic, "{baseline:?}");
+    }
+
+    // They are the first available font's, as Chrome's line box is.
+    let first = |css: &str| metrics(css, TextBaseline::Alphabetic).0;
+    assert_eq!(
+        first(&format!("40px NoSuchFamily, {}", family("GapHhea"))),
+        first(&format!("40px {}", family("GapHhea"))),
+    );
+    assert_eq!(
+        first(&format!("40px {}, {}", family("Oswald"), family("GapHhea"))),
+        first(&format!("40px {}", family("Oswald"))),
+    );
+}
+
 #[test]
 fn reset_clears_the_page_and_the_state() {
     let mut canvas = Canvas::new(10.0, 10.0);

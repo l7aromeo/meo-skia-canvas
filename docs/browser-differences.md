@@ -267,7 +267,11 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   library reports each face's own ascent. At 100px: Helvetica 77 here and 92
   in Chrome, Times 75 against 90, Courier 75.39 against 90; Helvetica's
   hanging baseline 61.60 against 73.60. The descents agree. Arial, Georgia,
-  Menlo, Helvetica Neue and Times New Roman are not adjusted.
+  Menlo, Helvetica Neue and Times New Roman are not adjusted. Chrome's
+  `line-height: normal` for these faces rises by the same amount, so a line
+  height built from `fontMetrics()` -- `Context2D::font_metrics` in Rust --
+  as Chrome builds its own comes out short of Chrome's: 16 against 18 at
+  16px, 100 against 115 at 100px, for all three.
 - _The em square that places `top`, `middle` and `bottom` is not snapped to
   a 64th of a pixel._ Both divide the font size at the alphabetic baseline
   as the face's typographic ascender and descender divide it, whether or not

@@ -23,6 +23,7 @@ use crate::{
         image::{Content, Source},
         path::{Path2D, conic_or_line},
     },
+    text::FontMetrics,
     typography::{
         PendingInk, font_features, from_text_align, from_text_baseline,
         from_width, js_text_ink, js_text_metrics, opt_spacing_arg,
@@ -1607,6 +1608,24 @@ pub fn measureText(mut cx: FunctionContext) -> JsResult<JsValue> {
     pair.set(&mut cx, 0u32, values)?;
     pair.set(&mut cx, 1u32, pending)?;
     Ok(pair.upcast())
+}
+
+/// The current font's ascent, descent and line gap, as three numbers in that
+/// order, which `fontMetrics` names on the JavaScript side.
+pub fn fontMetrics(mut cx: FunctionContext) -> JsResult<JsArray> {
+    let this = cx.argument::<BoxedContext2D>(0)?;
+    let FontMetrics {
+        ascent,
+        descent,
+        line_gap,
+        ..
+    } = this.borrow().font_metrics();
+    let values = JsArray::new(&mut cx, 3);
+    for (i, value) in [ascent, descent, line_gap].into_iter().enumerate() {
+        let value = cx.number(value);
+        values.set(&mut cx, i as u32, value)?;
+    }
+    Ok(values)
 }
 
 /// The ink of a measurement `measureText` left pending, once.
