@@ -4477,6 +4477,17 @@ export interface CanvasRenderingContext2D
   measureText(text: string, maxWidth?: number): TextMetrics;
   /** 🧪 Not in the HTML Canvas standard. */
   outlineText(text: string, maxWidth?: number): Path2D;
+  /**
+   * The ascent, descent and line gap of the current font's first available
+   * face -- what CSS `line-height: normal` is built from. See
+   * {@link FontMetrics}.
+   *
+   * The values depend on the font alone, not on a string or on
+   * {@link textBaseline}.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  fontMetrics(): FontMetrics;
 
   // Skia filter properties (CanvasKit parity)
   /**
@@ -4904,6 +4915,50 @@ declare var TextMetrics: {
    */
   [Symbol.hasInstance](value: unknown): value is TextMetrics;
 };
+
+/**
+ * The vertical metrics of a font's first available face, as
+ * {@link CanvasRenderingContext2D.fontMetrics} returns them: in pixels at the
+ * font size, unrounded, as Skia reads them from the face -- `hhea`'s values,
+ * or `OS/2`'s typographic ones where the face sets `USE_TYPO_METRICS`.
+ *
+ * These are what CSS `line-height: normal` is made of. Chrome rounds each of
+ * the three to whole pixels and adds them:
+ *
+ * ```js
+ * const { ascent, descent, lineGap } = ctx.fontMetrics();
+ * const normal = Math.round(ascent) + Math.round(descent) + Math.round(lineGap);
+ * ```
+ *
+ * The face is the first available font of the family list, the one
+ * `fontBoundingBoxAscent` is measured from, whatever face a fallback draws a
+ * string's glyphs in. Where a fallback face draws part of a line, Chrome's
+ * line box also grows to fit that face; these values do not include it.
+ * Chrome on macOS also raises the ascent of faces whose family is Helvetica,
+ * Times or Courier, which these values do not.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
+ */
+export interface FontMetrics {
+  /**
+   * Distance from the alphabetic baseline up to the face's ascent, positive,
+   * whatever the context's `textBaseline`.
+   */
+  ascent: number;
+  /**
+   * Distance from the alphabetic baseline down to the face's descent,
+   * positive, whatever the context's `textBaseline`.
+   */
+  descent: number;
+  /**
+   * The face's line gap, never negative: a face whose tables state a
+   * negative gap reports zero, which is what Chrome's `line-height: normal`
+   * adds for it.
+   */
+  lineGap: number;
+}
 
 /**
  * 🧪 Not in the HTML Canvas standard.

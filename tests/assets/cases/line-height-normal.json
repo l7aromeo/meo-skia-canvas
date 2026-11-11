@@ -1,0 +1,412 @@
+{
+  "about": "The height of a line Chrome lays out at `line-height: normal`, one line of `Hxg` in a block, against `fontMetrics()` -- `Context2D::font_metrics` in Rust -- with each of its three values rounded and the three added. Read by tests/native_context2d.rs and tests/suite/text.test.js. `faces` names each face by the file under tests/assets/fonts it is made from and the bytes changed in it: `hheaLineGap`, `hhea`'s lineGap; `useTypoMetrics`, bit 7 of `OS/2`'s fsSelection; `typoLineGap`, `OS/2`'s sTypoLineGap. Amstelvar has 2000 units to the em, an `hhea` ascender and descender of 1900 and -500 and a typographic pair of 1500 and -500 with a gap of 400. A size is left out where its ascent, descent or gap in pixels is within 0.02 of a half: there CoreText's figure and FreeType's exact one can round apart.",
+  "source": "HeadlessChrome/158.0.8127.18 (Chrome Headless Shell) on macOS, each face loaded as a FontFace from a data URL and checked with document.fonts.check, the line box read with getBoundingClientRect, measured 2026-11-11.",
+  "faces": {
+    "Amstelvar": {
+      "from": "AmstelvarAlpha-VF.ttf"
+    },
+    "GapHhea": {
+      "from": "AmstelvarAlpha-VF.ttf",
+      "hheaLineGap": 200
+    },
+    "GapTypo": {
+      "from": "AmstelvarAlpha-VF.ttf",
+      "hheaLineGap": 200,
+      "useTypoMetrics": true
+    },
+    "GapOdd": {
+      "from": "AmstelvarAlpha-VF.ttf",
+      "hheaLineGap": 67
+    },
+    "GapNegative": {
+      "from": "AmstelvarAlpha-VF.ttf",
+      "hheaLineGap": -200
+    },
+    "GapNegativeTypo": {
+      "from": "AmstelvarAlpha-VF.ttf",
+      "useTypoMetrics": true,
+      "typoLineGap": -300,
+      "hheaLineGap": 0
+    },
+    "Oswald": {
+      "from": "Oswald/Oswald-VariableFont_wght.ttf"
+    }
+  },
+  "rows": [
+    {
+      "family": "Amstelvar",
+      "px": 9,
+      "chrome": 11
+    },
+    {
+      "family": "Amstelvar",
+      "px": 12,
+      "chrome": 14
+    },
+    {
+      "family": "Amstelvar",
+      "px": 13,
+      "chrome": 15
+    },
+    {
+      "family": "Amstelvar",
+      "px": 15,
+      "chrome": 18
+    },
+    {
+      "family": "Amstelvar",
+      "px": 16,
+      "chrome": 19
+    },
+    {
+      "family": "Amstelvar",
+      "px": 20,
+      "chrome": 24
+    },
+    {
+      "family": "Amstelvar",
+      "px": 23,
+      "chrome": 28
+    },
+    {
+      "family": "Amstelvar",
+      "px": 31,
+      "chrome": 37
+    },
+    {
+      "family": "Amstelvar",
+      "px": 40,
+      "chrome": 48
+    },
+    {
+      "family": "Amstelvar",
+      "px": 64,
+      "chrome": 77
+    },
+    {
+      "family": "Amstelvar",
+      "px": 100,
+      "chrome": 120
+    },
+    {
+      "family": "GapHhea",
+      "px": 9,
+      "chrome": 12
+    },
+    {
+      "family": "GapHhea",
+      "px": 12,
+      "chrome": 15
+    },
+    {
+      "family": "GapHhea",
+      "px": 13,
+      "chrome": 16
+    },
+    {
+      "family": "GapHhea",
+      "px": 16,
+      "chrome": 21
+    },
+    {
+      "family": "GapHhea",
+      "px": 20,
+      "chrome": 26
+    },
+    {
+      "family": "GapHhea",
+      "px": 23,
+      "chrome": 30
+    },
+    {
+      "family": "GapHhea",
+      "px": 31,
+      "chrome": 40
+    },
+    {
+      "family": "GapHhea",
+      "px": 40,
+      "chrome": 52
+    },
+    {
+      "family": "GapHhea",
+      "px": 64,
+      "chrome": 83
+    },
+    {
+      "family": "GapHhea",
+      "px": 100,
+      "chrome": 130
+    },
+    {
+      "family": "GapTypo",
+      "px": 9,
+      "chrome": 11
+    },
+    {
+      "family": "GapTypo",
+      "px": 12,
+      "chrome": 14
+    },
+    {
+      "family": "GapTypo",
+      "px": 13,
+      "chrome": 16
+    },
+    {
+      "family": "GapTypo",
+      "px": 15,
+      "chrome": 18
+    },
+    {
+      "family": "GapTypo",
+      "px": 16,
+      "chrome": 19
+    },
+    {
+      "family": "GapTypo",
+      "px": 20,
+      "chrome": 24
+    },
+    {
+      "family": "GapTypo",
+      "px": 23,
+      "chrome": 28
+    },
+    {
+      "family": "GapTypo",
+      "px": 31,
+      "chrome": 37
+    },
+    {
+      "family": "GapTypo",
+      "px": 40,
+      "chrome": 48
+    },
+    {
+      "family": "GapTypo",
+      "px": 64,
+      "chrome": 77
+    },
+    {
+      "family": "GapTypo",
+      "px": 100,
+      "chrome": 120
+    },
+    {
+      "family": "GapOdd",
+      "px": 9,
+      "chrome": 11
+    },
+    {
+      "family": "GapOdd",
+      "px": 12,
+      "chrome": 14
+    },
+    {
+      "family": "GapOdd",
+      "px": 13,
+      "chrome": 15
+    },
+    {
+      "family": "GapOdd",
+      "px": 16,
+      "chrome": 20
+    },
+    {
+      "family": "GapOdd",
+      "px": 20,
+      "chrome": 25
+    },
+    {
+      "family": "GapOdd",
+      "px": 23,
+      "chrome": 29
+    },
+    {
+      "family": "GapOdd",
+      "px": 31,
+      "chrome": 38
+    },
+    {
+      "family": "GapOdd",
+      "px": 40,
+      "chrome": 49
+    },
+    {
+      "family": "GapOdd",
+      "px": 64,
+      "chrome": 79
+    },
+    {
+      "family": "GapOdd",
+      "px": 100,
+      "chrome": 123
+    },
+    {
+      "family": "GapNegative",
+      "px": 9,
+      "chrome": 11
+    },
+    {
+      "family": "GapNegative",
+      "px": 12,
+      "chrome": 14
+    },
+    {
+      "family": "GapNegative",
+      "px": 13,
+      "chrome": 15
+    },
+    {
+      "family": "GapNegative",
+      "px": 15,
+      "chrome": 18
+    },
+    {
+      "family": "GapNegative",
+      "px": 16,
+      "chrome": 19
+    },
+    {
+      "family": "GapNegative",
+      "px": 20,
+      "chrome": 24
+    },
+    {
+      "family": "GapNegative",
+      "px": 23,
+      "chrome": 28
+    },
+    {
+      "family": "GapNegative",
+      "px": 31,
+      "chrome": 37
+    },
+    {
+      "family": "GapNegative",
+      "px": 40,
+      "chrome": 48
+    },
+    {
+      "family": "GapNegative",
+      "px": 64,
+      "chrome": 77
+    },
+    {
+      "family": "GapNegative",
+      "px": 100,
+      "chrome": 120
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 9,
+      "chrome": 9
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 12,
+      "chrome": 12
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 13,
+      "chrome": 13
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 15,
+      "chrome": 15
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 16,
+      "chrome": 16
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 20,
+      "chrome": 20
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 23,
+      "chrome": 23
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 31,
+      "chrome": 31
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 40,
+      "chrome": 40
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 64,
+      "chrome": 64
+    },
+    {
+      "family": "GapNegativeTypo",
+      "px": 100,
+      "chrome": 100
+    },
+    {
+      "family": "Oswald",
+      "px": 6,
+      "chrome": 9
+    },
+    {
+      "family": "Oswald",
+      "px": 9,
+      "chrome": 14
+    },
+    {
+      "family": "Oswald",
+      "px": 12,
+      "chrome": 17
+    },
+    {
+      "family": "Oswald",
+      "px": 14,
+      "chrome": 21
+    },
+    {
+      "family": "Oswald",
+      "px": 15,
+      "chrome": 22
+    },
+    {
+      "family": "Oswald",
+      "px": 16,
+      "chrome": 24
+    },
+    {
+      "family": "Oswald",
+      "px": 20,
+      "chrome": 30
+    },
+    {
+      "family": "Oswald",
+      "px": 23,
+      "chrome": 34
+    },
+    {
+      "family": "Oswald",
+      "px": 31,
+      "chrome": 46
+    },
+    {
+      "family": "Oswald",
+      "px": 40,
+      "chrome": 60
+    },
+    {
+      "family": "Oswald",
+      "px": 100,
+      "chrome": 148
+    }
+  ]
+}

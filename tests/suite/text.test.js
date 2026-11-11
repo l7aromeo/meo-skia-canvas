@@ -2,7 +2,7 @@
 
 "use strict";
 
-const { assert, describe, test, beforeEach } = require("../runner"),
+const { assert, describe, test, beforeEach, afterEach } = require("../runner"),
   { Canvas, FontLibrary, ParagraphBuilder } = require("../../lib");
 
 // The families the machine itself holds, captured before any test registers
@@ -3539,6 +3539,134 @@ describe("the font box is the first available font's own", () => {
     assert.equal(fallback.fontBoundingBoxAscent, alone.fontBoundingBoxAscent);
     assert.equal(fallback.fontBoundingBoxDescent, alone.fontBoundingBoxDescent);
     FontLibrary.reset();
+  });
+});
+
+describe("fontMetrics gives what line-height: normal is built from", () => {
+  // tests/assets/cases/line-height-normal.json has Chrome's line box at
+  // `line-height: normal` for faces made from Amstelvar with their gaps
+  // changed, and Oswald. Chrome builds it as round(ascent) +
+  // round(descent) + round(lineGap) from the first available face.
+  const fs = require("fs"),
+    os = require("os"),
+    path = require("path");
+  const cases = require("../assets/cases/line-height-normal.json");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "line-height-normal-"));
+  /** The face `spec` describes, written to a file of its own. */
+  const made = (family, spec) => {
+    const font = Buffer.from(
+      fs.readFileSync(path.join("tests/assets/fonts", spec.from)),
+    );
+    for (let i = 0, n = font.readUInt16BE(4); i < n; i++) {
+      const entry = 12 + 16 * i,
+        tag = font.toString("latin1", entry, entry + 4),
+        at = font.readUInt32BE(entry + 8);
+      if (tag === "hhea" && spec.hheaLineGap !== undefined)
+        font.writeInt16BE(spec.hheaLineGap, at + 8);
+      if (tag === "OS/2" && spec.useTypoMetrics) font[at + 63] |= 0x80;
+      if (tag === "OS/2" && spec.typoLineGap !== undefined)
+        font.writeInt16BE(spec.typoLineGap, at + 72);
+    }
+    const file = path.join(dir, `${family}.ttf`);
+    fs.writeFileSync(file, font);
+    return file;
+  };
+  const FILES = Object.fromEntries(
+    Object.entries(cases.faces).map(([family, spec]) => [
+      family,
+      made(family, spec),
+    ]),
+  );
+  /** Each face registered under a name of this test's own. */
+  const family = (name) => `LineHeight${name}`;
+  beforeEach(() => {
+    for (const [name, file] of Object.entries(FILES))
+      FontLibrary.use(family(name), [file]);
+  });
+  afterEach(() => FontLibrary.reset());
+  const metrics = (font, setup = () => {}) => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = font;
+    setup(ctx);
+    return ctx.fontMetrics();
+  };
+
+  test("rounded and added, they give Chrome's line box", () => {
+    const wrong = cases.rows.flatMap(({ family: name, px, chrome }) => {
+      const { ascent, descent, lineGap } = metrics(`${px}px ${family(name)}`);
+      const normal =
+        Math.round(ascent) + Math.round(descent) + Math.round(lineGap);
+      return normal === chrome
+        ? []
+        : [`${name} ${px}px: ${normal} against Chrome's ${chrome}`];
+    });
+    assert.deepEqual(wrong, []);
+  });
+
+  test("a negative gap is zero", () => {
+    for (const name of ["GapNegative", "GapNegativeTypo"])
+      assert.equal(metrics(`20px ${family(name)}`).lineGap, 0, name);
+  });
+
+  test("the gap is the typographic one where the face says to use it", () => {
+    // Amstelvar's typographic gap is 400 of 2000 and `hhea`'s here 200.
+    const hhea = metrics(`20px ${family("GapHhea")}`).lineGap,
+      typo = metrics(`20px ${family("GapTypo")}`).lineGap;
+    assert.ok(Math.abs(hhea - 2) < 1e-3, `hhea gap ${hhea}`);
+    assert.ok(Math.abs(typo - 4) < 1e-3, `typographic gap ${typo}`);
+  });
+
+  test("ascent and descent are the font box at the alphabetic baseline", () => {
+    for (const name of Object.keys(cases.faces)) {
+      const ctx = new Canvas(10, 10).getContext("2d");
+      ctx.font = `31px ${family(name)}`;
+      const m = ctx.fontMetrics(),
+        box = ctx.measureText("Hxg");
+      assert.equal(m.ascent, box.fontBoundingBoxAscent, name);
+      assert.equal(m.descent, box.fontBoundingBoxDescent, name);
+    }
+  });
+
+  test("textBaseline does not move them", () => {
+    const font = `31px ${family("GapHhea")}`,
+      alphabetic = metrics(font);
+    for (const baseline of [
+      "top",
+      "hanging",
+      "middle",
+      "ideographic",
+      "bottom",
+    ])
+      assert.deepEqual(
+        metrics(font, (ctx) => (ctx.textBaseline = baseline)),
+        alphabetic,
+        baseline,
+      );
+  });
+
+  test("they are the first available font's", () => {
+    // Chrome takes `line-height: normal` from the first family that loads:
+    // `NoSuchFamily, Poppins` gives Poppins's line box and `Oswald, Poppins`
+    // Oswald's, 17 at 12px against Poppins's 18.
+    assert.deepEqual(
+      metrics(`40px NoSuchFamily, ${family("GapHhea")}`),
+      metrics(`40px ${family("GapHhea")}`),
+    );
+    assert.deepEqual(
+      metrics(`40px ${family("Oswald")}, ${family("GapHhea")}`),
+      metrics(`40px ${family("Oswald")}`),
+    );
+  });
+
+  test("they are a plain object of three numbers, new on each call", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = `16px ${family("GapHhea")}`;
+    const first = ctx.fontMetrics(),
+      second = ctx.fontMetrics();
+    assert.deepEqual(Object.keys(first), ["ascent", "descent", "lineGap"]);
+    assert.equal(Object.getPrototypeOf(first), Object.prototype);
+    assert.notEqual(first, second);
+    assert.deepEqual(first, second);
   });
 });
 

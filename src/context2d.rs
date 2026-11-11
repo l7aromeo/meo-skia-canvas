@@ -79,8 +79,8 @@ use crate::{
     },
     shader::Shader,
     text::{
-        FontFeature, Paragraph, TextAlign, TextBaseline, TextDecoration,
-        TextDecorationStyle, TextMetrics,
+        FontFeature, FontMetrics, Paragraph, TextAlign, TextBaseline,
+        TextDecoration, TextDecorationStyle, TextMetrics,
     },
     texture::Texture,
 };
@@ -2483,9 +2483,10 @@ impl Context2D {
     /// `max_width` behaves as it does for a draw: it condenses the run, or
     /// wraps it when [`Context2D::set_text_wrap`] is on.
     ///
-    /// The `font_bounding_box_*` values on the result come from the font's
-    /// `hhea` table on every platform, which a browser does not guarantee --
-    /// see [`TextMetrics::font_bounding_box_ascent`].
+    /// The `font_bounding_box_*` values on the result are the first
+    /// available font's own ascent and descent, which a browser on macOS
+    /// moves for a few system families -- see
+    /// [`TextMetrics::font_bounding_box_ascent`].
     pub fn measure_text(
         &self,
         text: &str,
@@ -2517,6 +2518,16 @@ impl Context2D {
             line_count: e.lines,
             lines: e.line_details,
         }
+    }
+
+    /// The ascent, descent and line gap of the current font's first
+    /// available face, at the alphabetic baseline -- what CSS
+    /// `line-height: normal` is built from. See [`FontMetrics`].
+    ///
+    /// The values depend on the font alone, not on a string or on
+    /// [`Context2D::set_text_baseline`].
+    pub fn font_metrics(&self) -> FontMetrics {
+        self.inner.font_metrics()
     }
 
     // -- Images ------------------------------------------------------------

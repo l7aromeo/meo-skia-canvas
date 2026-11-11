@@ -63,6 +63,7 @@ use crate::{
     },
     pixels::PixelColorSpace,
     started,
+    text::FontMetrics,
     typography::{
         Baseline, DecorationStyle, DrawnRun, DrawnText, FontSpec, PendingInk,
         RunPaint, Spacing, TextExtents, TypesetInputs, Typesetter,
@@ -3896,6 +3897,12 @@ impl Context2D {
         width: Option<f32>,
     ) -> TextExtents {
         Typesetter::new(&self.state, text, width).extents()
+    }
+
+    /// The ascent, descent and line gap of the current font's first
+    /// available face, at the alphabetic baseline, whatever the string.
+    pub fn font_metrics(&self) -> FontMetrics {
+        Typesetter::new(&self.state, "", None).font_metrics()
     }
 
     /// Measurements of `text` except its ink, and what the ink is worked

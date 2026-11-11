@@ -223,6 +223,62 @@ pub struct TextMetrics {
     pub lines: Vec<TextMetricsLine>,
 }
 
+/// The vertical metrics of a font's first available face: how far it reaches
+/// above and below the alphabetic baseline, and the gap it asks for between
+/// lines.
+///
+/// Returned by [`Context2D::font_metrics`](crate::Context2D::font_metrics).
+/// In pixels at the font size, unrounded, as Skia's scaler reads them from
+/// the face: `hhea`'s values, or `OS/2`'s typographic ones where the face sets
+/// `USE_TYPO_METRICS`. Non-exhaustive, so that further metrics of the face can
+/// be added.
+///
+/// These are what CSS `line-height: normal` is made of. Chrome rounds each
+/// of the three to whole pixels and adds them, so a caller laying lines out
+/// as Chrome does rounds them the same way:
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// let mut canvas = Canvas::new(10.0, 10.0);
+/// let ctx = canvas.context();
+/// ctx.set_font_css("16px serif");
+/// let m = ctx.font_metrics();
+/// let normal = m.ascent.round() + m.descent.round() + m.line_gap.round();
+/// assert!(normal > 0.0);
+/// ```
+///
+/// The face is the first available font of the family list, the one
+/// [`TextMetrics::font_bounding_box_ascent`] is measured from, whatever
+/// face a fallback draws a string's glyphs in. Where a fallback face draws
+/// part of a line, Chrome's line box also grows to fit that face's own
+/// ascent and descent; these values do not include it.
+///
+/// Chrome on macOS adds about 15% of the font size to the ascent of faces
+/// whose family is Helvetica, Times or Courier, which raises its
+/// `line-height: normal` for them too; these values are the face's own.
+/// docs/browser-differences.md has the figures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct FontMetrics {
+    /// Distance from the alphabetic baseline up to the face's ascent,
+    /// positive.
+    ///
+    /// The same whatever the context's [`TextBaseline`], where
+    /// [`TextMetrics::font_bounding_box_ascent`] is measured from the
+    /// baseline selected.
+    pub ascent: f32,
+    /// Distance from the alphabetic baseline down to the face's descent,
+    /// positive. As [`ascent`](Self::ascent), the same whatever the
+    /// baseline.
+    pub descent: f32,
+    /// The face's line gap, never negative.
+    ///
+    /// A face whose tables state a negative gap reports zero, which is what
+    /// Chrome's `line-height: normal` adds for it.
+    pub line_gap: f32,
+}
+
 /// Which horizontal line of the font a text draw sits on.
 ///
 /// These are the values the Canvas API's `textBaseline` accepts. They shift
