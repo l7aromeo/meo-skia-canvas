@@ -17,6 +17,22 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
+## 📦 ⟩ [v0.17.3] (crate) ⟩ Unreleased
+
+**A patch release, and nothing that worked changes.** `Context2D::font_metrics`
+returns a `FontMetrics` holding the current font's ascent, descent and line
+gap, which is what CSS `line-height: normal` is made of: unrounded pixels at
+the font size, measured from the alphabetic baseline whatever the
+`TextBaseline`, from the same face as `TextMetrics`'s font box. Rounding each
+and adding them gives the line height Chrome lays out on macOS, except in two
+cases `FontMetrics`'s documentation names. `FontMetrics` is
+`#[non_exhaustive]`, so later metrics can join it without a breaking release.
+One addition; the section below has it.
+
+### Added
+
+- **`Context2D::font_metrics` gives the current font's ascent, descent and line gap, so a line can be spaced as CSS `line-height: normal` is.** ([#690](https://github.com/l7aromeo/meo-skia-canvas/pull/690), [#689](https://github.com/l7aromeo/meo-skia-canvas/issues/689))
+
 ## 📦 ⟩ [v0.17.2] (crate) ⟩ November 11, 2026
 
 **A patch release.** A crate build from crates.io can now draw what the npm
