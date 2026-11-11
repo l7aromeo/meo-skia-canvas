@@ -9,6 +9,24 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
+## 📦 ⟩ [v7.1.0] (npm) ⟩ Unreleased
+
+**A minor release: nothing that worked changes, and one method is new.**
+`ctx.fontMetrics()` returns the current font's ascent, descent and line gap,
+which is what CSS `line-height: normal` is made of. Each is in pixels at the
+font size, unrounded, measured from the alphabetic baseline whatever
+`textBaseline` is, from the same face as `measureText`'s font box. Chrome
+rounds the three separately and adds them: at 16px Poppins that is 25px, where
+the font box's ascent and descent alone give 23. Measured against Chrome on
+macOS, that sum is Chrome's line height except in two cases, which the method's
+documentation names: Chrome raises the ascent of Helvetica, Times and Courier,
+and grows a line where a fallback face draws part of it. One addition; the
+section below has it.
+
+### Added
+
+- **`ctx.fontMetrics()` gives the current font's ascent, descent and line gap, so a line can be spaced as CSS `line-height: normal` is.** ([#690](https://github.com/l7aromeo/meo-skia-canvas/pull/690), [#689](https://github.com/l7aromeo/meo-skia-canvas/issues/689))
+
 ## 📦 ⟩ [v7.0.2] (npm) ⟩ November 11, 2026
 
 **A patch release: nothing that worked changes.** Text in a COLR colour font
