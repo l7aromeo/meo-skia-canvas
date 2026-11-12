@@ -21,9 +21,10 @@ const ENGINES: [bool; 2] = [false, true];
 
 /// The canvas spaces, each with the CSS function naming a colour in it, so
 /// that the exact value read back is the colour's own components.
-const SPACES: [(PixelColorSpace, &str); 3] = [
+const SPACES: [(PixelColorSpace, &str); 4] = [
     (PixelColorSpace::SrgbLinear, "srgb-linear"),
     (PixelColorSpace::DisplayP3, "display-p3"),
+    (PixelColorSpace::DisplayP3Linear, "display-p3-linear"),
     (PixelColorSpace::Rec2020, "rec2020"),
 ];
 

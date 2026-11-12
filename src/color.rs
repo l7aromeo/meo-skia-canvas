@@ -377,8 +377,9 @@ impl RgbaLinear {
     ///
     /// Named colors, hex, `rgb()`, `hsl()`, `hwb()`, `lab()`, `lch()`,
     /// `oklab()`, `oklch()` and `color()` in `srgb`, `srgb-linear`,
-    /// `display-p3`, `rec2020`, `a98-rgb`, `prophoto-rgb`, `xyz`, `xyz-d50`
-    /// or `xyz-d65`, each in its relative form too, and `rgb()` and `hsl()` in
+    /// `display-p3`, `display-p3-linear`, `rec2020`, `a98-rgb`,
+    /// `prophoto-rgb`, `xyz`, `xyz-d50` or `xyz-d65`, each in its relative
+    /// form too, and `rgb()` and `hsl()` in
     /// the legacy comma syntax CSS Color 4 allows. `currentcolor` is opaque
     /// black, the colour a canvas outside a document resolves it to, and a
     /// comment is dropped as CSS Syntax drops one. Whitespace is CSS's: space,
