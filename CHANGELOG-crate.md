@@ -17,7 +17,7 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
-## 📦 ⟩ [v0.17.3] (crate) ⟩ Unreleased
+## 📦 ⟩ [v0.17.3] (crate) ⟩ November 12, 2026
 
 **A patch release, and nothing that worked changes.** `Context2D::font_metrics`
 returns a `FontMetrics` holding the current font's ascent, descent and line
@@ -4966,6 +4966,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
   clamp during compositing; pin `RenderEngine::Cpu` for bit-exact HDR
   round-trips.
 
+[v0.17.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.17.2...rust-v0.17.3
 [v0.17.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.17.1...rust-v0.17.2
 [v0.17.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.17.0...rust-v0.17.1
 [v0.17.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.16.3...rust-v0.17.0
