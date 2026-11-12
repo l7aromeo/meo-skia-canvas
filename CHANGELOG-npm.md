@@ -9,7 +9,7 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
-## 📦 ⟩ [v7.1.0] (npm) ⟩ Unreleased
+## 📦 ⟩ [v7.1.0] (npm) ⟩ November 12, 2026
 
 **A minor release: nothing that worked changes, and one method is new.**
 `ctx.fontMetrics()` returns the current font's ascent, descent and line gap,
@@ -5787,6 +5787,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 **Initial public release** 🎉
 
+[v7.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v7.0.2...npm-v7.1.0
 [v7.0.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v7.0.1...npm-v7.0.2
 [v7.0.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v7.0.0...npm-v7.0.1
 [v7.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/npm-v6.0.2...npm-v7.0.0
