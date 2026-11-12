@@ -3119,6 +3119,20 @@ impl<'a> Typesetter<'a> {
             (ascent - shift, descent + shift)
         };
 
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+        // Re-check: on Linux, measureText("H") in 16px Oswald (561 of 1000
+        // units) is 8.976013 while this stands and 8.976 once fixed
+        //
+        // Skia's FreeType scaler takes an unhinted advance from FreeType's
+        // `linearHoriAdvance` (`SkFontHost_FreeType.cpp`), the font's units
+        // scaled by the 16.16 `x_scale` that `FT_Set_Char_Size` rounds: at
+        // 16px in a 1000-unit face 67,108.864 is stored as 67,109, so every
+        // advance is about 2/65536 px an em over, and a 1000-unit ideograph
+        // measures 16.000031 where CoreText gives 16. Skia hands HarfBuzz the
+        // same advances through its own font functions
+        // (`SkShaper_harfbuzz.cpp`), so no route here takes an exact one;
+        // docs/browser-differences.md has the measurements.
+
         // UPSTREAM: FreeType 2.14.3 -- unfiled -- not worked around
         // Re-check: bun run test:suite --test-name-pattern fraction
         //
