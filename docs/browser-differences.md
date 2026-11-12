@@ -1503,16 +1503,31 @@ reproduction at density 1 comes out within a level.
 mirrored or cropped in CoreGraphics, and the PDF is the one the specification
 describes.** A layer is written as a transparency-group form drawn with `Do`
 under the page's y flip, and a gradient inside it as a pattern whose matrix
-maps to the space in force at that `Do`, flip included -- as PDF Reference
-1.7 section 4.6.1 requires and poppler reads. CoreGraphics anchors the pattern
-to the page's default space instead, so in Preview, Quick Look, Safari and
-`sips` a vertical gradient in `saveLayer()` comes out upside down, and a COLR
-glyph, each composited through a form of its own, paints its gradients off the
-glyph: cropped, or missing outside the shading's domain. On a PDF of the COLR
-test glyphs on macOS 27.2, 4,445 of 40,000 pixels stand more than 32 levels
-off the canvas in CoreGraphics and 409 in poppler. The glyphs stay vector, and
-writing the form so that both readers agree is a change to Skia's PDF backend,
-tracked as #664.
+maps to the space in force at that `Do`, flip included. ISO 32000-1 section
+8.7.2 asks for exactly that: a pattern used in a form XObject maps to "the
+form coordinate space at the time the form is painted with the Do operator".
+Skia's PDF backend writes it so because a layer's device carries no initial
+transform of its own, where the page's carries the flip
+(`SkPDFDevice::createDevice` in `SkPDFDevice.cpp`). poppler and pdf.js read it
+as the specification does. CoreGraphics anchors the pattern to the page's
+default space instead, so in Preview, Quick Look, Safari and `sips` a vertical
+gradient in `saveLayer()` comes out upside down. A red-to-blue gradient down a
+200-pixel layer, sampled 60 pixels above and below its centre:
+
+| renderer                          | above      | below      |
+| --------------------------------- | ---------- | ---------- |
+| the canvas                        | 203, 0, 52 | 50, 0, 205 |
+| poppler 26.11 (`pdftoppm`)        | 204, 0, 51 | 51, 0, 204 |
+| pdf.js 5.4.530                    | 203, 0, 52 | 50, 0, 205 |
+| CoreGraphics, macOS 27.2 (`sips`) | 51, 0, 204 | 205, 0, 50 |
+
+A COLR glyph, each composited through a form of its own, paints its gradients
+off the glyph in CoreGraphics: cropped, or missing outside the shading's
+domain. On a PDF of the COLR test glyphs on macOS 27.2, 4,445 of 40,000 pixels
+stand more than 32 levels off the canvas in CoreGraphics and 409 in poppler.
+The glyphs stay vector. Writing the form so that every reader agrees -- the
+layer's device given the page's transform and its form a matching matrix --
+is a change to Skia's PDF backend, tracked as #664. PDFium is not measured.
 
 **A canvas's pattern is written as PDF tiling where its tiles land on whole
 device pixels, and poppler draws seams between the tiles.** A draw dyed by a
