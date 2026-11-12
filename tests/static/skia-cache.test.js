@@ -123,7 +123,7 @@ describe("the refusal, case by case", async () => {
 // installed Xcode carries, so the key is the version the SDK itself records,
 // read from the directory a path resolves to.
 describe("an entry's SDK is named by its version", async () => {
-  const { sdkKey, currentSdk, loggedSdk, entryDir, keyFor, store } =
+  const { sdkKey, currentSdk, loggedSdk, entryDir, keyFor, store, linkable } =
     await import(
       pathToFileURL(join(__dirname, "..", "..", "scripts", "skia-binaries.mjs"))
         .href
@@ -254,6 +254,95 @@ describe("an entry's SDK is named by its version", async () => {
         store(build, { profile: "dev", features: [] }, () => null, { cache }),
       /is not stored: the SDK at .* records no version/,
     );
+  });
+
+  // A build that links an entry has no ninja record to name what it links,
+  // so the entry keeps the record of the build that stored it.
+  describe("an entry keeps what its build compiled, for the notices", () => {
+    const { existsSync, readFileSync, unlinkSync } = require("fs");
+    const cache = join(root, "notices-cache");
+    const build = join(root, "notices-build");
+    const skia = join(build, "out", "skia");
+    mkdirSync(skia, { recursive: true });
+    writeFileSync(
+      join(build, "output"),
+      `${join(cache, treeName())}/ninja\nclang --sysroot=${xcode} -c a.cpp\n`,
+    );
+    writeFileSync(join(skia, "libskia.a"), "skia");
+    writeFileSync(join(skia, "skia-defines.txt"), "SK_X\n");
+    const compiled = { tree: "/tree", projects: ["skia", "zlib"] };
+    const notices = () => compiled;
+    const stored = () =>
+      store(build, { profile: "dev", features: [] }, () => null, {
+        cache,
+        notices,
+      });
+
+    test("a new entry carries the record, and is linked", () => {
+      const { dir, stored: wrote } = stored();
+      assert.ok(wrote);
+      assert.deepStrictEqual(
+        JSON.parse(readFileSync(join(dir, "notices.json"), "utf8")),
+        compiled,
+      );
+      assert.strictEqual(
+        linkable(dir, "/tree", () => null),
+        null,
+      );
+    });
+
+    test("an entry without the record has it derived from its seed log, and is linked", () => {
+      const { dir } = stored();
+      unlinkSync(join(dir, "notices.json"));
+      const derived = { tree: "/tree", projects: ["skia", "expat"] };
+      /** @type {[string, string][]} */
+      const asked = [];
+      const derive = (
+        /** @type {string} */ tree,
+        /** @type {string} */ log,
+      ) => {
+        asked.push([tree, log]);
+        return derived;
+      };
+      assert.strictEqual(linkable(dir, "/tree", derive), null);
+      assert.deepStrictEqual(
+        JSON.parse(readFileSync(join(dir, "notices.json"), "utf8")),
+        derived,
+      );
+      // Asked of the entry's own seed log, in the tree the build names.
+      assert.strictEqual(asked.length, 1);
+      assert.strictEqual(asked[0][0], "/tree");
+      assert.match(asked[0][1], /ninja/);
+    });
+
+    test("an entry whose record cannot be derived is not linked, and storing again adds it", () => {
+      const { dir } = stored();
+      unlinkSync(join(dir, "notices.json"));
+      assert.match(
+        linkable(dir, "/tree", () => null) ?? "",
+        /names no gn arguments/,
+      );
+      assert.match(
+        linkable(dir, "/tree", () => {
+          throw new Error("gn gen failed");
+        }) ?? "",
+        /gn could not derive one: gn gen failed/,
+      );
+      assert.ok(!existsSync(join(dir, "notices.json")));
+      const again = stored();
+      assert.strictEqual(again.stored, false);
+      assert.ok(existsSync(join(dir, "notices.json")));
+      assert.strictEqual(
+        linkable(dir, "/tree", () => null),
+        null,
+      );
+    });
+
+    test("a build with other libraries is still refused", () => {
+      writeFileSync(join(skia, "libskia.a"), "other");
+      assert.throws(stored, /already holds other libraries/);
+      writeFileSync(join(skia, "libskia.a"), "skia");
+    });
   });
 
   test("a log naming no sysroot gives no key", () => {

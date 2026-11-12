@@ -39,5 +39,5 @@
       diverges
 - [ ] A new workaround for a dependency carries an `UPSTREAM:` marker
 - [ ] A new platform target went into `lib/targets.json` only
-- [ ] A new bundled dependency is in `THIRD-PARTY-NOTICES.md`
+- [ ] A new bundled dependency passes `just check-notices`
 - [ ] No plans, notes or other process files are committed

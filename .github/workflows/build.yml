@@ -162,6 +162,14 @@ jobs:
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: bun run test:suite
 
+      # The notices the binary owes, from this build: the Skia it compiled or
+      # the cache entry it linked, and the crates this target links.
+      # `bun run upload` refuses a binary without them. Run on every build,
+      # not only an upload, so that a build whose notices cannot be written
+      # fails before a release needs it.
+      - name: Write the binary's third-party notices
+        run: just notices-release
+
       - name: Add to release
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
         env:
@@ -288,6 +296,15 @@ jobs:
           # The binary this job built, for the reason the macOS job gives.
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: bun run test:suite
+
+      # The macOS job's step. Cargo is asked again with the build's own
+      # arguments, so the cache is named through `S:` as the build named it.
+      - name: Write the binary's third-party notices
+        shell: pwsh
+        run: |
+          if (-not (Test-Path S:\)) { subst S: "$env:USERPROFILE\.cache" }
+          $env:XDG_CACHE_HOME = 'S:\'
+          just notices-release
 
       - name: Add to release
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
@@ -614,6 +631,16 @@ jobs:
         # names the runner's path, not the container's.
         run: cd skia-canvas && MEO_SKIA_CANVAS_BINARY="$PWD/lib/skia.node" bun run test:suite
 
+      # The macOS job's step, with the build's own RUSTFLAGS: cargo asked with
+      # other flags would build again rather than describe this build. The
+      # fontconfig text comes from licences/ for the release
+      # containers/install-fontlibs.sh pins, and a pin with no text there stops
+      # this step.
+      - name: Write the binary's third-party notices
+        run: |
+          export RUSTFLAGS="${RUSTFLAGS:-} -L native=/opt/skia-static-libs"
+          cd skia-canvas && just notices-release
+
       - name: Add to release
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload }}
         env:
@@ -626,6 +653,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export SRC_DIR="$GITHUB_WORKSPACE/skia-canvas"
+
+          # The layer holds this job's binary, so it carries this binary's
+          # notices, where the npm package carries every platform's.
+          cp "$SRC_DIR/lib/skia.node.notices.md" "$SRC_DIR/THIRD-PARTY-NOTICES.md"
 
           # The npm README and changelog, put in place by the script
           # `publish.yml` runs: this is a third place the tarball is built.

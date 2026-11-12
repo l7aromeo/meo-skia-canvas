@@ -144,7 +144,7 @@ prepush: fmt-check (check-docs "origin/main") check-repo (typecheck prepush_type
 # no workflow at all. The rest of `prepush` runs in rust-ci.yml, where the Skia
 # they compile against is built.
 [doc("The checks in prepush that build no Skia, which ci.yml's repo job runs.")]
-check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack check-build-brotli lint-js
+check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack check-build-brotli check-notices lint-js
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -744,6 +744,24 @@ build: ensure-deps
 build-release: ensure-deps
     rm -f {{ lib }}
     bun run build
+
+# The third-party notices `build-release`'s binary owes, beside it, where
+# `bun run upload` refuses to go without them. Read from the build itself
+# -- the Skia it compiled or the cache entry it linked, and the crates this
+# host's target links -- by scripts/notices.mjs, so it runs after
+# `build-release` with nothing changed between them.
+[doc("Write the third-party notices the release binary owes, beside it.")]
+notices-release: ensure-deps
+    node scripts/notices.mjs release {{ lib }}.notices.md
+
+# Every crate a shipped target links has its licence text, from its package
+# or from `licences/crates`, and that directory holds nothing else. Cargo
+# resolves each target's graph without building it. The self-test runs
+# first, for the reason `check-upstream-notes` runs one.
+[doc("Fail when a crate a shipped binary links has no licence text to ship.")]
+check-notices: ensure-deps
+    node scripts/notices.mjs --self-test
+    node scripts/notices.mjs check
 
 # Build the native module with a hand-picked cargo feature set.
 build-custom: ensure-deps

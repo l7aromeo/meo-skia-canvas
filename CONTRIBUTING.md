@@ -107,5 +107,7 @@ see the release notes in AGENTS.md.
 Contributions are accepted under the [MIT licence](LICENSE), the same terms as the project. By
 opening a pull request you confirm you have the right to submit the work under those terms.
 
-If your change pulls in a new dependency, check its licence is permissive and add it to
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) if it ends up compiled into the published binary.
+If your change pulls in a new dependency, check its licence is permissive. Its notice is generated
+with each binary, as [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) describes; `just check-notices`
+fails when a crate that links ships no licence file, and the fix is its text under
+`licences/crates/<name>-<version>` with a `source.json` saying where it came from.

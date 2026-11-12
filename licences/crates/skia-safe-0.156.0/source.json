@@ -1,0 +1,11 @@
+{
+  "crate": "skia-safe",
+  "version": "0.156.0",
+  "license": "MIT",
+  "repository": "https://github.com/rust-skia/rust-skia",
+  "commit": "ce6727ef251518df37bcfdde4865b71f7e3a4352",
+  "files": {
+    "LICENSE": "https://github.com/rust-skia/rust-skia/blob/ce6727ef251518df37bcfdde4865b71f7e3a4352/LICENSE"
+  },
+  "why": "The crate's package on crates.io holds no licence file; these are its repository's, at the commit its .cargo_vcs_info.json records."
+}

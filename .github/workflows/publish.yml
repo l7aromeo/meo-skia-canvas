@@ -198,6 +198,17 @@ jobs:
       #
       # Runs for the dry run too. A dry run that packs a different tarball
       # from the real one is not a rehearsal.
+      # The package installs or downloads one binary per platform, so it
+      # carries every one's notices, joined; each build uploaded its own
+      # beside its binary, and a platform with none fails here.
+      - name: Join the platform binaries' third-party notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=npm-v$(node -p "require('./package.json').version")
+          gh release download "$TAG" -R l7aromeo/meo-skia-canvas -p '*.gz.notices.md' -D "$RUNNER_TEMP/notices"
+          node scripts/notices.mjs package THIRD-PARTY-NOTICES.md "$RUNNER_TEMP/notices"
+
       - name: Put this channel's README and changelog in place
         run: node scripts/stage-npm-package.mjs
 

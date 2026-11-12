@@ -1,0 +1,13 @@
+{
+  "crate": "pathfinder_geometry",
+  "version": "0.5.1",
+  "license": "MIT/Apache-2.0",
+  "repository": "https://github.com/servo/pathfinder",
+  "commit": "a5e98fac00f433fe2ff4b2135383d82491b8bfc5",
+  "files": {
+    "LICENSE-APACHE": "https://github.com/servo/pathfinder/blob/0399061a/LICENSE-APACHE",
+    "LICENSE-MIT": "https://github.com/servo/pathfinder/blob/0399061a/LICENSE-MIT"
+  },
+  "note": "Published from a5e98fac, which is not public; the text is identical at 0399061a and 6c3c0466, the commits either side of it.",
+  "why": "The crate's package on crates.io holds no licence file, and the commit its .cargo_vcs_info.json records is not in the repository."
+}

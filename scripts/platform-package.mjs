@@ -6,13 +6,15 @@
 // repackages what the release already contains.
 //
 //   node scripts/platform-package.mjs build <triplet> <staging-dir> <assets-dir>
+//       <assets-dir> holds `<triplet>.gz` and `<triplet>.gz.notices.md`, the
+//       release's binary and the third-party notices it owes
 //   node scripts/platform-package.mjs matrix
 //
 
 import zlib from "zlib";
 import stream from "stream";
 import crypto from "crypto";
-import { createReadStream, createWriteStream } from "fs";
+import { createReadStream, createWriteStream, existsSync } from "fs";
 import { mkdir, readFile, writeFile, rm } from "fs/promises";
 import { resolve } from "path";
 import { promisify } from "util";
@@ -22,6 +24,9 @@ const pipeline = promisify(stream.pipeline);
 
 const ROOT = resolve(`${import.meta.dirname}/..`);
 const PACKAGE_JSON = `${ROOT}/package.json`;
+/// The notices file every package and archive carries, under the name
+/// scripts/skia-pack.mjs gives it in an archive.
+const NOTICES = "THIRD-PARTY-NOTICES.md";
 
 // The canonical target table, shared with lib/binary.js so a platform can only be added in one
 // place. `os` and `cpu` are matched by every package manager; `libc` is honoured by npm, pnpm,
@@ -91,6 +96,14 @@ async function build(triplet, stagingDir, assetsDir) {
   const target = TARGETS[triplet];
   if (!target) throw new Error(`unknown target: ${triplet}`);
 
+  // The notices the binary owes, uploaded beside it by the build that made
+  // it: nothing is staged without them.
+  const notices = resolve(assetsDir, `${triplet}.gz.notices.md`);
+  if (!existsSync(notices))
+    throw new Error(
+      `${notices} is missing: the release holds no notices for ${triplet}, and its package would ship a binary without the third-party notices it owes`,
+    );
+
   const { version, prebuild, license, repository } = await manifest();
   const dir = resolve(stagingDir, packageName(triplet));
   await mkdir(dir, { recursive: true });
@@ -113,7 +126,7 @@ async function build(triplet, stagingDir, assetsDir) {
         repository,
         ...target,
         exports: { "./skia.node": "./skia.node" },
-        files: ["skia.node"],
+        files: ["skia.node", NOTICES],
       },
       null,
       2,
@@ -122,6 +135,8 @@ async function build(triplet, stagingDir, assetsDir) {
 
   // Carried so each published package states its own terms rather than pointing at another one.
   await writeFile(`${dir}/LICENSE`, await readFile(`${ROOT}/LICENSE`));
+
+  await writeFile(`${dir}/${NOTICES}`, await readFile(notices));
 
   console.log(dir);
 }

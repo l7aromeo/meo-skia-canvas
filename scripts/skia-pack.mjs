@@ -63,12 +63,16 @@ import {
   buildScriptRuns,
   profileBuildDirs,
 } from "./cargo-build-dir.mjs";
+import { archiveNotices } from "./notices.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /// The directory the archive holds and skia-bindings unpacks
 /// (`binaries::ARCHIVE_NAME`).
 const ARCHIVE_NAME = "skia-binaries";
+/// The notices file every archive carries at its root, beside `key.txt`: a
+/// name consumers read, so it is fixed.
+export const NOTICES = "THIRD-PARTY-NOTICES.md";
 
 /// Hex digits of the rust-skia commit in a key (`git::HALF_HASH_LENGTH`).
 const HALF_HASH_LENGTH = 20;
@@ -231,7 +235,7 @@ export function archiveFiles(output, target, features) {
  * `{ archive, files }`: the archive's path, and each file it holds as
  * `{ name, bytes }`.
  */
-export function pack(buildDir, outDir, how, vouch) {
+export function pack(buildDir, outDir, how, vouch, notices = archiveNotices) {
   const output = readFileSync(buildScriptLogs(buildDir).output, "utf8");
   const why = vouch(output);
   if (why) throw new Error(`skia-pack: ${buildDir} is not packed: ${why}`);
@@ -249,7 +253,11 @@ export function pack(buildDir, outDir, how, vouch) {
       writeFileSync(join(dir, file), readFileSync(join(skia, file)));
     writeFileSync(join(dir, "tag.txt"), how.version);
     writeFileSync(join(dir, "key.txt"), name);
-    const held = [...files, "tag.txt", "key.txt"].map((file) => ({
+    // What the libraries link and the licences that travel with them, from
+    // the build's own record of what it compiled: see scripts/notices.mjs.
+    // skia-bindings unpacks every file and links only the libraries.
+    writeFileSync(join(dir, NOTICES), notices(skia, name));
+    const held = [...files, "tag.txt", "key.txt", NOTICES].map((file) => ({
       name: file,
       bytes: statSync(join(dir, file)).size,
     }));
@@ -603,9 +611,12 @@ function cases(scratch) {
     crtStatic: false,
     version: "0.156.0",
   });
+  // The notices of a build the self-test makes up name the key they were
+  // asked for, which an archive has to carry as written.
+  const stubNotices = (_skia, key) => `# Third-party notices\n\n${key}\n`;
   const packs = (dir, target, vouch, expected) => () => {
     const out = join(scratch, `out-${dir.split("/").pop()}`);
-    const { archive, files } = pack(dir, out, how(target), vouch);
+    const { archive, files } = pack(dir, out, how(target), vouch, stubNotices);
     const listing = execFileSync("tar", ["-tzf", archive], { encoding: "utf8" })
       .split("\n")
       .filter((line) => line && !line.endsWith("/"))
@@ -613,7 +624,7 @@ function cases(scratch) {
       .sort();
     // skia-bindings' `export` writes `tag.txt` and `key.txt` beside the
     // libraries (binaries.rs `prepare_export_directory`), and so does `pack`.
-    const want = [...expected, "tag.txt", "key.txt"]
+    const want = [...expected, "tag.txt", "key.txt", NOTICES]
       .map((f) => `${ARCHIVE_NAME}/${f}`)
       .sort();
     if (JSON.stringify(listing) !== JSON.stringify(want))
@@ -631,6 +642,15 @@ function cases(scratch) {
     const name = archive.split("/").pop();
     if (name !== `${ARCHIVE_NAME}-${keyText}.tar.gz`)
       throw new Error(`key.txt holds ${keyText}, the archive is ${name}`);
+    const noticesText = execFileSync(
+      "tar",
+      ["-xzOf", archive, `${ARCHIVE_NAME}/${NOTICES}`],
+      { encoding: "utf8" },
+    );
+    if (noticesText !== stubNotices(null, keyText))
+      throw new Error(
+        `${NOTICES} holds ${noticesText}, not the notices for ${keyText}`,
+      );
     const sized = `  key.txt ${Buffer.byteLength(keyText)} bytes`;
     if (!packedReport({ archive, files }).split("\n").includes(sized))
       throw new Error(`the report has no line \`${sized}\``);
@@ -833,6 +853,20 @@ function cases(scratch) {
       "an archive the release does not hold is uploaded",
       true,
       () => {
+        if (
+          noticesAsset(
+            "skia-binaries-k-x86_64-unknown-linux-gnu-pdf.tar.gz",
+          ) !== "skia-binaries-k-x86_64-unknown-linux-gnu-pdf.notices.md"
+        )
+          throw new Error("an archive's notices asset is misnamed");
+        let refused = false;
+        try {
+          noticesAsset("skia-binaries-k.zip");
+        } catch {
+          refused = true;
+        }
+        if (!refused)
+          throw new Error("a name that is no archive gave a notices asset");
         if (uploadDecision("a.tar.gz", "sha256:aa", undefined) !== "upload")
           throw new Error("not uploaded");
       },
@@ -1354,28 +1388,60 @@ async function uploadArchive(archive, tag, repository, token) {
     );
   const release = await found.json();
   const name = archive.split(/[\\/]/).at(-1);
-  const bytes = readFileSync(archive);
-  const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-  const decision = uploadDecision(
-    name,
-    digest,
-    release.assets.find((asset) => asset.name === name)?.digest,
-  );
-  if (decision === "held") return `${name}: already held, same bytes`;
-  if (decision !== "upload") throw new Error(decision);
-  const sent = await fetch(
-    `https://uploads.github.com/repos/${repository}/releases/${release.id}/assets?name=${encodeURIComponent(name)}`,
+  // The archive's notices go up first, beside it, under the name
+  // `noticesAsset` gives them, so that a release never holds an archive
+  // whose notices a consumer cannot fetch on their own.
+  const assets = [
     {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/gzip" },
-      body: bytes,
+      name: noticesAsset(name),
+      type: "text/markdown",
+      bytes: execFileSync("tar", [
+        "-xzOf",
+        archive,
+        `${ARCHIVE_NAME}/${NOTICES}`,
+      ]),
     },
-  );
-  if (!sent.ok)
-    throw new Error(
-      `skia-pack: uploading ${name} to ${tag} failed: ${sent.status} ${await sent.text()}`,
+    { name, type: "application/gzip", bytes: readFileSync(archive) },
+  ];
+  const report = [];
+  for (const asset of assets) {
+    const digest = `sha256:${createHash("sha256").update(asset.bytes).digest("hex")}`;
+    const decision = uploadDecision(
+      asset.name,
+      digest,
+      release.assets.find((held) => held.name === asset.name)?.digest,
     );
-  return `${name}: uploaded, ${digest}`;
+    if (decision === "held") {
+      report.push(`${asset.name}: already held, same bytes`);
+      continue;
+    }
+    if (decision !== "upload") throw new Error(decision);
+    const sent = await fetch(
+      `https://uploads.github.com/repos/${repository}/releases/${release.id}/assets?name=${encodeURIComponent(asset.name)}`,
+      {
+        method: "POST",
+        headers: { ...headers, "Content-Type": asset.type },
+        body: asset.bytes,
+      },
+    );
+    if (!sent.ok)
+      throw new Error(
+        `skia-pack: uploading ${asset.name} to ${tag} failed: ${sent.status} ${await sent.text()}`,
+      );
+    report.push(`${asset.name}: uploaded, ${digest}`);
+  }
+  return report.join("\n");
+}
+
+/**
+ * The name of the asset beside `archive` holding its notices: the archive's
+ * name with `.tar.gz` replaced, the rule a consumer finds them by, for the
+ * archives published before archives carried their notices too.
+ */
+export function noticesAsset(archive) {
+  if (!archive.endsWith(".tar.gz"))
+    throw new Error(`skia-pack: ${archive} is not an archive name`);
+  return `${archive.slice(0, -".tar.gz".length)}.notices.md`;
 }
 
 /**

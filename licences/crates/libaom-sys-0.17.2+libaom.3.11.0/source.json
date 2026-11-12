@@ -1,0 +1,11 @@
+{
+  "crate": "libaom-sys",
+  "version": "0.17.2+libaom.3.11.0",
+  "license": "BSD-2-Clause",
+  "repository": "https://github.com/njaard/libavif-rs",
+  "commit": "18304417e422120835c358cdd0721ee43e4c6d7c",
+  "files": {
+    "LICENSE": "https://github.com/njaard/libavif-rs/blob/18304417e422120835c358cdd0721ee43e4c6d7c/LICENSE"
+  },
+  "why": "The crate's package on crates.io holds no licence file; these are its repository's, at the commit its .cargo_vcs_info.json records."
+}

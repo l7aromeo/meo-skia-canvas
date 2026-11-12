@@ -21,6 +21,28 @@ GitHub then succeeds wherever npm delivered the binary. A source checkout
 downloads regardless, because CI and `npm test` load `lib/skia.node` in place
 of the installed platform package.
 
+**Each binary carries its own third-party notices.** build.yml writes
+`lib/skia.node.notices.md` beside each release build with `just
+notices-release`, and `lib/prebuild.mjs`'s upload refuses a binary without
+one and uploads it as `<asset>.notices.md` beside the `.gz`.
+`scripts/platform-package.mjs` puts that text in the platform package as
+`THIRD-PARTY-NOTICES.md`, and publish.yml joins every target's into the main
+package's with `notices.mjs package`, which refuses a target missing. What
+the files hold and how they are derived is in
+[THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md).
+
+**The fontconfig a Linux binary links is named by its recipe.**
+`scripts/notices.mjs` reads `FONTCONFIG_VERSION` from
+`containers/install-fontlibs.sh` and takes the text from
+`licences/fontconfig-<version>`, refusing a version with none there. The
+images keep only `libfontconfig.a`, not the tarball's COPYING, so the
+committed text is checked against the tarball the recipe pins by sha256 and
+not against the image itself. Keeping the COPYING in
+`/opt/skia-static-libs` and comparing it in build.yml waits for the next
+rebuild of the images: a rebuild takes whatever the floating base tags and
+package repositories hold that day, which is a toolchain change decided on
+its own.
+
 ## The ABI floors
 
 Two of them, and both fail the same way: the binary does not load at all, with
@@ -233,7 +255,17 @@ tree. Every cargo call in the justfile that builds skia-bindings goes through
 since one recipe can build several feature sets. It says on stderr whether it
 linked an entry or is compiling Skia, and why. `bun run build` reaches it
 through `lib/prebuild.mjs`. A plain `cargo` call, or one with no entry for its
-features, compiles Skia as before. Run with no `SKIA_SOURCE_DIR` where
+features, compiles Skia as before.
+
+**What the entry compiled.** An entry also keeps `notices.json`: the Skia
+tree and the projects its build compiled, from ninja's dependency record,
+which the third-party notices of a build that links it are written from. An
+entry stored before entries kept one has it derived when a lookup finds it,
+by `gn desc` over the arguments its seed log printed, and is linked as
+before -- the same set as ninja's, measured on three entries whose seed
+builds survived. An entry whose log names no arguments, or whose tree has no
+`gn` to ask, is not linked, and the build that compiles instead stores the
+record. Run with no `SKIA_SOURCE_DIR` where
 `skia-source.mjs env` would name a tree, the script refuses and names the
 command that sets it, rather than let skia-bindings build against rust-skia's
 unpatched Skia; `SKIA_CACHE_UNPATCHED=1` asks for that build on purpose. `just skia-cache-fill <cargo flags>` builds
@@ -289,7 +321,14 @@ runtime the consumer's target links.
 skia-bindings builds for the key's features -- a download unpacks every one
 and fails on one missing -- `bindings.rs`, `icudtl.dat` on Windows with
 `textlayout`, and `tag.txt` and `key.txt`, as skia-bindings' own export
-writes them. `skia-pack pack` makes one from a build directory, and only from
+writes them -- and `THIRD-PARTY-NOTICES.md`, the licences of what those
+libraries hold, from the build's own record (`archiveNotices` in
+`scripts/notices.mjs`). skia-bindings unpacks it with the rest and links only
+the libraries: measured with a `file://` archive, a consumer's build-script
+output is the same with the file and without it. `skia-pack upload` puts the
+same bytes beside the archive as `<archive name without .tar.gz>.notices.md`,
+uploaded first, so the notices can be read without unpacking anything; the
+asset name is a contract other projects read. `skia-pack pack` makes one from a build directory, and only from
 a build `scripts/check-patched-skia.mjs` passes, compiled from the platform's
 patched files with no download in its log, whose build-script stdout links
 those libraries as skia-bindings prints them: one run of consecutive lines, in
