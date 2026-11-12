@@ -38,6 +38,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildScriptLogs } from "./cargo-build-dir.mjs";
 import { cacheRoot, treeName } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -318,8 +319,8 @@ export function cacheEnv(args, env = process.env, root = ROOT) {
 }
 
 /**
- * Stores the build in `buildDir` -- a `target/<profile>/build/skia-bindings-*`
- * directory -- as the entry for `profile` and `features`, once `vouch` finds
+ * Stores the build in `buildDir` -- the unit directory skia-bindings' build
+ * script ran in, see scripts/cargo-build-dir.mjs -- as the entry for `profile` and `features`, once `vouch` finds
  * nothing wrong with its log. Written beside the entry and renamed into
  * place, so a reader never finds half an entry. An entry already there with
  * the same libraries is kept; one with others is refused, since two builds of
@@ -331,11 +332,10 @@ export function store(
   vouch,
   { cache = cacheRoot(), root = ROOT } = {},
 ) {
+  const logs = buildScriptLogs(buildDir);
   const log = [
-    readFileSync(join(buildDir, "output"), "utf8"),
-    existsSync(join(buildDir, "stderr"))
-      ? readFileSync(join(buildDir, "stderr"), "utf8")
-      : "",
+    readFileSync(logs.output, "utf8"),
+    existsSync(logs.stderr) ? readFileSync(logs.stderr, "utf8") : "",
   ].join("\n");
   const why = vouch(log);
   if (why) throw new Error(`skia-cache: ${buildDir} is not stored: ${why}`);
@@ -384,12 +384,9 @@ export function store(
   try {
     for (const name of [...libraries, DEFINES])
       copyFileSync(join(skia, name), join(partial, name));
-    writeFileSync(
-      join(partial, "seed-output"),
-      readFileSync(join(buildDir, "output")),
-    );
-    if (existsSync(join(buildDir, "stderr")))
-      copyFileSync(join(buildDir, "stderr"), join(partial, "seed-stderr"));
+    copyFileSync(logs.output, join(partial, "seed-output"));
+    if (existsSync(logs.stderr))
+      copyFileSync(logs.stderr, join(partial, "seed-stderr"));
     // Hashed from the copies, so the manifest names the bytes the entry holds.
     for (const name of libraries)
       if (digest(join(partial, name)) !== manifest.libraries[name])
