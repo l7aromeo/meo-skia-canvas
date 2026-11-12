@@ -1549,14 +1549,18 @@ pub(crate) enum ReachBound {
 }
 
 /// Whether a kept run keeps what it can ink -- see `PaintedBlobs::inks`:
-/// always, but in a test whose [`REACH_BOUND`] measures the boxes another
-/// way, which an answer kept from before the switch would hide.
+/// always outside the tests.
+#[cfg(not(test))]
 fn keeps_inks() -> bool {
-    #[cfg(test)]
-    if REACH_BOUND.get() != ReachBound::Stroked {
-        return false;
-    }
     true
+}
+
+/// Whether a kept run keeps what it can ink -- see `PaintedBlobs::inks`:
+/// not in a test whose [`REACH_BOUND`] measures the boxes another way, which
+/// an answer kept from before the switch would hide.
+#[cfg(test)]
+fn keeps_inks() -> bool {
+    REACH_BOUND.get() == ReachBound::Stroked
 }
 
 /// [`glyph_boxes`], or the mutant [`REACH_BOUND`] names in its place.
