@@ -455,6 +455,11 @@ pub struct PageRecorder {
     /// because it says how much would be replayed, which is what the
     /// measurement in that function is about.
     replay_cost: usize,
+    /// Whether an entry filed on this page, or in a layer open on it, draws
+    /// other bytes on a GPU canvas replaying a recording of it than on a
+    /// CPU canvas -- see [`Layer::plays_apart_on_gpu`]. Set as each entry is
+    /// filed, so that asking costs nothing however many the page holds.
+    plays_apart_on_gpu: bool,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
     /// open `current` records the innermost one's contents, and what each
@@ -1169,6 +1174,7 @@ impl PageRecorder {
             surface: SharedSurface::default(),
             place: Place::new(),
             replay_cost: 0,
+            plays_apart_on_gpu: false,
             open: Vec::new(),
             recorded: RecordedCount::default(),
         }
@@ -1497,6 +1503,8 @@ impl PageRecorder {
     /// a closed layer's group, whose entries were counted as they were
     /// filed in it.
     fn file_counted(&mut self, entry: Layer, features: VectorFeatures) {
+        self.plays_apart_on_gpu =
+            self.plays_apart_on_gpu || entry.plays_apart_on_gpu();
         match self.open.last_mut() {
             Some(layer) => {
                 layer.entries.push(entry);
@@ -2726,6 +2734,12 @@ impl PageRecorder {
     /// What one replay of this page costs; see the field.
     pub fn replay_cost(&self) -> usize {
         self.replay_cost
+    }
+
+    /// Whether this page holds an entry a GPU canvas replaying a recording
+    /// of it draws in other bytes than a CPU canvas -- see the field.
+    pub fn plays_apart_on_gpu(&self) -> bool {
+        self.plays_apart_on_gpu
     }
 
     /// Charges this page for replaying a picture that costs `cost` of its own.

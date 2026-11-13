@@ -2,8 +2,9 @@
 
 "use strict";
 
-const { assert, describe, test } = require("../runner"),
-  { Canvas } = require("../../lib");
+const path = require("path"),
+  { assert, describe, test } = require("../runner"),
+  { Canvas, FontLibrary } = require("../../lib");
 
 // A gradient on a GPU canvas is drawn in the bytes the CPU canvas draws it
 // in (#667): by an effect computing the CPU's arithmetic on the GPU, or,
@@ -490,4 +491,235 @@ describe("a gradient on a GPU canvas", () => {
         );
       },
     );
+});
+
+// A canvas drawn with `drawImage` into a GPU canvas draws its colour glyphs
+// and its gradients in the CPU canvas's bytes (#703). The image of a canvas
+// is backed by its page's picture, and Ganesh replaying that picture drew
+// both as Skia's own draws -- 284 pixels of the two colour glyphs below up
+// to 81 levels off, and the conic's hard stop 255 -- where drawn on the
+// canvas, or
+// into another with `drawCanvas`, they choose at playback how a GPU canvas
+// draws them in those bytes.
+describe("a canvas drawn as an image into a GPU canvas", () => {
+  const onGpu = new Canvas(1, 1, { gpu: true }).engine?.renderer === "GPU";
+  const skip = !onGpu && "no GPU engine";
+  const SIDE = 128;
+
+  FontLibrary.use("ColrGlyphs703", [
+    path.join(
+      __dirname,
+      "..",
+      "assets",
+      "fonts",
+      "color-fonts",
+      "test_glyphs-glyf_colr_1_variable.ttf",
+    ),
+  ]);
+
+  /** Colour glyphs, as the page holds them where nothing clips them. */
+  const glyphs = (ctx) => {
+    ctx.font = "40px ColrGlyphs703";
+    ctx.fillStyle = "rgb(40 90 160)";
+    ctx.fillText(String.fromCodePoint(0xf0200, 0xf0201), 4, 50);
+  };
+
+  // Each kind of entry that chooses at playback how a GPU canvas draws it,
+  // alone on its page, so that the page's answer rests on that entry: a
+  // colour glyph, one under a clip, which the page files as a piece of the
+  // clip's run, and a gradient.
+  const scenes = {
+    "colour glyphs": glyphs,
+    "colour glyphs under a clip": (ctx) => {
+      ctx.beginPath();
+      ctx.rect(30, 0, 60, 60);
+      ctx.clip();
+      glyphs(ctx);
+    },
+    "a conic with hard stops": (ctx) => {
+      const conic = ctx.createConicGradient(0.3, 64, 90);
+      conic.addColorStop(0, "yellow");
+      conic.addColorStop(0.5, "yellow");
+      conic.addColorStop(0.5, "green");
+      conic.addColorStop(1, "green");
+      ctx.fillStyle = conic;
+      ctx.fillRect(32, 60, 64, 60);
+    },
+  };
+
+  /** `scene` on a canvas of its own, on the GPU or the CPU. */
+  const source = (gpu, scene = scenes["colour glyphs"]) => {
+    const canvas = new Canvas(SIDE, SIDE);
+    canvas.gpu = gpu;
+    scene(canvas.getContext("2d"));
+    return canvas;
+  };
+
+  /** What `draw` leaves on a canvas `height` tall filled with a backdrop. */
+  const drawnOnto = (gpu, draw, height = SIDE) => {
+    const canvas = new Canvas(SIDE, height);
+    canvas.gpu = gpu;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "rgb(200 220 240)";
+    ctx.fillRect(0, 0, SIDE, height);
+    draw(ctx);
+    return ctx.getImageData(0, 0, SIDE, height).data;
+  };
+
+  /** How many bytes of `a` and `b` differ. */
+  const apart = (a, b) => {
+    let differ = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) differ++;
+    return differ;
+  };
+
+  // Each with the destination's own transform, alpha or blend, which the CPU
+  // applies to the draw as it makes it over the GPU's pixels.
+  const placements = {
+    "in place": (ctx, image) => ctx.drawImage(image, 0, 0),
+    "scaled by 1.5": (ctx, image) => {
+      ctx.scale(1.5, 1.5);
+      ctx.drawImage(image, 0, 0);
+    },
+    rotated: (ctx, image) => {
+      ctx.translate(64, 64);
+      ctx.rotate(0.3);
+      ctx.drawImage(image, -64, -64);
+    },
+    "into a rectangle": (ctx, image) => ctx.drawImage(image, 10, 10, 100, 70),
+    "at a globalAlpha of 0.5": (ctx, image) => {
+      ctx.globalAlpha = 0.5;
+      ctx.drawImage(image, 0, 0);
+    },
+    "through multiply": (ctx, image) => {
+      ctx.globalCompositeOperation = "multiply";
+      ctx.drawImage(image, 0, 0);
+    },
+    "through copy": (ctx, image) => {
+      ctx.globalCompositeOperation = "copy";
+      ctx.drawImage(image, 10, 10);
+    },
+  };
+
+  for (const from of [false, true])
+    test(
+      `from a ${from ? "GPU" : "CPU"} canvas, in the CPU canvas's bytes`,
+      { skip },
+      () => {
+        const backdrop = drawnOnto(false, () => {});
+        for (const [kind, scene] of Object.entries(scenes)) {
+          const image = source(from, scene);
+          for (const [name, place] of Object.entries(placements)) {
+            const cpu = drawnOnto(false, (ctx) => place(ctx, image));
+            assert.ok(apart(cpu, backdrop) > 0, `${kind} ${name}: it lands`);
+            assert.equal(
+              apart(
+                drawnOnto(true, (ctx) => place(ctx, image)),
+                cpu,
+              ),
+              0,
+              `${kind} ${name}`,
+            );
+          }
+        }
+      },
+    );
+
+  for (const from of [false, true])
+    test(
+      `from a ${from ? "GPU" : "CPU"} canvas under a shadow, the draw in the CPU canvas's bytes and its shadow within a level`,
+      { skip },
+      () => {
+        // The shadow is cast a whole source below the draw, on a canvas
+        // twice as tall, so that the draw's rows hold no shadow. A GPU
+        // canvas composites a shadow over what lies beneath it at half
+        // precision, as it blends any image, so its rows stand a level from
+        // the CPU's near a tie, whatever casts it. Cast from Ganesh's
+        // replay of the source's picture, the colour glyphs' shadow stood 3
+        // levels off.
+        const tall = 2 * SIDE;
+        const backdrop = drawnOnto(false, () => {}, tall);
+        const rows = (data, from, to) =>
+          data.subarray(from * SIDE * 4, to * SIDE * 4);
+        for (const [kind, scene] of Object.entries(scenes)) {
+          const image = source(from, scene);
+          const draw = (ctx) => {
+            ctx.shadowColor = "rgb(0 0 0 / 0.5)";
+            ctx.shadowBlur = 4;
+            ctx.shadowOffsetY = SIDE;
+            ctx.drawImage(image, 0, 0);
+          };
+          const cpu = drawnOnto(false, draw, tall);
+          assert.ok(
+            apart(rows(cpu, 0, SIDE), rows(backdrop, 0, SIDE)) > 0,
+            `${kind}: the draw lands`,
+          );
+          assert.ok(
+            apart(rows(cpu, SIDE, tall), rows(backdrop, SIDE, tall)) > 0,
+            `${kind}: the shadow lands below it`,
+          );
+          const gpu = drawnOnto(true, draw, tall);
+          assert.equal(
+            apart(rows(gpu, 0, SIDE), rows(cpu, 0, SIDE)),
+            0,
+            `${kind}: the draw`,
+          );
+          let most = 0;
+          for (let i = SIDE * SIDE * 4; i < gpu.length; i++)
+            most = Math.max(most, Math.abs(gpu[i] - cpu[i]));
+          assert.ok(most <= 1, `${kind}: the shadow ${most} levels apart`);
+        }
+      },
+    );
+
+  test(
+    "from a canvas that drew one, with drawImage or drawCanvas",
+    { skip },
+    () => {
+      // A page holding someone else's picture is rasterized where it is
+      // drawn, and a page holding a source drawn with `drawCanvas` holds
+      // that source's entries in a group: each keeps what the source asks
+      // of a GPU canvas.
+      const holding = (verb) => {
+        const canvas = new Canvas(SIDE, SIDE);
+        canvas.gpu = false;
+        canvas.getContext("2d")[verb](source(false), 0, 0);
+        return canvas;
+      };
+      for (const [inner, outer] of [
+        ["drawImage", "drawImage"],
+        ["drawImage", "drawCanvas"],
+        ["drawCanvas", "drawImage"],
+      ]) {
+        const image = holding(inner);
+        const draw = (ctx) => {
+          ctx.scale(1.5, 1.5);
+          ctx[outer](image, 0, 0);
+        };
+        assert.equal(
+          apart(drawnOnto(true, draw), drawnOnto(false, draw)),
+          0,
+          `${inner} inside, ${outer} outside`,
+        );
+      }
+    },
+  );
+
+  test("through a filter, within a level of the CPU canvas", { skip }, () => {
+    // The filter's layer on a GPU canvas parts from the CPU's by a level
+    // whatever it holds -- colour glyphs drawn straight onto it too -- so
+    // what this asks is that the source's draws inside it are the CPU's.
+    // Replayed by Ganesh they stood 5 levels off.
+    const image = source(false);
+    const draw = (ctx) => {
+      ctx.filter = "blur(2px)";
+      ctx.drawImage(image, 0, 0);
+    };
+    const gpu = drawnOnto(true, draw),
+      cpu = drawnOnto(false, draw);
+    let most = 0;
+    for (let i = 0; i < gpu.length; i++)
+      most = Math.max(most, Math.abs(gpu[i] - cpu[i]));
+    assert.ok(most <= 1, `at most a level apart, not ${most}`);
+  });
 });

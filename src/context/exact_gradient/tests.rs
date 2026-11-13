@@ -2865,3 +2865,57 @@ fn consecutive_runs_from_one_atlas_part_only_on_ties() {
     );
     eprintln!("{runs} runs; {judged} channels apart, each a tie");
 }
+
+/// A canvas holding gradients, drawn as an image into another, is filed as
+/// a draw a GPU canvas makes on the CPU (#703); what a CPU canvas stores,
+/// and what an SVG and a PDF write, for it is what they were before: a CPU
+/// raster and a document play the draw as it was recorded. Under a scale, a
+/// `globalAlpha` and a blend, each of which the draw is recorded through.
+#[test]
+fn a_canvas_drawn_as_an_image_draws_as_it_did_on_the_cpu_and_in_a_document() {
+    let side = SIDE as f32;
+    let mut source = Canvas::new(side, side);
+    {
+        let ctx = source.context();
+        ctx.set_fill_shader(&sweep_turned(
+            CanvasPoint { x: 40.0, y: 50.0 },
+            10.0,
+        ));
+        ctx.fill_rect(10.0, 10.0, 70.0, 60.0);
+    }
+    let inner = &source.context().inner;
+    let image = inner.source_image(false).expect("an image");
+    assert!(inner.plays_apart_on_gpu(), "the source holds a gradient");
+    let whole = Rect::from_wh(side, side);
+    let exported = || {
+        let mut canvas = Canvas::new(side, side);
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(20 40 200)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, side, side);
+            ctx.scale(1.25, 1.25);
+            ctx.set_global_alpha(0.6);
+            ctx.set_global_composite_operation(BlendMode::Multiply);
+            ctx.inner.draw_source_image(&image, &whole, &whole, true);
+        }
+        let raw = pixels(&mut canvas);
+        let svg = canvas
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("an SVG");
+        let pdf = canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("a PDF");
+        [raw, svg, pdf]
+    };
+    FILES_GRADIENTS.set(false);
+    let before = exported();
+    FILES_GRADIENTS.set(true);
+    let after = exported();
+    for (name, (a, b)) in ["pixels", "SVG", "PDF"]
+        .iter()
+        .zip(before.iter().zip(&after))
+    {
+        assert!(a == b, "the {name} moved");
+    }
+}
