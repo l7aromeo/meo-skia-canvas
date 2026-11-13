@@ -1,0 +1,551 @@
+{
+  "about": "Text decorations and the whitespace a canvas run ends in. `decorations`: each case is drawn on a canvas twice, plain and with `textDecoration` set to each of `lines`, in `font` with `letterSpacing` of `spacing` px, aligned `align` at `anchor[align]` in direction `dir` for each of `layouts`; the columns where the two draws differ are the decoration, and they are exactly floor(start) to ceil(start + width), width being measureText`s and start where the alignment puts the advance -- the anchor, less all of the width for `right` and half of it for `center`, in either direction. `inkBoxes`: measureText`s actualBoundingBoxLeft and actualBoundingBoxRight for right-to-left runs of text ending in whitespace, which stands at the visual start of the run. `paragraphs`: the same for the Paragraph API, which says what it holds. `emptyInkBoxes`: the same for runs of nothing but spaces, which ink nothing and whose empty box Chrome puts at the left edge of their advance, in either direction. Read by tests/native_context2d.rs and tests/suite/text.test.js.",
+  "source": "Chrome Headless Shell 158.0.8127.18 on macOS, 2026-11-13. The decorations from CSS text, Chrome`s canvas having no textDecoration -- a div with `white-space: pre`, which keeps every space as a canvas does, read plain against decorated -- in Oswald 16px and, for U+3000, in the system`s Hiragino Sans GB: the rule held in 234 of 234 cases, every line and layout here. The ink boxes from Chrome`s canvas measureText, in Oswald 16px.",
+  "font": "16px Oswald",
+  "lines": [
+    "underline",
+    "overline",
+    "line-through"
+  ],
+  "anchor": {
+    "left": 40,
+    "right": 280,
+    "center": 160
+  },
+  "layouts": [
+    {
+      "align": "left",
+      "dir": "ltr"
+    },
+    {
+      "align": "right",
+      "dir": "ltr"
+    },
+    {
+      "align": "center",
+      "dir": "ltr"
+    },
+    {
+      "align": "left",
+      "dir": "rtl"
+    },
+    {
+      "align": "center",
+      "dir": "rtl"
+    },
+    {
+      "align": "right",
+      "dir": "rtl"
+    }
+  ],
+  "decorations": [
+    {
+      "text": "ab",
+      "spacing": 0
+    },
+    {
+      "text": "ab ",
+      "spacing": 0
+    },
+    {
+      "text": "ab  ",
+      "spacing": 0
+    },
+    {
+      "text": " ",
+      "spacing": 0
+    },
+    {
+      "text": "a b",
+      "spacing": 0
+    },
+    {
+      "text": "  ab",
+      "spacing": 0
+    },
+    {
+      "text": "ab\t",
+      "spacing": 0
+    },
+    {
+      "text": "ab  ",
+      "spacing": 4
+    },
+    {
+      "text": " ",
+      "spacing": 4
+    },
+    {
+      "text": "　",
+      "spacing": 0
+    },
+    {
+      "text": "ab　",
+      "spacing": 0
+    }
+  ],
+  "inkBoxes": [
+    {
+      "text": "ab ",
+      "align": "left",
+      "spacing": 0,
+      "left": -4.34,
+      "right": 16.94
+    },
+    {
+      "text": "ab  ",
+      "align": "left",
+      "spacing": 0,
+      "left": -8,
+      "right": 20.61
+    },
+    {
+      "text": "ab  ",
+      "align": "left",
+      "spacing": 4,
+      "left": -16,
+      "right": 32.61
+    },
+    {
+      "text": "ab ",
+      "align": "center",
+      "spacing": 0,
+      "left": 4.48,
+      "right": 8.13
+    },
+    {
+      "text": "ab  ",
+      "align": "center",
+      "spacing": 0,
+      "left": 2.65,
+      "right": 9.96
+    },
+    {
+      "text": "ab  ",
+      "align": "center",
+      "spacing": 4,
+      "left": 2.65,
+      "right": 13.96
+    },
+    {
+      "text": "ab ",
+      "align": "right",
+      "spacing": 0,
+      "left": 13.3,
+      "right": -0.69
+    },
+    {
+      "text": "ab  ",
+      "align": "right",
+      "spacing": 0,
+      "left": 13.3,
+      "right": -0.69
+    },
+    {
+      "text": "ab  ",
+      "align": "right",
+      "spacing": 4,
+      "left": 21.3,
+      "right": -4.69
+    }
+  ],
+  "paragraphs": {
+    "about": "Paragraph API text in 16px Oswald, lines 48px tall (a height multiplier of 3, half leading), laid out `width` wide in direction `dir`, each piece pushed in a style of its own: `line` decorates it, `bg` gives it a background. `lines` are the columns, line by line, where the styled paragraph differs from the same paragraph unstyled. Decorations are Chrome`s, read the same way from a div of spans under `white-space: pre-wrap`, Chrome Headless Shell 158.0.8127.18, 2026-11-13. Backgrounds reach the same spaces in Chrome, which snaps their ends to the pixel where this draws them at their exact fraction -- see docs/browser-differences.md -- so their ends here are the advance`s, 0 to ceil(width).",
+    "cases": [
+      {
+        "name": "one box, trailing spaces",
+        "width": 400,
+        "dir": "ltr",
+        "pieces": [
+          [
+            "ab  ",
+            {
+              "line": "underline"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            22
+          ]
+        ]
+      },
+      {
+        "name": "two boxes, the spaces in the second",
+        "width": 400,
+        "dir": "ltr",
+        "pieces": [
+          [
+            "ab",
+            {
+              "line": "underline"
+            }
+          ],
+          [
+            "  ",
+            {
+              "line": "overline"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            22
+          ]
+        ]
+      },
+      {
+        "name": "a decorated space, then plain ones",
+        "width": 400,
+        "dir": "ltr",
+        "pieces": [
+          [
+            "ab ",
+            {
+              "line": "underline"
+            }
+          ],
+          [
+            "  ",
+            {}
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            18
+          ]
+        ]
+      },
+      {
+        "name": "a lone space",
+        "width": 400,
+        "dir": "ltr",
+        "pieces": [
+          [
+            " ",
+            {
+              "line": "underline"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            4
+          ]
+        ]
+      },
+      {
+        "name": "wrapped at spaces",
+        "width": 60,
+        "dir": "ltr",
+        "pieces": [
+          [
+            "abcd   efgh",
+            {
+              "line": "underline"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            39
+          ],
+          [
+            0,
+            26
+          ]
+        ]
+      },
+      {
+        "name": "right to left, trailing spaces",
+        "width": 400,
+        "dir": "rtl",
+        "pieces": [
+          [
+            "ab  ",
+            {
+              "line": "underline"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            378,
+            400
+          ]
+        ]
+      },
+      {
+        "name": "right to left, wrapped at spaces",
+        "width": 60,
+        "dir": "rtl",
+        "pieces": [
+          [
+            "abcd   efgh",
+            {
+              "line": "underline"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            21,
+            60
+          ],
+          [
+            34,
+            60
+          ]
+        ]
+      },
+      {
+        "name": "a background, trailing spaces",
+        "width": 400,
+        "dir": "ltr",
+        "pieces": [
+          [
+            "ab  ",
+            {
+              "bg": "yellow"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            22
+          ]
+        ]
+      },
+      {
+        "name": "a background, a lone space",
+        "width": 400,
+        "dir": "ltr",
+        "pieces": [
+          [
+            " ",
+            {
+              "bg": "yellow"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            4
+          ]
+        ]
+      },
+      {
+        "name": "a background, wrapped at spaces",
+        "width": 60,
+        "dir": "ltr",
+        "pieces": [
+          [
+            "abcd   efgh",
+            {
+              "bg": "yellow"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            39
+          ],
+          [
+            0,
+            26
+          ]
+        ]
+      },
+      {
+        "name": "a background, then plain spaces",
+        "width": 400,
+        "dir": "ltr",
+        "pieces": [
+          [
+            "ab ",
+            {
+              "bg": "yellow"
+            }
+          ],
+          [
+            "  ",
+            {}
+          ]
+        ],
+        "lines": [
+          [
+            0,
+            18
+          ]
+        ]
+      },
+      {
+        "name": "right to left, a background, trailing spaces",
+        "width": 400,
+        "dir": "rtl",
+        "pieces": [
+          [
+            "ab  ",
+            {
+              "bg": "yellow"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            378,
+            400
+          ]
+        ]
+      },
+      {
+        "name": "right to left, a background, a lone space",
+        "width": 400,
+        "dir": "rtl",
+        "pieces": [
+          [
+            " ",
+            {
+              "bg": "yellow"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            396,
+            400
+          ]
+        ]
+      },
+      {
+        "name": "right to left, a background, wrapped at spaces",
+        "width": 60,
+        "dir": "rtl",
+        "pieces": [
+          [
+            "abcd   efgh",
+            {
+              "bg": "yellow"
+            }
+          ]
+        ],
+        "lines": [
+          [
+            21,
+            60
+          ],
+          [
+            34,
+            60
+          ]
+        ]
+      }
+    ]
+  },
+  "emptyInkBoxes": [
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "ltr",
+      "spacing": 0,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "ltr",
+      "spacing": 4,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "ltr",
+      "spacing": 0,
+      "left": 3.66,
+      "right": -3.66
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "ltr",
+      "spacing": 4,
+      "left": 7.66,
+      "right": -7.66
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "ltr",
+      "spacing": 0,
+      "left": 1.83,
+      "right": -1.83
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "ltr",
+      "spacing": 4,
+      "left": 3.83,
+      "right": -3.83
+    },
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "rtl",
+      "spacing": 0,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "rtl",
+      "spacing": 4,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "rtl",
+      "spacing": 0,
+      "left": 1.83,
+      "right": -1.83
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "rtl",
+      "spacing": 4,
+      "left": 3.83,
+      "right": -3.83
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "rtl",
+      "spacing": 0,
+      "left": 3.66,
+      "right": -3.66
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "rtl",
+      "spacing": 4,
+      "left": 7.66,
+      "right": -7.66
+    }
+  ]
+}

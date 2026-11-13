@@ -438,6 +438,10 @@ pub struct TextLayout {
     /// The angle an `oblique` font is drawn at, which decides which runs
     /// are sheared -- see [`run_shear`].
     oblique: Option<f32>,
+    /// Whether the run is laid out right to left, which decides the side
+    /// of each line its trailing whitespace is decorated on -- see
+    /// `decorate::Spans::add_trailing`.
+    rtl: bool,
 }
 
 /// Which painter a test has a run drawn with: from the kept runs, as every
@@ -559,12 +563,18 @@ impl LaidOut {
             .map(|run| run_shear(&run.font.typeface(), layout.oblique))
             .collect();
         // The run is one decorating box: every run of it is the box's,
-        // whatever face draws it.
+        // whatever face draws it, and so is the whitespace it ends in.
         let spans = match decoration {
-            Some(_) => decorate::spans(&runs, |_| Some(0)),
+            Some(_) => decorate::spans(&runs, &layout.paragraph, layout.rtl),
             None => Vec::new(),
         };
-        let lines = runs.last().map_or(0, |run| run.line + 1);
+        // A line of nothing but whitespace has no run, and is drawn for its
+        // lines alone.
+        let lines = runs
+            .last()
+            .map(|run| run.line + 1)
+            .max(spans.last().map(|span| span.line + 1))
+            .unwrap_or(0);
         let glyphs = runs.iter().map(|run| run.glyphs.len()).sum();
         Self {
             layout,
@@ -2724,6 +2734,7 @@ impl<'a> Typesetter<'a> {
             condensation,
             restyled,
             oblique: self.oblique,
+            rtl: self.graf_style().text_direction() == TextDirection::RTL,
         }
     }
 
@@ -3256,9 +3267,21 @@ impl<'a> Typesetter<'a> {
         // lines, since
         // the advance is what it would take unwrapped and would contradict
         // both the ink bounds beside it and the pixels drawn.
+        let advance = self.signed_advance(&paragraph);
         let width = match self.text_wrap {
-            false => self.signed_advance(&paragraph) * condensation,
+            false => advance * condensation,
             true => width,
+        };
+        let empty_at = match self.text_wrap {
+            false => {
+                let share = match self.gravity() {
+                    TextAlign::Center => 0.5,
+                    TextAlign::Right => 1.0,
+                    _ => 0.0,
+                };
+                -share * advance
+            }
+            true => origin.x,
         };
 
         let extents = TextExtents {
@@ -3284,6 +3307,7 @@ impl<'a> Typesetter<'a> {
             ideo,
             char_ranges,
             oblique: self.oblique,
+            empty_at,
         };
         (extents, measured)
     }
@@ -3391,34 +3415,38 @@ impl<'a> Typesetter<'a> {
         alignment_factor * self.width + spacing_step * self.leading_spacing()
     }
 
-    /// How far a centred or right-aligned run moves for the whitespace it
-    /// ends in, which SkParagraph leaves out of the line it aligns.
+    /// How far a run moves for the whitespace it ends in, which SkParagraph
+    /// leaves out of the line it aligns.
     ///
     /// The canvas aligns the whole run, its advance with every trailing
-    /// space and that space's spacing, as Chrome does: a centred `"a "`
-    /// stands half a space left of `"a"`. SkParagraph aligns a line by its
-    /// width without the whitespace it ends in, which hangs, so the run is
-    /// moved by the share of the difference its alignment takes. A wrapped
-    /// run's lines hang their trailing spaces as CSS lines do, and keep
-    /// SkParagraph's alignment. Left to right only: a right-to-left run's
-    /// trailing space is at its visual start, and no browser measurement
-    /// says where Chrome puts it.
+    /// space and that space's spacing, as Chrome does. SkParagraph aligns a
+    /// line by its width without the whitespace it ends in, which hangs past
+    /// the line's logical end: on the right of a left-to-right line, so a
+    /// centred `"a "` moves half a space left and a right-aligned one a
+    /// whole space; on the left of a right-to-left one, so there the run
+    /// moves right, a whole space when aligned left and half when centred,
+    /// and its trailing space comes to stand at the anchor -- Chrome 158's
+    /// `fillText` measured both ways. The width aligned by is the line's
+    /// own: a line of nothing but whitespace aligns as nothing wide, though
+    /// `longest_line` reports the whitespace's width for it. A wrapped run's
+    /// lines hang their trailing spaces as CSS lines do, and keep
+    /// SkParagraph's alignment.
     fn trailing_space_shift(&self, paragraph: &Paragraph) -> f32 {
+        if self.text_wrap || !self.text.ends_with(char::is_whitespace) {
+            return 0.0;
+        }
         let share = match self.gravity() {
             TextAlign::Center => 0.5,
             TextAlign::Right => 1.0,
-            _ => return 0.0,
+            _ => 0.0,
         };
-        let applies = !self.text_wrap
-            && self.graf_style().text_direction() == TextDirection::LTR
-            && self.text.ends_with(char::is_whitespace);
-        match applies {
-            true => {
-                -share
-                    * (self.signed_advance(paragraph)
-                        - paragraph.longest_line())
-            }
-            false => 0.0,
+        let aligned = paragraph
+            .get_line_metrics_at(0)
+            .map_or_else(|| paragraph.longest_line(), |line| line.width as f32);
+        let hanging = self.signed_advance(paragraph) - aligned;
+        match self.graf_style().text_direction() {
+            TextDirection::LTR => -share * hanging,
+            TextDirection::RTL => (1.0 - share) * hanging,
         }
     }
 
@@ -4078,6 +4106,12 @@ pub struct Measured {
     /// The angle an `oblique` font is drawn at, which shears the ink of the
     /// runs it shears -- see [`run_shear`].
     oblique: Option<f32>,
+    /// Where a run that inks nothing has its empty ink box, relative to the
+    /// anchor before the run is squeezed: the left edge of its advance, where
+    /// Chrome 158 puts it -- a right-aligned `" "` in 16px Oswald reports an
+    /// `actualBoundingBoxLeft` of 3.66 and a right of -3.66, in either
+    /// direction. A wrapped run's is where its paragraph is painted.
+    empty_at: f32,
 }
 
 impl Measured {
@@ -4094,6 +4128,7 @@ impl Measured {
             ideo,
             char_ranges,
             oblique,
+            empty_at,
         } = self;
         let (origin, condensation) = (*origin, *condensation);
         let (hang, norm, ideo) = (*hang, *norm, *ideo);
@@ -4250,7 +4285,11 @@ impl Measured {
                 None => text_bounds,
             });
         }
-        let ink_bounds = ink_bounds.unwrap_or(Rect::new_empty());
+        // A run of spaces has glyph runs, each inking nothing, so its union
+        // is empty rather than missing.
+        let ink_bounds = ink_bounds
+            .filter(|bounds| !bounds.is_empty())
+            .unwrap_or_else(|| Rect::from_xywh(*empty_at, 0.0, 0.0, 0.0));
 
         // The ink box takes the condensation as the width does: a
         // horizontal scale about the anchor.
