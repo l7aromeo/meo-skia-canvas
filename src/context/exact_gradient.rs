@@ -209,18 +209,6 @@ impl GradientSpec {
         )
     }
 
-    /// Whether [`Self::exact`] can make an effect for this at `alpha`,
-    /// decided without making it: not where the CPU draws it through its
-    /// float pipeline and it, or the paint, is translucent. Where this says
-    /// yes, `exact` can still refuse -- a space Skia cannot convert the
-    /// stops to, more stops than the effect holds.
-    pub fn may_take_the_effect(&self, alpha: f32) -> bool {
-        Layout::of(self).is_some_and(|layout| {
-            !layout.highp
-                || (alpha >= 1.0 && self.colors.iter().all(|c| c.a == 1.0))
-        })
-    }
-
     /// The shader that draws this on the GPU in the bytes the CPU stores,
     /// on an eight-bit page in `page`, at `alpha` -- the paint's, which the
     /// shader takes and the paint drawing it then leaves at 1. `None` where

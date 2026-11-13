@@ -374,6 +374,9 @@ thread_local! {
     /// How many entries [`Layer::recorded_bytes`] has been asked of on this
     /// thread, a group's own and each it holds counted apart.
     pub(crate) static ENTRIES_WALKED: Cell<usize> = const { Cell::new(0) };
+    /// How many times [`drawn_on_their_backdrop`] has read a GPU canvas's
+    /// pixels back on this thread.
+    pub(crate) static BACKDROPS_READ: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many of a [`DeferredPicture`]'s recordings were made: those played as
@@ -2187,6 +2190,8 @@ fn drawn_on_their_backdrop(
     if !canvas.read_pixels(&info, &mut backdrop, row, (area.left, area.top)) {
         return false;
     }
+    #[cfg(test)]
+    BACKDROPS_READ.set(BACKDROPS_READ.get() + 1);
     // The raster reaches from the canvas's origin, so that the draws are
     // made at the device coordinates the CPU canvas makes them at: offset to
     // the area, the transform inverted with another translation moved a
@@ -2789,8 +2794,13 @@ impl GradientDraw {
                         OnGpu::Raster { beyond, .. } => {
                             Some((piece.pixels.picture()?, *beyond))
                         }
+                        // A path the effect cannot reproduce -- asked of
+                        // the effect itself, which keeps its answer.
                         OnGpu::Path(draw)
-                            if !draw.spec.may_take_the_effect(draw.alpha) =>
+                            if draw
+                                .spec
+                                .exact(&draw.page, draw.alpha)
+                                .is_none() =>
                         {
                             Some((piece.pixels.picture()?, draw.beyond))
                         }

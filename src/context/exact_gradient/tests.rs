@@ -4,7 +4,10 @@ use std::{f32::consts::TAU, io::Read, ops::Range, str, sync::Arc};
 use crate::{
     canvas::{Canvas, CanvasOptions, EngineKind},
     color::{RgbaLinear, linear_srgb_color_space},
-    context::{FILES_GRADIENTS, layer::Layer},
+    context::{
+        FILES_GRADIENTS,
+        layer::{BACKDROPS_READ, Layer},
+    },
     context2d::Context2D,
     export::{EncodeOptions, ImageFormat, VectorFeatures},
     geometry::Point as CanvasPoint,
@@ -1357,6 +1360,45 @@ fn consecutive_gradient_draws_share_an_entry() {
         })
         .collect();
     assert_eq!(runs, vec![3, 1]);
+}
+
+/// A run of gradient draws the effect refuses -- opaque, interpolated in
+/// Oklab -- is made on the CPU over one read back of the GPU's pixels, not
+/// one for each draw, and stores what a CPU canvas stores.
+#[test]
+fn a_run_the_effect_refuses_reads_the_gpu_back_once() {
+    let mut spec = kept_case();
+    spec.space = GradientColorSpace::Oklab;
+    spec.interpolation.color_space = InterpolationSpace::OKLab;
+    let page = ColorSpace::new_srgb();
+    assert!(spec.exact(&page, 1.0).is_none(), "the effect refuses Oklab");
+    assert!(spec.colors.iter().all(|c| c.a == 1.0), "opaque stops");
+    let shader = CanvasShader {
+        inner: spec.native().expect("native"),
+        features: VectorFeatures::PLAIN,
+        gradient: Some(Arc::new(spec)),
+    };
+    let drawn = |gpu: bool| {
+        let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
+        canvas.set_gpu(gpu);
+        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_shader(&shader);
+        for i in 0..6 {
+            ctx.fill_rect(i as f32 * 12.0, i as f32 * 9.0, 30.0, 20.0);
+        }
+        let before = BACKDROPS_READ.get();
+        let bytes = pixels(&mut canvas);
+        Some((bytes, BACKDROPS_READ.get() - before))
+    };
+    let Some((gpu, reads)) = drawn(true) else {
+        return;
+    };
+    let (cpu, _) = drawn(false).expect("a CPU canvas");
+    assert_eq!(reads, 1, "one read back for the run of six");
+    assert!(gpu == cpu, "the GPU canvas stores the CPU's bytes");
 }
 
 /// On a page that keeps a recording for each kind of target, a gradient
