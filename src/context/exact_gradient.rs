@@ -17,7 +17,9 @@
 //! `t >= stop`, as the `gradient` stage counts, and each channel is rounded
 //! where the CPU rounds it: on the eight-bit pipeline (`lowp`) as
 //! `trunc(x * 255 + 0.5)`, premultiplied with `div255_accurate` and scaled
-//! by the paint's alpha with `div255`. The effect returns whole levels,
+//! by the paint's alpha with `div255`; on the float pipeline (`highp`) at
+//! the store, which takes a half level to the even one on aarch64 and
+//! x86-64. The effect returns whole levels,
 //! which the half-precision fragment output carries to an eight-bit target
 //! unchanged.
 //!
@@ -256,7 +258,8 @@ impl GradientSpec {
         // The `highp` pipeline premultiplies, scales and blends in floats
         // and rounds once, at the store; the effect hands the GPU whole
         // levels, which match it only where none of those happen.
-        if layout.highp && (!ramp.opaque || alpha < 1.0) {
+        let highp = layout.highp;
+        if highp && (!ramp.opaque || alpha < 1.0) {
             return None;
         }
         let local = match &self.local {
@@ -269,7 +272,7 @@ impl GradientSpec {
                 .iter()
                 .find(|(size, ..)| ramp.ts.len() <= *size)?;
             effect.make_shader(
-                uniforms(offsets, *size, &layout, &ramp, alpha),
+                uniforms(offsets, *size, &layout, &ramp, alpha, highp),
                 &[],
                 Some(&local),
             )
@@ -977,6 +980,7 @@ struct Offsets {
     count: usize,
     premul_after: usize,
     exact_scale: usize,
+    ties_even: usize,
     alpha8: usize,
     t_scale: usize,
     t_bias: usize,
@@ -1008,6 +1012,7 @@ impl Offsets {
             count: at("count")?,
             premul_after: at("premulAfter")?,
             exact_scale: at("exactScale")?,
+            ties_even: at("tiesEven")?,
             alpha8: at("alpha8")?,
             t_scale: at("tScale")?,
             t_bias: at("tBias")?,
@@ -1033,6 +1038,7 @@ uniform int mode;
 uniform int count;
 uniform int premulAfter;
 uniform int exactScale;
+uniform int tiesEven;
 uniform float alpha8;
 uniform float tScale;
 uniform float tBias;
@@ -1123,7 +1129,12 @@ half4 main(float2 p) {{
     }}
     float4 c = t * f + b;
     c.rgb = clamp(c.rgb, 0.0, 1.0);
-    float4 l = floor(c * 255.0 + 0.5);
+    float4 s = c * 255.0;
+    float4 l = floor(s + 0.5);
+    if (tiesEven != 0) {{
+        // `l - s` is at most a half, and a half only on a tie.
+        l -= step(0.5, l - s) * (l - 2.0 * floor(l * 0.5));
+    }}
     if (premulAfter != 0) {{
         l.rgb = nearest255(float4(l.rgb * l.a, 0)).rgb;
     }}
@@ -1143,6 +1154,7 @@ fn uniforms(
     layout: &Layout,
     ramp: &Ramp,
     alpha: f32,
+    highp: bool,
 ) -> Data {
     // `from_float`: the paint's alpha as the level the pipeline scales by.
     let alpha8 = (alpha * 255.0 + 0.5).trunc();
@@ -1165,6 +1177,10 @@ fn uniforms(
         i32::from(ramp.premul_after).to_ne_bytes(),
     );
     put(offsets.exact_scale, i32::from(EXACT_SCALE).to_ne_bytes());
+    put(
+        offsets.ties_even,
+        i32::from(highp && HIGHP_TIES_TO_EVEN).to_ne_bytes(),
+    );
     put(offsets.alpha8, alpha8.to_ne_bytes());
     put(offsets.t_scale, layout.t_scale.to_ne_bytes());
     put(offsets.t_bias, layout.t_bias.to_ne_bytes());
@@ -1190,6 +1206,13 @@ fn uniforms(
 /// computes it, or is `(v + 255) >> 8`, as every other backend of
 /// `SkRasterPipeline_opts.h` computes it.
 const EXACT_SCALE: bool = cfg!(target_arch = "aarch64");
+
+/// Whether the CPU's `highp` store rounds a half level to the even one, as
+/// NEON's `vcvtnq` and x86's `cvtps` do, or up, as `round` in
+/// `SkRasterPipeline_opts.h` does on 32-bit ARM, LoongArch and the scalar
+/// backend. Its `lowp` pipeline rounds a half up everywhere.
+const HIGHP_TIES_TO_EVEN: bool =
+    cfg!(any(target_arch = "aarch64", target_arch = "x86_64"));
 
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
 mod tests;

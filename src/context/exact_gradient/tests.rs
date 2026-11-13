@@ -314,6 +314,70 @@ fn case(seed: u64) -> (GradientSpec, PixelColorSpace, f32) {
     (spec, page, alpha)
 }
 
+/// A level of 168.5 exactly in f32, which `0.6607843 * 255` is.
+const HALF_LEVEL: f32 = 0.660_784_3;
+
+/// A value a half level from two whole ones is stored as the CPU stores
+/// it: rounded up on the eight-bit pipeline, which a linear gradient takes;
+/// and, on the float pipeline a conical gradient takes, to the even level
+/// where the CPU's store rounds so.
+#[test]
+fn a_half_level_is_rounded_as_the_cpu_rounds_it() {
+    assert_eq!(HALF_LEVEL * 255.0, 168.5, "the value is a half level");
+    let middle = SIDE as f32 / 2.0;
+    for (geometry, highp) in [
+        (
+            Geometry::Linear {
+                start: Point::new(0.0, 0.0),
+                end: Point::new(SIDE as f32, 0.0),
+            },
+            false,
+        ),
+        (
+            // Two circles of one radius: Skia's strip, which it draws on
+            // the float pipeline.
+            Geometry::Conical {
+                start: Point::new(0.0, middle),
+                start_radius: 2.0 * SIDE as f32,
+                end: Point::new(SIDE as f32, middle),
+                end_radius: 2.0 * SIDE as f32,
+            },
+            true,
+        ),
+    ] {
+        let spec = GradientSpec {
+            geometry,
+            local: None,
+            colors: vec![Color4f::new(HALF_LEVEL, 0.0, 1.0, 1.0); 2],
+            positions: vec![0.0, 1.0],
+            color_space: ColorSpace::new_srgb(),
+            space: GradientColorSpace::Destination,
+            interpolation: Interpolation::default(),
+        };
+        let page = PixelColorSpace::Srgb;
+        let space = page.to_skia_color_space().expect("sRGB");
+        assert_eq!(Layout::of(&spec).expect("layout").highp, highp);
+        let native = spec.native().expect("native");
+        let cpu = drawn(false, page, &native, 1.0).expect("CPU");
+        let level = match highp && HIGHP_TIES_TO_EVEN {
+            true => 168,
+            false => 169,
+        };
+        let index = 4 * (SIDE / 2 * SIDE + SIDE / 2);
+        assert_eq!(
+            cpu[index..index + 4],
+            [level, 0, 255, 255],
+            "highp {highp}: the CPU's pixel"
+        );
+        let effect = spec.exact(&space, 1.0).expect("the effect");
+        let Some(gpu) = drawn(true, page, &effect, 1.0) else {
+            return;
+        };
+        assert_eq!(gpu[index], level, "highp {highp}: the effect's level");
+        assert_eq!(gpu, cpu, "highp {highp}: every byte the CPU's");
+    }
+}
+
 /// How far `t` at the centre of pixel `index` would have to move to change
 /// channel `channel`'s first rounding, and how far it lies from the nearest
 /// threshold: the two places float noise can move a pixel's bytes. Taken in
