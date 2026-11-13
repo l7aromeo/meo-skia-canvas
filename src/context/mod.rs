@@ -1466,13 +1466,9 @@ impl Context2D {
                     }
                 }
             };
-            let op = layer::GradientDraw {
-                draws: vec![piece],
-                clip: None,
-            };
             self.with_recorder(|mut recorder| {
                 recorder.append_gradient(
-                    Arc::new(op),
+                    piece,
                     self.state.clip.as_ref(),
                     features,
                 );

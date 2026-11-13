@@ -2373,8 +2373,8 @@ impl PageRecorder {
         );
     }
 
-    /// Files `op`, a run of draws dyed by gradients -- see
-    /// [`GradientDraw`](crate::context::layer::GradientDraw) -- under
+    /// Files `piece`, a draw dyed by a gradient, in a run of such draws --
+    /// see [`GradientDraw`](crate::context::layer::GradientDraw) -- under
     /// `clip`, the frame's clip, where the page would have recorded the
     /// draw, so that a CPU canvas and a document play what they would have:
     ///
@@ -2401,9 +2401,12 @@ impl PageRecorder {
     /// first, though the page would have recorded the draw into it: its
     /// frame is recorded inside it, which the op cannot join. A document of
     /// such a page writes the clip twice where it wrote it once.
+    ///
+    /// Taken by value, so that a draw joining a run is moved into it: a run
+    /// of 2000 small fills allocates nothing for each beyond the piece.
     pub fn append_gradient(
         &mut self,
-        op: Arc<GradientDraw>,
+        piece: GradientPiece,
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
@@ -2413,9 +2416,9 @@ impl PageRecorder {
         }
         self.settle();
         if let Some(last) = self.joinable_gradient(features, isolated) {
-            last.draws.extend(op.draws.iter().cloned());
-            self.recorded
-                .add(op.draws.iter().map(GradientPiece::recorded_bytes).sum());
+            let bytes = piece.recorded_bytes();
+            last.draws.push(piece);
+            self.recorded.add(bytes);
             if let Some(layer) = self.open.last_mut() {
                 layer.features = layer.features.with(features);
             }
@@ -2431,8 +2434,10 @@ impl PageRecorder {
             // for it.
             self.close_run();
             self.flush();
-            let mut op = Arc::unwrap_or_clone(op);
-            op.clip = clip.map(Path::serialize);
+            let op = GradientDraw {
+                draws: vec![piece],
+                clip: clip.map(Path::serialize),
+            };
             self.file_entry(Layer::Gradient(Arc::new(op)), features);
             self.gradient_filtered = 0;
             self.gradient_run =
@@ -2441,13 +2446,11 @@ impl PageRecorder {
             return;
         }
         self.append_under_clip(
-            |clip| match clip {
-                None => Layer::Gradient(op),
-                Some(clip) => {
-                    let mut op = Arc::unwrap_or_clone(op);
-                    op.clip = Some(clip);
-                    Layer::Gradient(Arc::new(op))
-                }
+            |clip| {
+                Layer::Gradient(Arc::new(GradientDraw {
+                    draws: vec![piece],
+                    clip,
+                }))
             },
             clip,
             features,
