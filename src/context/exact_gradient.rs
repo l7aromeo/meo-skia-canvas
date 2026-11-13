@@ -226,6 +226,8 @@ impl GradientSpec {
     /// new `CanvasGradient` for every draw, and making one reads its stops
     /// through a colour conversion and uploads its uniforms.
     pub fn exact(&self, page: &ColorSpace, alpha: f32) -> Option<Shader> {
+        #[cfg(test)]
+        EXACTS_ASKED.set(EXACTS_ASKED.get() + 1);
         let alpha = alpha.to_bits();
         let hash = exact_hash(self, page, alpha);
         let is_key = |key: &ExactKey| key.is_for(self, page, alpha);
@@ -398,6 +400,9 @@ thread_local! {
     /// How many shaders [`GradientSpec::exact`] has made on this thread
     /// rather than found kept.
     pub(crate) static EXACTS_MADE: Cell<usize> = const { Cell::new(0) };
+    /// How many times [`GradientSpec::exact`] has been asked on this thread,
+    /// made or found.
+    pub(crate) static EXACTS_ASKED: Cell<usize> = const { Cell::new(0) };
     /// Whether [`GradientSpec::exact`] takes a shader kept: off, every
     /// shader is made afresh, the reference the kept ones are held to.
     pub(crate) static KEEPS_EXACTS: Cell<bool> = const { Cell::new(true) };

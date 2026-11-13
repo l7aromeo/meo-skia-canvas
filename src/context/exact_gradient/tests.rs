@@ -1511,6 +1511,42 @@ fn a_run_the_effect_refuses_reads_the_gpu_back_once() {
     assert!(gpu == cpu, "the GPU canvas stores the CPU's bytes");
 }
 
+/// A run of gradient fills played on a GPU canvas asks for each draw's
+/// effect once: a fill off whole pixels, whose image the run's atlas holds,
+/// one on whole pixels, which the effect draws itself, and one the effect
+/// refuses, made on the CPU, alike.
+#[test]
+fn a_gpu_canvas_asks_for_each_draws_effect_once() {
+    let shader_of = |spec: GradientSpec| CanvasShader {
+        inner: spec.native().expect("native"),
+        features: VectorFeatures::PLAIN,
+        gradient: Some(Arc::new(spec)),
+    };
+    let spec = kept_case();
+    let mut refused = spec.clone();
+    refused.space = GradientColorSpace::Oklab;
+    refused.interpolation.color_space = InterpolationSpace::OKLab;
+    assert!(refused.exact(&ColorSpace::new_srgb(), 1.0).is_none());
+    let (taken, refused) = (shader_of(spec), shader_of(refused));
+    let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
+    canvas.set_gpu(true);
+    if canvas.engine_kind() != EngineKind::Gpu {
+        return;
+    }
+    let ctx = canvas.context();
+    const FILLS: usize = 9;
+    const REFUSED: usize = 3;
+    for i in 0..FILLS {
+        // Every other fill off whole pixels, and one of those refused.
+        let off = if i % 2 == 0 { 0.0 } else { 0.5 };
+        ctx.set_fill_shader(if i == REFUSED { &refused } else { &taken });
+        ctx.fill_rect(i as f32 * 10.0 + off, i as f32 * 9.0, 30.0, 20.0);
+    }
+    let before = EXACTS_ASKED.get();
+    pixels(&mut canvas);
+    assert_eq!(EXACTS_ASKED.get() - before, FILLS, "once a draw");
+}
+
 /// A gradient fill under `blur()` on a GPU canvas is the chain's input made
 /// on the CPU onto the chain's layer, which starts transparent, so nothing
 /// is read back for it; and the canvas stores what a CPU canvas does.

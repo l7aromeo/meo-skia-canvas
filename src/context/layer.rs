@@ -2460,6 +2460,18 @@ struct Slot {
     at: IPoint,
 }
 
+/// What a run's [`atlas`] found for a [`GradientPath`], asked once for the
+/// draw: the effect that draws it in the CPU's bytes, `None` where the
+/// effect cannot reproduce the CPU; and, for one off whole pixels that fits,
+/// where the atlas holds an image of it. Asking costs a hash and a compare
+/// of the gradient's every number: asked again as the draw is played, 2000
+/// small gradients alternating linear and conic spent 2.4 ms a frame on it.
+#[derive(Clone)]
+struct Found {
+    effect: Option<Shader>,
+    slot: Option<Slot>,
+}
+
 /// How far an atlas slot reaches past the path's area on every side.
 const SLOT_MARGIN_PX: i32 = 1;
 
@@ -2468,9 +2480,11 @@ const SLOT_MARGIN_PX: i32 = 1;
 const ATLAS_WIDTH_PX: i32 = 2048;
 
 /// One image holding the effect of each of `draws` that needs one, drawn in
-/// one pass onto a surface made from `canvas`: where each is, by index, or
-/// `None` for one that takes the effect itself, or that does not fit, which
-/// then makes an image of its own -- see [`GradientSpec::sampled`]. With an
+/// one pass onto a surface made from `canvas`; and, by index, what was
+/// found for each path: its effect, and where its image is -- none for one
+/// that takes the effect itself, or that does not fit, which then makes an
+/// image of its own -- see [`GradientSpec::sampled`]. `None` for a draw
+/// that is no path. With an
 /// image of its own for each draw, 2000 small gradient fills cost about
 /// eight times what Ganesh's own gradient did.
 ///
@@ -2478,14 +2492,14 @@ const ATLAS_WIDTH_PX: i32 = 2048;
 fn atlas(
     canvas: &SkCanvas,
     draws: &[Option<&GradientPath>],
-) -> Vec<Option<Slot>> {
-    // The effect for each draw that needs an image, made first: a draw it
-    // cannot be made for takes no slot, and is drawn on the CPU instead.
+) -> Vec<Option<Found>> {
+    // The effect for each path, made first: a draw it cannot be made for
+    // takes no slot, and is drawn on the CPU instead; one on whole pixels
+    // takes the effect itself and no slot either.
     let effects: Vec<Option<Shader>> = draws
         .iter()
         .map(|draw| {
-            draw.filter(|draw| !draw.whole_pixels)
-                .and_then(|draw| draw.spec.exact(&draw.page, draw.alpha))
+            draw.and_then(|draw| draw.spec.exact(&draw.page, draw.alpha))
         })
         .collect();
     let mut slots: Vec<Option<IPoint>> = vec![None; draws.len()];
@@ -2497,6 +2511,9 @@ fn atlas(
         let (Some(draw), Some(_)) = (draw, effect) else {
             continue;
         };
+        if draw.whole_pixels {
+            continue;
+        }
         let (w, h) = (
             draw.area.width() + 2 * SLOT_MARGIN_PX,
             draw.area.height() + 2 * SLOT_MARGIN_PX,
@@ -2525,7 +2542,7 @@ fn atlas(
         let mut surface = canvas.new_surface(&info, None)?;
         let target = surface.canvas();
         target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-        for ((draw, effect), at) in draws.iter().zip(effects).zip(&slots) {
+        for ((draw, effect), at) in draws.iter().zip(&effects).zip(&slots) {
             let (Some(draw), Some(effect), Some(at)) = (draw, effect, at)
             else {
                 continue;
@@ -2555,12 +2572,19 @@ fn atlas(
         }
         Some(surface.image_snapshot())
     });
-    slots
-        .into_iter()
-        .map(|at| {
-            Some(Slot {
-                image: made.clone()?,
-                at: at?,
+    draws
+        .iter()
+        .zip(effects)
+        .zip(slots)
+        .map(|((draw, effect), at)| {
+            draw.map(|_| Found {
+                effect,
+                slot: at.and_then(|at| {
+                    Some(Slot {
+                        image: made.clone()?,
+                        at,
+                    })
+                }),
             })
         })
         .collect()
@@ -2582,18 +2606,22 @@ fn max_texture_size(_canvas: &SkCanvas) -> i32 {
 
 /// Draws `draw` with the effect onto `canvas`, which maps the recording's
 /// device pixels onto its own whole: the effect itself for a rectangle on
-/// whole pixels, and otherwise an image of it, `slot` in an atlas or one of
-/// its own, sampled nearest at each pixel's centre. `false`, having drawn
-/// nothing, where no effect can be made.
+/// whole pixels, and otherwise an image of it, in an atlas or one of its
+/// own, sampled nearest at each pixel's centre -- what the run's atlas
+/// `found` for the draw where it was made. `false`, having drawn nothing,
+/// where no effect can be made.
 fn drawn_with_effect(
     canvas: &SkCanvas,
     draw: &GradientPath,
-    slot: Option<&Slot>,
+    found: Option<&Found>,
 ) -> bool {
     let outer = canvas.local_to_device_as_3x3();
-    let shader = match (draw.whole_pixels, slot) {
-        (true, _) => draw.spec.exact(&draw.page, draw.alpha),
-        (false, Some(slot)) => {
+    let slot = found.and_then(|found| found.slot.as_ref());
+    let shader = match (draw.whole_pixels, found, slot) {
+        (_, Some(Found { effect: None, .. }), _) => None,
+        (true, Some(found), _) => found.effect.clone(),
+        (true, None, _) => draw.spec.exact(&draw.page, draw.alpha),
+        (false, _, Some(slot)) => {
             let origin = (
                 draw.area.left - SLOT_MARGIN_PX,
                 draw.area.top - SLOT_MARGIN_PX,
@@ -2615,7 +2643,7 @@ fn drawn_with_effect(
                     )
                 })
         }
-        (false, None) => {
+        (false, _, None) => {
             draw.spec
                 .sampled(&draw.page, draw.alpha, &draw.matrix, draw.area)
         }
@@ -2633,18 +2661,20 @@ fn drawn_with_effect(
 }
 
 /// Plays `pixels`, a draw dyed by a gradient as the page's pixels recording
-/// records it, onto `canvas`, a GPU canvas, as `gpu` says -- see [`OnGpu`].
-/// A draw made on the CPU, on a canvas whose pixels cannot be read, plays
-/// `pixels`.
+/// records it, onto `canvas`, a GPU canvas, as `gpu` says -- see [`OnGpu`]
+/// -- with what the run's atlas `found` for it. A draw made on the CPU, on
+/// a canvas whose pixels cannot be read, plays `pixels`.
 fn played_on_gpu(
     canvas: &SkCanvas,
     pixels: &GradientPixels,
     gpu: &OnGpu,
-    slot: Option<&Slot>,
+    found: Option<&Found>,
 ) {
     let whole = on_whole_pixels(canvas);
     match gpu {
-        OnGpu::Path(draw) if whole && drawn_with_effect(canvas, draw, slot) => {
+        OnGpu::Path(draw)
+            if whole && drawn_with_effect(canvas, draw, found) =>
+        {
             return;
         }
         OnGpu::Effect { picture, .. } if whole => {
@@ -2773,15 +2803,15 @@ impl GradientDraw {
         })
     }
 
-    /// Plays the run onto `canvas`, taking its effects' images from
-    /// `slots`, one for each draw, where an atlas for more than this run
-    /// was made -- see [`play_entries`] -- and from one of its own where
-    /// not.
+    /// Plays the run onto `canvas`, taking its effects and their images
+    /// from what an atlas `found`, one for each draw, where one for more
+    /// than this run was made -- see [`play_entries`] -- and from one of its
+    /// own where not.
     fn played(
         &self,
         canvas: &SkCanvas,
         target: Target,
-        slots: Option<&[Option<Slot>]>,
+        found: Option<&[Option<Found>]>,
     ) {
         canvas.save();
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
@@ -2789,14 +2819,16 @@ impl GradientDraw {
         }
         let gpu = target == Target::Pixels && blur_mask::on_gpu(canvas);
         let own;
-        let slots = match slots {
-            Some(slots) => slots,
+        let found = match found {
+            Some(found) => found,
             None if gpu && on_whole_pixels(canvas) => {
                 own = atlas(canvas, &self.paths().collect::<Vec<_>>());
                 &own
             }
             None => &[],
         };
+        let found_for =
+            |index: usize| found.get(index).and_then(Option::as_ref);
         let mut index = 0;
         while index < self.draws.len() {
             // Draws one after another that the CPU makes over the GPU's
@@ -2804,17 +2836,23 @@ impl GradientDraw {
             if target == Target::Pixels && gpu {
                 let span: Vec<(Cow<'_, Picture>, bool)> = self.draws[index..]
                     .iter()
-                    .map_while(|piece| match &piece.gpu {
+                    .enumerate()
+                    .map_while(|(k, piece)| match &piece.gpu {
                         OnGpu::Raster { beyond, .. } => {
                             Some((piece.pixels.picture()?, *beyond))
                         }
-                        // A path the effect cannot reproduce -- asked of
-                        // the effect itself, which keeps its answer.
+                        // A path the effect cannot reproduce: as the atlas
+                        // found, or asked of the effect itself, which keeps
+                        // its answer, where no atlas was made.
                         OnGpu::Path(draw)
-                            if draw
-                                .spec
-                                .exact(&draw.page, draw.alpha)
-                                .is_none() =>
+                            if found_for(index + k).map_or_else(
+                                || {
+                                    draw.spec
+                                        .exact(&draw.page, draw.alpha)
+                                        .is_none()
+                                },
+                                |found| found.effect.is_none(),
+                            ) =>
                         {
                             Some((piece.pixels.picture()?, draw.beyond))
                         }
@@ -2845,7 +2883,7 @@ impl GradientDraw {
                     canvas,
                     &piece.pixels,
                     &piece.gpu,
-                    slots.get(index).and_then(Option::as_ref),
+                    found_for(index),
                 ),
             }
             index += 1;
@@ -4263,11 +4301,11 @@ pub(crate) fn play_entries(
             if ops.len() > 1 {
                 let paths: Vec<Option<&GradientPath>> =
                     ops.iter().flat_map(|op| op.paths()).collect();
-                let slots = atlas(canvas, &paths);
+                let found = atlas(canvas, &paths);
                 let mut from = 0;
                 for (k, op) in ops.iter().enumerate() {
                     let to = from + op.draws.len();
-                    op.played(canvas, target, Some(&slots[from..to]));
+                    op.played(canvas, target, Some(&found[from..to]));
                     from = to;
                     if let Some(features) =
                         features.get(at + k).filter(|_| paced)
@@ -4983,7 +5021,7 @@ impl CutOp {
     /// dyed by a gradient as its [`OnGpu`] says.
     fn play_draws(&self, canvas: &SkCanvas, target: Target) {
         let gpu = target == Target::Pixels && blur_mask::on_gpu(canvas);
-        let slots = match gpu && on_whole_pixels(canvas) {
+        let found = match gpu && on_whole_pixels(canvas) {
             true => atlas(
                 canvas,
                 &self
@@ -5006,7 +5044,7 @@ impl CutOp {
                         canvas,
                         &GradientPixels::Recorded(draw.clone()),
                         on_gpu,
-                        slots.get(index).and_then(Option::as_ref),
+                        found.get(index).and_then(Option::as_ref),
                     );
                     canvas.restore();
                 }
