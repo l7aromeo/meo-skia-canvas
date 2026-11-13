@@ -2330,9 +2330,17 @@ pub(crate) fn draw_glyphs_apart(
 ///   the scaled size: on FreeType, Oswald at 48px under a scale of 1.5 inked 16
 ///   of a glyph's pixels outside it.
 /// - Under any other transform, and for a paint with a mask filter, whose reach
-///   does not scale with the font, the box at the font's own size, mapped there
-///   -- and under any transform but a scale alike on both axes, grown by
-///   [`MAPPED_STRIKE_REACH`].
+///   does not scale with the font, the box the sheared font reports at its own
+///   size, mapped there -- and under a transform that turns or skews, grown by
+///   [`TURNED_STRIKE_REACH`].
+///
+/// Every box comes from the font sheared as the run is drawn, not from the
+/// font upright with its box sheared after. On FreeType they differ: Skia
+/// draws a glyph unhinted wherever its font is skewed or turned -- the rec
+/// filter in `SkFontHost_FreeType.cpp`, "rotated text looks bad with
+/// hinting" -- while the upright font's box is hinted. Oswald's e and o at
+/// 48px, hinted, have an upright box ending a pixel above the sheared glyph's
+/// ink.
 fn pixels_inked(
     canvas: &Canvas,
     font: &Font,
@@ -2374,7 +2382,7 @@ fn pixels_inked(
     if paint.mask_filter().is_none()
         && let Some(scale) = uniform_scale(&device)
     {
-        let mut sized = sheared;
+        let mut sized = sheared.clone();
         sized.set_size(font.size() * scale);
         let mut stroked = paint.clone();
         stroked.set_stroke_width(paint.stroke_width() * scale);
@@ -2388,34 +2396,28 @@ fn pixels_inked(
             })
             .collect();
     }
-    font.get_bounds(glyphs, &mut boxes, Some(paint));
-    let mut to_device = device;
-    to_device.pre_translate(origin);
-    if let Shear::By(shear) = shear {
-        to_device.pre_concat(shear);
-    }
-    let reach = match uniform_scale(&device) {
-        Some(_) => 0,
-        None => MAPPED_STRIKE_REACH,
+    sheared.get_bounds(glyphs, &mut boxes, Some(paint));
+    let reach = match device.is_scale_translate() {
+        true => 0,
+        false => TURNED_STRIKE_REACH,
     };
     zip(boxes, positions)
         .map(|(glyph, &at)| {
             (!glyph.is_empty()).then(|| {
-                device_pixels(glyph.with_offset(at), &to_device)
+                device_pixels(glyph.with_offset(placed(at)), &device)
                     .with_outset((reach, reach))
             })
         })
         .collect()
 }
 
-/// The pixels past its box -- at the font's own size, mapped and rounded out
-/// -- that a glyph drawn from a strike under a transform other than a scale
-/// alike on both axes can ink: one, measured, with the cause not traced. On
-/// FreeType, Oswald at 48px under a scale of 1.5 turned 10 degrees inked up to
-/// two pixels one past that box under every hinting, unhinted included, so
-/// not by hinting. On CoreText, which does not hint, Oswald at 16px and 48px
-/// under a scale of 1.5 by 1.2 and stroked 20 wide inked one pixel past it.
-const MAPPED_STRIKE_REACH: i32 = 1;
+/// The pixels past its box -- the sheared font's at its own size, mapped and
+/// rounded out -- that a glyph drawn from a strike under a transform that
+/// turns or skews can ink: one, measured, with the cause not traced. On
+/// FreeType, Oswald's q at 16px under a scale of 1.5 turned 10 degrees inked
+/// a pixel past that box, unhinted and under slight hinting. CoreText inks
+/// none past it, nor does either under a scale unlike on the two axes.
+const TURNED_STRIKE_REACH: i32 = 1;
 
 /// The device size past which Skia draws a glyph from its outline rather
 /// than from a strike: `memoryLimit` in `SkStrikeSpec::ShouldDrawAsPath`,
