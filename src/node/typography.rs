@@ -2309,10 +2309,23 @@ pub(crate) fn draw_glyphs_apart(
 }
 
 /// The pixels of `canvas` each of `glyphs` can ink, drawn as
-/// [`draw_glyphs_apart`] draws them: its box in `font`, stroked as `paint`
-/// strokes it, placed, sheared by `shear`, mapped under the canvas's
-/// transform and rounded out to whole pixels, which holds every pixel an
-/// anti-aliased edge touches. `None` for a glyph that inks nothing.
+/// [`draw_glyphs_apart`] draws them, rounded out to whole pixels, which
+/// holds every pixel an anti-aliased edge touches. `None` for a glyph that
+/// inks nothing.
+///
+/// Under a transform that only scales, alike on both axes, and moves, each
+/// glyph's box is the one `font` reports at the size the canvas draws it
+/// at, sheared as [`sheared_blob`] shears it and stroked as `paint` strokes
+/// it there: the strike the glyph is drawn from, hinted at that size. A box
+/// taken at the font's own size and scaled up does not hold a glyph hinted
+/// at the scaled size: on FreeType, Oswald at 48px under a scale of 1.5
+/// inked 16 of a glyph's pixels outside it. Under any other transform -- a
+/// turn, a scale unlike on the two axes -- the box at the font's own size
+/// is mapped there, and the containment test's turned and stretched cases
+/// hold it to the pixels drawn.
+///
+/// A paint with a mask filter takes the box at the font's own size too,
+/// since the filter's reach does not scale with the font.
 fn pixels_inked(
     canvas: &Canvas,
     font: &Font,
@@ -2323,8 +2336,33 @@ fn pixels_inked(
     paint: &Paint,
 ) -> Vec<Option<IRect>> {
     let mut boxes = vec![Rect::new_empty(); glyphs.len()];
+    let device = canvas.local_to_device_as_3x3();
+    if paint.mask_filter().is_none()
+        && let Some(scale) = uniform_scale(&device)
+    {
+        let mut sized = font.clone();
+        sized.set_size(font.size() * scale);
+        let mut stroked = paint.clone();
+        stroked.set_stroke_width(paint.stroke_width() * scale);
+        if let Shear::By(shear) = shear {
+            sized.set_skew_x(font.skew_x() + shear.skew_x());
+        }
+        sized.get_bounds(glyphs, &mut boxes, Some(&stroked));
+        return zip(boxes, positions)
+            .map(|(glyph, &at)| {
+                let moved = match shear {
+                    Shear::By(shear) => map_affine(shear, at),
+                    _ => at,
+                };
+                let placed = device.map_point(origin + moved);
+                (!glyph.is_empty()).then(|| {
+                    device_pixels(glyph.with_offset(placed), &Matrix::default())
+                })
+            })
+            .collect();
+    }
     font.get_bounds(glyphs, &mut boxes, Some(paint));
-    let mut to_device = canvas.local_to_device_as_3x3();
+    let mut to_device = device;
     to_device.pre_translate(origin);
     if let Shear::By(shear) = shear {
         to_device.pre_concat(shear);
@@ -2335,6 +2373,13 @@ fn pixels_inked(
                 .then(|| device_pixels(glyph.with_offset(at), &to_device))
         })
         .collect()
+}
+
+/// The scale `matrix` draws at where it only scales, alike on both axes,
+/// and moves, which is when Skia draws text from a strike of that size.
+fn uniform_scale(matrix: &Matrix) -> Option<f32> {
+    let (sx, sy) = (matrix.scale_x(), matrix.scale_y());
+    (matrix.is_scale_translate() && sx > 0.0 && sx == sy).then_some(sx)
 }
 
 /// The whole pixels `local` covers under `to_device`: mapped, and rounded
@@ -6733,104 +6778,175 @@ mod glyph_group_tests {
         }
     }
 
-    /// Each glyph of an oblique run, filled and stroked, drawn alone at
-    /// density 1.5 under each hinting and with subpixel positions on and
-    /// off, inks no pixel outside the pixels it is taken to ink.
+    /// A named transform the containment test draws under, made on demand
+    /// since `Matrix::scale` is not a `const fn`.
+    type Transform = (&'static str, fn() -> Matrix);
+
+    /// The transforms the containment test draws under: none, a scale alike
+    /// on both axes, which takes the glyph's box at the size drawn, and two
+    /// that do not -- a scale unlike on the two axes, and a turn.
+    const TRANSFORMS: [Transform; 4] = [
+        ("unscaled", Matrix::new_identity),
+        ("scaled", || Matrix::scale((1.5, 1.5))),
+        ("stretched", || Matrix::scale((1.5, 1.2))),
+        ("turned", || {
+            let mut turned = Matrix::scale((1.5, 1.5));
+            turned.pre_rotate(10.0, None);
+            turned
+        }),
+    ];
+
+    /// Every hinting a font takes, since FreeType moves a glyph's edges by
+    /// each differently.
+    const HINTINGS: [FontHinting; 4] = [
+        FontHinting::None,
+        FontHinting::Slight,
+        FontHinting::Normal,
+        FontHinting::Full,
+    ];
+
+    /// Each glyph of an oblique run, filled, stroked and blurred, drawn
+    /// alone under each of `TRANSFORMS`, at each size, under each of
+    /// `HINTINGS` and with subpixel positions on and off, on every font
+    /// manager the build has, inks no pixel outside the pixels it is taken
+    /// to ink.
     #[test]
     fn a_glyphs_pixels_hold_every_pixel_it_inks() {
-        let typeface = FontMgr::new()
-            .new_from_data(
-                Data::new_copy(&std::fs::read(OSWALD).expect("Oswald")),
-                None,
-            )
-            .expect("a face");
+        let data = std::fs::read(OSWALD).expect("Oswald");
+        // The system's font manager, and FreeType's where the build has it
+        // beside another: hinting moves a glyph's edges on FreeType and not
+        // on CoreText.
+        let typefaces: Vec<_> = [Some(FontMgr::new()), FontMgr::custom_empty()]
+            .into_iter()
+            .flatten()
+            .map(|manager| {
+                manager
+                    .new_from_data(Data::new_copy(&data), None)
+                    .expect("a face")
+            })
+            .collect();
         let shear = Shear::By(Matrix::skew((FAKE_ITALIC_SKEW, 0.0)));
-        let (width, height) = (420, 160);
+        let (width, height) = (1400, 700);
         let mut surface =
             started::raster_n32_premul((width, height)).expect("a surface");
-        let origin = Point::new(12.0, 70.0);
         let mut outside = Vec::new();
-        for hinting in [FontHinting::None, FontHinting::Normal] {
-            for subpixel in [false, true] {
-                for (style, blur) in [
-                    (PaintStyle::Fill, None),
-                    (PaintStyle::Stroke, None),
-                    (PaintStyle::Fill, Some(MASK_SIGMA)),
-                ] {
-                    let mut font = Font::from_typeface(typeface.clone(), 48.0);
-                    font.set_hinting(hinting).set_subpixel(subpixel);
-                    let mut paint = Paint::default();
-                    paint
-                        .set_anti_alias(true)
-                        .set_style(style)
-                        .set_stroke_width(3.0)
-                        .set_color(Color::BLACK)
-                        .set_mask_filter(blur.and_then(|sigma| {
-                            MaskFilter::blur(BlurStyle::Normal, sigma, None)
-                        }));
-                    let glyphs = font.str_to_glyphs_vec("Hello Wq");
-                    let mut advances = vec![0.0; glyphs.len()];
-                    font.get_widths(&glyphs, &mut advances);
-                    let positions: Vec<Point> = advances
-                        .iter()
-                        .scan(0.0, |x, advance| {
-                            let at = Point::new(*x, 0.0);
-                            *x += advance - 6.0;
-                            Some(at)
-                        })
-                        .collect();
-                    let canvas = surface.canvas();
-                    canvas.reset_matrix();
-                    canvas.scale((1.5, 1.5));
-                    let inked = pixels_inked(
-                        canvas, &font, &glyphs, &positions, &shear, origin,
-                        &paint,
-                    );
-                    for (at, pixels) in inked.iter().enumerate() {
-                        let canvas = surface.canvas();
-                        canvas.clear(Color::TRANSPARENT);
-                        let blob = sheared_blob(
-                            &font,
-                            &glyphs[at..=at],
-                            &positions[at..=at],
-                            shear,
-                        );
-                        if let Some(blob) = blob {
-                            canvas.draw_text_blob(&blob, origin, &paint);
-                        }
-                        let info = ImageInfo::new(
-                            (width, height),
-                            ColorType::Alpha8,
-                            AlphaType::Premul,
-                            None,
-                        );
-                        let mut alpha = vec![0u8; (width * height) as usize];
-                        assert!(surface.image_snapshot().read_pixels(
-                            &info,
-                            &mut alpha,
-                            width as usize,
-                            (0, 0),
-                            skia_safe::image::CachingHint::Allow,
-                        ));
-                        let stray = alpha
-                            .iter()
-                            .enumerate()
-                            .filter(|&(_, &a)| a > 0)
-                            .map(|(i, _)| (i as i32 % width, i as i32 / width))
-                            .filter(|&(x, y)| {
-                                !pixels.is_some_and(|p| {
-                                    p.left <= x
-                                        && x < p.right
-                                        && p.top <= y
-                                        && y < p.bottom
-                                })
-                            })
-                            .count();
-                        if stray > 0 {
-                            outside.push(format!(
-                                "{hinting:?} subpixel {subpixel} {style:?} \
-                                 glyph {at}: {stray} pixels outside {pixels:?}"
-                            ));
+        for (manager, typeface) in typefaces.iter().enumerate() {
+            for (transform, matrix) in TRANSFORMS {
+                for (size, text) in
+                    [(16.0, "Hello Wq"), (48.0, "Hello Wq"), (200.0, "Wq")]
+                {
+                    for hinting in HINTINGS {
+                        for subpixel in [false, true] {
+                            for (style, blur) in [
+                                (PaintStyle::Fill, None),
+                                (PaintStyle::Stroke, None),
+                                (PaintStyle::Fill, Some(MASK_SIGMA)),
+                            ] {
+                                let mut font =
+                                    Font::from_typeface(typeface.clone(), size);
+                                font.set_hinting(hinting)
+                                    .set_subpixel(subpixel);
+                                let mut paint = Paint::default();
+                                paint
+                                    .set_anti_alias(true)
+                                    .set_style(style)
+                                    .set_stroke_width(3.0)
+                                    .set_color(Color::BLACK)
+                                    .set_mask_filter(blur.and_then(|sigma| {
+                                        MaskFilter::blur(
+                                            BlurStyle::Normal,
+                                            sigma,
+                                            None,
+                                        )
+                                    }));
+                                let glyphs = font.str_to_glyphs_vec(text);
+                                let mut advances = vec![0.0; glyphs.len()];
+                                font.get_widths(&glyphs, &mut advances);
+                                let positions: Vec<Point> = advances
+                                    .iter()
+                                    .scan(0.0, |x, advance| {
+                                        let at = Point::new(*x, 0.0);
+                                        *x += advance - size / 8.0;
+                                        Some(at)
+                                    })
+                                    .collect();
+                                let origin = Point::new(12.3, size * 1.1);
+                                let canvas = surface.canvas();
+                                canvas.reset_matrix();
+                                canvas.concat(&matrix());
+                                let inked = pixels_inked(
+                                    canvas, &font, &glyphs, &positions, &shear,
+                                    origin, &paint,
+                                );
+                                for (at, pixels) in inked.iter().enumerate() {
+                                    let canvas = surface.canvas();
+                                    canvas.clear(Color::TRANSPARENT);
+                                    let blob = sheared_blob(
+                                        &font,
+                                        &glyphs[at..=at],
+                                        &positions[at..=at],
+                                        shear,
+                                    );
+                                    if let Some(blob) = blob {
+                                        canvas.draw_text_blob(
+                                            &blob, origin, &paint,
+                                        );
+                                    }
+                                    let info = ImageInfo::new(
+                                        (width, height),
+                                        ColorType::Alpha8,
+                                        AlphaType::Premul,
+                                        None,
+                                    );
+                                    let mut alpha =
+                                        vec![0u8; (width * height) as usize];
+                                    assert!(surface.image_snapshot().read_pixels(
+                                        &info,
+                                        &mut alpha,
+                                        width as usize,
+                                        (0, 0),
+                                        skia_safe::image::CachingHint::Allow,
+                                    ));
+                                    // How many inked pixels fall outside, and
+                                    // how
+                                    // far the farthest of them stands.
+                                    let (stray, farthest) = alpha
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|&(_, &a)| a > 0)
+                                        .map(|(i, _)| {
+                                            (i as i32 % width, i as i32 / width)
+                                        })
+                                        .map(|(x, y)| match pixels {
+                                            Some(p) => [
+                                                p.left - x,
+                                                x + 1 - p.right,
+                                                p.top - y,
+                                                y + 1 - p.bottom,
+                                            ]
+                                            .into_iter()
+                                            .max()
+                                            .unwrap_or(0),
+                                            None => i32::MAX,
+                                        })
+                                        .filter(|&beyond| beyond > 0)
+                                        .fold(
+                                            (0, 0),
+                                            |(count, most), beyond| {
+                                                (count + 1, most.max(beyond))
+                                            },
+                                        );
+                                    if stray > 0 {
+                                        outside.push(format!(
+                                            "manager {manager} {transform} size {size} \
+                                             {hinting:?} subpixel {subpixel} \
+                                             {style:?} blur {blur:?} glyph {at}: \
+                                             {stray} pixels outside {pixels:?}, \
+                                             the farthest {farthest} beyond"
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
