@@ -7296,6 +7296,135 @@ mod tests {
 }
 
 #[cfg(test)]
+mod release_tests {
+    //! A page drops its recorders as it files them and as it is read, and
+    //! begins them again at the next draw -- see
+    //! `page::PageRecorder::release_recorders`. A scene of draws and reads
+    //! is held to what it leaves with the recorders kept and begun again
+    //! at once, as a page kept them before, and to what it leaves with no
+    //! read between its draws, on either engine.
+
+    use super::page::RELEASES_RECORDERS;
+    use crate::prelude::*;
+
+    const SIDE: (f32, f32) = (120.0, 80.0);
+
+    /// Reads the whole page, as a script reading back a frame does.
+    fn read(ctx: &mut Context2D) {
+        ctx.get_image_data(0.0, 0.0, SIDE.0, SIDE.1)
+            .expect("a read");
+    }
+
+    /// Draws between reads, `between` called where a read may stand: under
+    /// the state the last draw left, inside a clip a run records, after a
+    /// transform set with nothing drawn inside the clip and outside it,
+    /// around an unclipped
+    /// `putImageData` and a shadow, and over three frames of an animation
+    /// that clears part of the page each frame.
+    fn scene(ctx: &mut Context2D, between: &dyn Fn(&mut Context2D)) {
+        let colour = |r, g, b, a| RgbaLinear::from_srgb8(r, g, b, a);
+        ctx.set_fill_style(colour(200, 40, 120, 0.7));
+        ctx.fill_rect(5.0, 5.0, 40.0, 30.0);
+        between(ctx);
+        ctx.fill_rect(30.0, 20.0, 40.0, 30.0);
+        ctx.save();
+        ctx.translate(20.0, 10.0);
+        ctx.rotate(0.3);
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, 50.0, 40.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.set_global_alpha(0.6);
+        ctx.fill_rect(-10.0, -10.0, 80.0, 80.0);
+        between(ctx);
+        ctx.set_fill_style(colour(30, 160, 60, 0.8));
+        ctx.fill_rect(10.0, 10.0, 30.0, 30.0);
+        between(ctx);
+        ctx.translate(5.0, 5.0);
+        between(ctx);
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.restore();
+        // A transform set with nothing drawn since a read, read, and drawn
+        // under with no state set between: outside a clip, so that the
+        // page's own recording, not a run, frames the draw.
+        between(ctx);
+        ctx.translate(7.0, 3.0);
+        between(ctx);
+        ctx.fill_rect(2.0, 50.0, 14.0, 14.0);
+        ctx.reset_transform();
+        let block = ctx.get_image_data(0.0, 0.0, 40.0, 40.0).expect("a read");
+        ctx.scale(1.5, 1.25);
+        ctx.put_image_data(&block, 60.0, 30.0).expect("a write");
+        between(ctx);
+        ctx.fill_rect(4.0, 40.0, 10.0, 10.0);
+        ctx.set_shadow_color(colour(0, 0, 90, 0.9));
+        ctx.set_shadow_blur(4.0);
+        ctx.fill_rect(50.0, 5.0, 20.0, 20.0);
+        between(ctx);
+        ctx.set_shadow_blur(0.0);
+        for frame in 0..3 {
+            let x = 70.0 + frame as f32 * 6.0;
+            ctx.clear_rect(60.0, 0.0, 40.0, 30.0);
+            ctx.fill_rect(x, 8.0, 12.0, 12.0);
+            between(ctx);
+        }
+    }
+
+    /// What the scene leaves on an eight-bit sRGB page on the engine `gpu`
+    /// names -- its pixels, and its PDF -- with the page releasing its
+    /// recorders or keeping them, and with a read or nothing where the
+    /// scene may read; `None` where no GPU engine starts.
+    fn drawn(
+        gpu: bool,
+        releases: bool,
+        reads: bool,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        RELEASES_RECORDERS.set(releases);
+        let mut canvas = Canvas::new(SIDE.0, SIDE.1);
+        canvas.set_gpu(gpu);
+        let started = !gpu || canvas.engine_kind() == EngineKind::Gpu;
+        if started {
+            let between: &dyn Fn(&mut Context2D) = match reads {
+                true => &read,
+                false => &|_| {},
+            };
+            scene(canvas.context(), between);
+        }
+        let mut bytes = |format| {
+            canvas
+                .to_buffer(format, &EncodeOptions::default())
+                .expect("encodes")
+        };
+        let kept =
+            started.then(|| (bytes(ImageFormat::Raw), bytes(ImageFormat::Pdf)));
+        RELEASES_RECORDERS.set(true);
+        kept
+    }
+
+    #[test]
+    fn a_page_drawn_and_read_by_turns_draws_as_one_that_kept_its_recorders() {
+        for gpu in [false, true] {
+            let Some(released) = drawn(gpu, true, true) else {
+                continue;
+            };
+            let kept = drawn(gpu, false, true).expect("the same engine");
+            let unread = drawn(gpu, true, false).expect("the same engine");
+            assert!(
+                released.0.iter().any(|&byte| byte != 0),
+                "gpu {gpu}: nothing was drawn"
+            );
+            assert!(
+                released == kept,
+                "gpu {gpu}: released recorders drew or wrote otherwise"
+            );
+            assert!(
+                released.0 == unread.0,
+                "gpu {gpu}: a read between draws changed the pixels"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod fork_tests {
     //! A page that keeps two recordings forks them only at the first draw
     //! that records differently in each -- see `page::Recorders::fork`.

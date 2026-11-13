@@ -628,6 +628,16 @@ thread_local! {
     pub(crate) static FORKS_LAZILY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether a page drops its recorders as it files them and as it is
+    /// read, on this thread: off, it begins its recordings again the moment
+    /// it files them, at depth 1 and unframed, and a read keeps them and the
+    /// spares -- the reference [`PageRecorder::release_recorders`] and the
+    /// lazy begin are held to.
+    pub(crate) static RELEASES_RECORDERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 impl Recorders {
     fn new(bounds: Rect, dual: bool) -> Self {
         Self::new_with(bounds, dual, true)
@@ -1621,6 +1631,8 @@ impl PageRecorder {
             layer.entry_features.push(layer.current_features);
         }
         layer.current_features = VectorFeatures::PLAIN;
+        #[cfg(test)]
+        self.begun_again_eagerly();
         self.framed = false;
         self.changed = false;
         self.filtered = 0;
@@ -1957,6 +1969,8 @@ impl PageRecorder {
 
         // The recordings were dropped as they were filed, and the next draw
         // begins new ones, framed as the page then stands.
+        #[cfg(test)]
+        self.begun_again_eagerly();
         self.framed = false;
         self.changed = false;
         self.filtered = 0;
@@ -2460,6 +2474,10 @@ impl PageRecorder {
     /// The frame's run keeps its own: a read splits it rather than ending
     /// it -- see [`Self::split_run`] -- and it goes on recording.
     fn release_recorders(&mut self) {
+        #[cfg(test)]
+        if !RELEASES_RECORDERS.get() {
+            return;
+        }
         if self.changed {
             return;
         }
@@ -2469,6 +2487,21 @@ impl PageRecorder {
         }
         self.spare = None;
         self.cut_spare = None;
+    }
+
+    /// With [`RELEASES_RECORDERS`] off, begins the page's recordings again
+    /// as they are filed, at depth 1 and unframed, as a page did before it
+    /// dropped them.
+    #[cfg(test)]
+    fn begun_again_eagerly(&mut self) {
+        if RELEASES_RECORDERS.get() {
+            return;
+        }
+        let mut recorders = Recorders::new(self.bounds, self.dual);
+        recorders.each(|canvas, _| {
+            canvas.restore_to_count(1);
+        });
+        self.current = Some(recorders);
     }
 
     /// The page as filed: everything but the layers still open. The
