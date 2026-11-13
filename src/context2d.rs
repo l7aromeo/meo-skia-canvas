@@ -5725,11 +5725,17 @@ mod overlapping_glyph_tests {
         bytes
     }
 
-    /// How much further than under `source-over` a route may stand from the
-    /// CPU under a blend read in the shader: 1 level, the blend's own
-    /// rounding of bytes that already stand apart. Under `blur(1px)` the
-    /// GPU's chain stood 36 levels from the CPU's under `source-over` and
-    /// 37 under `multiply`, drawn whole, apart, or as the canvas chose.
+    /// The GPU's blend rounding allowance: how much further than under
+    /// `source-over` a route's GPU canvas may stand from its CPU canvas under
+    /// a blend read in the shader. Where the GPU's source pixels already
+    /// stand apart from the CPU's, the blend rounds that difference to a
+    /// byte once more on each engine, and the two roundings can part by one
+    /// level. One is what was measured, not chosen: under `blur(1px)` the
+    /// GPU's chain stood 36 levels from the CPU's under `source-over` and 37
+    /// under `multiply`, the same whether the run's glyphs were drawn whole,
+    /// apart or as the canvas chose, so the extra level is not the glyphs'.
+    /// Held by [`every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu`]
+    /// and [`a_run_read_smaller_blends_its_glyphs_on_the_gpu_as_on_the_cpu`].
     const BLEND_ROUNDING: u8 = 1;
 
     /// Every route draws a run whole on the CPU, and blends its glyphs on
