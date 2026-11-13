@@ -3,11 +3,11 @@
 "use strict";
 
 // What GPU canvases made and dropped hold stays bounded without anything
-// forcing a collection. Judged by the memory the process holds, where the CPU
-// test, `dropped-canvas-memory.test.js`, judges the count of canvases alive --
-// see `tests/support/live-canvases.js`, which both follow.
+// forcing a collection. Judged by the memory the process holds, as the CPU
+// test, `dropped-canvas-memory.test.js`, judges it -- see
+// `tests/support/live-canvases.js`, which both follow.
 //
-// The count would not hold here. The pages on a thread are kept to a budget,
+// The count of canvases alive would not hold here. The pages on a thread are kept to a budget,
 // and V8 is told exactly what a canvas holds in pixels, which for these pages
 // is too little to start a collection: V8 collects them on its own heap's
 // schedule, so the count climbs with every pass while what they hold does
