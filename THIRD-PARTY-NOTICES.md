@@ -54,8 +54,20 @@ build rather than from a list kept by hand:
   saying where it was taken from. A crate with neither stops the notices, and with them the
   release build. No generic text stands in.
 
+Two licences ask more of a binary's documentation than their text: each requires a statement of
+its own, and a sentence quoted inside the licence is not that statement. FreeType's FTL requires a
+binary's documentation to state that it is based in part on the work of the FreeType Team, and
+credits the FreeType Project in the form FTL.TXT gives, dated by the release's own `freetype.h`;
+FreeType is dual-licensed, so the section also says it is used under the FTL and not the GPLv2.
+libjpeg-turbo's IJG clause requires a binary that links it statically to state that it is "based in
+part on the work of the Independent JPEG Group". Each notices file makes these statements in the
+project's section, above its licence texts, and the script refuses to write or join a file whose
+section lacks one.
+
 `just check-notices` runs the script's self-test and checks that every crate each target in
 `lib/targets.json` links has a text, and that `licences/crates` holds nothing else.
+`node scripts/notices.mjs check <file>...` checks notices files already written for those
+statements.
 
 ## The licence audit
 
@@ -91,6 +103,13 @@ licenses` reads both numbers back out of this file and fails when what it counte
 Skia's C and C++ dependencies are invisible to Cargo, so no `cargo` tool reports them. The audit
 above is of Rust crates; the notices for the rest come from Skia's build record, as described
 above.
+
+Read for what each licence asks beyond its text, on 2026-11-13: FreeType's FTL and libjpeg-turbo's
+IJG clause require the statements above. libpng and zlib say an acknowledgement "would be
+appreciated" and do not require one. Apache-2.0 asks a binary to carry the attribution notices of a
+`NOTICE` file, and no project or crate here ships one. Fontconfig's licence forbids using its
+authors' names in advertising and asks for nothing to be said. Every other licence asks only that
+its text travel with the binary.
 
 AV1 is patent-encumbered, and libaom, which the AVIF encoder and decoder are built on, ships a grant
 rather than a warranty. Its `PATENTS` file is the Alliance for Open Media Patent License 1.0: a
