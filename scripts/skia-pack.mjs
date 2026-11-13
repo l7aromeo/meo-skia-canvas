@@ -58,7 +58,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildScriptLogs } from "./check-patched-skia.mjs";
+import {
+  buildScriptLogs,
+  buildScriptRuns,
+  profileBuildDirs,
+} from "./cargo-build-dir.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -186,8 +190,8 @@ export function builtLibraries(features) {
  * `builtLibraries` names, `bindings.rs`, and `icudtl.dat` on Windows with
  * `textlayout`.
  *
- * The build's `output` has to link those libraries, so that an archive cannot
- * be packed for features other than the build's, and it does so the way
+ * The build script's stdout has to link those libraries, so that an archive
+ * cannot be packed for features other than the build's, and it does so the way
  * skia-bindings prints them: one run of consecutive lines in that order
  * (binaries_config.rs `commit_to_cargo`), each `rustc-link-lib=static=<name>`,
  * or on Windows, where `static=` breaks the link, `rustc-link-lib=<name>`
@@ -536,10 +540,10 @@ function cases(scratch) {
       const got = key(...args);
       if (got !== expected) throw new Error(`key ${got}, not ${expected}`);
     };
-  // A build dir in the shape a skia-bindings build leaves, its `output`
-  // linking `libs`, with `files` present in `out/skia`.
-  // `layout` "nightly" writes the log where nightly cargo's build directory
-  // keeps it, `run/stdout`, rather than stable's `output`.
+  // A build dir in the shape a skia-bindings build leaves, its log linking
+  // `libs`, with `files` present in `out/skia`. `layout` "1.100" writes the
+  // log where cargo 1.100 keeps it, `run/stdout`, rather than the earlier
+  // layout's `output`; see scripts/cargo-build-dir.mjs.
   // On Windows skia-bindings names the libraries it built with a bare
   // `rustc-link-lib=`, as it does the system ones (cargo.rs
   // `add_static_link_lib`); elsewhere with `static=`.
@@ -553,11 +557,11 @@ function cases(scratch) {
   ) => {
     const dir = join(scratch, name);
     mkdirSync(join(dir, "out", "skia"), { recursive: true });
-    if (layout === "nightly") mkdirSync(join(dir, "run"));
+    if (layout === "1.100") mkdirSync(join(dir, "run"));
     const windowsForm = files.some((file) => file.endsWith(".lib"));
     const prefix = form ?? (windowsForm ? "" : "static=");
     writeFileSync(
-      join(dir, layout === "nightly" ? "run/stdout" : "output"),
+      join(dir, layout === "1.100" ? "run/stdout" : "output"),
       [
         "STARTING OFFLINE BUILD",
         ...before,
@@ -1026,10 +1030,10 @@ function cases(scratch) {
       packs(build("linux", libs, unixFiles), linux, () => null, unixFiles),
     ],
     [
-      "a build in nightly cargo's directory layout packs the same",
+      "a build in cargo 1.100's directory layout packs the same",
       true,
       packs(
-        build("nightly", libs, unixFiles, { layout: "nightly" }),
+        build("cargo-1.100", libs, unixFiles, { layout: "1.100" }),
         "x86_64-unknown-linux-musl",
         () => null,
         unixFiles,
@@ -1496,21 +1500,15 @@ if (main) {
         throw new Error(
           "usage: node scripts/skia-pack.mjs consumer <target-dir> patched|stock",
         );
-      const logs = (prefix) =>
-        readdirSync(targetDir, { recursive: true })
-          .map(String)
-          .filter((path) => {
-            const parts = path.split(/[\\/]/);
-            return (
-              parts.at(-1) === "output" &&
-              parts.at(-3) === "build" &&
-              parts.at(-2).startsWith(prefix)
-            );
-          })
-          .map((path) => readFileSync(join(targetDir, path), "utf8"));
+      const logs = (pkg) =>
+        profileBuildDirs(targetDir)
+          .flatMap((build) => buildScriptRuns(build, pkg))
+          .map((dir) => buildScriptLogs(dir).output)
+          .filter(existsSync)
+          .map((path) => readFileSync(path, "utf8"));
       const why = consumerRefusal(
-        logs("skia-bindings-"),
-        logs("meo-skia-canvas-"),
+        logs("skia-bindings"),
+        logs("meo-skia-canvas"),
         mode,
       );
       if (why) throw new Error(`skia-pack: ${mode} crate build: ${why}`);

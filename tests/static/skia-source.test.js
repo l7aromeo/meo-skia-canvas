@@ -689,7 +689,8 @@ function withCache(t, dir) {
 /**
  * Writes a skia-bindings out-dir's `output` holding `lines` into the
  * `profile` directory of `worktree`'s target -- `debug`, or a target triple
- * and a profile.
+ * and a profile -- with the `root-output` cargo writes beside it, by which a
+ * run is told from the other directories under `build`.
  */
 function builtFrom(worktree, profile, lines) {
   const dir = join(
@@ -704,6 +705,7 @@ function builtFrom(worktree, profile, lines) {
     join(dir, "output"),
     `cargo:rustc-link-lib=static=skia\n${lines.join("\n")}\n`,
   );
+  writeFileSync(join(dir, "root-output"), join(dir, "out"));
 }
 
 /**
