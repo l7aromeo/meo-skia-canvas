@@ -21,9 +21,11 @@ use std::sync::Arc;
 
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
-    ColorSpace, ColorType, FilterMode, IRect, Image, ImageFilter, ImageInfo,
-    Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions, Shader,
-    Surface, Vector, color_filters,
+    ColorSpace, ColorType, FilterMode, IPoint, IRect, Image, ImageFilter,
+    ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions,
+    Shader, Surface, Vector,
+    canvas::SrcRectConstraint,
+    color_filters,
     image::{CachingHint, RequiredProperties},
     image_filter::MapDirection,
     image_filters,
@@ -192,7 +194,9 @@ pub(crate) fn apply(
 /// The image holds the part `inked` of the region, in the region's own
 /// pixels, and every pixel of the region outside it is transparent black:
 /// the whole region, unless whoever made the result counted -- see
-/// [`Self::with_inked`]. A blur works on its reach of [`REACH_SIGMAS`]
+/// [`Self::with_inked`]. The inked part lies at `source` in the image: at its
+/// origin, but for results a batch of chains made in one shared target --
+/// see [`Self::in_shared`]. A blur works on its reach of [`REACH_SIGMAS`]
 /// sigmas past what it reads, and what it leaves rounds to zero long before
 /// that: of the 124 by 89 pixels a 40px sans-serif "Ag" under `blur(3px)`
 /// works on with CoreText, 62 by 54 are inked.
@@ -202,6 +206,7 @@ pub(crate) struct Outcome {
     region: IRect,
     rest: Matrix,
     inked: IRect,
+    source: IPoint,
 }
 
 impl Outcome {
@@ -214,6 +219,25 @@ impl Outcome {
             region,
             rest,
             inked,
+            source: IPoint::new(0, 0),
+        }
+    }
+
+    /// The result of a chain covering all of `region` under `rest` that a
+    /// batch made in `shared`, one target holding every chain's result, the
+    /// region's pixel `(0, 0)` at `at` in it.
+    pub(crate) fn in_shared(
+        shared: Image,
+        at: (i32, i32),
+        region: IRect,
+        rest: Matrix,
+    ) -> Self {
+        Self {
+            image: shared,
+            inked: IRect::from_size(region.size()),
+            region,
+            rest,
+            source: IPoint::new(at.0, at.1),
         }
     }
 
@@ -245,6 +269,7 @@ impl Outcome {
             region,
             rest,
             inked,
+            source: IPoint::new(0, 0),
         }
     }
 
@@ -268,6 +293,43 @@ impl Outcome {
         let trimmed = self.rest.is_identity()
             && trims_composite()
             && leaves_transparent_alone(&paint);
+        // A result a batch made in a shared target is drawn from its own
+        // part of it, held to that part as an image of its own is held to
+        // its edges.
+        if !self.inked.is_empty()
+            && (self.source != IPoint::new(0, 0)
+                || self.image.dimensions() != self.inked.size())
+        {
+            #[cfg(test)]
+            if trimmed {
+                TRIMMED.set(TRIMMED.get() + 1);
+            }
+            let from = IRect::from_xywh(
+                self.source.x,
+                self.source.y,
+                self.inked.width(),
+                self.inked.height(),
+            );
+            let to =
+                self.inked.with_offset((self.region.left, self.region.top));
+            let sampling = match self.rest.is_identity() {
+                true => nearest,
+                false => {
+                    SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
+                }
+            };
+            canvas.save();
+            canvas.set_matrix(&self.rest.into());
+            canvas.draw_image_rect_with_sampling_options(
+                &self.image,
+                Some((&Rect::from(from), SrcRectConstraint::Strict)),
+                Rect::from(to),
+                sampling,
+                &paint,
+            );
+            canvas.restore();
+            return;
+        }
         let (image, at, sampling) = match trimmed {
             true => {
                 #[cfg(test)]
@@ -335,6 +397,7 @@ impl Outcome {
             region: self.region.with_offset(by),
             rest: self.rest,
             inked: self.inked,
+            source: self.source,
         })
     }
 }
@@ -676,6 +739,276 @@ impl Drawn {
     }
 }
 
+/// The shadows of a run's chains, made in passes they share -- see
+/// [`exact_blur_gpu::shadows`]: each chain whose one step casts a blurred
+/// shadow is copied, as its layer is drawn, into a lane of one target, the
+/// atlas, and once every layer is drawn the shadows cast by the same sigma
+/// are made together. A run then pays its layers, the atlas and the passes
+/// of one shadow for each sigma among them, however many layers its chains
+/// were drawn in and whether or not any of them shares one, every pass a
+/// render pass of its own. Each
+/// chain reads only its own region of its lane, as a chain alone reads its
+/// region copied out of its layer, so its bytes are those it makes alone.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+pub(crate) struct ShadowAtlas {
+    /// Where each of the run's chains lies in the atlas, its worked
+    /// rectangle's origin: `None` for a chain the atlas leaves alone.
+    places: Vec<Option<(i32, i32)>>,
+    /// The atlas's size, which holds every place.
+    size: (usize, usize),
+    /// The atlas, made with the first chain copied into it, of that chain's
+    /// layer's type and colour space.
+    surface: Option<Surface>,
+    /// Each chain copied in.
+    jobs: Vec<Staged>,
+}
+
+/// A chain [`ShadowAtlas`] holds.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+struct Staged {
+    /// The chain's index in the run.
+    index: usize,
+    /// The bits of its sigma, which the chains made together share.
+    sigma: (u32, u32),
+    /// Its shadow, with its lane in the atlas.
+    job: exact_blur_gpu::ShadowJob,
+    /// The rectangle its result composites over.
+    worked: IRect,
+    /// The transform its result composites through.
+    rest: Matrix,
+}
+
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+impl ShadowAtlas {
+    /// An atlas for those of `chains` that cast a blurred shadow and
+    /// nothing else, as many of them, in order, as one target of at most
+    /// `max` pixels a side holds. `None` where fewer than two would share it,
+    /// which gains nothing.
+    pub(crate) fn plan(
+        chains: &[(&Plan, &[Step])],
+        max: usize,
+    ) -> Option<Self> {
+        let candidates: Vec<(usize, (usize, usize))> = chains
+            .iter()
+            .enumerate()
+            .filter(|(_, (plan, steps))| shadow_sigma(plan, steps).is_some())
+            .map(|(i, (plan, _))| {
+                let worked = plan.worked;
+                (i, (worked.width() as usize, worked.height() as usize))
+            })
+            .collect();
+        let sizes: Vec<(usize, usize)> =
+            candidates.iter().map(|&(_, size)| size).collect();
+        // The longest leading run of candidates one target holds: what fits
+        // shrinks with what is left out, so the lengths that fit are those
+        // up to some length, found by halving.
+        let fits = |n: usize| exact_blur_gpu::shelves(&sizes[..n], max);
+        let (mut lo, mut hi) = (0, sizes.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            match fits(mid) {
+                Some(_) => lo = mid,
+                None => hi = mid - 1,
+            }
+        }
+        if lo < 2 {
+            return None;
+        }
+        let (size, at) = fits(lo)?;
+        let mut places = vec![None; chains.len()];
+        for (&(i, _), place) in candidates.iter().zip(at) {
+            places[i] = Some(place);
+        }
+        Some(Self {
+            places,
+            size,
+            surface: None,
+            jobs: Vec::new(),
+        })
+    }
+
+    /// Each copied chain's result, by its index in the run, made from the
+    /// atlas on `context`; and the chains whose shared passes could not be
+    /// made, or that have no context to be made on, which then finish
+    /// alone.
+    pub(crate) fn finish(
+        self,
+        context: Option<&mut Gpu>,
+    ) -> (Vec<(usize, Outcome)>, Vec<usize>) {
+        let (Some(mut surface), Some(context)) = (self.surface, context) else {
+            return (
+                Vec::new(),
+                self.jobs.iter().map(|job| job.index).collect(),
+            );
+        };
+        let atlas = surface.image_snapshot();
+        let mut sigmas: Vec<(u32, u32)> =
+            self.jobs.iter().map(|job| job.sigma).collect();
+        sigmas.sort_unstable();
+        sigmas.dedup();
+        let (mut done, mut failed) = (Vec::new(), Vec::new());
+        for sigma in sigmas {
+            let batch: Vec<_> =
+                self.jobs.iter().filter(|job| job.sigma == sigma).collect();
+            let jobs: Vec<exact_blur_gpu::ShadowJob> =
+                batch.iter().map(|job| job.job).collect();
+            match exact_blur_gpu::shadows(
+                context,
+                &atlas,
+                (f32::from_bits(sigma.0), f32::from_bits(sigma.1)),
+                &jobs,
+            ) {
+                Some((shared, places)) => {
+                    for (job, at) in batch.iter().zip(places) {
+                        done.push((
+                            job.index,
+                            Outcome::in_shared(
+                                shared.clone(),
+                                at,
+                                job.worked,
+                                job.rest,
+                            ),
+                        ));
+                    }
+                }
+                None => failed.extend(batch.iter().map(|job| job.index)),
+            }
+        }
+        (done, failed)
+    }
+}
+
+/// The sigma a chain of `steps` planned as `plan` blurs its shadow by, in
+/// its layer's pixels, where its one step casts a blurred shadow -- what
+/// [`ShadowAtlas`] takes. `None` for any other chain.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn shadow_sigma(plan: &Plan, steps: &[Step]) -> Option<(f32, f32)> {
+    let [Step::Shadow { sigma, .. }] = steps else {
+        return None;
+    };
+    let scale = (plan.layer.scale_x().abs(), plan.layer.scale_y().abs());
+    let sigma = (sigma * scale.0, sigma * scale.1);
+    (sigma.0 > 0.0 || sigma.1 > 0.0).then_some(sigma)
+}
+
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+impl Drawn {
+    /// Copies the chain the run knows as `index`, planned into this layer
+    /// as `plan`, with its steps and the paint its last step takes the
+    /// alpha of, into `atlas`, to be finished there -- see [`ShadowAtlas`].
+    /// Whether it did: a chain the atlas has no place for, one on a layer
+    /// that is not a GPU layer of bytes in the atlas's type and colour
+    /// space, and one whose shadow colour has no tint, are finished alone.
+    pub(crate) fn stage(
+        &mut self,
+        atlas: &mut ShadowAtlas,
+        index: usize,
+        (plan, steps, paint): (&Plan, &[Step], &Paint),
+    ) -> bool {
+        let Some(place) = atlas.places.get(index).copied().flatten() else {
+            return false;
+        };
+        let (
+            Some(sigma),
+            [
+                Step::Shadow {
+                    offset,
+                    colour,
+                    space,
+                    shadow_only,
+                    ..
+                },
+            ],
+        ) = (shadow_sigma(plan, steps), steps)
+        else {
+            return false;
+        };
+        let Some(context) = self.context.as_mut() else {
+            return false;
+        };
+        let info = self.snapshot.image_info();
+        if !matches!(
+            info.color_type(),
+            ColorType::RGBA8888 | ColorType::BGRA8888
+        ) {
+            return false;
+        }
+        let Some(tint) = tint_colour(*colour, space, info) else {
+            return false;
+        };
+        let surface = match &mut atlas.surface {
+            Some(surface) => {
+                let held = surface.image_info();
+                let alike = held.color_type() == info.color_type()
+                    && held.color_space() == info.color_space();
+                if !alike {
+                    return false;
+                }
+                surface
+            }
+            none => {
+                let info = info.with_dimensions((
+                    atlas.size.0 as i32,
+                    atlas.size.1 as i32,
+                ));
+                let Some(mut surface) = make_surface(Some(context), &info)
+                else {
+                    return false;
+                };
+                clear_unless_zeroed(&mut surface);
+                none.insert(surface)
+            }
+        };
+        let (region, worked) = (plan.region, plan.worked);
+        // The region, byte for byte, where it lies in the chain's worked
+        // rectangle at its place: what a chain alone copies out of its layer.
+        let from = IRect::from_xywh(
+            region.left - self.at.left,
+            region.top - self.at.top,
+            region.width(),
+            region.height(),
+        );
+        let to = IRect::from_xywh(
+            place.0 + region.left - worked.left,
+            place.1 + region.top - worked.top,
+            region.width(),
+            region.height(),
+        );
+        let mut copy = Paint::default();
+        copy.set_blend_mode(BlendMode::Src);
+        surface.canvas().draw_image_rect_with_sampling_options(
+            &self.snapshot,
+            Some((&Rect::from(from), SrcRectConstraint::Strict)),
+            Rect::from(to),
+            SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+            &copy,
+        );
+        let scale = (plan.layer.scale_x().abs(), plan.layer.scale_y().abs());
+        let job = exact_blur_gpu::ShadowJob {
+            from: place,
+            reads: IRect::from_xywh(
+                region.left - worked.left,
+                region.top - worked.top,
+                region.width(),
+                region.height(),
+            ),
+            size: (worked.width() as usize, worked.height() as usize),
+            offset: (offset.x * scale.0, offset.y * scale.1),
+            tint,
+            gain: paint.alpha_f(),
+            shadow_only: *shadow_only,
+        };
+        atlas.jobs.push(Staged {
+            index,
+            sigma: (sigma.0.to_bits(), sigma.1.to_bits()),
+            job,
+            worked,
+            rest: plan.rest,
+        });
+        true
+    }
+}
+
 /// `image`, which holds `region` of the layer, with nothing around it out
 /// to `worked`: the pixels the chain works on that nothing is painted in.
 fn padded(
@@ -717,6 +1050,11 @@ thread_local! {
     /// fallback on a page small enough to compare against.
     pub(crate) static REFUSE_PLACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
+    /// Whether [`shares_layers`] says no, as it does on Vulkan, so that a
+    /// test on Metal can hold a page whose chains each take a layer of
+    /// their own to what it lands and the passes it pays.
+    pub(crate) static UNSHARED_LAYERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// How many layers [`Drawn::new`] has made on this thread, which the
     /// tests of chains sharing a layer count by.
     pub(crate) static SHARED_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -729,6 +1067,18 @@ thread_local! {
     /// The most pixels a chain [`plan`] on this thread has worked on, which
     /// the tests of a chain's layer size count by.
     pub(crate) static LARGEST_REGION: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+
+    /// How many GPU targets a chain has opened on this thread after its
+    /// layer -- a region copied out of it, padded, a run's atlas, a blur's
+    /// pass, a shadow's composition -- each one a render pass of its own,
+    /// which the tests of how many passes a page of chains costs count by.
+    pub(crate) static OFFSCREEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one GPU target a chain opens -- see [`OFFSCREEN`].
+#[cfg(test)]
+pub(crate) fn opened_offscreen() {
+    OFFSCREEN.with(|n| n.set(n.get() + 1));
 }
 
 /// `base` as `rest * layer`: `layer` the scale from canvas pixels to the
@@ -1225,6 +1575,10 @@ fn subset(
     context: Option<&mut Gpu>,
     read: IRect,
 ) -> Option<Image> {
+    #[cfg(test)]
+    if context.is_some() {
+        opened_offscreen();
+    }
     let recorder =
         context.map(|context| context.as_recorder() as &mut dyn Recorder);
     image.make_subset(recorder, read, RequiredProperties { mipmapped: false })
@@ -1270,9 +1624,12 @@ pub(crate) fn is_on_gpu(canvas: &SkCanvas) -> bool {
 /// level apart at their corners, 4 to 8 pixels each, and 3 still do moved a
 /// hundredth of a pixel off the grid; shared, 181 to 243 pixels of a page of
 /// 12 blurred chains moved. A draw over the whole layer after each chain,
-/// which stops the merge and changes no pixel, brings both to none. No
+/// which stops the merge and changes no pixel, brings both to none. On an
+/// NVIDIA GTX 1050 Ti, driver 580.178.04, it does not either: the same 4 of
+/// 12 moved, and 7 of the sharing tests fail with sharing turned on. No
 /// other Vulkan device has been measured, so none shares; #524 tracks
-/// measuring them.
+/// measuring them. Chains that share no layer still share their shadows'
+/// passes -- see [`ShadowAtlas`].
 // UPSTREAM: Mesa llvmpipe 25.0.7 -- unfiled -- worked around
 // Re-check: cargo test a_rounded_rect_drawn_among_others_draws_as_it_does_alone
 // run with `--ignored` in a `vulkan` build on llvmpipe, where it fails while
@@ -1281,6 +1638,10 @@ pub(crate) fn is_on_gpu(canvas: &SkCanvas) -> bool {
 // what would let Vulkan share.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) fn shares_layers(canvas: &SkCanvas) -> bool {
+    #[cfg(test)]
+    if UNSHARED_LAYERS.with(std::cell::Cell::get) {
+        return false;
+    }
     canvas.recording_context().is_some_and(|context| {
         context.backend() == gpu::ganesh::BackendApi::Metal
     })
@@ -1311,6 +1672,10 @@ fn make_surface(
     context: Option<&mut Gpu>,
     info: &ImageInfo,
 ) -> Option<Surface> {
+    #[cfg(test)]
+    if context.is_some() {
+        opened_offscreen();
+    }
     match context {
         #[cfg(any(feature = "metal", feature = "vulkan"))]
         Some(context) => gpu::surfaces::render_target(
