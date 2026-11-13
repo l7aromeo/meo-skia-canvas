@@ -2377,6 +2377,13 @@ pub enum OnGpu {
         blend: BlendMode,
         beyond: bool,
     },
+    /// The draw made on the CPU and composited with `SrcOver` onto a layer
+    /// that holds nothing else where it draws -- a chain's input, played
+    /// into the chain's own layer, which starts transparent -- so that,
+    /// unlike [`OnGpu::Raster`], nothing is read back first: a read back
+    /// waits for the GPU, and one each made 200 blurred gradient fills take
+    /// three times what Ganesh's own gradient did.
+    Alone,
     /// A path dyed by a gradient, kept as what it is made from so that the
     /// effect is made for it where the page is played on the GPU, and a
     /// canvas that never is pays nothing for it -- see [`GradientPath`].
@@ -2401,7 +2408,7 @@ impl OnGpu {
                 layers.iter().map(Picture::approximate_bytes_used).sum()
             }
             OnGpu::Path(draw) => draw.path.lock().approximate_bytes_used(),
-            OnGpu::Native => 0,
+            OnGpu::Alone | OnGpu::Native => 0,
         }
     }
 }
@@ -2717,6 +2724,13 @@ fn played_on_gpu(
                 );
             }
         }
+        OnGpu::Alone => rasterized_onto(
+            canvas,
+            recorded,
+            Some(recorded.cull_rect()),
+            &format,
+            &Paint::default(),
+        ),
         OnGpu::Native => pixels.playback(canvas),
     }
 }

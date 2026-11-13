@@ -1665,7 +1665,7 @@ impl Context2D {
     /// `entry`, a draw recorded for a chain to run -- see
     /// [`Self::files_through_chain`] -- as a run a GPU canvas draws in the
     /// CPU's bytes, where the draw is dyed by a gradient: made on the CPU
-    /// onto the chain's layer -- see `layer::OnGpu::Raster` -- rather than
+    /// onto the chain's layer -- see `layer::OnGpu::Alone` -- rather than
     /// by Ganesh's own gradient, which the chain would otherwise blur, tint
     /// or cast a shadow from up to four levels off what a CPU canvas runs it
     /// on. Not the effect, whose image covers only the page, where a chain
@@ -1688,11 +1688,7 @@ impl Context2D {
         };
         Layer::Gradient(Arc::new(layer::GradientDraw {
             draws: vec![layer::GradientPiece {
-                gpu: layer::OnGpu::Raster {
-                    layers: vec![pixels.clone()],
-                    blend: BlendMode::SrcOver,
-                    beyond: false,
-                },
+                gpu: layer::OnGpu::Alone,
                 pixels: layer::GradientPixels::Recorded(pixels),
                 document,
             }],

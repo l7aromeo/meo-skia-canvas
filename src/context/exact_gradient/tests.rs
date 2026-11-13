@@ -1447,6 +1447,45 @@ fn a_run_the_effect_refuses_reads_the_gpu_back_once() {
     assert!(gpu == cpu, "the GPU canvas stores the CPU's bytes");
 }
 
+/// A gradient fill under `blur()` on a GPU canvas is the chain's input made
+/// on the CPU onto the chain's layer, which starts transparent, so nothing
+/// is read back for it; and the canvas stores what a CPU canvas does.
+#[test]
+fn a_blurred_gradient_reads_nothing_back() {
+    let (spec, _, _) = case(1);
+    let shader = CanvasShader {
+        inner: spec.native().expect("native"),
+        features: VectorFeatures::PLAIN,
+        gradient: Some(Arc::new(spec)),
+    };
+    let drawn = |gpu: bool| {
+        let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
+        canvas.set_gpu(gpu);
+        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let ctx = canvas.context();
+        ctx.set_filter_css("blur(2px)").expect("a filter");
+        ctx.set_fill_shader(&shader);
+        // Apart, each blur's reach clear of the next, so that no group is
+        // composited over another -- which a GPU blends as it blends any
+        // layer.
+        for i in 0..4 {
+            let at = 4.0 + i as f32 * 24.0;
+            ctx.fill_rect(at, at, 12.0, 10.0);
+        }
+        let before = BACKDROPS_READ.get();
+        let bytes = pixels(&mut canvas);
+        Some((bytes, BACKDROPS_READ.get() - before))
+    };
+    let Some((gpu, reads)) = drawn(true) else {
+        return;
+    };
+    let (cpu, _) = drawn(false).expect("a CPU canvas");
+    assert_eq!(reads, 0, "nothing read back for the chain's input");
+    assert!(gpu == cpu, "the GPU canvas stores the CPU's bytes");
+}
+
 /// On a page that keeps a recording for each kind of target, a gradient
 /// draw records one for a document only where it draws apart from the
 /// pixels -- casting its shadow itself, under a blend that covers beyond it,
