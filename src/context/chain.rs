@@ -670,21 +670,18 @@ impl Drawn {
         } = *plan;
         let context = &mut self.context;
         let read = region.with_offset((-self.at.left, -self.at.top));
-        let mut image = match read == IRect::from_size(self.at.size()) {
-            true => Some(self.snapshot.clone()),
-            false => subset(&self.snapshot, context.as_mut(), read),
-        }?;
-        if worked != region {
-            image = padded(context.as_mut(), &image, region, worked)?;
-        }
-
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
         // On the CPU a chain handed an input it has run on before takes the
         // result it left, once the input is that one to the byte -- see
-        // `kept`.
+        // `kept`. The input is judged by the region where it lies in the
+        // layer, before it is copied out and padded, which a result found
+        // never needs.
         let input = match context.is_none() {
-            true => ChainInput::of(
-                &image,
+            true => ChainInput::of_region(
+                &self.snapshot,
+                read,
+                worked.size(),
+                region.with_offset((-worked.left, -worked.top)),
                 steps,
                 Vector::new(scale.0, scale.1),
                 paint.alpha_f(),
@@ -694,6 +691,14 @@ impl Drawn {
         if let Some(kept) = input.as_ref().and_then(ChainInput::kept) {
             return Some(Outcome::whole(kept, worked, rest));
         }
+        let mut image = match read == IRect::from_size(self.at.size()) {
+            true => Some(self.snapshot.clone()),
+            false => subset(&self.snapshot, context.as_mut(), read),
+        }?;
+        if worked != region {
+            image = padded(context.as_mut(), &image, region, worked)?;
+        }
+
         let last = steps.len().saturating_sub(1);
         for (i, step) in steps.iter().enumerate() {
             let gain = match i == last {
