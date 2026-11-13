@@ -122,6 +122,20 @@ pub(crate) enum ShadowPart {
 const BLACK: Color = Color::BLACK;
 const TRANSPARENT: Color = Color::TRANSPARENT;
 
+/// The native memory a context holds whatever is drawn on it, which
+/// [`Context2D::report_resident`] tells the engine beside its page and its
+/// recording.
+///
+/// Measured, not derived, so it goes stale when what a context holds
+/// changes: the state, the path and the rest of [`Context2D`]. With heap
+/// and MallocStackLogging on a debug build for arm64 macOS, 400 CPU
+/// canvases of 1000 by 800 with a context, nothing drawn, held 4,800 bytes
+/// apiece more than 400 without one: 3,680 in eleven allocations of this
+/// crate's own, 640 Skia's paragraph style, 448 its path builder and 32 a
+/// text style. `tests/suite/external-memory.test.js` holds it against the
+/// process's growth in memory as contexts are made.
+pub(crate) const CONTEXT_BYTES: usize = 4_800;
+
 /// The most grid positions a texture may be stamped at in a single draw.
 ///
 /// Skia spends on the order of a hundred bytes on each, so this is several
@@ -145,11 +159,10 @@ const DEFAULT_FONT_SIZE: f32 = 10.0;
 
 pub type BoxedContext2D = JsBox<RefCell<Context2D>>;
 impl Finalize for Context2D {
-    /// Releases what this context told the engine its page and its
-    /// recording hold.
+    /// Releases what this context told the engine it holds.
     fn finalize<'a, C: Context<'a>>(mut self, cx: &mut C) {
         self.external.release(cx);
-        self.recording_external.release(cx);
+        self.beside_page.release(cx);
     }
 }
 
@@ -193,11 +206,12 @@ pub struct Context2D {
     /// What the JavaScript engine has been told this context's page holds
     /// in pixels. See [`Context2D::report_resident`].
     external: External,
-    /// What the JavaScript engine has been told this context's recording
-    /// holds: apart from `external`, because the budget the pages on a
-    /// thread keep to drops a page's pixels and never its recording. See
+    /// What the JavaScript engine has been told this context holds beside
+    /// its page's pixels: its recording, and [`CONTEXT_BYTES`] for itself.
+    /// Apart from `external`, because the budget the pages on a thread keep
+    /// to drops a page's pixels and never these. See
     /// [`Context2D::report_resident`].
-    recording_external: External,
+    beside_page: External,
 }
 
 /// A picture-backed image with its pixels taken now.
@@ -662,7 +676,7 @@ impl Context2D {
             layers: vec![],
             state: State::default(),
             external,
-            recording_external: External::default(),
+            beside_page: External::default(),
         }
     }
 
@@ -670,34 +684,30 @@ impl Context2D {
     /// that a collection is scheduled by the memory a canvas holds and not
     /// only by its small JavaScript object: its page's pixels, a GPU page's
     /// multisample buffer with them -- see
-    /// `page::RecordingSurface::budgeted_bytes` -- and its recording -- see
-    /// [`PageRecorder::recorded_bytes`].
+    /// `page::RecordingSurface::budgeted_bytes` -- its recording -- see
+    /// [`PageRecorder::recorded_bytes`] -- and itself, [`CONTEXT_BYTES`].
     ///
-    /// Called by the binding after a read, which builds the page surface or
-    /// its tiles and files what was drawn, and after a resize, which drops
-    /// them, and released in the finalizer. A drawing that clears the whole
-    /// page drops them too and is counted at the next of those, so the
-    /// engine is told too much in between and never too little. The budget
-    /// the pages on a thread keep to drops the pixels, for a page read only
-    /// once, when another page's read takes the thread past it -- see
-    /// [`resident`] -- and the engine is told of that by the next report any
-    /// canvas or image on the thread makes, through the count the pixels
-    /// share with the page -- see `External::reported`. The recording is
-    /// reported apart, since the budget never drops it: a canvas whose page
-    /// was dropped still holds its recording until it is finalized, and the
-    /// engine is told so until then.
-    ///
-    /// Not told: what a context holds beside its page and its pictures --
-    /// its state, its path, its paragraph style. 400 CPU canvases of 1000
-    /// by 800, each filled once, read and held, held 8.1 KB of native
-    /// memory apiece beside their kept pages, about 2 KB of it pictures.
+    /// Called by the binding as the context is made, after a read, which
+    /// builds the page surface or its tiles and files what was drawn, and
+    /// after a resize, which drops them, and released in the finalizer. A
+    /// drawing that clears the whole page drops them too and is counted at
+    /// the next of those, so the engine is told too much in between and
+    /// never too little; what is drawn between them is told late. The
+    /// budget the pages on a thread keep to drops the pixels, for a page
+    /// read only once, when another page's read takes the thread past it --
+    /// see [`resident`] -- and the engine is told of that by the next report
+    /// any canvas or image on the thread makes, through the count the pixels
+    /// share with the page -- see `External::reported`. The recording and
+    /// the context itself are reported apart, since the budget drops
+    /// neither: a canvas whose page was dropped still holds them until it is
+    /// finalized, and the engine is told so until then.
     pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
         let recorder = self.recorder.borrow();
         let (pixels, recorded) =
             (recorder.budgeted_bytes(), recorder.recorded_bytes());
         drop(recorder);
         self.external.hold(cx, pixels);
-        self.recording_external.hold(cx, recorded);
+        self.beside_page.hold(cx, recorded + CONTEXT_BYTES);
     }
 
     pub fn in_local_coordinates(&mut self, x: f32, y: f32) -> Point {

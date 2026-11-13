@@ -5,9 +5,10 @@
 // What a canvas or an image holds natively is reported to V8 as external
 // memory, and released when the object is finalized, so the engine schedules
 // collections by it: a canvas's page in pixels, with a GPU page's
-// multisample buffer, and its recording, as Skia estimates its pictures. These read what this addon has reported and the engine
-// accepted, through `__reportedMemory`, which debug builds alone export:
-// against a release binary they are skipped by name. The engine's own total,
+// multisample buffer, its recording, as Skia estimates its pictures, and a
+// fixed figure for its context. These read what this addon has reported and
+// the engine accepted, through `__reportedMemory`, which debug builds alone
+// export: against a release binary they are skipped by name. The engine's own total,
 // which `napi_adjust_external_memory` returns, cannot stand in for it: it
 // counts every live array buffer in the process as well, so a buffer held
 // for any other reason lands in it. The first test holds one to keep that
@@ -21,7 +22,8 @@ const { assert, describe, test } = require("../runner"),
   { runInNewContext } = require("node:vm"),
   { setImmediate: turn } = require("node:timers/promises"),
   { Canvas, Image } = require("../../lib"),
-  { skiaNode } = require("../../lib/classes/neon");
+  { skiaNode } = require("../../lib/classes/neon"),
+  { processMemory } = require("../support/live-canvases");
 
 // The suite runs without `--expose-gc`; a context made after the flag is set
 // carries `gc`.
@@ -34,6 +36,12 @@ const why = !skiaNode.__reportedMemory
 
 /** The canvas read back. */
 const SIDE = [1000, 800];
+
+/**
+ * What a context reports whatever is drawn on it: `CONTEXT_BYTES` in
+ * src/context/mod.rs, read from the build under test.
+ */
+const CONTEXT_BYTES = why ? 0 : skiaNode.__contextBytes();
 
 /**
  * A buffer held across the reads, which is none of what this addon reports.
@@ -77,6 +85,21 @@ const drawn = (/** @type {number} */ fills) => {
   return canvas;
 };
 
+/**
+ * Contexts made for a measurement of the process's memory: enough that
+ * what they hold, about 5 KB each, stands well clear of the memory a
+ * process moves by on its own between two readings.
+ */
+const CONTEXTS = 4000;
+
+/**
+ * How far what a context reports may stand from what the process grows by
+ * natively for each, as a share of that growth. Measured on this Mac at
+ * 0.78 to 0.91 over ten batches; a context reporting nothing, or twice what
+ * it holds, lands outside.
+ */
+const CONTEXT_SHARE = [0.6, 1.4];
+
 /** Fills drawn on a page whose recording is to weigh something. */
 const FILLS = 1000;
 
@@ -115,8 +138,8 @@ describe("Native memory reported to V8", () => {
       live[0].getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
       assert.equal(
         (await settled()) - before,
-        PAGE_BYTES,
-        "the page a live canvas holds",
+        PAGE_BYTES + CONTEXT_BYTES,
+        "the page and the context a live canvas holds",
       );
 
       live.pop();
@@ -138,13 +161,13 @@ describe("Native memory reported to V8", () => {
       canvas.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
       assert.equal(
         (await settled()) - before,
-        PAGE_BYTES,
+        PAGE_BYTES + CONTEXT_BYTES,
         "the page kept before the resize",
       );
       canvas.width = SIDE[0];
       assert.equal(
         (await settled()) - before,
-        0,
+        CONTEXT_BYTES,
         "what a canvas whose page a resize dropped counts",
       );
       assert.equal(canvas.width, SIDE[0]);
@@ -165,18 +188,22 @@ describe("Native memory reported to V8", () => {
       try {
         const live = [cpuCanvas()];
         live[0].getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
-        assert.equal((await settled()) - before, page, "the first page");
+        assert.equal(
+          (await settled()) - before,
+          page + CONTEXT_BYTES,
+          "the first page",
+        );
         const second = cpuCanvas();
         second.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
         assert.equal(
           (await settled()) - before,
-          page,
+          page + 2 * CONTEXT_BYTES,
           "the first page dropped and the second kept",
         );
         live.pop();
         assert.equal(
           (await settled()) - before,
-          page,
+          page + CONTEXT_BYTES,
           "what the dropped canvas's finalizer releases",
         );
         assert.equal(second.width, SIDE[0]);
@@ -192,10 +219,11 @@ describe("Native memory reported to V8", () => {
     async () => {
       const before = await settled();
       const live = [drawn(1)];
-      const one = (await settled()) - before - PAGE_BYTES;
+      const canvas = PAGE_BYTES + CONTEXT_BYTES;
+      const one = (await settled()) - before - canvas;
       assert.ok(one > 0, `one fill's recording counts: ${one} bytes`);
       live.push(drawn(FILLS));
-      const many = (await settled()) - before - 2 * PAGE_BYTES - one;
+      const many = (await settled()) - before - 2 * canvas - one;
       assert.ok(
         many - one >= (FILLS - 1) * FILL_RECORD_BYTES,
         `${FILLS} fills' recording counts ${many} bytes, one fill's ${one}`,
@@ -222,19 +250,21 @@ describe("Native memory reported to V8", () => {
         // Drawn through `drawn`, so that no variable here names its
         // context and keeps the canvas alive.
         const live = [drawn(FILLS)];
-        const recorded = (await settled()) - before - PAGE_BYTES;
+        const recorded =
+          (await settled()) - before - PAGE_BYTES - CONTEXT_BYTES;
         assert.ok(recorded > 0, `the recording counts: ${recorded} bytes`);
         const second = cpuCanvas();
         second.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
         assert.equal(
           (await settled()) - before,
-          PAGE_BYTES + recorded,
-          "the first page dropped, its recording and the second page kept",
+          PAGE_BYTES + recorded + 2 * CONTEXT_BYTES,
+          "the first page dropped, its recording, both contexts and the " +
+            "second page kept",
         );
         live.pop();
         assert.equal(
           (await settled()) - before,
-          PAGE_BYTES,
+          PAGE_BYTES + CONTEXT_BYTES,
           "what the dropped canvas's finalizer releases",
         );
         assert.equal(second.width, SIDE[0]);
@@ -259,8 +289,8 @@ describe("Native memory reported to V8", () => {
       assert.equal(live[0].engine.renderer, "GPU", "the canvas is on the GPU");
       assert.equal(
         (await settled()) - before,
-        PAGE_BYTES * (1 + DEFAULT_SAMPLES),
-        "the page and a sample buffer of four of it",
+        PAGE_BYTES * (1 + DEFAULT_SAMPLES) + CONTEXT_BYTES,
+        "the page, a sample buffer of four of it and the context",
       );
       live.pop();
       assert.equal(
@@ -268,6 +298,48 @@ describe("Native memory reported to V8", () => {
         0,
         "what stays counted once the canvas is finalized",
       );
+    },
+  );
+
+  // `CONTEXT_BYTES` is a measurement, and goes stale when what a context
+  // holds changes. Held against what the process grows by natively as
+  // contexts are made and kept: a batch of canvases with contexts against
+  // one of canvases alone, the engine's own heap taken out of each, within
+  // a share either way, since allocators round and the binding keeps a
+  // little of its own for each object.
+  test(
+    "reports about what a context holds, by the process's growth",
+    { skip: why ?? false },
+    async () => {
+      const live = [];
+      /** What the process grows by natively for each canvas `make` makes. */
+      const grownFor = async (/** @type {() => Canvas} */ make) => {
+        await settled();
+        const memory = processMemory();
+        const heap = process.memoryUsage().heapTotal;
+        for (let i = 0; i < CONTEXTS; i++) live.push(make());
+        await settled();
+        const engine = process.memoryUsage().heapTotal - heap;
+        return (processMemory() - memory - engine) / CONTEXTS;
+      };
+      const bare = await grownFor(cpuCanvas);
+      const before = await settled();
+      const grown =
+        (await grownFor(() => {
+          const canvas = cpuCanvas();
+          // Nothing drawn, so that the context is all a canvas reports.
+          canvas.getContext("2d");
+          return canvas;
+        })) - bare;
+      const reported = ((await settled()) - before) / CONTEXTS;
+      assert.equal(reported, CONTEXT_BYTES, "each context reports itself");
+      assert.ok(
+        reported >= grown * CONTEXT_SHARE[0] &&
+          reported <= grown * CONTEXT_SHARE[1],
+        `each context reports ${reported} bytes where the process grew ` +
+          `natively by ${Math.round(grown)} for each`,
+      );
+      assert.equal(live.length, 2 * CONTEXTS);
     },
   );
 

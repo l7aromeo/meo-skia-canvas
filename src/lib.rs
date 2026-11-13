@@ -1047,6 +1047,8 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     #[cfg(debug_assertions)]
     cx.export_function("__reportedMemory", node::external::reported_memory)?;
     #[cfg(debug_assertions)]
+    cx.export_function("__contextBytes", ctx::context_bytes)?;
+    #[cfg(debug_assertions)]
     cx.export_function("__droppedPages", context::resident::dropped_pages)?;
     #[cfg(debug_assertions)]
     cx.export_function("__setPageBudget", context::resident::set_page_budget)?;

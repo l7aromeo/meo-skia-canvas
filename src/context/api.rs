@@ -9,6 +9,8 @@ use skia_safe::{
 };
 use std::cell::RefCell;
 
+#[cfg(debug_assertions)]
+use super::CONTEXT_BYTES;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
@@ -617,14 +619,24 @@ verbs! {
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let parent = cx.argument::<BoxedCanvas>(1)?;
     let parent = parent.borrow();
-    let this = RefCell::new(Context2D::new(
+    let mut this = Context2D::new(
         parent.color_space.clone(),
         parent.color_type,
         (parent.text_contrast as f32, parent.text_gamma as f32),
         (parent.width, parent.height),
-    ));
+    );
+    // What the context holds before anything is drawn.
+    this.report_resident(&mut cx);
 
-    Ok(cx.boxed(this))
+    Ok(cx.boxed(RefCell::new(this)))
+}
+
+/// [`CONTEXT_BYTES`], for the tests that count what a context reports.
+///
+/// Exported by debug builds only, as `__reportedMemory` is.
+#[cfg(debug_assertions)]
+pub fn context_bytes(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(CONTEXT_BYTES as f64))
 }
 
 pub fn resetSize(mut cx: FunctionContext) -> JsResult<JsUndefined> {
