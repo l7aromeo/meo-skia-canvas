@@ -8,7 +8,7 @@ use crate::{
     context2d::Context2D,
     export::{EncodeOptions, ImageFormat, VectorFeatures},
     geometry::Point as CanvasPoint,
-    gpu::RenderingEngine,
+    gpu::{NEVER_GPU, RenderingEngine},
     paint::BlendMode,
     path::FillRule,
     pixels::{PixelColorSpace, PixelDepth},
@@ -1281,6 +1281,53 @@ fn a_gradient_draw_records_a_document_only_where_it_draws_apart() {
         vec![true],
         "a shadow the draw casts itself: a document"
     );
+}
+
+/// In a process where no GPU can play a page -- a build without a GPU
+/// backend, or one whose probe found no device -- a gradient draw is
+/// recorded as it was before `GradientDraw`, filing nothing for a GPU, and a
+/// CPU canvas stores the same bytes.
+#[test]
+fn a_process_without_a_gpu_files_no_gradient_draw() {
+    let (spec, _, _) = case(1);
+    let shader = CanvasShader {
+        inner: spec.native().expect("native"),
+        features: VectorFeatures::PLAIN,
+        gradient: Some(Arc::new(spec)),
+    };
+    let drawn = |never_gpu: bool| {
+        NEVER_GPU.set(Some(never_gpu));
+        let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
+        canvas.set_gpu(false);
+        let filed = {
+            let ctx = canvas.context();
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(10.0, 10.0, 30.0, 20.0);
+            ctx.begin_path();
+            ctx.rect(20.0, 40.0, 30.0, 20.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.fill_rect(0.0, 0.0, SIDE as f32, SIDE as f32);
+            ctx.inner
+                .entries()
+                .layers
+                .iter()
+                .filter(|entry| match entry {
+                    Layer::Gradient(_) => true,
+                    Layer::Clipped(piece) => {
+                        matches!(piece.entry(), Layer::Gradient(_))
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        NEVER_GPU.set(None);
+        (filed, pixels(&mut canvas))
+    };
+    let (filed, kept) = drawn(false);
+    let (none, recorded) = drawn(true);
+    assert!(filed > 0, "a process with a GPU files its gradient draws");
+    assert_eq!(none, 0, "a process without one files none");
+    assert!(kept == recorded, "and a CPU canvas stores the same bytes");
 }
 
 /// The sweep of the integration tests, about `center` and turned by `turn`

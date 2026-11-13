@@ -1404,10 +1404,11 @@ impl Context2D {
         // `GradientDraw`, which a GPU canvas draws in the CPU's bytes -- see
         // `layer::GradientDraw`. A float page is drawn on the CPU whichever
         // engine is asked for -- see `RenderingEngine::for_canvas` -- and
-        // has nothing to choose.
+        // has nothing to choose; nor has a page in a process no GPU can play
+        // it in -- see `RenderingEngine::never_gpu`.
         #[cfg(test)]
         let gradient = gradient.filter(|_| FILES_GRADIENTS.get());
-        if let Some(dye) = gradient.filter(|_| !self.composites_in_floats()) {
+        if let Some(dye) = gradient.filter(|_| self.files_gradients()) {
             let dual = self.records_pixels_apart();
             let pixels = match dual {
                 true => Recording::Pixels,
@@ -1644,6 +1645,13 @@ impl Context2D {
             );
         });
         true
+    }
+
+    /// Whether a draw dyed by a gradient is kept so that a GPU canvas can
+    /// draw it in the CPU's bytes -- see `layer::GradientDraw`: on an
+    /// eight-bit page, in a process where a GPU can play one.
+    fn files_gradients(&self) -> bool {
+        !self.composites_in_floats() && !RenderingEngine::never_gpu()
     }
 
     /// `draw`, recorded on its own under the canvas's transform.
@@ -3240,37 +3248,38 @@ impl Context2D {
             let gradient = self.state.dye(style).gradient();
             #[cfg(test)]
             let gradient = gradient.filter(|_| FILES_GRADIENTS.get());
-            let gpu = gradient
-                .filter(|_| !self.composites_in_floats())
-                .and_then(|spec| {
-                    let bounds =
-                        drawn_bounds(&path, &paint, style, &matrix, false);
-                    let dye = GradientDye {
-                        spec,
-                        path: Some((&path, bounds)),
-                        whole_pixels: false,
-                    };
-                    let shape = |canvas: &SkCanvas, paint: &Paint| {
-                        canvas.draw_path(&path, &faint.drawable(paint));
-                    };
-                    let pixels = exact.as_ref().unwrap_or(&paint);
-                    let beyond = covers_beyond_the_draw(
-                        self.state.global_composite_operation,
-                    );
-                    match self.gradient_path(&dye, &paint, pixels, beyond) {
-                        Some(path) => Some(layer::OnGpu::Path(path)),
-                        None => self.gradient_on_gpu(
-                            &dye,
-                            &paint,
-                            pixels,
-                            beyond,
-                            bounds,
-                            &shape,
-                            &|_, _| {},
-                            &shape,
-                        ),
-                    }
-                });
+            let gpu =
+                gradient
+                    .filter(|_| self.files_gradients())
+                    .and_then(|spec| {
+                        let bounds =
+                            drawn_bounds(&path, &paint, style, &matrix, false);
+                        let dye = GradientDye {
+                            spec,
+                            path: Some((&path, bounds)),
+                            whole_pixels: false,
+                        };
+                        let shape = |canvas: &SkCanvas, paint: &Paint| {
+                            canvas.draw_path(&path, &faint.drawable(paint));
+                        };
+                        let pixels = exact.as_ref().unwrap_or(&paint);
+                        let beyond = covers_beyond_the_draw(
+                            self.state.global_composite_operation,
+                        );
+                        match self.gradient_path(&dye, &paint, pixels, beyond) {
+                            Some(path) => Some(layer::OnGpu::Path(path)),
+                            None => self.gradient_on_gpu(
+                                &dye,
+                                &paint,
+                                pixels,
+                                beyond,
+                                bounds,
+                                &shape,
+                                &|_, _| {},
+                                &shape,
+                            ),
+                        }
+                    });
             self.with_recorder(|mut recorder| {
                 recorder.append_cut(
                     clip,
