@@ -1,0 +1,11 @@
+{
+  "crate": "alloc-stdlib",
+  "version": "0.2.4",
+  "license": "BSD-3-Clause",
+  "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+  "commit": "ae42d22078b98549e987d2f03d12df7b984fde47",
+  "files": {
+    "LICENSE": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE"
+  },
+  "why": "The crate's package on crates.io holds no licence file; these are its repository's, at the commit its .cargo_vcs_info.json records."
+}

@@ -36,6 +36,8 @@ describe("platform-package build", () => {
   const staging = join(sandbox, "staging");
   const binary = Buffer.from("a stand-in for skia.node");
   const gz = zlib.gzipSync(binary);
+  const notices =
+    "# Third-party notices\n\na stand-in for the binary's notices\n";
   let triplet;
   let manifest;
 
@@ -54,6 +56,7 @@ describe("platform-package build", () => {
     )[0];
     mkdirSync(assetsDir, { recursive: true });
     writeFileSync(join(assetsDir, `${triplet}.gz`), gz);
+    writeFileSync(join(assetsDir, `${triplet}.gz.notices.md`), notices);
   });
 
   after(() => rmSync(sandbox, { recursive: true, force: true }));
@@ -93,6 +96,24 @@ describe("platform-package build", () => {
     const pkg = JSON.parse(readFileSync(join(dir, "package.json")));
     assert.strictEqual(pkg.name, `meo-skia-canvas-${triplet}`);
     assert.strictEqual(pkg.version, manifest.version);
+    assert.strictEqual(
+      readFileSync(join(dir, "THIRD-PARTY-NOTICES.md"), "utf8"),
+      notices,
+    );
+    assert.ok(pkg.files.includes("THIRD-PARTY-NOTICES.md"), pkg.files);
+  });
+
+  test("refuses a binary whose notices the release does not hold", () => {
+    const held = join(assetsDir, `${triplet}.gz.notices.md`);
+    rmSync(held);
+    try {
+      const { status, output, dir } = build({ [`${triplet}.gz`]: sha256(gz) });
+      assert.strictEqual(status, 1, output);
+      assert.match(output, /holds no notices for/);
+      assert.ok(!existsSync(join(dir, "skia.node")), "left the binary staged");
+    } finally {
+      writeFileSync(held, notices);
+    }
   });
 
   test("refuses a binary whose hash is not the one recorded", () => {

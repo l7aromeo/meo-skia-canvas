@@ -1,0 +1,11 @@
+{
+  "crate": "objc2",
+  "version": "0.6.5",
+  "license": "MIT",
+  "repository": "https://github.com/madsmtm/objc2",
+  "commit": "d7d2fa23ceaa5e6096c923b081040e5d81b3b9df",
+  "files": {
+    "LICENSE.md": "https://github.com/madsmtm/objc2/blob/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/LICENSE.md"
+  },
+  "why": "The crate's package on crates.io holds no licence file; these are its repository's, at the commit its .cargo_vcs_info.json records."
+}

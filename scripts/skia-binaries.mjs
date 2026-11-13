@@ -23,7 +23,9 @@
 // An entry is stored only from a build `check-patched-skia` passes, and keeps
 // that build's log, so that a build linking the entry can be checked against
 // it: `check-patched-skia` matches the linked libraries to an entry byte for
-// byte, then checks the entry's log -- see `bindRefusal` there.
+// byte, then checks the entry's log -- see `bindRefusal` there. It also keeps
+// what that build compiled, `notices.json`, which the third-party notices of a
+// build linking it are written from.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -39,6 +41,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildScriptLogs } from "./cargo-build-dir.mjs";
+import { record, recordFromLog } from "./notices.mjs";
 import { cacheRoot, treeName } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -59,6 +62,10 @@ const DEFINES = "skia-defines.txt";
 
 /// The manifest's layout. A cache written by another layout is not read.
 const MANIFEST_VERSION = 1;
+
+/// What an entry's build compiled, for the notices of a build that links
+/// it: see `record` in scripts/notices.mjs.
+export const NOTICES_RECORD = "notices.json";
 
 /// Variables under which an entry would not be what the build compiles:
 /// skia-bindings reads each into the Skia it builds, and none is part of an
@@ -296,6 +303,32 @@ export function keyFor(args, env = process.env, root = ROOT) {
 }
 
 /**
+ * Why the entry at `dir` cannot be linked, or `null` where it can. A build
+ * that links an entry runs no ninja of its own, so its notices come from the
+ * record the entry keeps. An entry stored before entries kept one has it
+ * derived here from the gn arguments its seed build printed -- `derive`,
+ * given the Skia tree `tree` and that log -- and written, so it is linked as
+ * before; one whose record cannot be derived is not linked, and the build
+ * that compiles instead stores one.
+ */
+export function linkable(dir, tree, derive = recordFromLog) {
+  if (!readManifest(dir)) return `no entry at ${dir}`;
+  if (existsSync(join(dir, NOTICES_RECORD))) return null;
+  let derived;
+  try {
+    derived = tree ? derive(tree, seedLog(dir)) : null;
+  } catch (error) {
+    return `${dir} holds no ${NOTICES_RECORD}, and gn could not derive one: ${error.message}`;
+  }
+  if (!derived)
+    return `${dir} holds no ${NOTICES_RECORD}, and its seed log names no gn arguments to derive one from`;
+  const partial = join(dir, `${NOTICES_RECORD}.partial-${process.pid}`);
+  writeFileSync(partial, `${JSON.stringify(derived, null, 2)}\n`);
+  renameSync(partial, join(dir, NOTICES_RECORD));
+  return null;
+}
+
+/**
  * The variables that link the entry for `args`, and that entry, or `null`
  * where there is none -- with the reason, for the caller to print.
  */
@@ -303,8 +336,8 @@ export function cacheEnv(args, env = process.env, root = ROOT) {
   const { key, why } = keyFor(args, env, root);
   if (!key) return { why };
   const dir = entryDir(key);
-  const manifest = readManifest(dir);
-  if (!manifest) return { why: `no entry at ${dir}` };
+  const unlinkable = linkable(dir, env.SKIA_SOURCE_DIR);
+  if (unlinkable) return { why: unlinkable };
   return {
     dir,
     env: {
@@ -323,14 +356,15 @@ export function cacheEnv(args, env = process.env, root = ROOT) {
  * script ran in, see scripts/cargo-build-dir.mjs -- as the entry for `profile` and `features`, once `vouch` finds
  * nothing wrong with its log. Written beside the entry and renamed into
  * place, so a reader never finds half an entry. An entry already there with
- * the same libraries is kept; one with others is refused, since two builds of
- * one key ought to agree.
+ * the same libraries is kept, given this build's notices record where it has
+ * none; one with others is refused, since two builds of one key ought to
+ * agree.
  */
 export function store(
   buildDir,
   { profile, features },
   vouch,
-  { cache = cacheRoot(), root = ROOT } = {},
+  { cache = cacheRoot(), root = ROOT, notices = record } = {},
 ) {
   const logs = buildScriptLogs(buildDir);
   const log = [
@@ -368,12 +402,24 @@ export function store(
     ),
     seed: resolve(buildDir),
   };
+  const noticesRecord = `${JSON.stringify(notices(skia), null, 2)}\n`;
   const existing = readManifest(dir);
   if (existing) {
     if (
       JSON.stringify(existing.libraries) === JSON.stringify(manifest.libraries)
-    )
+    ) {
+      // The same libraries, from an entry stored before entries carried
+      // their notices record: the record is this build's, so it is theirs.
+      if (!existsSync(join(dir, NOTICES_RECORD))) {
+        const partialRecord = join(
+          dir,
+          `${NOTICES_RECORD}.partial-${process.pid}`,
+        );
+        writeFileSync(partialRecord, noticesRecord);
+        renameSync(partialRecord, join(dir, NOTICES_RECORD));
+      }
       return { dir, stored: false };
+    }
     throw new Error(
       `skia-cache: ${dir} already holds other libraries for the same key`,
     );
@@ -391,6 +437,7 @@ export function store(
     for (const name of libraries)
       if (digest(join(partial, name)) !== manifest.libraries[name])
         throw new Error(`skia-cache: ${name} changed while it was copied`);
+    writeFileSync(join(partial, NOTICES_RECORD), noticesRecord);
     writeFileSync(
       join(partial, "manifest.json"),
       `${JSON.stringify(manifest, null, 2)}\n`,

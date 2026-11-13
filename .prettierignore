@@ -2,6 +2,10 @@
 # diff against their upstreams is the only way to audit them.
 vendor/
 
+# Licence texts as their projects publish them, shipped verbatim in the
+# third-party notices; scripts/notices.mjs records where each came from.
+licences/
+
 # Build output and dependencies.
 target/
 node_modules/

@@ -1,0 +1,12 @@
+{
+  "crate": "dispatch",
+  "version": "0.2.0",
+  "license": "MIT",
+  "repository": "https://github.com/SSheldon/rust-dispatch",
+  "commit": "82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748",
+  "files": {
+    "LICENSE": "the MIT licence text (SPDX: MIT), with the author dispatch 0.2.0's Cargo.toml names"
+  },
+  "note": "dispatch 0.2.0 declares `license = \"MIT\"` in its Cargo.toml and ships no licence file; this is the MIT licence text with the author it names.",
+  "why": "Neither the crate's package nor its repository at the recorded commit holds a licence file; the maintainer chose to ship the licence it declares."
+}

@@ -1,0 +1,12 @@
+{
+  "crate": "neon",
+  "version": "1.1.2",
+  "license": "MIT/Apache-2.0",
+  "repository": "https://github.com/neon-bindings/neon",
+  "commit": "6ae30d172d00e47600204e22f1d615d0c8cc92ec",
+  "files": {
+    "LICENSE-APACHE": "https://github.com/neon-bindings/neon/blob/6ae30d172d00e47600204e22f1d615d0c8cc92ec/LICENSE-APACHE",
+    "LICENSE-MIT": "https://github.com/neon-bindings/neon/blob/6ae30d172d00e47600204e22f1d615d0c8cc92ec/LICENSE-MIT"
+  },
+  "why": "The crate's package on crates.io holds no licence file; these are its repository's, at the commit its .cargo_vcs_info.json records."
+}

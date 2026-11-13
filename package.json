@@ -74,7 +74,8 @@
     "lib/*ts",
     "lib/classes/*js",
     "lib/*.json",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
     "node": ">=22"

@@ -1,0 +1,12 @@
+{
+  "crate": "pathfinder_simd",
+  "version": "0.5.6",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/servo/pathfinder",
+  "commit": "6c3c0466f451c5bd2007087728cd168798cd64e8",
+  "files": {
+    "LICENSE-APACHE": "https://github.com/servo/pathfinder/blob/6c3c0466f451c5bd2007087728cd168798cd64e8/LICENSE-APACHE",
+    "LICENSE-MIT": "https://github.com/servo/pathfinder/blob/6c3c0466f451c5bd2007087728cd168798cd64e8/LICENSE-MIT"
+  },
+  "why": "The crate's package on crates.io holds no licence file; these are its repository's, at the commit its .cargo_vcs_info.json records."
+}

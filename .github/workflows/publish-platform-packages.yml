@@ -71,7 +71,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG=npm-v$(node -p "require('./package.json').version")
-          gh release download "$TAG" -R l7aromeo/meo-skia-canvas -p '*.gz' -D "$RUNNER_TEMP/release"
+          gh release download "$TAG" -R l7aromeo/meo-skia-canvas -p '*.gz' -p '*.gz.notices.md' -D "$RUNNER_TEMP/release"
           ls -l "$RUNNER_TEMP/release"
 
       # Kept for a week rather than a day: a target whose job fails is recovered by re-running

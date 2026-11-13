@@ -3,6 +3,8 @@
 .env
 _arc
 lib/*.node
+# The notices `just notices-release` writes beside a release build.
+lib/*.node.notices.md
 node_modules
 target
 

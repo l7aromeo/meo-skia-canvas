@@ -1,0 +1,11 @@
+{
+  "crate": "skia-svg-macros",
+  "version": "0.2.0",
+  "license": "MIT",
+  "repository": "https://github.com/rust-skia/rust-skia",
+  "commit": "b0260d93e48425b4b39f701c33a9a1b373e7dbcd",
+  "files": {
+    "LICENSE": "https://github.com/rust-skia/rust-skia/blob/b0260d93e48425b4b39f701c33a9a1b373e7dbcd/LICENSE"
+  },
+  "why": "The crate's package on crates.io holds no licence file; these are its repository's, at the commit its .cargo_vcs_info.json records."
+}
