@@ -1349,3 +1349,107 @@ fn a_blurred_stroked_rectangle_is_the_exact_gaussian_of_what_it_draws() {
         }
     }
 }
+
+/// The six colour functions of a filter that tints black to a sky blue,
+/// one of them saturating 48-fold, so that any rounding between them is
+/// multiplied into levels.
+const TINT: &str = "invert(56%) sepia(63%) saturate(4837%) hue-rotate(163deg) \
+                    brightness(96%) contrast(101%)";
+
+/// How far, in a level of an unpremultiplied channel, a pixel the blur
+/// leaves translucent may read from the colour the tint alone makes: the
+/// tinted colour is stored premultiplied and read back divided by its
+/// alpha.
+const UNPREMULTIPLIED: i16 = 1;
+
+/// The pixel at (10, 10) of `fill` drawn under `filter`, unpremultiplied.
+fn tinted(
+    gpu: bool,
+    filter: &str,
+    fill: fn(&mut Context2D),
+) -> Option<[u8; 4]> {
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_filter_css(filter).expect("a filter");
+    fill(ctx);
+    let data = ctx.get_image_data(10.0, 10.0, 1.0, 1.0).expect("a pixel");
+    let p = data.pixels();
+    Some([p[0], p[1], p[2], p[3]])
+}
+
+/// A black square under a gradient of black alone: the tint over it runs
+/// in the gradient's shader, in one pass, on either engine.
+fn graded_black(ctx: &mut Context2D) {
+    let black = RgbaLinear::from_srgb(0.0, 0.0, 0.0, 1.0);
+    let gradient = Shader::linear_gradient(
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 20.0, y: 0.0 },
+        &[0.0, 1.0].map(|position| GradientStop {
+            position,
+            color: black,
+        }),
+        GradientColorSpace::Srgb,
+    )
+    .expect("a gradient");
+    ctx.set_fill_shader(&gradient);
+    ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+}
+
+/// Colour functions in a row tint as one composed colour filter, worked in
+/// floats in one pass, after a `blur()` or with none: as the same functions
+/// tint a gradient's colours in its shader, on any draw the chain runs them
+/// for: a canvas or an image drawn in takes them there. Run a function at a
+/// time with the pixels stored between, the tint of black read
+/// `(0, 164, 217)` on the CPU and `(0, 164, 219)` on the GPU where in one
+/// pass it is `(0, 162, 213)` and, in Ganesh's half precision,
+/// `(0, 163, 215)`.
+#[test]
+fn colour_functions_in_a_row_tint_as_one() {
+    let drawn_in: fn(&mut Context2D) = |ctx| {
+        let mut source = Canvas::new(20.0, 20.0);
+        source.context().fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+    };
+    let image: fn(&mut Context2D) = |ctx| {
+        let black = [0u8, 0, 0, 255].repeat(20 * 20);
+        let image = Image::from_pixels(
+            &black,
+            20,
+            20,
+            20 * 4,
+            PixelExportOptions::default(),
+        )
+        .expect("an image");
+        ctx.draw_image(&image, 0.0, 0.0);
+    };
+    let blurred = format!("blur(5px) {TINT}");
+    let mut wrong = Vec::new();
+    for gpu in [false, true] {
+        let Some(one) = tinted(gpu, TINT, graded_black) else {
+            continue;
+        };
+        for (name, filter, fill) in [
+            ("a canvas drawn in", TINT, drawn_in),
+            ("a blurred canvas drawn in", blurred.as_str(), drawn_in),
+            ("an image", TINT, image),
+            ("a blurred image", &blurred, image),
+        ] {
+            let got =
+                tinted(gpu, filter, fill).expect("the engine the tint ran on");
+            let off = (0..3)
+                .map(|i| (i16::from(got[i]) - i16::from(one[i])).abs())
+                .max()
+                .unwrap_or(0);
+            if off > UNPREMULTIPLIED {
+                wrong.push(format!(
+                    "{name} gpu {gpu}: {got:?} where one pass is {one:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "tinted apart from one pass: {wrong:#?}");
+}
