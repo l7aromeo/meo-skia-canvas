@@ -11161,8 +11161,8 @@ mod tests {
     /// others', flush every so many groups, and the flushes fall among the
     /// chains, no more than that many between two: counted after the whole
     /// run, they came out the same in number with every chain before the
-    /// first. Twice the draws make twice the flushes, within one,
-    /// and a page of a few never flushes before its read.
+    /// first. Twice the draws make twice the flushes, within one, and a
+    /// page of a few never flushes before its read.
     #[test]
     fn a_gpu_playback_flushes_every_so_many_offscreen_layers() {
         let per = pacing::LAYERS_PER_FLUSH;

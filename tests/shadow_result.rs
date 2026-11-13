@@ -172,6 +172,41 @@ const SOURCES: [(&str, Draw); 9] = [
     ("drawn canvas", drawn_canvas),
 ];
 
+/// Each draw under a filter, or a clip, of its own: what a draw that casts a
+/// shadow takes a route of its own for -- a `BlurOp`, a cut, a chain --
+/// beside the route its shadow takes.
+const FILTERED: [(&str, Draw); 10] = [
+    ("triangle under blur()", |ctx| {
+        under("blur(3px)", ctx, filled_triangle)
+    }),
+    ("rectangle under blur()", |ctx| {
+        under("blur(3px)", ctx, rectangle)
+    }),
+    ("triangle under drop-shadow()", |ctx| {
+        under(DROP_SHADOW, ctx, filled_triangle)
+    }),
+    ("triangle a clip cuts", |ctx| {
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, 90.5, SIZE.1);
+        ctx.clip(FillRule::NonZero);
+        filled_triangle(ctx);
+    }),
+    ("canvas pattern under drop-shadow()", |ctx| {
+        under(DROP_SHADOW, ctx, pattern_triangle)
+    }),
+    ("text in a canvas pattern under drop-shadow()", |ctx| {
+        under(DROP_SHADOW, ctx, pattern_text)
+    }),
+    ("drawn canvas under blur()", |ctx| {
+        under("blur(3px)", ctx, drawn_canvas)
+    }),
+    ("text under blur()", |ctx| under("blur(2px)", ctx, text)),
+    ("turned rectangle under drop-shadow()", |ctx| {
+        under(DROP_SHADOW, ctx, turned_rectangle)
+    }),
+    ("image under blur()", |ctx| under("blur(3px)", ctx, image)),
+];
+
 /// A `drop-shadow()` that moves what it casts by whole pixels, in a colour
 /// no shadow here is cast in.
 const DROP_SHADOW: &str = "drop-shadow(30px 0 0 blue)";
@@ -435,23 +470,25 @@ fn drawn_over(
 fn a_draw_casting_a_shadow_lands_the_bytes_it_does_casting_none() {
     // The shadow is a group of its own, cast before the draw, and the draw
     // is drawn as it is: through the shadow's layer it would be rounded
-    // twice where it is translucent, and an edge's coverage with it.
+    // twice where it is translucent, and an edge's coverage with it. Under a
+    // filter or a clip of its own the draw takes the route it takes casting
+    // none: a `BlurOp`, a cut, a chain, each of which refuses a shadow.
     let mut wrong = vec![];
     for gpu in [false, true] {
-        for (name, draw) in SOURCES {
+        for (name, draw) in SOURCES.iter().chain(&FILTERED) {
             for (paint, global_alpha) in [
                 ("rgb(250 200 20)", 1.0),
                 ("rgba(250 200 20 / 0.55)", 1.0),
                 ("rgba(250 200 20 / 0.55)", 0.45),
             ] {
                 let Some(plain) =
-                    drawn_over(gpu, draw, paint, global_alpha, None)
+                    drawn_over(gpu, *draw, paint, global_alpha, None)
                 else {
                     continue;
                 };
                 for blur in [0.0, 4.0, 12.0] {
                     let shadowed =
-                        drawn_over(gpu, draw, paint, global_alpha, Some(blur))
+                        drawn_over(gpu, *draw, paint, global_alpha, Some(blur))
                             .expect("the same engine");
                     let apart = plain
                         .iter()

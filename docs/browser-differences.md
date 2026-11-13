@@ -1324,9 +1324,8 @@ what casts it here, and 12.5 and 4.5 in Chrome, which puts it at 4.32 when
 it is blurred by 2px. `tests/blur_result.rs` holds the shadow to the exact
 one and `tests/filter_transform.rs` the offsets.
 
-A draw that casts a `shadowColor` shadow as well, or is drawn under a
-`globalCompositeOperation` that composites the whole canvas, is drawn
-through Skia's filter layer instead. There the offset and the blur's length
+A draw under a `globalCompositeOperation` that composites the whole canvas
+is drawn through Skia's filter layer instead. There the offset and the blur's length
 are Chrome's, but the blur is Skia's approximation, and under a turn or a
 skew Skia draws the filtered draw at the transform's scale and turns it onto
 the page, which resamples the draw itself: a 30-pixel square read up to 16
@@ -1369,6 +1368,12 @@ the shadow here is within 0.6 of a level of the exact shadow of the exact
 filtered draw at a `shadowBlur` of 4, 8 and 16, the filtered draw being
 held as pixels between the two; Chrome's raster canvas is 9.33, 7.84 and
 5.47 off, its GPU canvas 1.05, 1.12 and 1.24.
+
+Casting a shadow leaves the draw's own pixels as they are casting none: the
+shadow is a group of its own, cast before the draw, and the draw takes the
+route it takes casting none. `tests/shadow_result.rs` holds the shadow to
+the exact one -- translucent, clipped and filtered -- and the draw to its
+bytes casting none, under a filter and under a clip.
 
 Four shadows are still Skia's: one under a `globalCompositeOperation` that
 composites the whole canvas, one under a CanvasKit filter, one cast by a run
