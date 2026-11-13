@@ -1343,6 +1343,7 @@ fn color_function_to_xyz(space: &str, [x, y, z]: [f64; 3]) -> Option<[f64; 3]> {
         "display-p3" => {
             apply_matrix(LINEAR_P3_TO_XYZ, linear(srgb_to_linear_f64))
         }
+        "display-p3-linear" => apply_matrix(LINEAR_P3_TO_XYZ, [x, y, z]),
         "rec2020" => {
             apply_matrix(LINEAR_REC2020_TO_XYZ, linear(rec2020_decode))
         }
@@ -1365,6 +1366,7 @@ fn xyz_to_color_function(space: &str, xyz: [f64; 3]) -> Option<[f64; 3]> {
         "srgb" => encode(XYZ_TO_LINEAR_SRGB, linear_to_srgb_f64),
         "srgb-linear" => apply_matrix(XYZ_TO_LINEAR_SRGB, xyz),
         "display-p3" => encode(XYZ_TO_LINEAR_P3, linear_to_srgb_f64),
+        "display-p3-linear" => apply_matrix(XYZ_TO_LINEAR_P3, xyz),
         "rec2020" => encode(XYZ_TO_LINEAR_REC2020, rec2020_encode),
         "a98-rgb" => encode(XYZ_TO_LINEAR_A98, a98_encode),
         "prophoto-rgb" => {
@@ -2087,7 +2089,8 @@ pub fn declared_color(declared: &Declared) -> (Color4f, &'static str) {
     let alpha = declared.alpha.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
     let (components, space) = match declared.form {
         Form::Color(
-            space @ ("srgb" | "srgb-linear" | "display-p3" | "rec2020"),
+            space @ ("srgb" | "srgb-linear" | "display-p3"
+            | "display-p3-linear" | "rec2020"),
         ) => (held.map(|c| c.unwrap_or(0.0)), space),
         _ => {
             let at_f32 = Declared {
@@ -2340,6 +2343,7 @@ fn color_space(token: &str) -> Option<&'static str> {
         "srgb" => "srgb",
         "srgb-linear" => "srgb-linear",
         "display-p3" => "display-p3",
+        "display-p3-linear" => "display-p3-linear",
         "rec2020" => "rec2020",
         "a98-rgb" => "a98-rgb",
         "prophoto-rgb" => "prophoto-rgb",
@@ -5043,8 +5047,13 @@ const NAMED_SPACES: [&str; 8] = [
 
 /// The spaces `color()` names that a canvas can be in, in the order
 /// [`color_space_name`] asks after them.
-const COLOR_FUNCTION_SPACES: [&str; 4] =
-    ["srgb", "srgb-linear", "display-p3", "rec2020"];
+const COLOR_FUNCTION_SPACES: [&str; 5] = [
+    "srgb",
+    "srgb-linear",
+    "display-p3",
+    "display-p3-linear",
+    "rec2020",
+];
 
 /// The space each of [`NAMED_SPACES`] names, built once by
 /// [`built_color_space`]. A Skia colour space is immutable and its

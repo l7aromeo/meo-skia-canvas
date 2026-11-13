@@ -1,7 +1,7 @@
 {
   "about": "Colour strings and whether Chrome takes them, as the pixel each paints. Read by tests/css_grammar.rs for `Context2D::set_fill_style_css` and by tests/suite/css-grammar.test.js for `ctx.fillStyle`, so the two surfaces answer one table. Comments, `currentcolor` and whitespace: the colour functions' own grammar is pinned in tests/native_api_contract.rs.",
-  "source": "Chrome 152.0.7977.167: ctx.fillStyle set to `#010203` on a fresh 2D context of a canvas outside a document, then to the string, a pixel filled and read back with getImageData, measured 2026-10-26. A refused row is one Chrome ignored, leaving `#010203`; `rgba` is the 8-bit pixel of each it took.",
-  "knownDifferences": "Left out: a comment beside a keyword. Chrome 152 ignores `red/**/`, `/**/red`, `red /**/`, `transparent/**/`, `currentcolor/**/` and `red/*`, and takes a comment beside a hex colour or a function. CSS Syntax drops a comment when it tokenizes, so each of those is a valid <color>, and here each is read; docs/browser-differences.md says so.",
+  "source": "Chrome 152.0.7977.167: ctx.fillStyle set to `#010203` on a fresh 2D context of a canvas outside a document, then to the string, a pixel filled and read back with getImageData, measured 2026-10-26. A refused row is one Chrome ignored, leaving `#010203`; `rgba` is the 8-bit pixel of each it took. The rows naming `display-p3-linear` were measured the same way in Chrome Headless Shell 158.0.8127.18 on 2026-11-13.",
+  "knownDifferences": "Left out: a comment beside a keyword. Chrome 152 ignores `red/**/`, `/**/red`, `red /**/`, `transparent/**/`, `currentcolor/**/` and `red/*`, and takes a comment beside a hex colour or a function. CSS Syntax drops a comment when it tokenizes, so each of those is a valid <color>, and here each is read; docs/browser-differences.md says so. Left out too: `color(display-p3-linear 0.5 0.5 0.5)`, which Chrome 158 paints 187, 188, 188 and this library 188, 188, 188: a grey in linear light is a grey in sRGB, its three channels equal; docs/browser-differences.md, \"`color(display-p3-linear ...)` converts by CSS Color 4's matrices\".",
   "cases": [
     {
       "css": "rgb(/*x*/255 0 0)",
@@ -536,6 +536,18 @@
         0,
         255
       ]
-    }
+    },
+    {"css": "color(display-p3-linear 0.2 0.5 0.3)", "rgba": [102, 190, 146, 255]},
+    {"css": "color(display-p3-linear 0.3 0.15 0.6)", "rgba": [156, 106, 210, 255]},
+    {"css": "color(display-p3-linear 0.6 0.4 0.2)", "rgba": [210, 168, 117, 255]},
+    {"css": "color(display-p3-linear 1 0 0)", "rgba": [255, 0, 0, 255]},
+    {"css": "COLOR(Display-P3-Linear 0.2 0.5 0.3)", "rgba": [102, 190, 146, 255]},
+    {"css": "color(display-p3-linear 0.2 0.5 0.3 / 0.5)", "rgba": [102, 189, 145, 128]},
+    {"css": "color(display-p3-linear none 0.5 0.3)", "rgba": [0, 191, 147, 255]},
+    {"css": "color(display-p3-linear 20% 50% 30%)", "rgba": [102, 190, 146, 255]},
+    {"css": "color(display-p3-linear)", "refused": true},
+    {"css": "color(display-p3-linear 0.2 0.5)", "refused": true},
+    {"css": "color(display-p3linear 0.2 0.5 0.3)", "refused": true},
+    {"css": "color(p3-linear 0.2 0.5 0.3)", "refused": true}
   ]
 }

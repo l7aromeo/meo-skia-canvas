@@ -1,11 +1,12 @@
 {
   "about": "color-mix() as CSS Color 5 section 3 defines it, each row as set on fillStyle: `expected` is what this library reads back, `null` where it refuses the string; `chrome`, `chromePixel` and `chromeStop` are what Chrome reads back, paints on an 8-bit canvas and whether its addColorStop takes it. Read by src/node/utils.rs and tests/suite/color-mix.test.js. A row without `why` agrees with Chrome to its six figures and its pixel to one level.",
-  "source": "Chrome 156.0.8078.49 headless, a 1x1 canvas outside a document, measured 2026-10-28.",
+  "source": "Chrome 156.0.8078.49 headless, a 1x1 canvas outside a document, measured 2026-10-28. The rows naming `display-p3-linear` were measured the same way in Chrome Headless Shell 158.0.8127.18 on 2026-11-13.",
   "why": {
     "draft": "CSS Color 5's grammar takes one or more colours, `[ <color> && <percentage [0,100]>? ]#`; Chrome 156 takes exactly two. docs/browser-differences.md.",
     "reference": "Chrome's figures stray from CSS Color 4's sample code worked in f64 from the fifth figure; this library's are that arithmetic at f32 precision. docs/browser-differences.md.",
     "rec2020": "rec2020 decodes by CSS Color 4's 2.4 gamma here and by BT.2020's curve in Chrome 156. docs/browser-differences.md.",
-    "junk": "Chrome 156's addColorStop takes a colour followed by other text, which its fillStyle refuses; this library refuses both."
+    "junk": "Chrome 156's addColorStop takes a colour followed by other text, which its fillStyle refuses; this library refuses both.",
+    "p3Linear": "Chrome 158 converts `display-p3-linear` by figures that stray from CSS Color 4's sample code worked in f64 from the fourth figure: `color(display-p3-linear 0.2 0.5 0.3)` is `color(srgb 0.399341 0.74364 0.571495)` there and 0.39949968, 0.7436066, 0.57145216 here. docs/browser-differences.md, \"`color(display-p3-linear ...)` converts by CSS Color 4's matrices\"."
   },
   "cases": [
     {
@@ -1144,6 +1145,44 @@
       ],
       "chromeStop": true,
       "expected": "color(srgb 0.5 0 0.5)"
+    },
+    {
+      "css": "color-mix(in display-p3-linear, red, blue)",
+      "chrome": "color(display-p3-linear 0.411271 0.0165849 0.463734)",
+      "chromePixel": [
+        188,
+        0,
+        188,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(display-p3-linear 0.41123098 0.0165971 0.4638013)",
+      "why": "p3Linear"
+    },
+    {
+      "css": "color-mix(in display-p3-linear, color(display-p3-linear 0.2 0.5 0.3), color(display-p3-linear 0.6 0.4 0.2) 25%)",
+      "chrome": "color(display-p3-linear 0.3 0.475 0.275)",
+      "chromePixel": [
+        140,
+        185,
+        139,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(display-p3-linear 0.3 0.475 0.275)"
+    },
+    {
+      "css": "color-mix(in srgb, color(display-p3-linear 0.2 0.5 0.3), color(srgb 0 0 1))",
+      "chrome": "color(srgb 0.199671 0.37182 0.785747)",
+      "chromePixel": [
+        51,
+        95,
+        200,
+        255
+      ],
+      "chromeStop": true,
+      "expected": "color(srgb 0.19974984 0.3718033 0.7857261)",
+      "why": "p3Linear"
     }
   ]
 }

@@ -381,6 +381,71 @@ describe("a wide CSS colour", () => {
   });
 });
 
+describe("color(display-p3-linear)", () => {
+  // Display P3's primaries in linear light, with no transfer function. Each
+  // colour but the red is inside sRGB, so nothing clips: read with Display
+  // P3's curve, or as `srgb-linear`, each paints 6 to 102 levels from these.
+  // The bytes are Chrome 158's fill, on a canvas of each space, read back in
+  // that space.
+  const PAINTED = [
+    ["0.2 0.5 0.3", [102, 190, 146], [124, 188, 149]],
+    ["0.3 0.15 0.6", [156, 106, 210], [149, 108, 203]],
+    ["0.6 0.4 0.2", [210, 168, 117], [203, 170, 124]],
+    ["1 0 0", [255, 0, 0], [255, 0, 0]],
+  ];
+
+  test("paints as Chrome fills it, by every reader of a style", () => {
+    const wrong = [];
+    for (const [channels, srgb, p3] of PAINTED) {
+      const css = `color(display-p3-linear ${channels})`;
+      for (const [colorSpace, want] of [
+        ["srgb", srgb],
+        ["display-p3", p3],
+      ]) {
+        const canvas = new Canvas(100, 20, { colorSpace });
+        canvas.gpu = false;
+        const ctx = canvas.getContext("2d");
+        const read = (x, y) =>
+          Array.from(ctx.getImageData(x, y, 1, 1, { colorSpace }).data);
+
+        ctx.fillStyle = css;
+        ctx.fillRect(0, 0, 10, 10);
+        ctx.strokeStyle = css;
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.moveTo(15, 0);
+        ctx.lineTo(15, 20);
+        ctx.stroke();
+        ctx.fillStyle = "#000";
+        ctx.save();
+        ctx.shadowColor = css;
+        ctx.shadowOffsetX = 30;
+        ctx.fillRect(20, 0, 5, 5);
+        ctx.restore();
+        ctx.save();
+        ctx.filter = `drop-shadow(30px 0 0 ${css})`;
+        ctx.fillRect(60, 0, 5, 5);
+        ctx.restore();
+
+        // Chrome 158 paints each of these as its fill but the filter's on a
+        // Display P3 canvas, which it clips to sRGB: red as 234, 51, 35.
+        // Here a filter's colour is the fill's: docs/browser-differences.md,
+        // "A `drop-shadow()` filter keeps a wide colour on a wide canvas".
+        // Linear grey 0.5 is left out for the entry before it.
+        for (const [reader, pixel] of [
+          ["fillStyle", read(5, 5)],
+          ["strokeStyle", read(15, 10)],
+          ["shadowColor", read(52, 2)],
+          ["filter", read(92, 2)],
+        ])
+          if (pixel.join() !== [...want, 255].join())
+            wrong.push(`${css} on ${colorSpace}, ${reader}: ${pixel}`);
+      }
+    }
+    assert.deepEqual(wrong, []);
+  });
+});
+
 describe("a paragraph on a float canvas", () => {
   // SkParagraph paints in the paints it was built with, which Skia holds
   // converted to sRGB through an approximate transfer function: on an sRGB

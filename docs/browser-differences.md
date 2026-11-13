@@ -1014,6 +1014,39 @@ is zero here. A mix in `rec2020` differs from Chrome by the 2.4 gamma above.
 Chrome's `addColorStop` also takes `color-mix(in srgb, red, blue)foo`, which
 its `fillStyle` refuses; both refuse it here.
 
+**`color(display-p3-linear ...)` converts by CSS Color 4's matrices, and
+Chrome 158's figures stray from them from the fourth.** Read through
+`color-mix(in srgb, ...)`, Chrome takes `color(display-p3-linear 0.2 0.5
+0.3)` for `color(srgb 0.399341 0.74364 0.571495)`; the sample code's
+`lin_P3_to_XYZ` and `XYZ_to_lin_sRGB` in `f64` give 0.39949968, 0.7436066
+and 0.57145216, which is what this library paints. Away from a byte's edge
+the two paint alike, and at one they part. P3 and sRGB share D65's white, so
+a grey in linear light is a grey in sRGB: `color(display-p3-linear 0.5 0.5
+0.5)` is 0.73535698 in each channel, 187.52 as a byte, and paints 188, 188,
+188 here, where Chrome Headless Shell 158.0.8127.18 paints 187, 188, 188 on
+an sRGB canvas, by `fillStyle`, `strokeStyle`, `shadowColor` and `filter`
+alike.
+
+**A `drop-shadow()` filter keeps a wide colour on a wide canvas, as a fill
+does; Chrome 158 clips it to sRGB.** Filter Effects Module Level 1 gives
+`drop-shadow()` a `<color>` and says nothing of its gamut, and Chrome's own
+`fillStyle` and `shadowColor` keep the same colour wide on the same canvas.
+Measured in Chrome Headless Shell 158.0.8127.18 on a `display-p3` canvas,
+read back with `getImageData` in `display-p3`, each filter a `drop-shadow(30px
+0 0 ...)` of a black square:
+
+        colour                            fill and shadowColor   drop-shadow
+        color(display-p3 1 0 0)           255, 0, 0              234, 51, 35
+        color(display-p3-linear 1 0 0)    255, 0, 0              234, 51, 35
+        color(rec2020 0 1 0)              0, 255, 0              117, 251, 76
+
+234, 51, 35 is sRGB red as Display P3 holds it, and 117, 251, 76 sRGB green.
+Here the drop-shadow paints each as its fill does. A colour inside sRGB
+stays within a level of its fill on the same canvas:
+`color(display-p3-linear 0.3 0.15 0.6)` fills 149, 108, 203 in both and
+filters 149, 108, 204 in Chrome. On an sRGB canvas Chrome's filter and fill
+agree.
+
 **`AccentColor` and `AccentColorText` are read; Chrome 156 refuses both.**
 CSS Color 4 section 6.2 lists them among the system colours, valued by the
 user agent like the rest, so a string naming one is a valid colour. Here they
