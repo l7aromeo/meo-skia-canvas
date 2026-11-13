@@ -20,7 +20,7 @@ use skia_safe::{
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 pub mod api;
@@ -77,8 +77,8 @@ use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
-    Entries, ExactColour, Group, Layer, LayerRec, Replay, coverage_files,
-    holds_a_cut, holds_a_pair, reach_the_clip,
+    Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
+    coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use run_mask::Kept;
@@ -1401,7 +1401,7 @@ impl Context2D {
         };
         let (drawn, shadow) = paints(pixels);
         #[cfg_attr(not(test), expect(unused_mut))]
-        let mut recording = OnceLock::new();
+        let mut recording = LazyPicture::default();
         #[cfg_attr(not(test), expect(unused_mut))]
         let mut document = dual.then(|| {
             let (paint, shadow) = paints(Recording::Document);
@@ -1419,7 +1419,7 @@ impl Context2D {
             let Some(recorded) = record(pixels) else {
                 return false;
             };
-            recording = OnceLock::from(Some(recorded));
+            recording = LazyPicture::from(Some(recorded));
             if dual {
                 let Some(recorded) = record(Recording::Document) else {
                     return false;
@@ -1820,7 +1820,7 @@ impl Context2D {
                     inked: Rect::new_empty(),
                     shadow: None,
                     blend: None,
-                    recording: OnceLock::from(Some(recorded_as)),
+                    recording: LazyPicture::from(Some(recorded_as)),
                     bounds: self.bounds,
                     document: document.map(layer::ColourRecording::recorded),
                     clip: None,
@@ -2212,7 +2212,7 @@ impl Context2D {
             inked,
             shadow: None,
             blend: None,
-            recording: OnceLock::from(Some(recorded)),
+            recording: LazyPicture::from(Some(recorded)),
             bounds: self.bounds,
             document: document.map(layer::ColourRecording::recorded),
             clip: None,

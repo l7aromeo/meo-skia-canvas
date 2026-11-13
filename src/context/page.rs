@@ -33,6 +33,8 @@ use std::{
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
+#[cfg(test)]
+use crate::context::layer::ENTRIES_WALKED;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::gpu::unpremultiply as gpu_unpremultiply;
 use crate::{
@@ -47,8 +49,8 @@ use crate::{
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, ColourText, Composite,
             Coverage, CutOp, Entries, Group, Layer, LayerRec, PatternDraw,
-            Target, TileScope, holds_a_cut, in_document_space, play_entries,
-            tiles_exactly,
+            RecordedCount, Target, TileScope, holds_a_cut, in_document_space,
+            play_entries, tiles_exactly,
         },
         resident::{Place, SharedSurface},
     },
@@ -454,6 +456,15 @@ pub struct PageRecorder {
     /// holds besides is filed in its [`OpenLayer`] -- see
     /// [`PageRecorder::open_layer`].
     open: Vec<OpenLayer>,
+    /// What the pictures filed among `layers` and the open layers' entries
+    /// hold -- see [`Self::recorded_bytes`] -- added to as each entry is
+    /// filed and as a picture recorded when first played is recorded, and
+    /// begun again with the page's content. Kept rather than worked out at
+    /// each read: summed over every entry at each read, a 600 by 400 canvas
+    /// filled twice, lettered and read each frame took 32.5 microseconds a
+    /// frame over its 2,000th to 4,000th frames and 233 over its 38,000th to
+    /// 40,000th, each frame filing entries every later read walked.
+    recorded: RecordedCount,
 }
 
 /// A `saveLayer` open on a [`PageRecorder`].
@@ -641,6 +652,23 @@ thread_local! {
     /// the begin that follows it are held to.
     pub(crate) static RELEASES_RECORDERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
+
+#[cfg(test)]
+thread_local! {
+    /// Whether [`PageRecorder::recorded_bytes`] holds its count to a walk of
+    /// the page on this thread: off only where a test counts the entries
+    /// the count itself walks -- see `ENTRIES_WALKED` -- which the
+    /// walk would add to.
+    pub(crate) static COUNT_HELD_TO_WALK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// How many times [`PageRecorder::recorded_bytes`] yields for a picture
+/// another thread has recorded to be counted, in a build with debug
+/// assertions, before it calls the count short: the addition follows the
+/// picture by a few instructions, and a thousand yields leave it far more
+/// room than that without hanging a test on a count that will never come.
+#[cfg(debug_assertions)]
+const COUNT_CATCH_UP_TRIES: usize = 1000;
 
 impl Recorders {
     fn new(bounds: Rect, dual: bool) -> Self {
@@ -992,14 +1020,70 @@ impl PageRecorder {
 
     /// The bytes the pictures of this page's recording hold, filed so far
     /// among its layers and in any `saveLayer` still open -- see
-    /// [`Layer::recorded_bytes`]. What is being recorded and not yet filed
-    /// is not counted: a read files it, and the binding asks after a read.
+    /// [`Layer::recorded_bytes`] -- as counted while they were filed and
+    /// recorded, which costs the same however long the recording is. What
+    /// is being recorded and not yet filed is not counted: a read files it,
+    /// and the binding asks after a read.
+    ///
+    /// A build with debug assertions holds the count to the walk it stands
+    /// for at every call -- see [`Self::walked_bytes`].
     pub fn recorded_bytes(&self) -> usize {
+        let counted = self.recorded.bytes();
+        #[cfg(debug_assertions)]
+        self.hold_count_to_walk(counted);
+        counted
+    }
+
+    /// The bytes the pictures of this page's recording hold, summed over
+    /// every entry: what [`Self::recorded_bytes`] counts as entries are
+    /// filed.
+    #[cfg(debug_assertions)]
+    fn walked_bytes(&self) -> usize {
         self.layers
             .iter()
             .chain(self.open.iter().flat_map(|layer| layer.entries.iter()))
             .map(Layer::recorded_bytes)
             .sum()
+    }
+
+    /// Panics where `counted`, read just before, is not what a walk of the
+    /// page finds. A picture an export records on another thread is counted
+    /// after it is in place, so the count may trail a walk for as long as
+    /// that takes and never leads it: it is held to be no more than the
+    /// walk at once, and to reach it within [`COUNT_CATCH_UP_TRIES`] yields.
+    #[cfg(debug_assertions)]
+    fn hold_count_to_walk(&self, counted: usize) {
+        #[cfg(test)]
+        if !COUNT_HELD_TO_WALK.get() {
+            return;
+        }
+        #[cfg(test)]
+        let walked_before = ENTRIES_WALKED.get();
+        let walked = self.walked_bytes();
+        #[cfg(test)]
+        ENTRIES_WALKED.set(walked_before);
+        assert!(
+            counted <= walked,
+            "the page counts {counted} bytes recorded, past the {walked} \
+             its entries hold"
+        );
+        let caught_up = (0..COUNT_CATCH_UP_TRIES).any(|_| {
+            std::thread::yield_now();
+            self.recorded.bytes() >= walked
+        });
+        assert!(
+            caught_up,
+            "the page counts {} bytes recorded, short of the {walked} its \
+             entries hold",
+            self.recorded.bytes()
+        );
+    }
+
+    /// Adds what `entry` holds to the page's count, and has what it records
+    /// when first played add to it then -- see [`Layer::count_into`].
+    fn count(&self, entry: &Layer) {
+        entry.count_into(&self.recorded);
+        self.recorded.add(entry.recorded_bytes());
     }
 
     /// Shares what the page's canvas reports to the JavaScript engine with
@@ -1058,6 +1142,7 @@ impl PageRecorder {
             place: Place::new(),
             replay_cost: 0,
             open: Vec::new(),
+            recorded: RecordedCount::default(),
         }
     }
 
@@ -1209,6 +1294,9 @@ impl PageRecorder {
         // what it was given.
         self.layers = Arc::default();
         self.features = Arc::default();
+        // A count of its own, which what the old content records when an
+        // export first plays it adds to rather than to this one's.
+        self.recorded = RecordedCount::default();
         self.changed = false;
         self.isolated = None;
         self.filtered = 0;
@@ -1373,6 +1461,14 @@ impl PageRecorder {
     /// asking `features` of a vector backend for it, or among the contents
     /// of the innermost open `saveLayer`, which asks for them in turn.
     fn file_entry(&mut self, entry: Layer, features: VectorFeatures) {
+        self.count(&entry);
+        self.file_counted(entry, features);
+    }
+
+    /// Files `entry` as [`Self::file_entry`] does, its bytes counted already:
+    /// a closed layer's group, whose entries were counted as they were
+    /// filed in it.
+    fn file_counted(&mut self, entry: Layer, features: VectorFeatures) {
         match self.open.last_mut() {
             Some(layer) => {
                 layer.entries.push(entry);
@@ -1552,7 +1648,10 @@ impl PageRecorder {
                 .features
                 .with(layer.features.nested())
                 .with(rec_features);
-            self.file_group(group, features.with(VectorFeatures::LAYER));
+            self.file_counted(
+                Layer::Group(Arc::new(group)),
+                features.with(VectorFeatures::LAYER),
+            );
         }
         self.restore();
     }
@@ -1634,6 +1733,8 @@ impl PageRecorder {
             recorders.begin_with(bounds, true);
             entry
         }) {
+            entry.count_into(&self.recorded);
+            self.recorded.add(entry.recorded_bytes());
             layer.entries.push(entry);
             layer.entry_features.push(layer.current_features);
         }
@@ -1968,6 +2069,7 @@ impl PageRecorder {
             entry
         });
         if let Some(entry) = filed {
+            self.count(&entry);
             Arc::make_mut(&mut self.layers).push(entry);
             Arc::make_mut(&mut self.features)
                 .push(self.isolated.unwrap_or(VectorFeatures::PLAIN));
@@ -2340,7 +2442,8 @@ impl PageRecorder {
                 && last_features.is_none_or(|last| *last == features)
                 && let Some(op) = Arc::get_mut(op)
             {
-                op.extend(drawn);
+                let added = op.extend(drawn);
+                self.recorded.add(added);
                 if let Some(layer) = self.open.last_mut() {
                     layer.features = layer.features.with(features);
                 }
@@ -2446,6 +2549,10 @@ impl PageRecorder {
     /// replays the open layers and nothing filed -- see [`Page::cache_key`].
     pub fn page(&mut self) -> Page {
         let filed = self.filed_page();
+        // Every read and export a test makes holds the page's count to a
+        // walk of it, as the binding's report does in a debug build.
+        #[cfg(test)]
+        self.recorded_bytes();
         let Some(drawn) = self.open_layers_entry() else {
             return filed;
         };
