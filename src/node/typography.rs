@@ -434,6 +434,10 @@ pub struct TextLayout {
     /// The angle an `oblique` font is drawn at, which decides which runs
     /// are sheared -- see [`run_shear`].
     oblique: Option<f32>,
+    /// Whether the run is laid out right to left, which decides the side
+    /// of each line its trailing whitespace is decorated on -- see
+    /// `decorate::Spans::add_trailing`.
+    rtl: bool,
 }
 
 /// Which painter a test has a run drawn with: from the kept runs, as every
@@ -555,12 +559,18 @@ impl LaidOut {
             .map(|run| run_shear(&run.font.typeface(), layout.oblique))
             .collect();
         // The run is one decorating box: every run of it is the box's,
-        // whatever face draws it.
+        // whatever face draws it, and so is the whitespace it ends in.
         let spans = match decoration {
-            Some(_) => decorate::spans(&runs, |_| Some(0)),
+            Some(_) => decorate::spans(&runs, &layout.paragraph, layout.rtl),
             None => Vec::new(),
         };
-        let lines = runs.last().map_or(0, |run| run.line + 1);
+        // A line of nothing but whitespace has no run, and is drawn for its
+        // lines alone.
+        let lines = runs
+            .last()
+            .map(|run| run.line + 1)
+            .max(spans.last().map(|span| span.line + 1))
+            .unwrap_or(0);
         let glyphs = runs.iter().map(|run| run.glyphs.len()).sum();
         Self {
             layout,
@@ -2630,6 +2640,7 @@ impl<'a> Typesetter<'a> {
             condensation,
             restyled,
             oblique: self.oblique,
+            rtl: self.graf_style().text_direction() == TextDirection::RTL,
         }
     }
 

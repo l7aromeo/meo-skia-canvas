@@ -3746,10 +3746,12 @@ describe("text on the GPU draws the same whatever fonts were registered before i
   }
 });
 
-// A canvas aligns the whole of a run, the whitespace it ends in included, and
-// the whitespace a right-to-left run ends in stands at its visual start, as in
-// Chrome. tests/assets/cases/text-trailing-whitespace.json holds the cases and
-// where Chrome was measured, and tests/native_context2d.rs reads it too.
+// A canvas keeps every space it is given, and Chrome draws a decoration
+// under every one, the spaces a run ends in included: where the decoration
+// runs is the run's advance, wherever the alignment puts it, in either
+// direction. tests/assets/cases/text-trailing-whitespace.json holds the
+// cases, the rule and where Chrome was measured to follow it, and
+// tests/native_context2d.rs reads it too.
 describe("Text that ends in whitespace", () => {
   const cases = require("../assets/cases/text-trailing-whitespace.json");
   // Before each test, since the tests before these reset the library.
@@ -3758,6 +3760,165 @@ describe("Text that ends in whitespace", () => {
       "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
     ]),
   );
+
+  /** The height of each of a case's two draws, and the canvas's width. */
+  const [ROW, WIDTH] = [48, 320];
+
+  /** How far a channel may differ and still count as the same pixel. */
+  const SAME = 8;
+
+  const gpu = new Canvas(1, 1).engine.renderer == "GPU";
+
+  /**
+   * Where `text` decorated with `line` differs from it plain, as the
+   * first and last column plus one, and where the rule puts its advance.
+   */
+  const decorated = (onGpu, { text, spacing }, { align, dir }, line) => {
+    const canvas = new Canvas(WIDTH, 2 * ROW);
+    canvas.gpu = onGpu;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, WIDTH, 2 * ROW);
+    ctx.fillStyle = "black";
+    Object.assign(ctx, {
+      font: cases.font,
+      letterSpacing: `${spacing}px`,
+      textAlign: align,
+      direction: dir,
+      textBaseline: "middle",
+    });
+    const width = ctx.measureText(text).width;
+    for (const [row, decoration] of [
+      [0, "none"],
+      [1, line],
+    ]) {
+      ctx.textDecoration = decoration;
+      ctx.fillText(text, cases.anchor[align], (row + 0.5) * ROW);
+    }
+    const data = ctx.getImageData(0, 0, WIDTH, 2 * ROW).data;
+    const differs = (x) => {
+      for (let y = 0; y < ROW; y++) {
+        const a = (y * WIDTH + x) * 4,
+          b = ((y + ROW) * WIDTH + x) * 4;
+        for (let k = 0; k < 3; k++)
+          if (Math.abs(data[a + k] - data[b + k]) > SAME) return true;
+      }
+      return false;
+    };
+    const columns = [...Array(WIDTH).keys()].filter(differs);
+    const share = { left: 0, center: 0.5, right: 1 }[align];
+    const start = cases.anchor[align] - share * width;
+    return {
+      got: columns.length ? [columns[0], columns.at(-1) + 1] : null,
+      want: [Math.floor(start), Math.ceil(start + width)],
+    };
+  };
+
+  /** Every case, layout and line whose decoration `fits` refuses. */
+  const misses = (onGpu, fits) =>
+    cases.decorations.flatMap((each) =>
+      cases.layouts.flatMap((layout) =>
+        cases.lines.flatMap((line) => {
+          const { got, want } = decorated(onGpu, each, layout, line);
+          return fits(got, want)
+            ? []
+            : [
+                `${line} ${JSON.stringify(each.text)} at ${each.spacing}px ` +
+                  `${layout.align} ${layout.dir}: ${got} for ${want}`,
+              ];
+        }),
+      ),
+    );
+
+  test("a decoration runs under every space, as in Chrome", () => {
+    const wrong = misses(
+      false,
+      (got, want) => got?.[0] === want[0] && got[1] === want[1],
+    );
+    assert.deepEqual(wrong, []);
+  });
+
+  // A multisampled GPU page can drop the sliver of a line under a column it
+  // covers less than a sample of, so either end may stop a column short.
+  test(
+    "a decoration runs under every space on the GPU, to a column",
+    { skip: gpu ? false : "skipped: a canvas takes the CPU here" },
+    () => {
+      const wrong = misses(
+        true,
+        (got, want) =>
+          got !== null &&
+          Math.abs(got[0] - want[0]) <= 1 &&
+          Math.abs(got[1] - want[1]) <= 1,
+      );
+      assert.deepEqual(wrong, []);
+    },
+  );
+
+  // A paragraph's lines reach the spaces each line ends in too, a wrapped
+  // line's and a right-to-left line's included, for the box the spaces are
+  // in: Chrome's columns, line by line.
+  test("a paragraph's decorations and backgrounds reach every space", () => {
+    const { TextDecoration } = require("../../lib");
+    const LINE = 48;
+    const LINES = {
+      underline: TextDecoration.Underline,
+      overline: TextDecoration.Overline,
+    };
+    const wrong = [];
+    for (const { name, width, dir, pieces, lines } of cases.paragraphs.cases) {
+      const [W, H] = [width + 80, LINE * (lines.length + 1)];
+      /** The paragraph's pixels, its pieces styled or not. */
+      const drawn = (styled) => {
+        const base = {
+          fontFamilies: ["Oswald"],
+          fontSize: 16,
+          color: "black",
+          heightMultiplier: LINE / 16,
+          halfLeading: true,
+        };
+        const pb = ParagraphBuilder.Make({
+          textStyle: base,
+          textDirection: dir,
+        });
+        for (const [text, { line, bg }] of pieces) {
+          pb.pushStyle({
+            ...base,
+            ...(styled && line ? { decoration: LINES[line] } : {}),
+            ...(styled && bg ? { backgroundColor: bg } : {}),
+          });
+          pb.addText(text);
+          pb.pop();
+        }
+        const paragraph = pb.build();
+        paragraph.layout(width);
+        const ctx = new Canvas(W, H).getContext("2d");
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, W, H);
+        ctx.drawParagraph(paragraph, 40, 0);
+        return ctx.getImageData(0, 0, W, H).data;
+      };
+      const [plain, styled] = [drawn(false), drawn(true)];
+      const got = lines.map((_, line) => {
+        const columns = [...Array(W).keys()].filter((x) => {
+          for (let y = line * LINE; y < (line + 1) * LINE; y++)
+            for (let k = 0; k < 3; k++) {
+              const at = (y * W + x) * 4 + k;
+              if (Math.abs(plain[at] - styled[at]) > SAME) return true;
+            }
+          return false;
+        });
+        return columns.length
+          ? [columns[0] - 40, columns.at(-1) + 1 - 40]
+          : null;
+      });
+      if (JSON.stringify(got) !== JSON.stringify(lines))
+        wrong.push(
+          `${name}: ${JSON.stringify(got)} for ${JSON.stringify(lines)}`,
+        );
+    }
+    assert.deepEqual(wrong, []);
+  });
 
   // The spaces a right-to-left run ends in stand at its visual start, so
   // the glyphs stand a whole run of them in from where a left-aligned run

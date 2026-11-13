@@ -44,7 +44,8 @@ use skia_safe::{
     paint::{Cap, Style},
     path_utils::fill_path_with_paint,
     textlayout::{
-        FontArguments, FontCollection, TextDecoration, TextDecorationStyle,
+        FontArguments, FontCollection, Paragraph, RectHeightStyle,
+        RectWidthStyle, TextDecoration, TextDecorationStyle,
     },
 };
 use std::{
@@ -391,8 +392,8 @@ pub(crate) fn on_line(spans: &[Span], line: usize) -> &[Span] {
 
 /// The span each box covers on each line of a paragraph, gathered a glyph
 /// run at a time from the runs `Paragraph::paint` draws -- see
-/// `glyph_runs`, which leave out a line's trailing spaces as SkParagraph's
-/// own decorations did.
+/// `glyph_runs` -- and then from the whitespace each line ends in, which
+/// those runs leave out -- see [`Spans::add_trailing`].
 ///
 /// A glyph at a time rather than a run: SkParagraph shapes adjacent styles
 /// in one font as one run, so a run can hold text of two boxes, or of a box
@@ -478,21 +479,142 @@ impl Spans {
         self.joinable = true;
     }
 
-    /// The spans, in the order their lines and glyph runs came.
-    pub(crate) fn finish(self) -> Vec<Span> {
+    /// Adds the whitespace each line of `paragraph` ends in, once its runs
+    /// are added: SkParagraph paints none of it, so [`Self::add`] never
+    /// sees it, though a canvas keeps every space and a line's decoration
+    /// and background reach across them, as they do in Chrome. `box_of`
+    /// names the box the text at a UTF-16 offset belongs to, the offsets
+    /// SkParagraph's line metrics are in.
+    ///
+    /// The whitespace follows the line's content in the paragraph's
+    /// direction -- `rtl` says which -- as the bidirectional algorithm's
+    /// rule L1 sets a line's trailing whitespace: on its right in a
+    /// left-to-right paragraph and on its left in a right-to-left one, from
+    /// the edge of the line's width without it, a piece of each box at a
+    /// time in the order of the text. Each piece is as wide as
+    /// `getRectsForRange` makes it, its letter spacing counted, but is not
+    /// where that puts it: SkParagraph resolves the paragraph's directions
+    /// before it breaks lines, and never applies L1 to a line, so the spaces
+    /// a right-to-left line wrapped at stay right of it, where Chrome draws
+    /// their decoration on its left.
+    ///
+    /// A piece joins the span of its box it touches on either side, so that
+    /// a dotted line keeps its phase across it, and otherwise stands alone at
+    /// the line's baseline: the one its other spans are on, or for a line of
+    /// nothing but whitespace, the line's baseline rounded to the pixel as
+    /// `Paragraph::paint` rounds the glyphs' -- see [`painted_baseline`].
+    pub(crate) fn add_trailing(
+        &mut self,
+        paragraph: &Paragraph,
+        rtl: bool,
+        box_of: impl Fn(usize) -> Option<usize>,
+    ) {
+        for metrics in paragraph.get_line_metrics() {
+            let white = metrics.end_excluding_whitespaces..metrics.end_index;
+            let line = metrics.line_number;
+            // Where the next piece starts: right of the content, or left of
+            // it in a right-to-left paragraph.
+            let mut edge = match rtl {
+                true => metrics.left,
+                false => metrics.left + metrics.width,
+            } as f32;
+            let mut start = white.start;
+            while start < white.end {
+                let current = box_of(start);
+                // Whitespace is all in the basic multilingual plane, so a
+                // code unit at a time steps a character at a time.
+                let end = (start + 1..white.end)
+                    .find(|&at| box_of(at) != current)
+                    .unwrap_or(white.end);
+                let pieces = paragraph.get_rects_for_range(
+                    start..end,
+                    RectHeightStyle::Tight,
+                    RectWidthStyle::Tight,
+                );
+                let width: f32 =
+                    pieces.iter().map(|piece| piece.rect.width()).sum();
+                let (left, right) = match rtl {
+                    true => {
+                        edge -= width;
+                        (edge, edge + width)
+                    }
+                    false => {
+                        edge += width;
+                        (edge - width, edge)
+                    }
+                };
+                if let Some(box_index) = current
+                    && width > 0.0
+                {
+                    let y = self
+                        .spans
+                        .iter()
+                        .find(|span| span.line == line)
+                        .map_or_else(
+                            || painted_baseline(metrics.baseline),
+                            |span| span.y,
+                        );
+                    self.place(Span {
+                        left,
+                        right,
+                        y,
+                        line,
+                        box_index,
+                    });
+                }
+                start = end;
+            }
+        }
+        self.joinable = false;
+    }
+
+    /// Joins `span` to a span of its box on its line and baseline that it
+    /// touches on either side, or adds it.
+    fn place(&mut self, span: Span) {
+        let touching = self.spans.iter_mut().find(|other| {
+            other.line == span.line
+                && other.box_index == span.box_index
+                && other.y == span.y
+                && ((span.left - other.right).abs() <= JOIN_TOLERANCE
+                    || (other.left - span.right).abs() <= JOIN_TOLERANCE)
+        });
+        match touching {
+            Some(other) => {
+                other.left = other.left.min(span.left);
+                other.right = other.right.max(span.right);
+            }
+            None => self.spans.push(span),
+        }
+    }
+
+    /// The spans, in line order, and within a line in the order their glyph
+    /// runs came, the whitespace added after them last.
+    pub(crate) fn finish(mut self) -> Vec<Span> {
+        self.spans.sort_by_key(|span| span.line);
         self.spans
     }
 }
 
-/// [`Spans`] over runs already collected.
+/// Where `Paragraph::paint` draws the glyphs of a line whose baseline is
+/// `baseline`: on the pixel nearest it, as `TextLine` rounds it before
+/// drawing, by `SkScalarFloorToScalar(baseline + 0.5)`.
+fn painted_baseline(baseline: f64) -> f32 {
+    (baseline as f32 + 0.5).floor()
+}
+
+/// [`Spans`] over runs already collected from `paragraph`, right to left
+/// where `rtl` says, every one of them, whitespace included, the one box
+/// 0's -- a canvas's text run.
 pub(crate) fn spans(
     runs: &[GlyphRun],
-    box_of: impl Fn(usize) -> Option<usize>,
+    paragraph: &Paragraph,
+    rtl: bool,
 ) -> Vec<Span> {
     let mut spans = Spans::default();
     for run in runs {
-        spans.add(&run.borrowed(), &box_of);
+        spans.add(&run.borrowed(), |_| Some(0));
     }
+    spans.add_trailing(paragraph, rtl, |_| Some(0));
     spans.finish()
 }
 
@@ -626,6 +748,11 @@ fn line_paint(base: &Paint, color: Option<Color4f>) -> Paint {
 
 /// Draws one line of `span` in `line`, its paint from [`line_paint`], onto
 /// pixels that do with a faint paint what `faint` says.
+///
+/// A line is a filled rectangle, so a multisampled GPU page can leave out
+/// the column it covers less of than a sample: 16px Oswald's underline,
+/// 0.8 high, ending 0.30 into a column, stops a column short there, as a
+/// `fillRect` of the same band does.
 fn draw_line(
     canvas: &Canvas,
     decoration: &Decoration,
@@ -1457,6 +1584,29 @@ fn cut(
     kept
 }
 
+/// `ranges`, UTF-8 offsets into `text` in order and not overlapping, as
+/// UTF-16 offsets: the box ranges [`Spans::add_trailing`] looks a line's
+/// whitespace up in, SkParagraph's line metrics counting UTF-16.
+pub(crate) fn utf16_ranges(
+    text: &str,
+    ranges: &[(Range<usize>, usize)],
+) -> Vec<(Range<usize>, usize)> {
+    let (mut bytes, mut units) = (0, 0);
+    let mut to_units = |at: usize| {
+        let at = at.clamp(bytes, text.len());
+        units += text[bytes..at].encode_utf16().count();
+        bytes = at;
+        units
+    };
+    ranges
+        .iter()
+        .map(|(range, index)| {
+            let start = to_units(range.start);
+            (start..to_units(range.end), *index)
+        })
+        .collect()
+}
+
 /// The box a UTF-8 offset falls in, among boxes given as the text each
 /// covers, in order and not overlapping -- for [`spans`]' `box_of`.
 pub(crate) fn box_at(
@@ -1473,7 +1623,8 @@ pub(crate) fn box_at(
 #[cfg(test)]
 mod tests {
     use super::{
-        Decoration, FaceLines, Layer, LinePaint, Span, Thickness, paint, wave,
+        Decoration, FaceLines, Layer, LinePaint, Span, Spans, Thickness, paint,
+        utf16_ranges, wave,
     };
     use crate::{context::faint::Faint, started};
     use skia_safe::{
@@ -2477,5 +2628,56 @@ mod tests {
         // Not vacuous: the three faces' lines differ.
         assert_ne!(answers[0], answers[1], "by weight");
         assert_ne!(answers[0], answers[2], "by slant");
+    }
+
+    /// A span of whitespace joins the span of its box it touches on either
+    /// side, as one does on a right-to-left line, so that a dotted line
+    /// keeps its phase across both; one of another box, line or baseline
+    /// stands alone.
+    #[test]
+    fn a_piece_of_whitespace_joins_its_box_on_either_side() {
+        let span = |left, right, box_index| Span {
+            left,
+            right,
+            y: 20.0,
+            line: 0,
+            box_index,
+        };
+        let mut spans = Spans {
+            spans: vec![span(10.0, 20.0, 0)],
+            joinable: false,
+        };
+        spans.place(span(20.0, 24.0, 0));
+        spans.place(span(6.0, 10.0, 0));
+        spans.place(span(24.0, 28.0, 1));
+        spans.place(Span {
+            line: 1,
+            ..span(28.0, 30.0, 1)
+        });
+        assert_eq!(
+            spans.finish(),
+            [
+                span(6.0, 24.0, 0),
+                span(24.0, 28.0, 1),
+                Span {
+                    line: 1,
+                    ..span(28.0, 30.0, 1)
+                }
+            ]
+        );
+    }
+
+    /// Box ranges in UTF-8 offsets become UTF-16 ones, which a character
+    /// outside ASCII is fewer of, and one outside the basic multilingual
+    /// plane is two of.
+    #[test]
+    fn box_ranges_count_in_utf16() {
+        // "漢" is 3 bytes and 1 unit, "😀" 4 bytes and 2 units.
+        let text = "漢 a😀  ";
+        let ranges = [(0..4, 0), (4..5, 1), (5..12, 2)];
+        assert_eq!(
+            utf16_ranges(text, &ranges),
+            [(0..2, 0), (2..3, 1), (3..7, 2)]
+        );
     }
 }

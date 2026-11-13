@@ -4426,4 +4426,57 @@ mod route_tests {
         }
         assert!(parted.is_empty(), "{}", parted.join("\n"));
     }
+
+    /// `Paragraph::paint`, which keeps SkParagraph's glyphs on a line of one
+    /// line's paragraph, decorates the spaces each line ends in as the
+    /// canvas's paths do, a lone space included -- see
+    /// `decorate::Spans::add_trailing`.
+    #[test]
+    fn paragraph_paint_decorates_the_spaces_a_line_ends_in() {
+        let engine = engine();
+        let underlined = |text: &str| {
+            let draw = |decoration: TextDecoration| {
+                let mut base = style(&["OswaldTest"]);
+                base.font_size = 16.0;
+                base.decoration = decoration;
+                let paragraph = engine.layout_text(text, &base, 400.0);
+                let (w, h) = (440, 60);
+                let mut surface =
+                    started::raster_n32_premul((w, h)).expect("a surface");
+                surface.canvas().clear(Color::WHITE);
+                paragraph.paint(surface.canvas(), Point::new(20.0, 10.0));
+                let info = ImageInfo::new_n32_premul((w, h), None);
+                let mut pixels = vec![0u8; (w * h * 4) as usize];
+                assert!(surface.read_pixels(
+                    &info,
+                    &mut pixels,
+                    (w * 4) as usize,
+                    (0, 0),
+                ));
+                pixels
+            };
+            let (plain, under) = (
+                draw(TextDecoration::default()),
+                draw(TextDecoration::underline()),
+            );
+            let columns: Vec<usize> = (0..440usize)
+                .filter(|&x| {
+                    (0..60usize).any(|y| {
+                        (0..3).any(|k| {
+                            plain[(y * 440 + x) * 4 + k]
+                                != under[(y * 440 + x) * 4 + k]
+                        })
+                    })
+                })
+                .collect();
+            columns
+                .first()
+                .zip(columns.last())
+                .map(|(a, b)| (*a - 20, *b + 1 - 20))
+        };
+        // 16px Oswald: "ab" 13.97 wide, a space 3.66.
+        assert_eq!(underlined("ab"), Some((0, 14)), "the letters");
+        assert_eq!(underlined("ab  "), Some((0, 22)), "and two spaces");
+        assert_eq!(underlined(" "), Some((0, 4)), "a lone space");
+    }
 }

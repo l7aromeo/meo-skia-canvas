@@ -548,6 +548,14 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   pattern: a dot `t` long and a gap of `t`, a dash `2t` and a gap of `t`,
   from the box's left edge.
 
+- _A Paragraph API background ends where its text does, where Chrome snaps
+  its ends to the pixel._ A span's background in CSS covers its text,
+  trailing spaces included, and Chrome paints it from and to whole pixels:
+  behind `"ab  "` in 16px Oswald, 21.30px wide, it covers columns 0 to 21 in
+  Chrome 158, and here 0 to 22, the last column covered for the 0.30 of it
+  the text reaches. Text has no such rounding, and a background that stopped
+  short of its last glyph's advance would cut the glyph's box.
+
 - _A text shadow stays beneath every glyph it reaches -- its own span's,
   the spans before it on its line, and the lines above -- where Chrome paints
   a later span's or line's shadow over them._ CSS Text Decoration 3 section 4
