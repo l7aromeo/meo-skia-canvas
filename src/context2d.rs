@@ -5730,24 +5730,23 @@ mod overlapping_glyph_tests {
         bytes
     }
 
-    /// The GPU's blend rounding allowance: how much further than under
-    /// `source-over` a route's GPU canvas may stand from its CPU canvas under
-    /// a blend read in the shader. Where the GPU's source pixels already
-    /// stand apart from the CPU's, the blend rounds that difference to a
-    /// byte once more on each engine, and the two roundings can part by one
-    /// level. One is what was measured, not chosen: under `blur(1px)` the
-    /// GPU's chain stood 36 levels from the CPU's under `source-over` and 37
-    /// under `multiply`, the same whether the run's glyphs were drawn whole,
-    /// apart or as the canvas chose, so the extra level is not the glyphs'.
-    /// Held by [`every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu`]
-    /// and [`a_run_read_smaller_blends_its_glyphs_on_the_gpu_as_on_the_cpu`].
-    const BLEND_ROUNDING: u8 = 1;
-
     /// Every route draws a run whole on the CPU, and blends its glyphs on
-    /// the GPU as on the CPU: no further from it under a blend read in the
-    /// shader than the same route stands under `source-over` -- and
-    /// [`BLEND_ROUNDING`] -- nor past the levels a fill stands -- see
+    /// the GPU as on the CPU.
+    ///
+    /// Where the glyphs meet the page, the GPU canvas stands no further from
+    /// the CPU canvas under a blend read in the shader than the same route
+    /// stands under `source-over`, nor past the levels a fill stands -- see
     /// [`METAL_FILL_LEVELS`].
+    ///
+    /// Where a chain runs over the run -- [`DEFERRED_ROUTES`] -- the glyphs
+    /// are drawn into the chain's group in `source-over` and the blend
+    /// applies once, to the group, so how the glyphs are drawn cannot change
+    /// the page: the GPU canvas draws the same bytes with its glyphs forced
+    /// whole, forced apart and as it chose, and draws none apart itself.
+    /// How far that page stands from the CPU's is then the chain's blur and
+    /// not the glyphs', and it differs by backend: under `blur(1px)`, 36
+    /// levels under `source-over` and 37 under `multiply` on Metal, 35 and
+    /// 37 on lavapipe.
     #[test]
     fn every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu() {
         let gpu = RenderingEngine::GPU.selectable();
@@ -5757,14 +5756,16 @@ mod overlapping_glyph_tests {
         };
         let mut wrong = vec![];
         for route in ROUTES {
+            let chained = DEFERRED_ROUTES.contains(&route);
             // A float page is not drawn by Ganesh, and with no other GPU
             // engine in the build it falls back to the CPU.
-            let source_over = (gpu && route != "F16 page").then(|| {
-                most_apart(
-                    &drawn_on_route(false, route, SourceOver),
-                    &drawn_on_route(true, route, SourceOver),
-                )
-            });
+            let source_over =
+                (gpu && route != "F16 page" && !chained).then(|| {
+                    most_apart(
+                        &drawn_on_route(false, route, SourceOver),
+                        &drawn_on_route(true, route, SourceOver),
+                    )
+                });
             for blend in [Multiply, Difference, Luminosity] {
                 GLYPHS_DRAWN_ALONE.set(0);
                 let deferred = DEFERRED_FILED.get();
@@ -5772,9 +5773,7 @@ mod overlapping_glyph_tests {
                 // The chain routes keep the run, to be recorded when the
                 // chain first plays it -- see `layer::DeferredPicture` --
                 // so that the sweep holds that path and not another.
-                if DEFERRED_ROUTES.contains(&route)
-                    && DEFERRED_FILED.get() == deferred
-                {
+                if chained && DEFERRED_FILED.get() == deferred {
                     wrong.push(format!(
                         "CPU {route} {blend:?}: no run deferred"
                     ));
@@ -5785,12 +5784,35 @@ mod overlapping_glyph_tests {
                         GLYPHS_DRAWN_ALONE.get()
                     ));
                 }
+                if chained && gpu {
+                    GLYPHS_DRAWN_ALONE.set(0);
+                    let chosen = drawn_on_route(true, route, blend);
+                    if GLYPHS_DRAWN_ALONE.get() != 0 {
+                        wrong.push(format!(
+                            "GPU {route} {blend:?}: {} glyphs drawn apart \
+                             inside the chain",
+                            GLYPHS_DRAWN_ALONE.get()
+                        ));
+                    }
+                    for forced in [GlyphDraws::Each, GlyphDraws::Whole] {
+                        GLYPH_DRAWS_FOR.set(Some(forced));
+                        let drawn = drawn_on_route(true, route, blend);
+                        GLYPH_DRAWS_FOR.set(None);
+                        if drawn != chosen {
+                            wrong.push(format!(
+                                "GPU {route} {blend:?}: drawn {forced:?} \
+                                 stands {} levels from the canvas's choice",
+                                most_apart(&drawn, &chosen)
+                            ));
+                        }
+                    }
+                }
                 let Some(source_over) = source_over else {
                     continue;
                 };
                 let most =
                     most_apart(&cpu, &drawn_on_route(true, route, blend));
-                if most > (source_over + BLEND_ROUNDING).max(bound) {
+                if most > source_over.max(bound) {
                     wrong.push(format!(
                         "GPU {route} {blend:?}: {most} levels, past \
                          {source_over} under source-over and {bound}"
@@ -5897,7 +5919,7 @@ mod overlapping_glyph_tests {
                     &read_smaller(false, read, blend),
                     &read_smaller(true, read, blend),
                 );
-                if most > (source_over + BLEND_ROUNDING).max(bound) {
+                if most > source_over.max(bound) {
                     wrong.push(format!(
                         "{read} {blend:?}: {most} levels, past {source_over} \
                          under source-over and {bound}"

@@ -1548,10 +1548,11 @@ thread_local! {
     /// How many times [`RunPaint::built_blobs`] has built a run's blobs on
     /// this thread.
     pub(crate) static BLOB_BUILDS: Cell<usize> = const { Cell::new(0) };
-    /// How [`glyph_draws`] draws every run in a blend that reads the page,
-    /// whatever its canvas, on this thread, where set: as one blob, the
-    /// mutant the GPU's pixels are held against, or apart, which the CPU's
-    /// bytes are held to.
+    /// How [`glyph_draws`] draws every run on this thread, whatever its
+    /// canvas and its blend, where set: as one blob, the mutant the GPU's
+    /// pixels are held against, or apart, which the CPU's bytes are held to
+    /// -- and, under a chain whose group the glyphs are drawn into in
+    /// `source-over`, either, which the page must not tell apart.
     pub(crate) static GLYPH_DRAWS_FOR: Cell<Option<GlyphDraws>> =
         const { Cell::new(None) };
     /// How many glyphs [`draw_glyphs_apart`] has drawn on this thread.
@@ -2221,14 +2222,14 @@ pub(crate) enum GlyphDraws {
 /// such a case: the CPU blurs each glyph's mask and composites it in turn,
 /// as a group drawn apart does.
 pub(crate) fn glyph_draws(paint: &Paint, canvas: &Canvas) -> GlyphDraws {
+    #[cfg(test)]
+    if let Some(draws) = GLYPH_DRAWS_FOR.get() {
+        return draws;
+    }
     if blends_by_coefficients(paint.blend_mode_or(SkBlendMode::SrcOver))
         || paint.image_filter().is_some()
     {
         return GlyphDraws::Whole;
-    }
-    #[cfg(test)]
-    if let Some(draws) = GLYPH_DRAWS_FOR.get() {
-        return draws;
     }
     if WHOLE_RUNS.get() {
         return GlyphDraws::Whole;
