@@ -33,7 +33,7 @@ use std::{
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 use crate::context::layer::ENTRIES_WALKED;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::gpu::unpremultiply as gpu_unpremultiply;
