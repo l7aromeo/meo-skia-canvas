@@ -2,38 +2,30 @@
 
 "use strict";
 
-// What the dropped-canvas tests judge collection by: how many of the canvases
-// a run made are still alive, counted by the test itself -- one more as each
-// is made, one fewer as a `FinalizationRegistry` hears V8 has collected it.
+// What the dropped-canvas tests judge by: the memory the process holds after
+// each pass of canvases made, read and dropped, the slope of it pass by pass.
+// A run keeping its pages climbs by them every pass; a run whose canvases
+// are collected, or whose pages the budget drops, holds level.
 //
-// A count rather than resident memory, which does not hold both ways.
-// Resident memory hid kept canvases: on a Mac under memory pressure, 400 held
-// alive (1.28 GB of pixels) stood at 940 MB resident at most, having fallen
-// from 922.2 to 808.2 MB at pass 36, as the system compressed or paged out
-// what they held. And what the readback itself allocates in
-// JavaScript drives collection whether or not a canvas reports its page, so
-// a full-page `getImageData` hid the very defect the reporting fixes. Each
-// canvas here reads one column instead: that still gives it its whole page,
-// reported to V8 like any other, while handing JavaScript a few KB.
+// Memory rather than the count of canvases alive, which no longer says
+// whether what they hold is bounded. The pages on a thread are kept to a
+// budget, and a page the budget drops stops being reported to V8, so V8 is
+// told too little of what dropped canvases still hold to start a collection
+// on its own schedule: the count of canvases alive can climb with every pass
+// while what they hold does not -- on the CPU some runs and not others,
+// since whether a collection is still in reach depends on where the last one
+// landed. The count is still kept, for the message of a run.
 //
-// Collected canvases leave a sawtooth in the count, climbing until a
-// collection runs and falling back when one does, its troughs at no fixed
-// spacing. So what is judged is the trend: the least-squares slope of the
-// count, pass by pass, after the first few. A canvas never collected adds one
-// to every later pass.
-//
-// The GPU test judges memory instead, by the same slope -- see
-// `judgedMemory`. The pages on a thread are kept to a budget, which counts a
-// GPU page with its multisample buffer, so about sixteen of these pages fit
-// in it, and V8 is told only their pixels: too little to start a collection.
-// So the count of GPU canvases alive climbs with every pass while what they
-// hold does not, and V8 collects them on its own heap's schedule. The memory
-// is the process's physical footprint on macOS, which counts what the GPU
-// driver allocates for the process and what the system compressed, where
-// resident memory counts neither; elsewhere it is resident memory.
+// The memory is the process's physical footprint on macOS, which counts what
+// the GPU driver allocates for the process and what the system compressed,
+// where resident memory counts neither; elsewhere it is resident memory.
+// Each canvas reads one column, which still gives it its whole page,
+// reported to V8 like any other, while handing JavaScript a few KB: a
+// full-page `getImageData` allocates enough JavaScript to drive collection
+// by itself, whether or not a canvas reports its page.
 //
 // Shared by the CPU and GPU tests, each a file of its own so that neither's
-// canvases land in the other's count: node runs each test file in a process
+// canvases land in the other's memory: node runs each test file in a process
 // of its own.
 
 const { execFileSync } = require("node:child_process"),
@@ -53,24 +45,16 @@ const PAGE_BYTES = SIDE[0] * SIDE[1] * PIXEL_BYTES;
 const PER_PASS = 10;
 
 /**
- * Passes made before any is judged, while V8 sizes its heap and the first
- * collections settle.
+ * Passes made in all, every one judged. Sixty keep a sawtooth's slope small
+ * for collections up to 30 passes apart, and a run keeping every page passes
+ * the bound by its slope well before `CEILING_BYTES` stops it.
  */
-const WARM_PASSES = 10;
+const PASSES = 60;
 
 /**
- * Passes made in all, the last `PASSES - WARM_PASSES` judged. Fifty judged
- * passes keep a sawtooth's slope small for troughs up to 30 passes apart: one
- * climbing as far as 240 canvases between them slopes at most 1.8 canvases a
- * pass, wherever its troughs fall, where thirty judged passes would allow
- * 8.3.
- */
-const PASSES = WARM_PASSES + 50;
-
-/**
- * The most of the canvases one pass makes that the count may grow by a pass.
- * A run keeping every canvas slopes at all of them; collected ones slope
- * within a fraction of one canvas of zero.
+ * The most of the pages one pass makes that what the process holds may grow
+ * by a pass. A run keeping every page slopes at all of them; a run whose
+ * pages are collected or dropped slopes within a few per cent of them.
  */
 const KEPT_SHARE = 0.25;
 
@@ -101,40 +85,15 @@ function slope(values) {
 }
 
 /**
- * Whether `alive`, the canvases alive after each pass, grows by no more than
- * `KEPT_SHARE` of those a pass makes -- the least-squares slope of the passes
- * after the first `WARM_PASSES` -- and a message saying what it grew by and
- * the most alive at once, for a failure and for the log of a run that passes.
- * `resident`, the bytes resident after each pass where they were read, is
- * shown in the message and not judged.
- *
- * @param {number[]} alive
- * @param {number[]} [resident]
- */
-function judged(alive, resident = []) {
-  const grown = slope(alive.slice(WARM_PASSES));
-  const message =
-    `the canvases alive grew by ${grown.toFixed(2)} a pass over passes ` +
-    `${WARM_PASSES + 1} to ${alive.length}, against the ${PER_PASS} each ` +
-    `pass makes, with ${Math.max(...alive)} alive at most; alive after each ` +
-    `pass ${alive.join(", ")}` +
-    (resident.length
-      ? `; resident after each pass, not judged, ` +
-        `${resident.map((b) => (b / 1e6).toFixed(1)).join(", ")} MB`
-      : "");
-  return { kept: grown <= KEPT_SHARE * PER_PASS, message };
-}
-
-/**
  * Whether `memory`, the bytes the process holds after each pass, grows by no
  * more than `KEPT_SHARE` of the pages a pass makes -- the least-squares slope
  * of every pass, so that a run stopped at `CEILING_BYTES` is refused by its
  * slope too -- and a message saying what it grew by and the most it held, for
  * a failure and for the log of a run that passes.
  *
- * Every pass, where the count skips the first `WARM_PASSES`: what the first
- * pass adds -- the budget filled, the GPU's pipelines loaded -- is a single
- * step, which sixty passes read as half a megabyte a pass on this Mac.
+ * Every pass: what the first passes add -- the budget filling, the GPU's
+ * pipelines loaded -- is a single step, which sixty passes read as a megabyte
+ * or two a pass on this Mac.
  *
  * @param {number[]} memory
  */
@@ -223,6 +182,5 @@ module.exports = {
   PASSES,
   PER_PASS,
   afterEachPass,
-  judged,
   judgedMemory,
 };
