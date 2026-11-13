@@ -615,6 +615,52 @@ fn a_plain_gradient_is_covered() {
     assert!(spec.exact(&page, 1.0).is_some(), "shader");
 }
 
+/// A gradient interpolated in Display P3 by name, on a Display P3 page,
+/// takes the effect: the CPU draws it as it draws one interpolated in the
+/// page's space, byte for byte, and the effect made for it draws as the one
+/// made for that. On an sRGB page, where the CPU converts back, it does not.
+#[test]
+fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
+    let p3 = PixelColorSpace::DisplayP3;
+    let p3_space = p3.to_skia_color_space().expect("P3");
+    let mut checked = 0;
+    for seed in 0..200 {
+        let (spec, _, alpha) = case(seed);
+        if spec.interpolation.color_space != InterpolationSpace::Destination {
+            continue;
+        }
+        let Some(native) = spec.native() else {
+            continue;
+        };
+        let Some(effect) = spec.exact(&p3_space, alpha) else {
+            continue;
+        };
+        let mut named = spec.clone();
+        named.space = GradientColorSpace::DisplayP3;
+        named.interpolation.color_space = InterpolationSpace::DisplayP3;
+        let named_native = named.native().expect("native");
+        assert_eq!(
+            drawn(false, p3, &named_native, alpha),
+            drawn(false, p3, &native, alpha),
+            "seed {seed}: the CPU draws Display P3 by name as the page's"
+        );
+        let named_effect = named
+            .exact(&p3_space, alpha)
+            .unwrap_or_else(|| panic!("seed {seed}: refused on a P3 page"));
+        assert_eq!(
+            drawn(false, p3, &named_effect, 1.0),
+            drawn(false, p3, &effect, 1.0),
+            "seed {seed}: the effect for it is the page's"
+        );
+        assert!(
+            named.exact(&ColorSpace::new_srgb(), alpha).is_none(),
+            "seed {seed}: refused on an sRGB page"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 50, "only {checked} cases checked");
+}
+
 /// The gradient the kept-shader tests draw: a sweep turned by a local
 /// matrix, so that every field of the key changes what it draws.
 fn kept_case() -> GradientSpec {

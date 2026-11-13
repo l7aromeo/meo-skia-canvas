@@ -56,6 +56,7 @@ use skia_safe::{
 
 use crate::{
     cache_map::{GOLDEN_RATIO_64, KeptSets},
+    pixels::PixelColorSpace,
     shader::GradientColorSpace,
     started,
 };
@@ -879,6 +880,14 @@ fn stops(
 /// back runs through skcms's approximate transfer functions, which the
 /// effect does not reproduce -- and wherever a working space is wrapped
 /// around the shader.
+///
+/// A space named rather than taken from the destination is the page's own
+/// where it equals the page's: sRGB on an sRGB page, Display P3 on a
+/// Display P3 one. Skia builds its Display P3 from the sRGB transfer
+/// function and `SkNamedGamut::kDisplayP3` (`intermediate_color_space` in
+/// `SkGradientBaseShader.cpp`), the gamut its CICP table gives the code
+/// point a page's Display P3 is built from (`SkColorSpace.cpp`), so the two
+/// compare equal and the CPU converts nothing.
 fn intermediate_space(
     spec: &GradientSpec,
     page: &ColorSpace,
@@ -889,6 +898,9 @@ fn intermediate_space(
     let intermediate = match spec.interpolation.color_space {
         InterpolationSpace::Destination => page.clone(),
         InterpolationSpace::SRGB => ColorSpace::new_srgb(),
+        InterpolationSpace::DisplayP3 => {
+            PixelColorSpace::DisplayP3.to_skia_color_space().ok()?
+        }
         _ => return None,
     };
     (intermediate == *page).then_some(intermediate)
