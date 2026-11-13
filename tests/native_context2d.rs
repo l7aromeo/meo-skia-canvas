@@ -14053,3 +14053,308 @@ fn a_family_registered_again_moves_the_baselines_with_the_glyphs() {
     assert_ne!(wanted, before, "the two faces place their baselines apart");
     assert_eq!(after, wanted, "the new face's baselines");
 }
+
+/// The cases of `tests/assets/cases/text-trailing-whitespace.json`, which
+/// `tests/suite/text.test.js` reads too.
+fn trailing_whitespace_cases() -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(
+            "tests/assets/cases/text-trailing-whitespace.json",
+        )
+        .expect("the case file is readable"),
+    )
+    .expect("the case file is JSON")
+}
+
+/// Sets `ctx` to draw a case of the file at `spacing` px, `align`ed, in
+/// direction `dir`, as the file spells them.
+fn set_case(ctx: &mut Context2D, spacing: f64, align: &str, dir: &str) {
+    assert!(ctx.set_font_css(&format!("16px {}", oswald())));
+    ctx.set_letter_spacing(spacing as f32);
+    ctx.set_text_align(match align {
+        "left" => TextAlign::Left,
+        "right" => TextAlign::Right,
+        "center" => TextAlign::Center,
+        other => panic!("no alignment {other}"),
+    });
+    ctx.set_direction(match dir {
+        "ltr" => TextDirection::LeftToRight,
+        "rtl" => TextDirection::RightToLeft,
+        other => panic!("no direction {other}"),
+    });
+}
+
+/// A canvas keeps every space, and Chrome draws a decoration under each,
+/// the spaces a run ends in included: the decoration covers the columns of
+/// the run's advance, floor of its start to ceiling of its end, wherever the
+/// alignment puts it -- the rule the case file records Chrome following.
+#[test]
+fn a_decoration_runs_under_every_space_a_run_ends_in() {
+    let cases = trailing_whitespace_cases();
+    const ROW: usize = 48;
+    const WIDTH: usize = 320;
+    // How far a channel may differ and still count as the same pixel.
+    const SAME: i16 = 8;
+    let anchor = |align: &str| cases["anchor"][align].as_f64().expect("x");
+    let mut wrong = vec![];
+    for case in cases["decorations"].as_array().expect("decorations") {
+        let text = case["text"].as_str().expect("a text");
+        let spacing = case["spacing"].as_f64().expect("a spacing");
+        for layout in cases["layouts"].as_array().expect("layouts") {
+            let align = layout["align"].as_str().expect("an alignment");
+            let dir = layout["dir"].as_str().expect("a direction");
+            for line in cases["lines"].as_array().expect("lines") {
+                let line = line.as_str().expect("a line");
+                let mut canvas = Canvas::new(WIDTH as f32, (2 * ROW) as f32);
+                canvas.set_gpu(false);
+                let ctx = canvas.context();
+                ctx.set_fill_style_css("white").expect("a colour");
+                ctx.fill_rect(0.0, 0.0, WIDTH as f32, (2 * ROW) as f32);
+                ctx.set_fill_style_css("black").expect("a colour");
+                ctx.set_text_baseline(TextBaseline::Middle);
+                set_case(ctx, spacing, align, dir);
+                let width = ctx.measure_text(text, None).width as f64;
+                for (row, decoration) in [(0, "none"), (1, line)] {
+                    ctx.set_text_decoration_css(decoration)
+                        .expect("a decoration");
+                    let y = (row as f32 + 0.5) * ROW as f32;
+                    ctx.fill_text(text, anchor(align) as f32, y, None);
+                }
+                let data = ctx
+                    .get_image_data(0.0, 0.0, WIDTH as f32, (2 * ROW) as f32)
+                    .expect("a read");
+                let px = data.pixels();
+                let differs = |x: usize| {
+                    (0..ROW).any(|y| {
+                        let (a, b) =
+                            ((y * WIDTH + x) * 4, ((y + ROW) * WIDTH + x) * 4);
+                        (0..3).any(|k| {
+                            (px[a + k] as i16 - px[b + k] as i16).abs() > SAME
+                        })
+                    })
+                };
+                let columns: Vec<usize> =
+                    (0..WIDTH).filter(|&x| differs(x)).collect();
+                let got = columns
+                    .first()
+                    .zip(columns.last())
+                    .map(|(a, b)| (*a, b + 1));
+                let share = match align {
+                    "center" => 0.5,
+                    "right" => 1.0,
+                    _ => 0.0,
+                };
+                let start = anchor(align) - share * width;
+                let want =
+                    (start.floor() as usize, (start + width).ceil() as usize);
+                if got != Some(want) {
+                    wrong.push(format!(
+                        "{line} {text:?} at {spacing}px {align} {dir}: \
+                         {got:?} for {want:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The spaces a right-to-left run ends in stand at its visual start, so
+/// its glyphs stand a whole run of them in from where a left-aligned run
+/// starts and half of it from where a centred one does: measure_text's ink
+/// box is Chrome's for every row of the case file.
+#[test]
+fn a_right_to_left_runs_trailing_spaces_stand_at_its_start() {
+    let cases = trailing_whitespace_cases();
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for row in cases["inkBoxes"].as_array().expect("ink boxes") {
+        let text = row["text"].as_str().expect("a text");
+        let align = row["align"].as_str().expect("an alignment");
+        let spacing = row["spacing"].as_f64().expect("a spacing");
+        set_case(ctx, spacing, align, "rtl");
+        let m = ctx.measure_text(text, None);
+        let (left, right) = (
+            row["left"].as_f64().expect("a left") as f32,
+            row["right"].as_f64().expect("a right") as f32,
+        );
+        assert!(
+            (m.actual_bounding_box_left - left).abs() < 0.02
+                && (m.actual_bounding_box_right - right).abs() < 0.02,
+            "{text:?} at {spacing}px {align}: {}, {} for Chrome's {left}, \
+             {right}",
+            m.actual_bounding_box_left,
+            m.actual_bounding_box_right
+        );
+    }
+}
+
+/// A paragraph's lines reach the spaces each of its lines ends in, a
+/// wrapped line's and a right-to-left line's included, for the box the
+/// spaces are in, and so do its backgrounds: the case file's columns, line
+/// by line.
+#[test]
+fn a_paragraphs_lines_and_backgrounds_reach_every_space() {
+    let cases = trailing_whitespace_cases();
+    const LINE: usize = 48;
+    const SAME: i16 = 8;
+    const FAMILY: &str = "RustTrailingOswald";
+    let library = FontLibrary::new();
+    library
+        .use_paths(
+            Some(FAMILY),
+            ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+        )
+        .expect("Oswald");
+    let engine = TextEngine::new(&library);
+    let mut wrong = vec![];
+    for case in cases["paragraphs"]["cases"].as_array().expect("cases") {
+        let name = case["name"].as_str().expect("a name");
+        let width = case["width"].as_f64().expect("a width") as f32;
+        let lines = case["lines"].as_array().expect("lines");
+        let base = TextStyle {
+            font_families: vec![FAMILY.into()],
+            font_size: 16.0,
+            color: RgbaLinear::opaque(0.0, 0.0, 0.0),
+            line_height_multiplier: (LINE / 16) as f32,
+            half_leading: true,
+            align: TextAlign::Start,
+            direction: match case["dir"].as_str() {
+                Some("rtl") => TextDirection::RightToLeft,
+                _ => TextDirection::LeftToRight,
+            },
+            ..TextStyle::default()
+        };
+        let (w, h) = (width as usize + 80, LINE * (lines.len() + 1));
+        let drawn = |styled: bool| {
+            let mut builder = engine.paragraph_builder(&base);
+            for piece in case["pieces"].as_array().expect("pieces") {
+                let style = &piece[1];
+                let mut pushed = base.clone();
+                if styled {
+                    pushed.decoration = match style["line"].as_str() {
+                        Some("underline") => TextDecoration::underline(),
+                        Some("overline") => TextDecoration::overline(),
+                        _ => TextDecoration::default(),
+                    };
+                    if style["bg"].is_string() {
+                        pushed.background_color =
+                            Some(RgbaLinear::opaque(1.0, 1.0, 0.0));
+                    }
+                }
+                builder
+                    .push_style(&pushed)
+                    .add_text(piece[0].as_str().expect("a text"))
+                    .pop();
+            }
+            let paragraph = builder.build(width);
+            let mut canvas = Canvas::new(w as f32, h as f32);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("white").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, w as f32, h as f32);
+            ctx.draw_paragraph(&paragraph, 40.0, 0.0);
+            ctx.get_image_data(0.0, 0.0, w as f32, h as f32)
+                .expect("a read")
+                .pixels()
+                .to_vec()
+        };
+        let (plain, styled) = (drawn(false), drawn(true));
+        let got: Vec<Option<(i64, i64)>> = (0..lines.len())
+            .map(|line| {
+                let differs = |x: usize| {
+                    (line * LINE..(line + 1) * LINE).any(|y| {
+                        (0..3).any(|k| {
+                            let at = (y * w + x) * 4 + k;
+                            (plain[at] as i16 - styled[at] as i16).abs() > SAME
+                        })
+                    })
+                };
+                let columns: Vec<usize> =
+                    (0..w).filter(|&x| differs(x)).collect();
+                columns
+                    .first()
+                    .zip(columns.last())
+                    .map(|(a, b)| (*a as i64 - 40, *b as i64 + 1 - 40))
+            })
+            .collect();
+        let want: Vec<Option<(i64, i64)>> = lines
+            .iter()
+            .map(|line| {
+                Some((
+                    line[0].as_i64().expect("x"),
+                    line[1].as_i64().expect("x"),
+                ))
+            })
+            .collect();
+        if got != want {
+            wrong.push(format!("{name}: {got:?} for {want:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A run of nothing but spaces has no glyphs to give its line a baseline,
+/// and is decorated on the one its text would be: a lone space's underline
+/// covers the rows a letter's does.
+#[test]
+fn a_run_of_only_spaces_is_decorated_on_its_baseline() {
+    const SIDE: usize = 60;
+    let rows = |text: &str| {
+        let underlined = |decoration: &str| {
+            let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(&format!("16px {}", oswald())));
+            ctx.set_text_decoration_css(decoration)
+                .expect("a decoration");
+            ctx.fill_text(text, 10.0, 30.3, None);
+            ctx.get_image_data(0.0, 0.0, SIDE as f32, SIDE as f32)
+                .expect("a read")
+                .pixels()
+                .to_vec()
+        };
+        let (plain, under) = (underlined("none"), underlined("underline"));
+        (0..SIDE)
+            .filter(|y| {
+                (0..SIDE).any(|x| {
+                    plain[(y * SIDE + x) * 4 + 3]
+                        != under[(y * SIDE + x) * 4 + 3]
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let letter = rows("x");
+    assert!(!letter.is_empty(), "the letter is underlined");
+    assert_eq!(rows(" "), letter, "the space's underline");
+}
+
+/// A run of nothing but spaces inks nothing, and measure_text's empty box
+/// stands at the left edge of its advance, wherever the alignment puts it,
+/// as Chrome's does: every row of the case file's `emptyInkBoxes`.
+#[test]
+fn a_run_of_only_spaces_has_its_empty_ink_box_at_its_start() {
+    let cases = trailing_whitespace_cases();
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for row in cases["emptyInkBoxes"].as_array().expect("empty ink boxes") {
+        let text = row["text"].as_str().expect("a text");
+        let align = row["align"].as_str().expect("an alignment");
+        let dir = row["dir"].as_str().expect("a direction");
+        let spacing = row["spacing"].as_f64().expect("a spacing");
+        set_case(ctx, spacing, align, dir);
+        let m = ctx.measure_text(text, None);
+        let (left, right) = (
+            row["left"].as_f64().expect("a left") as f32,
+            row["right"].as_f64().expect("a right") as f32,
+        );
+        assert!(
+            (m.actual_bounding_box_left - left).abs() < 0.02
+                && (m.actual_bounding_box_right - right).abs() < 0.02,
+            "{text:?} at {spacing}px {align} {dir}: {}, {} for Chrome's \
+             {left}, {right}",
+            m.actual_bounding_box_left,
+            m.actual_bounding_box_right
+        );
+    }
+}

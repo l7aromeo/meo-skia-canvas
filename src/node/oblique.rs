@@ -64,7 +64,8 @@ use skia_safe::{
     font_style::Slant,
     textlayout::{
         FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle,
-        PlaceholderStyle, StyleType, TextDecoration, TextShadow, TextStyle,
+        PlaceholderStyle, StyleType, TextDecoration, TextDirection, TextShadow,
+        TextStyle,
     },
 };
 use std::{borrow::Cow, cell::RefCell, iter::once, mem, ops::Range, rc::Rc};
@@ -649,12 +650,21 @@ impl ParagraphRecipe {
             .asked_text
             .take()
             .unwrap_or_else(|| self.builder.get_text().to_owned());
+        let box_ranges = remap(&slots, &box_slots);
+        let background_ranges = remap(&slots, &background_slots);
+        let text = self.builder.get_text();
+        let box_ranges_utf16 = decorate::utf16_ranges(text, &box_ranges);
+        let background_ranges_utf16 =
+            decorate::utf16_ranges(text, &background_ranges);
         Passes {
             #[cfg(test)]
             as_asked: self.as_asked(&asked_text),
-            box_ranges: remap(&slots, &box_slots),
+            box_ranges_utf16,
+            rtl: self.style.text_direction() == TextDirection::RTL,
+            box_ranges,
             box_of_slot: box_slots,
-            background_ranges: remap(&slots, &background_slots),
+            background_ranges_utf16,
+            background_ranges,
             slots,
             colours: once(self.base_colour.clone())
                 .chain(self.pushed.iter().map(|pushed| pushed.colour.clone()))
@@ -1468,11 +1478,18 @@ pub(crate) struct Passes {
     /// with its style's glyphs -- see [`Self::casts`].
     boxes: Vec<Decoration>,
     box_ranges: Vec<(Range<usize>, usize)>,
+    /// The same in UTF-16 offsets, for the whitespace a line ends in --
+    /// see `Spans::add_trailing`.
+    box_ranges_utf16: Vec<(Range<usize>, usize)>,
+    /// Whether the paragraph is right to left, which decides the side of
+    /// each line its trailing whitespace is decorated on.
+    rtl: bool,
     /// The box each slot's decoration is drawn as, where it has one.
     box_of_slot: Vec<Option<usize>>,
     /// Each style's background, by box, and the text each covers.
     backgrounds: Vec<StyleBackground>,
     background_ranges: Vec<(Range<usize>, usize)>,
+    background_ranges_utf16: Vec<(Range<usize>, usize)>,
     /// What this layout draws, in line order, found at its first paint --
     /// see [`Self::follow`].
     runs: Vec<PaintedRun>,
@@ -1698,10 +1715,11 @@ impl Passes {
                     });
                 }
             });
+            self.add_trailing(paragraph, &mut spans, &mut background_spans);
             self.spans = spans.finish();
             self.background_spans = background_spans.finish();
             self.runs.clear();
-            self.lines = lines;
+            self.lines = self.lines_with_spans(lines);
             return;
         }
         self.collect_runs(paragraph);
@@ -1714,6 +1732,36 @@ impl Passes {
         self.follow(paragraph);
         if !self.runs_followed {
             self.collect_runs(paragraph);
+        }
+    }
+
+    /// The lines to draw: the `runs` lines glyph runs are on, or more where
+    /// a line of nothing but whitespace, which has none, is decorated or has
+    /// a background.
+    fn lines_with_spans(&self, runs: usize) -> usize {
+        let last =
+            |spans: &[Span]| spans.last().map_or(0, |span| span.line + 1);
+        runs.max(last(&self.spans))
+            .max(last(&self.background_spans))
+    }
+
+    /// Adds to the decorations' and backgrounds' spans the whitespace each
+    /// line of `paragraph` ends in -- see `Spans::add_trailing`.
+    fn add_trailing(
+        &self,
+        paragraph: &Paragraph,
+        spans: &mut Spans,
+        background_spans: &mut Spans,
+    ) {
+        if !self.boxes.is_empty() {
+            spans.add_trailing(paragraph, self.rtl, |at| {
+                decorate::box_at(&self.box_ranges_utf16, at)
+            });
+        }
+        if !self.backgrounds.is_empty() {
+            background_spans.add_trailing(paragraph, self.rtl, |at| {
+                decorate::box_at(&self.background_ranges_utf16, at)
+            });
         }
     }
 
@@ -1742,10 +1790,11 @@ impl Passes {
             }
             self.painted(&run, &mut last.1, &mut runs);
         }
+        self.add_trailing(paragraph, &mut spans, &mut background_spans);
         self.spans = spans.finish();
         self.background_spans = background_spans.finish();
         self.runs = runs;
-        self.lines = lines;
+        self.lines = self.lines_with_spans(lines);
         self.runs_followed = true;
     }
 
