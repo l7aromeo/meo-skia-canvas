@@ -5322,6 +5322,283 @@ mod run_painter_tests {
 }
 
 #[cfg(test)]
+mod overlapping_glyph_tests {
+    //! The glyphs of one run drawn into one another under a blend that reads
+    //! the page in the shader -- see
+    //! `node::typography::draws_glyph_by_glyph`.
+    use super::*;
+    use std::iter::zip;
+
+    use crate::{
+        canvas::{BackendInfo, EngineKind},
+        font::FontLibrary,
+        node::typography::{GLYPHS_DRAWN_ALONE, WHOLE_RUNS, forget_laid_out},
+        paint::BlendMode::*,
+    };
+
+    const W: f32 = 320.0;
+    const H: f32 = 160.0;
+
+    /// A run drawn in the scenes: its font, its text, and how many of its
+    /// glyphs a draw of it sets a glyph at a time under a blend read in the
+    /// shader.
+    type Run = (&'static str, &'static str, usize);
+
+    /// Oswald's plain glyphs, every one drawn alone.
+    const OSWALD: Run = ("48px OverlapOswald", "Hello Wq", 8);
+
+    /// A face with a `COLR` table, whose colour glyph `A` this library draws
+    /// itself and whose lowercase letters are plain boxes, drawn between
+    /// the colour glyphs -- see `draw_colour_run` -- each alone.
+    const PALETTES: Run = ("40px OverlapPalettes", "Abcdef", 5);
+
+    /// `globalCompositeOperation`'s blends that Ganesh does in the shader,
+    /// past those it does by coefficients.
+    const READ_IN_THE_SHADER: [BlendMode; 14] = [
+        Multiply, Overlay, Darken, Lighten, ColorDodge, ColorBurn, HardLight,
+        SoftLight, Difference, Exclusion, Hue, Saturation, Color, Luminosity,
+    ];
+
+    /// The rest, which a GPU blends in its fixed-function stage.
+    const BY_COEFFICIENTS: [BlendMode; 12] = [
+        SourceOver,
+        SourceIn,
+        SourceOut,
+        SourceAtop,
+        DestinationOver,
+        DestinationIn,
+        DestinationOut,
+        DestinationAtop,
+        Copy,
+        Xor,
+        Lighter,
+        Screen,
+    ];
+
+    /// How far a channel of the GPU canvas may stand from the CPU canvas's
+    /// on Metal, where these scenes were measured, for filled text: 3
+    /// levels, the most any of the 14 blends stood with glyphs overlapping
+    /// or not, and what `source-over` stands for the same scene. Drawn as
+    /// one blob, the scenes whose glyphs share a pixel stood 25 to 218
+    /// levels apart in Oswald and 10 to 195 in the `COLR` face, whose boxes
+    /// share their edge pixels with no letter spacing.
+    const METAL_FILL_LEVELS: u8 = 3;
+
+    /// [`METAL_FILL_LEVELS`] for stroked text: 5 levels, which `source-over`
+    /// stands as well, where drawn as one blob the scenes stood 26 to 219
+    /// apart in Oswald and 13 to 195 in the `COLR` face.
+    const METAL_STROKE_LEVELS: u8 = 5;
+
+    /// How far elsewhere -- Mesa's llvmpipe on the Linux binding job, where
+    /// these scenes were not measured: the issue's threshold for a channel
+    /// that differs, under the 10 levels the least of the scenes stood drawn
+    /// as one blob on Metal.
+    const UNMEASURED_LEVELS: u8 = 8;
+
+    /// The scenes: `letterSpacing`, which at -12px draws neighbouring glyphs
+    /// into one another and at 0 does not, `globalAlpha`, the fill
+    /// colour's alpha, and whether the text is stroked rather than filled.
+    const SCENES: [(f32, f32, f32, bool); 8] = [
+        (-12.0, 1.0, 1.0, false),
+        (-12.0, 0.5, 1.0, false),
+        (-12.0, 1.0, 0.5, false),
+        (0.0, 1.0, 1.0, false),
+        (0.0, 0.5, 1.0, false),
+        (-12.0, 1.0, 1.0, true),
+        (-12.0, 0.5, 1.0, true),
+        (0.0, 1.0, 1.0, true),
+    ];
+
+    /// Registers the scenes' faces, once on each thread: a face another
+    /// test thread registered is not found on this one, and the scenes then
+    /// drew in the platform's fallback face.
+    fn register() {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if REGISTERED.replace(true) {
+            return;
+        }
+        {
+            let fonts = FontLibrary::new();
+            for (family, path) in [
+                (
+                    "OverlapOswald",
+                    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                ),
+                (
+                    "OverlapPalettes",
+                    "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
+                ),
+            ] {
+                fonts
+                    .register_font_from_path(family, path)
+                    .expect("a bundled face registers");
+            }
+        }
+    }
+
+    /// Whether this machine's GPU canvas is Mesa's llvmpipe.
+    fn on_llvmpipe() -> bool {
+        BackendInfo::query()
+            .device
+            .is_some_and(|device| device.contains("llvmpipe"))
+    }
+
+    /// The canvas's bytes after `run` is drawn twice in `blend` over a page
+    /// of two colours: first laid out for that draw, then from the run kept
+    /// from it -- see `Typesetter::laid_out`.
+    fn drawn(
+        gpu: bool,
+        (font, text, _): Run,
+        blend: BlendMode,
+        (spacing, alpha, colour_alpha, stroke): (f32, f32, f32, bool),
+    ) -> Vec<u8> {
+        register();
+        forget_laid_out();
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+        ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+        ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+        ctx.set_global_composite_operation(blend);
+        ctx.set_global_alpha(alpha);
+        // The face the scene names, not the fallback a family not found
+        // falls back to.
+        let size = font.split_once(' ').map_or(font, |(size, _)| size);
+        assert!(ctx.set_font_css(&format!("{size} OverlapNowhere")));
+        let fallback = ctx.measure_text("A", None).width;
+        assert!(ctx.set_font_css(font), "{font} parses");
+        let advance = ctx.measure_text("A", None).width;
+        assert_ne!(advance, fallback, "{font} is found");
+        ctx.set_letter_spacing(spacing);
+        let ink = format!("rgba(40,90,160,{colour_alpha})");
+        ctx.set_fill_style_css(&ink).expect("a colour");
+        ctx.set_stroke_style_css(&ink).expect("a colour");
+        ctx.set_line_width(3.0);
+        for y in [70.0, 140.0] {
+            match stroke {
+                true => ctx.stroke_text(text, 10.0, y, None),
+                false => ctx.fill_text(text, 10.0, y, None),
+            }
+        }
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        // A canvas that asks for the GPU falls back to the CPU where it
+        // cannot have one, and a comparison of the CPU with itself passes.
+        let engine = canvas.engine_kind();
+        assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+        bytes
+    }
+
+    /// The most two buffers' channels stand apart.
+    fn most_apart(a: &[u8], b: &[u8]) -> u8 {
+        zip(a, b).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn overlapping_glyphs_blend_on_the_gpu_as_on_the_cpu() {
+        if !RenderingEngine::GPU.selectable() {
+            // A Mac built with Metal always has a GPU, so there a missing one
+            // is a failure; a build without a GPU backend says the test did
+            // not run.
+            if cfg!(all(target_os = "macos", feature = "metal")) {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let llvmpipe = on_llvmpipe();
+        let mut apart = vec![];
+        let blends = READ_IN_THE_SHADER.into_iter().chain([SourceOver, Screen]);
+        for (run, blend) in blends.flat_map(|b| [(OSWALD, b), (PALETTES, b)]) {
+            for scene in SCENES {
+                let bound = match (llvmpipe, scene.3) {
+                    (true, _) => UNMEASURED_LEVELS,
+                    (false, true) => METAL_STROKE_LEVELS,
+                    (false, false) => METAL_FILL_LEVELS,
+                };
+                let cpu = drawn(false, run, blend, scene);
+                // Every pixel is opaque, so the straight bytes compared are
+                // the premultiplied ones.
+                assert!(
+                    cpu.chunks(4).all(|pixel| pixel[3] == u8::MAX),
+                    "{} {blend:?} {scene:?}: the page stays opaque",
+                    run.1
+                );
+                let most = most_apart(&cpu, &drawn(true, run, blend, scene));
+                if most > bound {
+                    apart.push(format!(
+                        "{} {blend:?} {scene:?}: {most} levels, past {bound}",
+                        run.1
+                    ));
+                }
+            }
+        }
+        assert!(apart.is_empty(), "{}", apart.join("\n"));
+    }
+
+    #[test]
+    fn the_cpu_canvas_draws_a_run_a_glyph_at_a_time_as_it_draws_it_whole() {
+        let mut differing = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for (run, scene) in [OSWALD, PALETTES]
+                .into_iter()
+                .flat_map(|run| SCENES.map(|scene| (run, scene)))
+            {
+                GLYPHS_DRAWN_ALONE.set(0);
+                let alone = drawn(false, run, blend, scene);
+                // Each draw a glyph at a time, into each recording the page
+                // keeps -- two, for pixels and for a document, where the
+                // draw is translucent.
+                let (glyphs, each) = (GLYPHS_DRAWN_ALONE.get(), run.2);
+                assert!(
+                    glyphs >= 2 * each && glyphs % each == 0,
+                    "{} {blend:?} {scene:?}: {glyphs} glyphs drawn alone",
+                    run.1
+                );
+                WHOLE_RUNS.set(true);
+                let whole = drawn(false, run, blend, scene);
+                WHOLE_RUNS.set(false);
+                if alone != whole {
+                    differing.push(format!("{} {blend:?} {scene:?}", run.1));
+                }
+            }
+        }
+        assert!(
+            differing.is_empty(),
+            "bytes apart:\n{}",
+            differing.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_blend_by_coefficients_draws_a_run_whole() {
+        for blend in BY_COEFFICIENTS {
+            for (run, scene) in [OSWALD, PALETTES]
+                .into_iter()
+                .flat_map(|run| SCENES.map(|scene| (run, scene)))
+            {
+                GLYPHS_DRAWN_ALONE.set(0);
+                drawn(false, run, blend, scene);
+                assert_eq!(
+                    GLYPHS_DRAWN_ALONE.get(),
+                    0,
+                    "{} {blend:?} {scene:?}: no glyph drawn alone",
+                    run.1
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod paragraph_shadow_tests {
     use super::*;
     use std::iter::zip;

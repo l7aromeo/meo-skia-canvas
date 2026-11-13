@@ -797,7 +797,7 @@ fn on_gpu(_canvas: &Canvas) -> bool {
 /// stage, each fragment over what the one before it wrote. Past it, Ganesh
 /// reads the page beneath in the shader, from a copy it takes once for a
 /// draw.
-fn blends_by_coefficients(mode: BlendMode) -> bool {
+pub(crate) fn blends_by_coefficients(mode: BlendMode) -> bool {
     mode as i32 <= BlendMode::Screen as i32
 }
 

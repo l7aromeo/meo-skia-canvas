@@ -14,7 +14,10 @@ use crate::{
     export::VectorFeatures,
     font::{
         FontFamily, ObliqueAngle,
-        colr::{ColourRun, Placed, colr_face, draw_placed, flush_batch},
+        colr::{
+            ColourRun, Placed, blends_by_coefficients, colr_face, draw_placed,
+            flush_batch,
+        },
         designed_style, leans_as_asked,
         platform_colour::draws_own_colours,
         typo_ascent_share, variation_axes,
@@ -32,9 +35,10 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Canvas, Color4f, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
-    PaintJoin, PaintStyle, Path as SkPath, PathBuilder as SkPathBuilder, Point,
-    Rect, TextBlob, TextBlobBuilder, Typeface,
+    BlendMode as SkBlendMode, Canvas, Color4f, Font, FontMetrics, FourByteTag,
+    GlyphId, Matrix, Paint, PaintJoin, PaintStyle, Path as SkPath,
+    PathBuilder as SkPathBuilder, Point, Rect, TextBlob, TextBlobBuilder,
+    Typeface,
     font::Edging,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
@@ -778,7 +782,9 @@ impl RunPaint {
     /// Draws the runs in `range` from `blobs`, the blobs of every run, onto
     /// pixels that do with a faint paint what `faint` says. A run in a face
     /// whose colour glyphs this library draws is drawn without its blob,
-    /// which may be `None` for it -- see [`Self::built_plain_blobs`].
+    /// which may be `None` for it -- see [`Self::built_plain_blobs`] -- and
+    /// a run drawn a glyph at a time leaves its blob unused -- see
+    /// [`draws_glyph_by_glyph`].
     fn draw_runs(
         &self,
         canvas: &Canvas,
@@ -812,6 +818,15 @@ impl RunPaint {
             flush_batch(canvas);
             match drawn_as_outlines(canvas, &run.font, shear) {
                 true => draw_outlines(
+                    canvas,
+                    &run.font,
+                    &run.glyphs,
+                    &run.positions,
+                    shear,
+                    at,
+                    &paint,
+                ),
+                false if draws_glyph_by_glyph(&paint) => draw_each_glyph(
                     canvas,
                     &run.font,
                     &run.glyphs,
@@ -1519,6 +1534,12 @@ thread_local! {
     /// How many times [`RunPaint::built_blobs`] has built a run's blobs on
     /// this thread.
     pub(crate) static BLOB_BUILDS: Cell<usize> = const { Cell::new(0) };
+    /// A mutant of [`draws_glyph_by_glyph`] that draws every run as one
+    /// blob, whatever its blend, on this thread.
+    pub(crate) static WHOLE_RUNS: Cell<bool> = const { Cell::new(false) };
+    /// How many glyphs [`draw_each_glyph`] has drawn on this thread.
+    pub(crate) static GLYPHS_DRAWN_ALONE: Cell<usize> =
+        const { Cell::new(0) };
     /// How far, in the units a run is laid out in, [`RunPaint::reach`]
     /// draws its answer in on this thread: a mutant, a reach that cuts ink,
     /// for the checks on it to refuse.
@@ -2129,6 +2150,68 @@ pub(crate) fn draw_glyphs(
     }
 }
 
+/// Whether a run of glyphs in `paint` is drawn a glyph at a time -- see
+/// [`draw_each_glyph`] -- rather than as one blob: where `paint`'s blend
+/// reads the page in the shader, past the blends a GPU does in its
+/// fixed-function stage -- see `font::colr::blends_by_coefficients`. Those
+/// are `globalCompositeOperation`'s 14 from `multiply` to `luminosity`.
+///
+/// Where glyphs overlap, the CPU canvas composites each over what the
+/// glyphs before it left, as Chrome's CPU and GPU canvases both do. Ganesh
+/// draws a blob's glyphs as the quads of one operation, and under one of
+/// these blends, with neither framebuffer fetch nor a texture barrier --
+/// Metal's Ganesh turns on neither, in `src/gpu/ganesh/mtl/GrMtlCaps.mm` --
+/// every quad reads one copy of the page taken before the operation and
+/// writes its result over the pixel. One glyph's composite over the page as it
+/// stood before the text then replaced the others' where they overlapped:
+/// Oswald's "Hello Wq" at 48px with `letterSpacing` -12px stood 213 levels from
+/// the CPU canvas under `multiply`. A blob for each glyph is a draw for each,
+/// and Ganesh copies the page again for each, after the one before it has
+/// landed: drawn so, the same run stood 3 levels from the CPU canvas under
+/// any of the 14, as `source-over` does.
+///
+/// The choice is made where the draw is recorded, which does not know
+/// whether it will be played on a GPU, so the CPU canvas draws the glyphs
+/// one at a time as well. Its raster composites a blob's glyphs in order,
+/// each over the last, so it draws the same bytes either way. A run drawn
+/// from its outlines -- see [`draw_outlines`] -- is one path on either
+/// engine, and is left so.
+pub(crate) fn draws_glyph_by_glyph(paint: &Paint) -> bool {
+    #[cfg(test)]
+    if WHOLE_RUNS.get() {
+        return false;
+    }
+    !blends_by_coefficients(paint.blend_mode_or(SkBlendMode::SrcOver))
+}
+
+/// Draws `glyphs` in `font` at `positions` from `origin`, sheared by
+/// `shear`, in `paint`, as [`sheared_blob`]'s glyphs, each glyph a blob and
+/// a draw of its own, in the order the run holds them -- see
+/// [`draws_glyph_by_glyph`].
+pub(crate) fn draw_each_glyph(
+    canvas: &Canvas,
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Shear,
+    origin: Point,
+    paint: &Paint,
+) {
+    #[cfg(test)]
+    GLYPHS_DRAWN_ALONE.set(GLYPHS_DRAWN_ALONE.get() + glyphs.len());
+    for (glyph, at) in zip(glyphs, positions) {
+        let one = sheared_blob(
+            font,
+            std::slice::from_ref(glyph),
+            std::slice::from_ref(at),
+            *shear,
+        );
+        if let Some(blob) = one {
+            canvas.draw_text_blob(&blob, origin, paint);
+        }
+    }
+}
+
 /// What the colour glyphs among `runs`, each a font and its glyphs, ask of a
 /// vector backend when drawn in `paint` -- see `font::colr::ColourRun::
 /// features` -- so that a document a backend cannot write them into embeds
@@ -2191,9 +2274,9 @@ pub(crate) fn draws_colour_glyphs(font: &Font) -> bool {
 /// drawn nothing, where the face has no such table.
 ///
 /// The glyphs are drawn in order, the plain ones between two colour glyphs
-/// as one blob and the colour ones between two plain glyphs together, so
-/// that where they overlap the later one lies on top as it would in one
-/// blob.
+/// as one blob -- or a glyph at a time, where [`draws_glyph_by_glyph`] says
+/// -- and the colour ones between two plain glyphs together, so that where
+/// they overlap the later one lies on top as it would in one blob.
 pub(crate) fn draw_colour_run(
     canvas: &Canvas,
     font: &Font,
@@ -2218,7 +2301,18 @@ pub(crate) fn draw_colour_run(
         return false;
     };
     let plain = |from: usize, to: usize| {
-        if from < to
+        if from < to && draws_glyph_by_glyph(paint) {
+            flush_batch(canvas);
+            draw_each_glyph(
+                canvas,
+                &sheared,
+                &glyphs[from..to],
+                &moved[from..to],
+                &Shear::None,
+                origin,
+                paint,
+            );
+        } else if from < to
             && let Some(blob) = sheared_blob(
                 &sheared,
                 &glyphs[from..to],
@@ -2796,12 +2890,14 @@ impl<'a> Typesetter<'a> {
     /// The run laid out for one draw in `paint` on `canvas` and not kept, as
     /// a run is drawn the first time: by `Paragraph::paint` where nothing
     /// needs its runs, and from its runs, lines between them, where it is
-    /// decorated or `oblique`, or where `canvas` may shear a run past what
-    /// FreeType draws -- see [`may_draw_outlines`].
+    /// decorated or `oblique`, where `canvas` may shear a run past what
+    /// FreeType draws -- see [`may_draw_outlines`] -- or where `paint` draws
+    /// a glyph at a time -- see [`draws_glyph_by_glyph`].
     pub fn drawn_once(&self, paint: &Paint, canvas: &Canvas) -> DrawnRun {
         let layout = self.layout(paint);
         let plain = !may_draw_outlines(canvas, FAKE_ITALIC_SKEW)
-            && !holds_colour_runs(&layout.paragraph);
+            && !holds_colour_runs(&layout.paragraph)
+            && !draws_glyph_by_glyph(paint);
         match (self.decoration(1.0), self.oblique) {
             (None, None) if plain => DrawnRun::Plain(layout),
             (decoration, _) => {
