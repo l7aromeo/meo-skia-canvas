@@ -307,6 +307,25 @@ describe("Context2D", () => {
       assert.deepEqual(ctx.getLineDash(), [1, 2, 3, 4]);
     });
 
+    // A nullable attribute of an interface type, as a browser's are: `null`
+    // and `undefined` both clear it -- WebIDL converts `undefined` to `null`
+    // for a nullable type, and Chrome 158 clears an `Element?` attribute
+    // set to `undefined` -- and anything but a Path2D is a TypeError.
+    test("lineDashMarker", () => {
+      assert.strictEqual(ctx.lineDashMarker, null);
+      const dot = new Path2D();
+      dot.arc(0, 0, 2, 0, 2 * Math.PI);
+      for (const cleared of [null, undefined]) {
+        ctx.lineDashMarker = dot;
+        assert.ok(ctx.lineDashMarker instanceof Path2D);
+        ctx.lineDashMarker = cleared;
+        assert.strictEqual(ctx.lineDashMarker, null, `cleared by ${cleared}`);
+      }
+      for (const wrong of [42, "dot", {}]) {
+        assert.throws(() => (ctx.lineDashMarker = wrong), TypeError);
+      }
+    });
+
     test("lineJoin", () => {
       let vals = ["miter", "round", "bevel"];
 

@@ -98,6 +98,8 @@ The standard canvas has a rather impoverished typesetting system, allowing for o
 
 If a Path2D object is assigned to the context’s `lineDashMarker` property, it will be used instead of the default dash pattern when [`setLineDash`][setLineDash()] has been set to a non-empty value. The marker will be drawn at evenly spaced intervals along the path with the distance controlled by the first number in the `setLineDash` array—any subsequent values are ignored.
 
+Assigning `null` or `undefined` removes the marker, as a browser's nullable properties treat `undefined` as `null`; any other value but a Path2D throws a `TypeError`.
+
 The marker should be a Path2D object centered on (0, 0). Points to the right of the origin will run parallel to the path being stroked. If the marker path ends with a [`closePath()`][p2d_closePath], the marker will be filled using the current [`strokeStyle`][strokeStyle]. if the path is not closed, it will be stroked using the current [`lineWidth`][lineWidth]/[`join`][lineJoin]/[`cap`][lineCap], [`miterLimit`][miterLimit], and [`strokeStyle`][strokeStyle].
 
 ```js
@@ -974,11 +976,12 @@ An SVG export has no element for a sweep of any width, so draws using a conic gr
 let grad = ctx.createLinearGradient(0, 0, 200, 0);
 grad.colorInterpolationSpace = "oklch";
 grad.hueInterpolationMethod = "longer";
+grad.alphaInterpolationMethod = "premultiplied";
 ```
 
-Every **CanvasGradient** this context creates carries two settings controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be changed at any time: like a stop [`addColorStop`](https://developer.mozilla.org/docs/Web/API/CanvasGradient/addColorStop) adds, a change reaches the fills made after it, including through a context whose `fillStyle` is already the gradient, and leaves the ones made before it as they were drawn.
+Every **CanvasGradient** this context creates carries three settings controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be changed at any time: like a stop [`addColorStop`](https://developer.mozilla.org/docs/Web/API/CanvasGradient/addColorStop) adds, a change reaches the fills made after it, including through a context whose `fillStyle` is already the gradient, and leaves the ones made before it as they were drawn.
 
-Each has two names. `colorInterpolationSpace` and `hueInterpolationMethod` are the ones to reach for — `"oklab"` is a coordinate system rather than a method, since the mixing is a straight line whichever space it happens in, while `"longer"` really is a method, because hue is an angle and two stops leave two arcs to choose between. `interpolation` and `hueInterpolation` are the names these shipped under and are **deprecated**: they keep working, nothing throws and nothing warns, and no behaviour turns on which spelling is used — only the old names are imprecise about what they hold. Each pair is one setting rather than two that agree, with a single accessor behind both spellings, so they cannot disagree.
+The first two have two names each. `colorInterpolationSpace` and `hueInterpolationMethod` are the ones to reach for — `"oklab"` is a coordinate system rather than a method, since the mixing is a straight line whichever space it happens in, while `"longer"` really is a method, because hue is an angle and two stops leave two arcs to choose between. `interpolation` and `hueInterpolation` are the names these shipped under and are **deprecated**: they keep working, nothing throws and nothing warns, and no behaviour turns on which spelling is used — only the old names are imprecise about what they hold. Each pair is one setting rather than two that agree, with a single accessor behind both spellings, so they cannot disagree. [`alphaInterpolationMethod`](#alphainterpolationmethod) has the one name: it was added under it, so it has no older spelling.
 
 #### colorInterpolationSpace
 
@@ -1028,9 +1031,15 @@ Which way hue travels in the cylindrical spaces — `oklch`, `lch`, `hsl`, and `
 
 Two stops leave only two arcs, so these four names give two answers between them, and which pair agrees depends on the endpoints: red to blue is 235° ascending and 125° descending, so there `"shorter"` and `"decreasing"` coincide.
 
-An unrecognized value on either setting throws a `TypeError` naming it. It is a value rather than a key, so it is substitutive — the blend the caller asked for will not happen, and keeping the previous setting silently would paint a gradient they did not ask for.
+#### alphaInterpolationMethod
 
-Note that `display-p3` and `rec2020` are not accepted as interpolation spaces even though [`colorSpace`][canvas_colorspace] takes them when creating a canvas. Those name the space a canvas stores its pixels in; this names the space two stops are mixed in.
+_Default value: **`"unpremultiplied"`**_
+
+Whether the stops are mixed with their alpha multiplied in. `"unpremultiplied"` is what a browser's canvas does and is the default; `"premultiplied"` mixes each channel weighted by its alpha, as CSS Color 4 specifies for CSS gradients — canvas gradients are not CSS gradients, so it is offered rather than imposed.
+
+It shows only where a stop is not opaque, and there it shows plainly. On a 100-pixel ramp from `red` to `transparent`, which is transparent _black_, the pixel at x = 20 reads `[202, 0, 0, 203]` unpremultiplied, as Chrome 158's canvas reads it — the colour falls with the alpha, toward the black it fades to — and `[255, 0, 0, 203]` premultiplied, where a stop with no alpha contributes no colour and the red holds.
+
+An unrecognized value on any of the three settings throws a `TypeError` naming it. It is a value rather than a key, so it is substitutive — the blend the caller asked for will not happen, and keeping the previous setting silently would paint a gradient they did not ask for.
 
 ### `saveLayer()`
 
