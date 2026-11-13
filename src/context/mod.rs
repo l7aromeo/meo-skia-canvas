@@ -46,7 +46,7 @@ use crate::node::typography::Painter;
 use exact_gradient::GradientSpec;
 
 use crate::{
-    cache_map::KeptSets,
+    cache_map::{GOLDEN_RATIO_64, KeptSets},
     context2d::{FontKerning, TextRendering, font_spec_from_css},
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
     export::{VectorFeatures, blend_features},
@@ -5527,11 +5527,6 @@ struct FillKey {
     floats: bool,
 }
 
-/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
-/// hashing by multiplication (The Art of Computer Programming, vol. 3,
-/// section 6.4), as the verdicts of `layer::ExactColour` are filed by.
-const FILL_SLOT_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
-
 /// How many sets of flat colours [`FILLS`] keeps on a thread, and how many
 /// a set holds: 1,024 colours, each 64 bytes with what was made of it,
 /// 64 KiB a thread once the first is kept. A page of 200 colours, each set
@@ -5553,8 +5548,8 @@ thread_local! {
 
 impl FillKey {
     /// Where [`FILLS`] files this key: its bits folded together and
-    /// multiplied by [`FILL_SLOT_MULTIPLIER`], which carries every bit into
-    /// the top ones a set is taken from.
+    /// multiplied by [`GOLDEN_RATIO_64`], which carries every bit into the
+    /// top ones a set is taken from.
     fn hash(&self) -> u64 {
         let [r, g, b, a] = self.colour.map(u64::from);
         let key =
@@ -5562,7 +5557,7 @@ impl FillKey {
                 ^ u64::from(self.alpha).rotate_left(8)
                 ^ (self.page as u64) << 56
                 ^ u64::from(self.floats) << 63;
-        key.wrapping_mul(FILL_SLOT_MULTIPLIER)
+        key.wrapping_mul(GOLDEN_RATIO_64)
     }
 
     fn of(

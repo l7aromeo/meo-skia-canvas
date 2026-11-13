@@ -42,7 +42,7 @@ use skia_safe::{
 };
 
 use crate::{
-    cache_map::KeptSets,
+    cache_map::{GOLDEN_RATIO_64, KeptSets},
     context::{
         blur_mask,
         chain::{self, Depth, Step},
@@ -831,12 +831,6 @@ const NUDGES: usize = 3;
 const VERDICTS_KEPT: usize = 4096;
 
 const _: () = assert!(VERDICTS_KEPT.is_power_of_two());
-
-/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
-/// hashing by multiplication (The Art of Computer Programming, vol. 3,
-/// section 6.4), whose product carries every bit of a key into its top
-/// bits, which [`verdict_slot`] takes.
-const GOLDEN_RATIO_64: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// A placed colour's page space and the premultiplied bytes it is to store.
 type VerdictKey = (PixelColorSpace, [u8; 4]);
