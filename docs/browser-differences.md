@@ -1097,7 +1097,11 @@ the hundredth. An image, or a canvas drawn into another, through a `blur()`
 or a chain of blurs and colour functions is blurred the same way, and
 composited at its `globalAlpha` rounded once: a 40px red square blurred by
 8px reads alpha 72 and 30 five and ten pixels outside it and 228 ten pixels
-inside it here, where Chrome's `drawImage` of it reads 72, 28 and 233. `tests/blur_result.rs`
+inside it here, where Chrome's `drawImage` of it reads 72, 28 and 233. So is
+a fill or stroke in a pattern or a gradient, whose blur is of its pixels:
+through Skia's image blur, a triangle in a canvas's pattern of translucent
+stripes blurred by 4px was 5.78 levels off the exact blur on the CPU engine
+and 1.19 on the GPU. `tests/blur_result.rs`
 holds the pixels, at a density and inside a `saveLayer` too. A draw that its clip cuts is the exception, and
 the same one any clipped draw is: Skia anti-aliases a path its clip does not
 contain by another route, whose edges move by up to 15 levels, and the blur

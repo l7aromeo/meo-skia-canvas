@@ -1350,6 +1350,161 @@ fn a_blurred_stroked_rectangle_is_the_exact_gaussian_of_what_it_draws() {
     }
 }
 
+/// A canvas on `gpu`'s engine with [`WIDE`] filled in `dye` through
+/// `filter`, or `None` where that engine is not available.
+fn dyed_triangle(
+    gpu: bool,
+    dye: fn(&mut Context2D),
+    filter: &str,
+) -> Option<Canvas> {
+    let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+    canvas.set_gpu(gpu);
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    dye(ctx);
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.begin_path();
+    let [(x0, y0), (x1, y1), (x2, y2)] = WIDE;
+    ctx.move_to(x0, y0);
+    ctx.line_to(x1, y1);
+    ctx.line_to(x2, y2);
+    ctx.close_path();
+    ctx.fill(FillRule::NonZero);
+    Some(canvas)
+}
+
+/// A canvas's pattern of translucent stripes, its alpha varying across it,
+/// so the blur has structure inside the triangle to spread.
+fn striped(ctx: &mut Context2D) {
+    let mut tile = Canvas::new(12.0, 12.0);
+    let inner = tile.context();
+    for (x, alpha) in [(0.0, 1.0), (4.0, 0.6), (8.0, 0.25)] {
+        inner
+            .set_fill_style_css(&format!("rgba(0, 0, 0, {alpha})"))
+            .expect("a colour");
+        inner.fill_rect(x, 0.0, 4.0, 12.0);
+    }
+    let pattern =
+        ctx.create_pattern_from_canvas(&mut tile, PatternRepeat::Repeat);
+    ctx.set_fill_pattern(&pattern);
+}
+
+#[test]
+fn a_blurred_pattern_fill_is_the_exact_gaussian_of_what_it_draws() {
+    // A canvas's pattern has no `BlurOp` of its own; its blur is the
+    // chain's, as a run of text's is, and not Skia's, which was 5.78 levels
+    // off on the CPU and 1.19 on the GPU.
+    let mut wrong = vec![];
+    for gpu in [false, true] {
+        for sigma in [2.0f32, 4.0, 8.0] {
+            let (Some(mut drawn), Some(mut blurred)) = (
+                dyed_triangle(gpu, striped, "none"),
+                dyed_triangle(gpu, striped, &format!("blur({sigma}px)")),
+            ) else {
+                continue;
+            };
+            let drawn: Vec<f64> = alpha(&mut drawn)
+                .into_iter()
+                .map(|a| f64::from(a) / 255.0)
+                .collect();
+            let reference = sampled(&drawn, SIZE.0 as usize, f64::from(sigma));
+            let misses = misses(&alpha(&mut blurred), &reference);
+            if !misses.is_empty() {
+                wrong.push(format!(
+                    "gpu {gpu} sigma {sigma}: {} pixels off, first {:?}",
+                    misses.len(),
+                    &misses[..misses.len().min(3)],
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "off the exact blur: {wrong:#?}");
+}
+
+/// A pattern of a 12px image of translucent stripes, as [`striped`] draws
+/// them: a pattern the canvas pattern's own route does not take.
+fn striped_pixels(ctx: &mut Context2D) {
+    let pixels: Vec<u8> = (0..12 * 12)
+        .flat_map(|i| {
+            let alpha = [255u8, 153, 64][(i % 12) / 4];
+            [0, 0, 0, alpha]
+        })
+        .collect();
+    let image = Image::from_pixels(
+        &pixels,
+        12,
+        12,
+        12 * 4,
+        PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        },
+    )
+    .expect("an image");
+    let pattern = ctx.create_pattern(&image, PatternRepeat::Repeat);
+    ctx.set_fill_pattern(&pattern);
+}
+
+/// A linear gradient from opaque to faint black across the triangle.
+fn graded(ctx: &mut Context2D) {
+    let gradient = Shader::linear_gradient(
+        Point { x: 20.0, y: 0.0 },
+        Point { x: 140.0, y: 0.0 },
+        &[
+            GradientStop {
+                position: 0.0,
+                color: RgbaLinear::from_srgb(0.0, 0.0, 0.0, 1.0),
+            },
+            GradientStop {
+                position: 1.0,
+                color: RgbaLinear::from_srgb(0.0, 0.0, 0.0, 0.2),
+            },
+        ],
+        GradientColorSpace::Srgb,
+    )
+    .expect("a gradient");
+    ctx.set_fill_shader(&gradient);
+}
+
+#[test]
+fn a_blurred_image_pattern_or_gradient_fill_is_the_exact_gaussian() {
+    // Each paints a shader, so its paint blurs what it draws through an
+    // image filter, and the chain blurs it exactly; through Skia's filter,
+    // three box blurs.
+    let mut wrong = vec![];
+    for (name, dye) in [
+        ("image pattern", striped_pixels as fn(&mut Context2D)),
+        ("gradient", graded),
+    ] {
+        for gpu in [false, true] {
+            for sigma in [2.0f32, 8.0] {
+                let (Some(mut drawn), Some(mut blurred)) = (
+                    dyed_triangle(gpu, dye, "none"),
+                    dyed_triangle(gpu, dye, &format!("blur({sigma}px)")),
+                ) else {
+                    continue;
+                };
+                let drawn: Vec<f64> = alpha(&mut drawn)
+                    .into_iter()
+                    .map(|a| f64::from(a) / 255.0)
+                    .collect();
+                let reference =
+                    sampled(&drawn, SIZE.0 as usize, f64::from(sigma));
+                let misses = misses(&alpha(&mut blurred), &reference);
+                if !misses.is_empty() {
+                    wrong.push(format!(
+                        "{name} gpu {gpu} sigma {sigma}: {} pixels off",
+                        misses.len(),
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "off the exact blur: {wrong:#?}");
+}
+
 /// The six colour functions of a filter that tints black to a sky blue,
 /// one of them saturating 48-fold, so that any rounding between them is
 /// multiplied into levels.
@@ -1402,13 +1557,19 @@ fn graded_black(ctx: &mut Context2D) {
 /// Colour functions in a row tint as one composed colour filter, worked in
 /// floats in one pass, after a `blur()` or with none: as the same functions
 /// tint a gradient's colours in its shader, on any draw the chain runs them
-/// for: a canvas or an image drawn in takes them there. Run a function at a
-/// time with the pixels stored between, the tint of black read
-/// `(0, 164, 217)` on the CPU and `(0, 164, 219)` on the GPU where in one
-/// pass it is `(0, 162, 213)` and, in Ganesh's half precision,
-/// `(0, 163, 215)`.
+/// for: a canvas or an image drawn in takes them there, and a fill under a
+/// `blur()` with them. Run a function at a time with the pixels stored
+/// between, the tint of black read `(0, 164, 217)` on the CPU and
+/// `(0, 164, 219)` on the GPU where in one pass it is `(0, 162, 213)` and,
+/// in Ganesh's half precision, `(0, 163, 215)`.
 #[test]
 fn colour_functions_in_a_row_tint_as_one() {
+    let disc: fn(&mut Context2D) = |ctx| {
+        ctx.begin_path();
+        ctx.arc(10.0, 10.0, 40.0, 0.0, TAU, false).expect("arc");
+        ctx.fill(FillRule::NonZero);
+    };
+    let square: fn(&mut Context2D) = |ctx| ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
     let drawn_in: fn(&mut Context2D) = |ctx| {
         let mut source = Canvas::new(20.0, 20.0);
         source.context().fill_rect(0.0, 0.0, 20.0, 20.0);
@@ -1433,8 +1594,10 @@ fn colour_functions_in_a_row_tint_as_one() {
             continue;
         };
         for (name, filter, fill) in [
+            ("a blurred disc", blurred.as_str(), disc),
+            ("a blurred square", &blurred, square),
             ("a canvas drawn in", TINT, drawn_in),
-            ("a blurred canvas drawn in", blurred.as_str(), drawn_in),
+            ("a blurred canvas drawn in", &blurred, drawn_in),
             ("an image", TINT, image),
             ("a blurred image", &blurred, image),
         ] {

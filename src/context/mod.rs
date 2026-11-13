@@ -1675,8 +1675,9 @@ impl Context2D {
             return false;
         };
         // Its shadow is a group of its own, so the draw is run through the
-        // chain it would be casting none.
-        let steps = self.draw_chain(false, true);
+        // chain it would be casting none; it has no `BlurOp`, so a `blur()`
+        // alone is the chain's too.
+        let steps = self.draw_chain(true, true);
         let blend = self.state.global_composite_operation;
         let beyond = covers_beyond_the_draw(blend);
         // Drawn on its own wherever it composites only where it lands and
@@ -1932,18 +1933,19 @@ impl Context2D {
 
     /// The filter chain a draw is run through by the crate rather than by
     /// Skia -- see [`Self::files_through_chain`]: one holding a
-    /// `drop-shadow()` or a step run in the draw's own space, and for a run
-    /// of text, `text`, one holding a `blur()`, for a draw casting no shadow
-    /// of the context's own, or casting one `shadow_apart` as a group of its
-    /// own, under a blend that composites only where it lands. Any other
-    /// chain of blurs and colour functions keeps the route
-    /// its draw takes otherwise: a `BlurOp`, or Skia's filter. Text has no
-    /// `BlurOp`, and Skia's filter blurs it by three box blurs, which came
+    /// `drop-shadow()` or a step run in the draw's own space, and for a draw
+    /// with no `BlurOp` of its own, `unblurrable`, one holding a `blur()`,
+    /// for a draw casting no shadow of the context's own, or casting one
+    /// `shadow_apart` as a group of its own, under a blend that composites
+    /// only where it lands. Any other chain of blurs and colour functions
+    /// keeps the route its draw takes otherwise: a `BlurOp`, or Skia's
+    /// filter. A run of text, a pattern fill and a gradient have no
+    /// `BlurOp`, and Skia's filter blurs them by three box blurs, which came
     /// up to 12.7 levels off the Gaussian on 40px text blurred by 3, as
-    /// Chrome's does.
+    /// Chrome's does, and 5.78 on a striped pattern blurred by 4.
     fn draw_chain(
         &self,
-        text: bool,
+        unblurrable: bool,
         shadow_apart: bool,
     ) -> Option<Arc<[Step]>> {
         if covers_beyond_the_draw(self.state.global_composite_operation)
@@ -1955,7 +1957,7 @@ impl Context2D {
             steps.iter().any(|step| {
                 matches!(step, Step::Shadow { .. })
                     || step.runs_in_local_space()
-                    || (text && matches!(step, Step::Blur(_)))
+                    || (unblurrable && matches!(step, Step::Blur(_)))
             })
         })
     }
@@ -1991,8 +1993,14 @@ impl Context2D {
     {
         let reached = text.map(|text| text.reached);
         let lines = text.is_some_and(|text| text.lines);
-        let Some(steps) =
-            steps.or_else(|| self.draw_chain(reached.is_some(), false))
+        // A draw whose paint blurs what it draws, through an image filter --
+        // a pattern, a gradient, a run of text -- has no `BlurOp`; one whose
+        // paint blurs its coverage, through a mask filter, keeps it, which
+        // the chain's recording would blur a second time.
+        let unblurrable = reached.is_some()
+            || (paint.image_filter().is_some()
+                && paint.mask_filter().is_none());
+        let Some(steps) = steps.or_else(|| self.draw_chain(unblurrable, false))
         else {
             return false;
         };
