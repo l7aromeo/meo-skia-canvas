@@ -1,6 +1,6 @@
 {
   "about": "`ctx.filter` strings and whether Chrome takes them. Read by tests/css_grammar.rs for `Context2D::set_filter_css` and by tests/suite/css-grammar.test.js for `ctx.filter`, so the two surfaces answer one table. Whether a filter is taken, and what it reads back as: every filter Chrome takes reads back exactly as it was written, whitespace and letter case included, so a row's own `css` is its reading.",
-  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged. The three blank rows -- the empty string, three spaces and a tab -- were measured in Chrome 152.0.7977.167 on 2026-10-25 the same way. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way. The rows with a comment were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way.",
+  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`. Each taken filter was read back from a fresh context too, and every one came back unchanged. The three blank rows -- the empty string, three spaces and a tab -- were measured in Chrome 152.0.7977.167 on 2026-10-25 the same way. The rows with a character CSS does not count as whitespace -- U+000B, U+00A0, U+2028, U+3000 and U+FEFF -- and those with a carriage return or a form feed were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way. The rows with a comment were measured in Chrome 152.0.7977.167 on 2026-10-26 the same way. The rows naming `display-p3-linear` were measured the same way in Chrome Headless Shell 158.0.8127.18 on 2026-11-13.",
   "knownDifferences": "Math functions and the font-relative units are in css-math.json.",
   "cases": [
     {
@@ -512,6 +512,10 @@
     },
     {
       "css": "blur(2px) /*"
-    }
+    },
+    {"css": "drop-shadow(30px 0 0 color(display-p3-linear 0.2 0.5 0.3))"},
+    {"css": "drop-shadow(1px 1px color(display-p3-linear 0.2 0.5 0.3))"},
+    {"css": "drop-shadow(0 0 2px color-mix(in display-p3-linear, red, blue))"},
+    {"css": "drop-shadow(0 0 0 color(display-p3linear 0.2 0.5 0.3))", "refused": true}
   ]
 }

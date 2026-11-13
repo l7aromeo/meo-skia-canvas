@@ -162,6 +162,93 @@ fn a_colour_outside_srgb_is_not_clamped() {
     );
 }
 
+/// `color(display-p3-linear ...)` inside sRGB's gamut: the sRGB CSS Color
+/// 4's sample code computes for it -- `lin_P3_to_XYZ`, `XYZ_to_lin_sRGB`
+/// and `gam_sRGB`, with no transfer function on the way in, since the space
+/// is linear light -- evaluated in `f64` outside this crate, and the pixel
+/// Chrome 158 paints for it on an 8-bit sRGB canvas.
+///
+/// Inside the gamut, so that nothing clips: read with Display P3's curve,
+/// these paint 0, 130, 71 and 82, 36, 159 and 162, 99, 38, and read as
+/// `srgb-linear` 124, 188, 149 and 149, 108, 203 and 203, 170, 124. A red
+/// of one, the obvious case, clips to 255, 0, 0 whichever it is read as.
+const DISPLAY_P3_LINEAR: [(&str, [f64; 3], [u8; 3]); 3] = [
+    (
+        "color(display-p3-linear 0.2 0.5 0.3)",
+        [0.3994996827410734, 0.7436066251815049, 0.5714521599124812],
+        [102, 190, 146],
+    ),
+    (
+        "color(display-p3-linear 0.3 0.15 0.6)",
+        [0.6128410730408542, 0.41509109160468405, 0.821707974595879],
+        [156, 106, 210],
+    ),
+    (
+        "color(display-p3-linear 0.6 0.4 0.2)",
+        [0.823818081719513, 0.6588357821126819, 0.45704928262859973],
+        [210, 168, 117],
+    ),
+];
+
+#[test]
+fn display_p3_linear_is_p3_light_with_no_curve() {
+    for (css, srgb, chrome) in DISPLAY_P3_LINEAR {
+        expect_close(css, [srgb[0], srgb[1], srgb[2], 1.0]);
+        let got = parse(css);
+        let bytes = [got.r, got.g, got.b].map(|c| (c * 255.0).round() as u8);
+        assert_eq!(bytes, chrome, "{css}: as Chrome 158 paints it");
+    }
+    // A grey stays grey: P3 and sRGB share D65's white, so linear 0.5 is
+    // sRGB's encoding of 0.5 in every channel, 187.52 as a byte. Chrome 158
+    // paints 187, 188, 188; docs/browser-differences.md.
+    expect_close(
+        "color(display-p3-linear 0.5 0.5 0.5)",
+        [
+            0.7353569830524493,
+            0.7353569830524495,
+            0.7353569830524495,
+            1.0,
+        ],
+    );
+    // The red of the report: linear one is encoded one, so this is
+    // `display-p3`'s red, outside sRGB and kept there.
+    expect_close(
+        "color(display-p3-linear 1 0 0)",
+        [
+            1.0930663624351615,
+            -0.22674197356975417,
+            -0.15013458093711954,
+            1.0,
+        ],
+    );
+    expect_close(
+        "COLOR(Display-P3-Linear 0.2 0.5 0.3 / 50%)",
+        [
+            0.3994996827410734,
+            0.7436066251815049,
+            0.5714521599124812,
+            0.5,
+        ],
+    );
+}
+
+#[test]
+fn display_p3_linear_as_linear_light_is_the_matrices_alone() {
+    // `XYZ_to_lin_sRGB` after `lin_P3_to_XYZ`, nothing else: the same
+    // sample code, stopped before `gam_sRGB`.
+    let linear = [0.13251794711583198, 0.5126170864129066, 0.286236546348907];
+    let got = RgbaLinear::from_css("color(display-p3-linear 0.2 0.5 0.3)")
+        .expect("a colour");
+    let channels = [got.r, got.g, got.b, got.a].map(f64::from);
+    assert!(
+        channels
+            .iter()
+            .zip([linear[0], linear[1], linear[2], 1.0])
+            .all(|(g, w)| (g - w).abs() <= f64::from(f32::EPSILON)),
+        "{channels:?}"
+    );
+}
+
 /// Colours written in sRGB inside its gamut: their channels are the written
 /// numbers, so they lie in `0.0..=1.0` exactly.
 const WRITTEN_IN_SRGB: [&str; 13] = [
@@ -187,7 +274,7 @@ const WRITTEN_IN_SRGB: [&str; 13] = [
 /// place above one: `OKLab_to_XYZ` maps (1, 1, 1) to (0.9504559270516719,
 /// 0.9999999999999999, 1.0890577507598782) against D65's (0.9504559270516716,
 /// 1, 1.0890577507598784).
-const CONVERTED_WHITES: [(&str, [f64; 3]); 7] = [
+const CONVERTED_WHITES: [(&str, [f64; 3]); 8] = [
     ("color(srgb-linear 1 1 1)", [0.9999999999999999; 3]),
     (
         "lab(100 0 0)",
@@ -207,6 +294,10 @@ const CONVERTED_WHITES: [(&str, [f64; 3]); 7] = [
     ),
     (
         "color(display-p3 1 1 1)",
+        [0.9999999999999997, 0.9999999999999999, 0.9999999999999999],
+    ),
+    (
+        "color(display-p3-linear 1 1 1)",
         [0.9999999999999997, 0.9999999999999999, 0.9999999999999999],
     ),
     (
@@ -268,6 +359,8 @@ fn refusals_are_the_fill_styles() {
         "lab(50, 40, 30)",
         "red blue",
         "/* only a comment */",
+        // A canvas's `colorSpace` alias, which `color()` does not name.
+        "color(p3-linear 0.2 0.5 0.3)",
         // Accepted by both: the refusal table needs rows that must not refuse.
         "red",
         "rgb(255 0 0",
@@ -294,7 +387,7 @@ fn refusals_are_the_fill_styles() {
             }
         }
     }
-    assert_eq!(refused, 14, "rows the fill style refuses");
+    assert_eq!(refused, 15, "rows the fill style refuses");
 }
 
 #[test]

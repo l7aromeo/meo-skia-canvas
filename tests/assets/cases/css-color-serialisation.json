@@ -1,9 +1,10 @@
 {
   "about": "What `fillStyle`, `strokeStyle` and `shadowColor` read back after being set to each string, by CSS Color 4 section 16 (editor's draft 1da0d9fb, 2026-10-27). Read by the unit test in src/node/utils.rs, `every_row_serialises_as_the_table_says`, and by tests/suite/color-serialisation.test.js. `expected` is this library's answer; `null` means the setter ignores the string and the getter keeps its previous value.",
-  "source": "`chrome` is Chrome 156.0.8078.48 headless, `ctx.fillStyle` read back after being set on a canvas outside a document, measured 2026-10-28; its `shadowColor` read back the same string for every row.",
+  "source": "`chrome` is Chrome 156.0.8078.48 headless, `ctx.fillStyle` read back after being set on a canvas outside a document, measured 2026-10-28; its `shadowColor` read back the same string for every row. The rows naming `display-p3-linear` were measured the same way in Chrome Headless Shell 158.0.8127.18 on 2026-11-13.",
   "why": {
     "float": "This library holds a colour in floating point and paints `rgb(127.5 0 0)` as 127.5 and `#ff000080`'s alpha as 128/255, so section 16.2.1's hex form, which needs whole-byte components, does not apply and section 16.2.2's `rgb()` carries the number; the alpha takes section 16.1.2's rule rather than 16.1.1's, which is for an alpha held as a byte; and every number takes the fewest figures that repaint the colour held, more than six where it holds more. Chrome holds eight bits and writes six places. docs/browser-differences.md.",
-    "reference": "A relative colour's origin converted to Lab or OkLCh. Chrome 156's channels differ from CSS Color 4's sample code worked in f64 from the fourth figure, and set again they paint red with a green of -6.7e-4 on a float canvas. `expected` is the sample code's arithmetic in f64, held at f32 and written in the fewest figures that repaint it. docs/browser-differences.md."
+    "reference": "A relative colour's origin converted to Lab or OkLCh. Chrome 156's channels differ from CSS Color 4's sample code worked in f64 from the fourth figure, and set again they paint red with a green of -6.7e-4 on a float canvas. `expected` is the sample code's arithmetic in f64, held at f32 and written in the fewest figures that repaint it. docs/browser-differences.md.",
+    "p3Linear": "Chrome 158 converts `display-p3-linear` by figures that stray from CSS Color 4's sample code worked in f64 from the fourth figure: `color(display-p3-linear 0.2 0.5 0.3)` is `color(srgb 0.399341 0.74364 0.571495)` there and 0.39949968, 0.7436066, 0.57145216 here. docs/browser-differences.md, \"`color(display-p3-linear ...)` converts by CSS Color 4's matrices\"."
   },
   "cases": [
     {
@@ -424,6 +425,54 @@
       "css": "ButtonText",
       "chrome": "#000000",
       "expected": "#000000"
+    },
+    {
+      "css": "color(display-p3-linear 0.2 0.5 0.3)",
+      "chrome": "color(display-p3-linear 0.2 0.5 0.3)",
+      "expected": "color(display-p3-linear 0.2 0.5 0.3)"
+    },
+    {
+      "css": "COLOR(Display-P3-Linear 0.2 0.5 0.3)",
+      "chrome": "color(display-p3-linear 0.2 0.5 0.3)",
+      "expected": "color(display-p3-linear 0.2 0.5 0.3)"
+    },
+    {
+      "css": "color(display-p3-linear 20% 50% 30%)",
+      "chrome": "color(display-p3-linear 0.2 0.5 0.3)",
+      "expected": "color(display-p3-linear 0.2 0.5 0.3)"
+    },
+    {
+      "css": "color(display-p3-linear none 0.5 0.3)",
+      "chrome": "color(display-p3-linear none 0.5 0.3)",
+      "expected": "color(display-p3-linear none 0.5 0.3)"
+    },
+    {
+      "css": "color(display-p3-linear 0.2 0.5 0.3 / 0.5)",
+      "chrome": "color(display-p3-linear 0.2 0.5 0.3 / 0.5)",
+      "expected": "color(display-p3-linear 0.2 0.5 0.3 / 0.5)"
+    },
+    {
+      "css": "color(from color(display-p3-linear 0.2 0.5 0.3) display-p3-linear calc(r * 2) g b / 0.5)",
+      "chrome": "color(display-p3-linear 0.4 0.5 0.3 / 0.5)",
+      "expected": "color(display-p3-linear 0.4 0.5 0.3 / 0.5)"
+    },
+    {
+      "css": "color(from color(srgb 0.4 0.7 0.2) display-p3-linear r g b)",
+      "chrome": "color(display-p3-linear 0.188888 0.437489 0.0648329)",
+      "expected": "color(display-p3-linear 0.18881412 0.43752825 0.0648455)",
+      "why": "p3Linear"
+    },
+    {
+      "css": "color(from color(display-p3-linear 0.2 0.5 0.3) srgb r g b)",
+      "chrome": "color(srgb 0.399341 0.74364 0.571495)",
+      "expected": "color(srgb 0.39949968 0.7436066 0.57145216)",
+      "why": "p3Linear"
+    },
+    {
+      "css": "color(from color(display-p3-linear 0.2 0.5 0.3) display-p3 r g b)",
+      "chrome": "color(display-p3 0.484529 0.735357 0.583831)",
+      "expected": "color(display-p3 0.4845292 0.735357 0.5838315)",
+      "why": "float"
     }
   ]
 }
