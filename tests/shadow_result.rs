@@ -510,6 +510,14 @@ fn a_filtered_draw_casts_the_shadow_of_what_its_filter_makes() {
     // not at all where the shadow is not blurred. Each source takes a route
     // of its own: a path, a canvas's pattern under a path and under text, a
     // drawn canvas.
+    //
+    // An unblurred shadow is held to the filter's value before rounding, so
+    // that `misses` lets a value within `TIE` of a half-level round either
+    // way, as every other reference here does. Held to the rounded level,
+    // it refused the f32 rounding of a value just below a tie: from Metal's
+    // coverage the filled triangle's pixel (81, 18) filters to 166.499987,
+    // 1.3e-5 of a level from the tie, which Metal stores as 166 and
+    // lavapipe as 167.
     let filter_sigma = 2.0f64;
     let sources: [(&str, Draw); 4] = [
         ("filled triangle", filled_triangle),
@@ -523,11 +531,11 @@ fn a_filtered_draw_casts_the_shadow_of_what_its_filter_makes() {
             let Some(drawn) = coverage(gpu, draw) else {
                 continue;
             };
-            let filtered: Vec<f64> =
-                sampled(&drawn, SIZE.0 as usize, filter_sigma)
-                    .into_iter()
-                    .map(|v| (v * 255.0).round() / 255.0)
-                    .collect();
+            let unrounded = sampled(&drawn, SIZE.0 as usize, filter_sigma);
+            let filtered: Vec<f64> = unrounded
+                .iter()
+                .map(|v| (v * 255.0).round() / 255.0)
+                .collect();
             for blur in [0.0f32, 4.0, 12.0] {
                 let mut canvas = page(gpu).expect("the same engine");
                 let ctx = canvas.context();
@@ -541,7 +549,7 @@ fn a_filtered_draw_casts_the_shadow_of_what_its_filter_makes() {
                 draw(ctx);
                 let shadow = alpha(&mut canvas);
                 let reference = match blur {
-                    0.0 => filtered.clone(),
+                    0.0 => unrounded.clone(),
                     _ => sampled(
                         &filtered,
                         SIZE.0 as usize,
