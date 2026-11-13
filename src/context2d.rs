@@ -5334,6 +5334,7 @@ mod overlapping_glyph_tests {
 
     use crate::{
         canvas::{BackendInfo, EngineKind},
+        context::layer::DEFERRED_FILED,
         export::{EncodeOptions, ImageFormat},
         filter::BlurStyle,
         font::FontLibrary,
@@ -5647,6 +5648,10 @@ mod overlapping_glyph_tests {
         "F16 page",
     ];
 
+    /// The routes of [`ROUTES`] that run a filter chain over a run kept to
+    /// be recorded when the chain first plays it.
+    const DEFERRED_ROUTES: [&str; 2] = ["drop-shadow filter", "blur filter"];
+
     /// Oswald's run drawn twice, its glyphs a quarter em into one another,
     /// under `blend` on the route named, on the GPU where `gpu`.
     fn drawn_on_route(gpu: bool, route: &str, blend: BlendMode) -> Vec<u8> {
@@ -5762,7 +5767,18 @@ mod overlapping_glyph_tests {
             });
             for blend in [Multiply, Difference, Luminosity] {
                 GLYPHS_DRAWN_ALONE.set(0);
+                let deferred = DEFERRED_FILED.get();
                 let cpu = drawn_on_route(false, route, blend);
+                // The chain routes keep the run, to be recorded when the
+                // chain first plays it -- see `layer::DeferredPicture` --
+                // so that the sweep holds that path and not another.
+                if DEFERRED_ROUTES.contains(&route)
+                    && DEFERRED_FILED.get() == deferred
+                {
+                    wrong.push(format!(
+                        "CPU {route} {blend:?}: no run deferred"
+                    ));
+                }
                 if GLYPHS_DRAWN_ALONE.get() != 0 {
                     wrong.push(format!(
                         "CPU {route} {blend:?}: {} glyphs drawn apart",
