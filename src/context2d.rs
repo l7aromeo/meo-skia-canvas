@@ -4936,16 +4936,24 @@ mod run_painter_tests {
     const W: f32 = 420.0;
     const H: f32 = 160.0;
 
-    /// The bundled faces the scenes use, registered once.
+    /// The bundled faces the scenes use, registered once on each thread:
+    /// a registration is seen only on the thread that made it -- see
+    /// `FontLibrary::register_font_from_data` -- and tests run on threads of
+    /// their own.
     fn register() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
             let fonts = FontLibrary::new();
             let m = "tests/assets/fonts/montserrat-latin/montserrat-v30-latin";
             for (family, files) in [
                 (
                     "Oswald",
-                    vec!["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+                    vec![
+                        "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                    ],
                 ),
                 (
                     "Raleway",
@@ -4963,7 +4971,10 @@ mod run_painter_tests {
                     ],
                 ),
                 ("Monoton", vec!["tests/assets/fonts/Monoton-Regular.woff"]),
-                ("Amstelvar", vec!["tests/assets/fonts/AmstelvarAlpha-VF.ttf"]),
+                (
+                    "Amstelvar",
+                    vec!["tests/assets/fonts/AmstelvarAlpha-VF.ttf"],
+                ),
             ] {
                 for file in files {
                     fonts
@@ -4971,7 +4982,7 @@ mod run_painter_tests {
                         .expect("a bundled face registers");
                 }
             }
-        });
+        }
     }
 
     /// The canvas's bytes after `scene`, painted through `Paragraph::paint`
@@ -5328,9 +5339,16 @@ mod paragraph_shadow_tests {
     /// adds to the base.
     type Spans = Vec<(&'static str, fn(&mut TextStyle))>;
 
+    /// A text engine finding the scenes' faces, registered once on each
+    /// thread: a registration is seen only on the thread that made it -- see
+    /// `FontLibrary::register_font_from_data` -- and tests run on threads of
+    /// their own.
     fn engine() -> TextEngine {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
             let fonts = FontLibrary::new();
             for (family, file) in [
                 ("ShadowOswald", "Oswald/Oswald-VariableFont_wght.ttf"),
@@ -5343,7 +5361,7 @@ mod paragraph_shadow_tests {
                     )
                     .expect("a bundled face registers");
             }
-        });
+        }
         TextEngine::new(&FontLibrary::new())
     }
 
