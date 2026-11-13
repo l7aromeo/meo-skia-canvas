@@ -36,10 +36,10 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    BlendMode as SkBlendMode, Canvas, Color4f, Font, FontMetrics, FourByteTag,
-    GlyphId, IRect, Matrix, Paint, PaintJoin, PaintStyle, Path as SkPath,
-    PathBuilder as SkPathBuilder, Point, Rect, RoundOut, TextBlob,
-    TextBlobBuilder, Typeface,
+    BlendMode as SkBlendMode, Canvas, Color4f, Font, FontHinting, FontMetrics,
+    FourByteTag, GlyphId, IRect, Matrix, Paint, PaintJoin, PaintStyle,
+    Path as SkPath, PathBuilder as SkPathBuilder, PictureRecorder, Point, Rect,
+    RoundOut, TextBlob, TextBlobBuilder, Typeface,
     font::Edging,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
@@ -2314,19 +2314,25 @@ pub(crate) fn draw_glyphs_apart(
 /// holds every pixel an anti-aliased edge touches. `None` for a glyph that
 /// inks nothing.
 ///
-/// Under a transform that only scales, alike on both axes, and moves, each
-/// glyph's box is the one `font` reports at the size the canvas draws it
-/// at, sheared as [`sheared_blob`] shears it and stroked as `paint` strokes
-/// it there: the strike the glyph is drawn from, hinted at that size. A box
-/// taken at the font's own size and scaled up does not hold a glyph hinted
-/// at the scaled size: on FreeType, Oswald at 48px under a scale of 1.5
-/// inked 16 of a glyph's pixels outside it. Under any other transform -- a
-/// turn, a scale unlike on the two axes -- the box at the font's own size
-/// is mapped there, and the containment test's turned and stretched cases
-/// hold it to the pixels drawn.
+/// Each glyph's box is taken from what Skia draws it from:
 ///
-/// A paint with a mask filter takes the box at the font's own size too,
-/// since the filter's reach does not scale with the font.
+/// - Past [`OUTLINE_TEXT_SIZE`] device pixels -- see [`drawn_from_outlines`] --
+///   the glyph's outline, unhinted, at [`OUTLINE_STRIKE_SIZE`] and scaled up,
+///   drawn with the whole paint under the canvas's transform. Its box is that
+///   outline recorded in `paint` under that transform, within the canvas's clip
+///   -- see [`outline_pixels`]. `Font::get_bounds` does not give it: past that
+///   size it drops the paint, so a stroke or a blur reaches past the box it
+///   reports.
+/// - Under a transform that only scales, alike on both axes, and moves, the
+///   strike of the size the canvas draws at, sheared as [`sheared_blob`] shears
+///   it and stroked as `paint` strokes it there, hinted at that size. A box
+///   taken at the font's own size and scaled up does not hold a glyph hinted at
+///   the scaled size: on FreeType, Oswald at 48px under a scale of 1.5 inked 16
+///   of a glyph's pixels outside it.
+/// - Under any other transform, and for a paint with a mask filter, whose reach
+///   does not scale with the font, the box at the font's own size, mapped there
+///   -- and under a transform that turns or skews, grown by
+///   [`TURNED_STRIKE_REACH`].
 fn pixels_inked(
     canvas: &Canvas,
     font: &Font,
@@ -2336,28 +2342,48 @@ fn pixels_inked(
     origin: Point,
     paint: &Paint,
 ) -> Vec<Option<IRect>> {
-    let mut boxes = vec![Rect::new_empty(); glyphs.len()];
     let device = canvas.local_to_device_as_3x3();
+    let mut sheared = font.clone();
+    if let Shear::By(shear) = shear {
+        sheared.set_skew_x(font.skew_x() + shear.skew_x());
+    }
+    // Where `sheared_blob` puts each glyph's origin.
+    let placed = |at: Point| {
+        origin
+            + match shear {
+                Shear::By(shear) => map_affine(shear, at),
+                _ => at,
+            }
+    };
+    if drawn_from_outlines(&sheared, paint, &device) {
+        let clip = Rect::from(canvas.device_clip_bounds().unwrap_or_default());
+        return zip(glyphs, positions)
+            .map(|(&glyph, &at)| {
+                outline_pixels(
+                    &sheared,
+                    glyph,
+                    placed(at),
+                    paint,
+                    &device,
+                    clip,
+                )
+            })
+            .collect();
+    }
+    let mut boxes = vec![Rect::new_empty(); glyphs.len()];
     if paint.mask_filter().is_none()
         && let Some(scale) = uniform_scale(&device)
     {
-        let mut sized = font.clone();
+        let mut sized = sheared;
         sized.set_size(font.size() * scale);
         let mut stroked = paint.clone();
         stroked.set_stroke_width(paint.stroke_width() * scale);
-        if let Shear::By(shear) = shear {
-            sized.set_skew_x(font.skew_x() + shear.skew_x());
-        }
         sized.get_bounds(glyphs, &mut boxes, Some(&stroked));
         return zip(boxes, positions)
             .map(|(glyph, &at)| {
-                let moved = match shear {
-                    Shear::By(shear) => map_affine(shear, at),
-                    _ => at,
-                };
-                let placed = device.map_point(origin + moved);
+                let at = device.map_point(placed(at));
                 (!glyph.is_empty()).then(|| {
-                    device_pixels(glyph.with_offset(placed), &Matrix::default())
+                    device_pixels(glyph.with_offset(at), &Matrix::default())
                 })
             })
             .collect();
@@ -2368,12 +2394,91 @@ fn pixels_inked(
     if let Shear::By(shear) = shear {
         to_device.pre_concat(shear);
     }
+    let reach = match device.is_scale_translate() {
+        true => 0,
+        false => TURNED_STRIKE_REACH,
+    };
     zip(boxes, positions)
         .map(|(glyph, &at)| {
-            (!glyph.is_empty())
-                .then(|| device_pixels(glyph.with_offset(at), &to_device))
+            (!glyph.is_empty()).then(|| {
+                device_pixels(glyph.with_offset(at), &to_device)
+                    .with_outset((reach, reach))
+            })
         })
         .collect()
+}
+
+/// The pixels past its box -- at the font's own size, mapped and rounded out
+/// -- that a glyph drawn from a strike under a transform that turns or skews
+/// can ink: one, measured on FreeType, where Oswald at 48px under a scale of
+/// 1.5 turned 10 degrees inked up to two pixels one pixel past that box under
+/// every hinting, unhinted included, so not by hinting. The cause is not
+/// traced. A scale unlike on the two axes, which does not turn, inked none
+/// past it at 16px and 48px.
+const TURNED_STRIKE_REACH: i32 = 1;
+
+/// The device size past which Skia draws a glyph from its outline rather
+/// than from a strike: the memory limit in `SkStrikeSpec::ShouldDrawAsPath`.
+const OUTLINE_TEXT_SIZE: f32 = 256.0;
+
+/// The size Skia takes a glyph's outline at to draw it as one, scaling it to
+/// the size drawn: `SkFontPriv::kCanonicalTextSizeForPaths`.
+const OUTLINE_STRIKE_SIZE: f32 = 64.0;
+
+/// Whether Skia draws `font`'s glyphs in `paint` under `device` from their
+/// outlines, as `SkStrikeSpec::ShouldDrawAsPath` decides it: a hairline, a
+/// transform with perspective, or a glyph past [`OUTLINE_TEXT_SIZE`] along
+/// either axis of the text's transform under `device` --
+/// `SkFontPriv::MakeTextMatrix` followed by `device`.
+fn drawn_from_outlines(font: &Font, paint: &Paint, device: &Matrix) -> bool {
+    if paint.style() == PaintStyle::Stroke && paint.stroke_width() == 0.0 {
+        return true;
+    }
+    if device.has_perspective() {
+        return true;
+    }
+    let mut text = Matrix::scale((font.size() * font.scale_x(), font.size()));
+    text.post_skew((font.skew_x(), 0.0), None);
+    let text = Matrix::concat(device, &text);
+    let past =
+        |a: f32, b: f32| a * a + b * b > OUTLINE_TEXT_SIZE * OUTLINE_TEXT_SIZE;
+    past(text.scale_x(), text.skew_y()) || past(text.skew_x(), text.scale_y())
+}
+
+/// The pixels `glyph` inks drawn from its outline, as Skia's glyph painter
+/// draws it past [`OUTLINE_TEXT_SIZE`]: the outline of `font`'s glyph taken
+/// unhinted at [`OUTLINE_STRIKE_SIZE`] -- `SkFont::setupForAsPaths` -- scaled
+/// to `font`'s size, placed at `at`, and drawn in `paint` under `device`. The
+/// box is the one a recording of that draw keeps -- Skia's own reach for the
+/// paint, stroke and mask filter included, under that transform -- within
+/// `clip`, the device pixels the draw can reach. `None` for a glyph with no
+/// outline, an empty one, or one wholly outside `clip`.
+fn outline_pixels(
+    font: &Font,
+    glyph: GlyphId,
+    at: Point,
+    paint: &Paint,
+    device: &Matrix,
+    clip: Rect,
+) -> Option<IRect> {
+    let mut outlined = font.clone();
+    outlined
+        .set_size(OUTLINE_STRIKE_SIZE)
+        .set_hinting(FontHinting::None)
+        .set_subpixel(true);
+    let outline = outlined.get_path(glyph)?;
+    let scale = font.size() / OUTLINE_STRIKE_SIZE;
+    let placed = outline
+        .make_transform(&Matrix::scale_translate((scale, scale), (at.x, at.y)));
+    if placed.bounds().is_empty() {
+        return None;
+    }
+    let mut recorder = PictureRecorder::new();
+    let canvas = recorder.begin_recording(clip, true);
+    canvas.concat(device);
+    canvas.draw_path(&placed, paint);
+    let drawn = recorder.finish_recording_as_picture(None)?.cull_rect();
+    (!drawn.is_empty()).then(|| RoundOut::<IRect>::round_out(&drawn))
 }
 
 /// The scale `matrix` draws at where it only scales, alike on both axes,
@@ -6797,6 +6902,12 @@ mod glyph_group_tests {
         }),
     ];
 
+    /// The width the containment test strokes at: wide enough that, past
+    /// the size Skia draws a glyph from its outline, a stroke left out of the
+    /// glyph's box reaches past it even on CoreText, whose box there, taken
+    /// at 64px and scaled up, stands up to four pixels wide of the outline.
+    const STROKE_WIDTH: f32 = 9.0;
+
     /// Every hinting a font takes, since FreeType moves a glyph's edges by
     /// each differently.
     const HINTINGS: [FontHinting; 4] = [
@@ -6851,7 +6962,7 @@ mod glyph_group_tests {
                                 paint
                                     .set_anti_alias(true)
                                     .set_style(style)
-                                    .set_stroke_width(3.0)
+                                    .set_stroke_width(STROKE_WIDTH)
                                     .set_color(Color::BLACK)
                                     .set_mask_filter(blur.and_then(|sigma| {
                                         MaskFilter::blur(
