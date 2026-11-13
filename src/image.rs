@@ -2617,7 +2617,10 @@ fn labelled_bmp(image: SkImage, bytes: &[u8]) -> SkImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::image::{Content, record_svg};
+    use crate::node::{
+        image::{Content, record_svg},
+        typography::FAKE_ITALIC_SKEW,
+    };
     use skia_safe::textlayout::TypefaceFontProvider;
 
     /// A one-pixel PNG, which is a still image however it is asked about.
@@ -3262,6 +3265,97 @@ mod tests {
             })
             .collect();
         assert_eq!(got, CHROME.to_vec());
+    }
+
+    /// An SVG document's `italic` and `oblique <angle>` text in a family
+    /// with no face that leans is drawn skewed, as canvas text is: a quarter
+    /// for `italic`, `tan(angle)` for `oblique <angle>` at any angle, a
+    /// negative one leaning back -- see docs/browser-differences.md for
+    /// where Chrome differs. A build of crates.io's Skia, without
+    /// `containers/skia-svg-synthetic-slant.patch`, draws all of it upright,
+    /// as `docs/rust.md` says; this holds each build to what it says.
+    ///
+    /// The lean is read off an "I": the left edge of its stem near its top
+    /// and near its baseline, apart by the skew over the height between,
+    /// less what the upright "I" measures, since Recursive's has serifs.
+    #[test]
+    fn svg_text_leans_by_the_slant_it_asks_for_in_a_face_that_does_not() {
+        /// How far a measured lean may stand from the skew asked for: a
+        /// quarter of a pixel of edge over the rows the lean is read across.
+        const LEAN_TOLERANCE: f32 = 0.25 / 70.0;
+        crate::font::FontLibrary::new()
+            .register_font_from_path(
+                SVG_UPRIGHT_FAMILY,
+                "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf",
+            )
+            .expect("a bundled face registers");
+        // Rows inside the stem, clear of the serifs at its top, about row
+        // 110, and at the baseline, row 250.
+        let (side, top, bottom) = (300u32, 140u32, 210u32);
+        let lean = |style: &str| {
+            let xml = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="{side}" height="{side}"><text x="100" y="250" font-size="200" font-family="{SVG_UPRIGHT_FAMILY}" font-style="{style}">I</text></svg>"#
+            );
+            let image = Svg::parse(&xml)
+                .expect("valid SVG")
+                .rasterize(side, side)
+                .expect("rasterizes");
+            let info = ImageInfo::new(
+                (side as i32, side as i32),
+                ColorType::Alpha8,
+                AlphaType::Premul,
+                None,
+            );
+            let mut alpha = vec![0u8; (side * side) as usize];
+            assert!(image.inner.read_pixels(
+                &info,
+                &mut alpha,
+                side as usize,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ));
+            // Where the stem's left edge crosses the row, to a fraction of a
+            // pixel: the first fully covered pixel, less the coverage of the
+            // anti-aliased pixels before it, which is what a straight edge
+            // leaves of each.
+            let edge = |y: u32| {
+                let row =
+                    &alpha[(y * side) as usize..((y + 1) * side) as usize];
+                let full = row
+                    .iter()
+                    .position(|&a| a == u8::MAX)
+                    .unwrap_or_else(|| panic!("{style}: no stem on row {y}"));
+                let partial: f32 = row[..full]
+                    .iter()
+                    .map(|&a| f32::from(a) / f32::from(u8::MAX))
+                    .sum();
+                full as f32 - partial
+            };
+            (edge(top) - edge(bottom)) / (bottom - top) as f32
+        };
+        let patched = cfg!(meo_svg_synthetic_slant);
+        let skew = |degrees: f32| match patched {
+            true => degrees.to_radians().tan(),
+            false => 0.0,
+        };
+        let quarter = match patched {
+            true => FAKE_ITALIC_SKEW.abs(),
+            false => 0.0,
+        };
+        let upright = lean("normal");
+        let mut wrong = Vec::new();
+        for (style, want) in [
+            ("italic", quarter),
+            ("oblique 20deg", skew(20.0)),
+            ("oblique 10deg", skew(10.0)),
+            ("oblique -20deg", skew(-20.0)),
+        ] {
+            let got = lean(style) - upright;
+            if (got - want).abs() > LEAN_TOLERANCE {
+                wrong.push(format!("{style}: leans {got}, not {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "patched {patched}: {}", wrong.join("; "));
     }
 
     /// Rasterizing does not leave the document resized behind it.
@@ -4665,6 +4759,10 @@ mod tests {
             "x-height {ratio}em, the x outline {outline}em",
         );
     }
+
+    /// The family the crate's SVG slant test registers: Recursive's upright
+    /// face alone, under a name nothing on the system answers to.
+    const SVG_UPRIGHT_FAMILY: &str = "SvgSlantUprightOnly";
 
     /// The family the crate's SVG door test registers: Oswald, under a name
     /// nothing on the system answers to.

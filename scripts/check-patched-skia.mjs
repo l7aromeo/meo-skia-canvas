@@ -60,13 +60,6 @@ import { cacheRoot, treeName } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/// containers/skia-svg-synthetic-slant.patch, on every platform.
-const SVG_SYNTHETIC_SLANT = {
-  patch: "containers/skia-svg-synthetic-slant.patch",
-  file: "modules/svg/src/SkSVGText.cpp",
-  marker: "!Leans(font.getTypeface())",
-};
-
 /// containers/skia-font-match-slant-first.patch, on every platform.
 const FONT_MATCH_SLANT_FIRST = {
   patch: "containers/skia-font-match-slant-first.patch",
@@ -157,6 +150,12 @@ const EXACT_BLEND_DIVISION = {
   patch: "containers/skia-exact-blend-division.patch",
   ...buildRsPatch("meo_exact_blend_division"),
   unit: "src/core/SkOpts.cpp",
+};
+
+/// containers/skia-svg-synthetic-slant.patch, on every platform.
+const SVG_SYNTHETIC_SLANT = {
+  patch: "containers/skia-svg-synthetic-slant.patch",
+  ...buildRsPatch("meo_svg_synthetic_slant"),
 };
 
 /// containers/skia-patch-marker.patch, on every platform.

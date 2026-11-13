@@ -89,7 +89,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 7] = [
+const SKIA_PATCHES: [SkiaPatch; 8] = [
     // `containers/skia-atlas-placement.patch`: a path drawn into Ganesh's
     // path atlas relative to its own device top-left, rounded to a grid, and
     // only then moved by its whole-pixel location, so its coverage does not
@@ -138,6 +138,14 @@ const SKIA_PATCHES: [SkiaPatch; 7] = [
         cfg: "meo_exact_blend_division",
         file: "src/opts/SkRasterPipeline_opts.h",
         marker: "(d*sa) / (sa - s)",
+    },
+    // `containers/skia-svg-synthetic-slant.patch`: an SVG document's `italic`
+    // and `oblique <angle>` text in a face that does not lean is drawn
+    // skewed, as CSS Fonts 4 section 5.2 synthesises it.
+    SkiaPatch {
+        cfg: "meo_svg_synthetic_slant",
+        file: "modules/svg/src/SkSVGText.cpp",
+        marker: "!Leans(font.getTypeface())",
     },
     // `containers/skia-patch-marker.patch`: no fix, one function a crate
     // build that names the patched archives links against, so a build that
