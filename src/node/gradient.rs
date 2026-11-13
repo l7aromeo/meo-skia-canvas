@@ -2,11 +2,7 @@
 use crate::shader::{AlphaInterpolation, GradientColorSpace, HueMethod};
 use neon::prelude::*;
 use skia_safe::{
-    Color, Color4f, ColorSpace, Matrix, Point, Shader, TileMode,
-    gradient::{
-        Colors as GradientColors, Gradient as SkGradient, Interpolation,
-        shaders as gradient_shaders,
-    },
+    Color, Color4f, ColorSpace, Matrix, Point, Shader, gradient::Interpolation,
     shaders,
 };
 use std::{
@@ -14,7 +10,11 @@ use std::{
     rc::Rc,
 };
 
-use crate::{export::VectorFeatures, utils::*};
+use crate::{
+    context::exact_gradient::{Geometry, GradientSpec},
+    export::VectorFeatures,
+    utils::*,
+};
 
 /// Degrees in a full turn, which is how far `createConicGradient` sweeps.
 const FULL_TURN_DEGREES: f32 = 360.0;
@@ -185,70 +185,52 @@ impl CanvasGradient {
         Some(shaders::color(Color::TRANSPARENT))
     }
 
-    pub fn shader(&self) -> Option<Shader> {
+    /// Everything this gradient is drawn from, `None` where the Canvas
+    /// standard says it paints nothing -- see [`Gradient::paints_nothing`].
+    ///
+    /// One description, so that the shader the CPU draws -- see
+    /// [`Self::shader`] -- and the one a GPU canvas draws in the CPU's
+    /// bytes -- see [`GradientSpec::exact`] -- cannot describe two
+    /// gradients.
+    pub fn spec(&self) -> Option<GradientSpec> {
         let mixing = self.mixing.get();
-        let interp = Interpolation {
-            // Was hard-coded to `No` here, which is what made the crate's
-            // `AlphaInterpolation` unreachable from JavaScript: the option
-            // existed, threaded through `Shader`'s factories, and this line
-            // discarded it on the one path a JavaScript caller can take.
+        let interpolation = Interpolation {
             in_premul: mixing.alpha.to_skia(),
             color_space: mixing.color_space.to_skia(),
             hue_method: mixing.hue_method.to_skia(),
         };
-
-        let shader = match &*self.gradient.borrow() {
-            // The clauses are on [`Gradient::paints_nothing`], which
-            // `is_opaque` reads too.
-            ramp if ramp.paints_nothing() => return Self::transparent(),
-
-            Gradient::Linear {
-                start,
-                end,
-                stops,
-                colors,
-            } => {
-                let stop_colors = GradientColors::new(
-                    colors.as_slice(),
-                    Some(stops.as_slice()),
-                    TileMode::Clamp,
-                    Some(ColorSpace::new_srgb()),
-                );
-                let gradient = SkGradient::new(stop_colors, interp);
-                gradient_shaders::linear_gradient(
-                    (*start, *end),
-                    &gradient,
-                    None,
-                )
-            }
+        let ramp = self.gradient.borrow();
+        if ramp.paints_nothing() {
+            return None;
+        }
+        let (geometry, local) = match &*ramp {
+            Gradient::Linear { start, end, .. } => (
+                Geometry::Linear {
+                    start: *start,
+                    end: *end,
+                },
+                None,
+            ),
             Gradient::Radial {
                 start_point,
                 start_radius,
                 end_point,
                 end_radius,
-                stops,
-                colors,
-            } => {
-                let stop_colors = GradientColors::new(
-                    colors.as_slice(),
-                    Some(stops.as_slice()),
-                    TileMode::Clamp,
-                    Some(ColorSpace::new_srgb()),
-                );
-                let gradient = SkGradient::new(stop_colors, interp);
-                gradient_shaders::two_point_conical_gradient(
-                    (*start_point, *start_radius),
-                    (*end_point, *end_radius),
-                    &gradient,
-                    None,
-                )
-            }
+                ..
+            } => (
+                Geometry::Conical {
+                    start: *start_point,
+                    start_radius: *start_radius,
+                    end: *end_point,
+                    end_radius: *end_radius,
+                },
+                None,
+            ),
             Gradient::Conic {
                 center,
                 angle,
                 sweep,
-                stops,
-                colors,
+                ..
             } => {
                 let Point { x, y } = *center;
                 let mut rotated = Matrix::new_identity();
@@ -256,27 +238,36 @@ impl CanvasGradient {
                     .pre_translate((x, y))
                     .pre_rotate(*angle, None)
                     .pre_translate((-x, -y));
-
-                let stop_colors = GradientColors::new(
-                    colors.as_slice(),
-                    Some(stops.as_slice()),
-                    TileMode::Clamp,
-                    Some(ColorSpace::new_srgb()),
-                );
-                let gradient = SkGradient::new(stop_colors, interp);
-                // The old `sweep_with_interpolation` defaulted the
-                // angle range to `(0, 360)` when passed `None`; the
-                // new `sweep_gradient` requires it explicitly.
-                gradient_shaders::sweep_gradient(
-                    *center,
-                    (0.0, *sweep),
-                    &gradient,
-                    Some(&rotated),
+                (
+                    Geometry::Sweep {
+                        center: *center,
+                        start: 0.0,
+                        end: *sweep,
+                    },
+                    Some(rotated),
                 )
             }
-        }?;
-        // `None` for a space Skia cannot build, as for a shader it declines.
-        mixing.color_space.in_working_space(shader).ok()
+        };
+        Some(GradientSpec {
+            geometry,
+            local,
+            colors: ramp.get_colors().clone(),
+            positions: ramp.get_stops().clone(),
+            color_space: ColorSpace::new_srgb(),
+            space: mixing.color_space,
+            interpolation,
+        })
+    }
+
+    pub fn shader(&self) -> Option<Shader> {
+        // The clauses are on [`Gradient::paints_nothing`], which `is_opaque`
+        // reads too.
+        match self.spec() {
+            // `None` for a space Skia cannot build, as for a shader it
+            // declines.
+            Some(spec) => spec.native(),
+            None => Self::transparent(),
+        }
     }
 
     pub fn add_color_stop(&mut self, offset: f32, color: Color4f) {
