@@ -277,8 +277,14 @@ impl Content {
         !matches!(self, Content::Loading | Content::Broken)
     }
 
-    pub fn snap_rects_to_bounds(
-        &self,
+    pub fn snap_rects_to_bounds(&self, src: Rect, dst: Rect) -> (Rect, Rect) {
+        Self::snap_rects_to_size(self.size(), src, dst)
+    }
+
+    /// [`Self::snap_rects_to_bounds`] for content of `size`, which a canvas
+    /// drawn as its page knows before anything is recorded of it.
+    pub fn snap_rects_to_size(
+        size: Size,
         mut src: Rect,
         mut dst: Rect,
     ) -> (Rect, Rect) {
@@ -288,7 +294,6 @@ impl Content {
         // included in the crop.
         let scale_x = dst.width() / src.width();
         let scale_y = dst.height() / src.height();
-        let size = self.size();
 
         if src.left < 0.0 {
             dst.left += -src.left * scale_x;

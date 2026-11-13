@@ -22,11 +22,11 @@ use std::{
 };
 
 use skia_safe::{
-    Color4f, Data, FourByteTag, IRect, ImageInfo as SkImageInfo,
-    Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
-    Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
-    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
-    Size as SkSize,
+    Color4f, Data, FourByteTag, IRect, Image as SkImage,
+    ImageInfo as SkImageInfo, Matrix as SkMatrix, Paint as SkPaint,
+    PaintStyle as SkPaintStyle, Path as SkPath, PathBuilder as SkPathBuilder,
+    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
+    Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -46,7 +46,7 @@ use crate::{
     context::{
         Context2D as Inner, Dye, initial_root_face,
         layer::{Entries, reach_the_clip},
-        page::{ExportOptions, Matte},
+        page::{ExportOptions, Matte, Page},
     },
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
@@ -4400,13 +4400,13 @@ impl Context2D {
 
 /// What [`capture`] resolved a source canvas to.
 struct Captured {
-    content: Content,
+    content: Captive,
     size: SkSize,
     features: VectorFeatures,
     cost: usize,
     /// The source's own picture when it was handed over as pixels, so the
     /// draw can replay just the region it shows rather than materializing
-    /// the whole page. `None` when the content is already a picture.
+    /// the whole page. `None` when the content is the page itself.
     picture: Option<SkPicture>,
     /// The source page's own entries where the content is its picture, so a
     /// draw through a paint holds the page as recorded -- see
@@ -4414,10 +4414,19 @@ struct Captured {
     entries: Option<Entries>,
 }
 
+/// A source canvas's page as [`capture`] hands it over: as pixels, or as the
+/// page itself, recorded into a picture only where the draw needs one -- see
+/// `Inner::draw_picture_costing`.
+enum Captive {
+    Bitmap(SkImage),
+    Page(Page),
+}
+
 /// Closes a canvas's recording and hands back its page as vectors.
 ///
-/// `None` when the page recorded nothing, which is a blank canvas rather
-/// than a failure -- the callers treat it as nothing to draw.
+/// `None` only where a source handed over as pixels yields none -- the
+/// callers treat it as nothing to draw. A page handed over as itself is
+/// recorded into a picture, if at all, by the draw -- see [`Captive`].
 fn capture(source: &mut Canvas) -> Option<Captured> {
     let context = source.context();
     let size = context.inner.bounds.size();
@@ -4439,15 +4448,15 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
 
     match cost > 0 {
         true => context.inner.source_image(false).map(|image| Captured {
-            content: Content::Bitmap(image),
+            content: Captive::Bitmap(image),
             size,
             features,
             cost,
             picture: context.inner.picture(),
             entries: None,
         }),
-        false => context.inner.picture().map(|picture| Captured {
-            content: Content::Vector(picture, size),
+        false => Some(Captured {
+            content: Captive::Page(context.inner.page()),
             size,
             features,
             cost,
@@ -4474,8 +4483,8 @@ fn place_capture(
     } = captured;
     let (features, cost) = (*features, *cost);
     match content {
-        Content::Vector(picture, _) => ctx.draw_picture_costing(
-            picture,
+        Captive::Page(page) => ctx.draw_picture_costing(
+            &|| page.picture(None),
             entries.clone(),
             src,
             dst,
@@ -4485,11 +4494,10 @@ fn place_capture(
         // A bitmap here is a source that carries nesting and has yet to be
         // rasterized; `draw_nested_image` takes only the part this draw can
         // show. Charged as well, because the destination now carries it.
-        Content::Bitmap(image) => {
+        Captive::Bitmap(image) => {
             ctx.charge_replay(cost.max(1));
             ctx.draw_nested_image(image, picture.as_ref(), src, dst)
         }
-        _ => {}
     }
 }
 
@@ -5994,6 +6002,51 @@ mod overlapping_glyph_tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// A canvas holding a kept run, drawn into a CPU canvas and read there,
+    /// draws none of the run's glyphs apart, and reads the bytes the source
+    /// does. The destination takes the source as its entries and plays the
+    /// run whole on the CPU -- see `typography::glyph_draws` -- and records
+    /// no picture of the source, which, not knowing its target, would draw
+    /// each glyph apart -- see `Context2D::draw_picture_costing`.
+    #[test]
+    fn a_kept_run_drawn_into_a_cpu_canvas_draws_no_glyph_apart() {
+        register();
+        forget_laid_out();
+        let mut source = Canvas::new(W, H);
+        source.set_gpu(false);
+        let ctx = source.context();
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W, H);
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css(OSWALD.0));
+        ctx.set_letter_spacing(-12.0);
+        ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+            .expect("a colour");
+        for y in [70.0, 140.0] {
+            ctx.fill_text(OSWALD.1, 10.0, y, None);
+        }
+        let read = |canvas: &mut Canvas| {
+            canvas
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec()
+        };
+        let own = read(&mut source);
+        let mut into = Canvas::new(W, H);
+        into.set_gpu(false);
+        GLYPHS_DRAWN_ALONE.set(0);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        let drawn = read(&mut into);
+        assert_eq!(
+            GLYPHS_DRAWN_ALONE.get(),
+            0,
+            "glyphs drawn apart for a CPU canvas"
+        );
+        assert!(drawn == own, "the CPU canvas reads other bytes");
+    }
+
     /// A run kept to be drawn again where the page is played writes a PDF
     /// and an SVG with its glyphs whole, the bytes a run drawn as one blob
     /// writes -- see `typography::WholeRuns`. Drawn apart, the PDF differs
@@ -6133,9 +6186,9 @@ mod overlapping_glyph_tests {
     }
 
     /// A plain run is kept to be drawn again where the page is played only
-    /// under a blend read in the shader: a canvas drawn into another asks
-    /// each run kept for a recording, which the watch counts, and asks none
-    /// of a run recorded as it was drawn.
+    /// under a blend read in the shader: a picture of the page asks each run
+    /// kept for a recording, which the watch counts, and asks none of a run
+    /// recorded as it was drawn.
     #[test]
     fn only_a_blend_read_in_the_shader_keeps_a_plain_run() {
         use crate::context::layer::REPLAYED_WATCH;
@@ -6156,9 +6209,7 @@ mod overlapping_glyph_tests {
             assert!(ctx.set_font_css(OSWALD.0));
             ctx.fill_text(OSWALD.1, 10.0, 70.0, None);
             REPLAYED_WATCH.with_borrow_mut(|watch| *watch = None);
-            let mut into = Canvas::new(W, H);
-            into.set_gpu(false);
-            into.context().draw_canvas(&mut canvas, 0.0, 0.0);
+            assert!(canvas.context().inner.picture().is_some());
             asked.load(Ordering::Relaxed)
         };
         for blend in BY_COEFFICIENTS {

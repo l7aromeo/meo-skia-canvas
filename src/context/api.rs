@@ -1384,24 +1384,30 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // however often it is copied again. Only nesting is counted, so a page
     // with a hundred thousand ordinary draws on it never reaches this.
     let cost = context.borrow().replay_cost();
-    let vector = cost == 0;
+    if cost == 0 {
+        // The page itself, recorded into a picture only where the draw needs
+        // one -- see `Context2D::draw_picture_costing`.
+        let (page, size, entries) = {
+            let context = context.borrow();
+            (context.page(), context.bounds.size(), context.entries())
+        };
+        let (src, dst) = _layout_rects(&mut cx, size, &nums)?;
+        let (src, dst) = Content::snap_rects_to_size(size, src, dst);
+        this.borrow_mut().draw_picture_costing(
+            &|| page.picture(None),
+            Some(entries),
+            &src,
+            &dst,
+            source,
+            cost,
+        );
+        return Ok(cx.undefined());
+    }
 
-    let content = Content::from_context(&mut context.borrow_mut(), vector);
+    let content = Content::from_context(&mut context.borrow_mut(), false);
     let (src, dst) = _layout_rects(&mut cx, content.size(), &nums)?;
     let (src, dst) = content.snap_rects_to_bounds(src, dst);
     match &content {
-        Content::Vector(pict, _) => {
-            let entries = context.borrow().entries();
-            this.borrow_mut().draw_picture_costing(
-                pict,
-                Some(entries),
-                &src,
-                &dst,
-                source,
-                cost,
-            );
-            Ok(cx.undefined())
-        }
         Content::Bitmap(image) => {
             this.borrow_mut().draw_image(image, &src, &dst);
             Ok(cx.undefined())

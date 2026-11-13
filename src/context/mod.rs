@@ -18,7 +18,7 @@ use skia_safe::{
     textlayout::{StrutStyle, TextStyle},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     rc::Rc,
     sync::Arc,
 };
@@ -3349,7 +3349,14 @@ impl Context2D {
         dst_rect: &Rect,
         source: VectorFeatures,
     ) {
-        self.draw_picture_costing(picture, None, src_rect, dst_rect, source, 1)
+        self.draw_picture_costing(
+            &|| Some(picture.clone()),
+            None,
+            src_rect,
+            dst_rect,
+            source,
+            1,
+        )
     }
 
     /// As [`Self::draw_picture`], charging this page for what replaying the
@@ -3359,6 +3366,15 @@ impl Context2D {
     /// so the charge is what makes a page that keeps drawing copies of itself
     /// declare its own cost. See `PageRecorder::replay_cost`.
     ///
+    /// `picture` records the source as one picture, and is called only where
+    /// the draw needs one: a source drawn as its entries -- below -- whose
+    /// crop is not in question is not recorded at all. Recording a page's
+    /// kept run -- see `layer::ReplayedText` -- into a picture, which cannot
+    /// know what it will be played onto, draws its glyphs a glyph at a time:
+    /// a page of 16px Oswald under `multiply` drawn into a CPU canvas took
+    /// 1.09 ms recording a picture its entries then stood in for, and takes
+    /// 0.27 ms without, measured in a release build.
+    ///
     /// `entries` is the source page's own list where the picture is a
     /// canvas's, each entry with what it asks of a vector backend, so that a
     /// draw through its paint holds the page as it was recorded and each
@@ -3367,7 +3383,7 @@ impl Context2D {
     /// asking for what `source` names.
     pub(crate) fn draw_picture_costing(
         &mut self,
-        picture: &Picture,
+        picture: &dyn Fn() -> Option<Picture>,
         entries: Option<Entries>,
         src_rect: &Rect,
         dst_rect: &Rect,
@@ -3375,6 +3391,8 @@ impl Context2D {
         cost: usize,
     ) {
         self.recorder.borrow_mut().charge_replay(cost);
+        let recorded = OnceCell::new();
+        let picture = || recorded.get_or_init(picture).as_ref();
         let paint = self.paint_for_image();
         let mag = Point::new(
             dst_rect.width() / src_rect.width(),
@@ -3427,17 +3445,25 @@ impl Context2D {
                 || holds_a_cut(&entries.layers)
                 || holds_a_pair(&entries.layers)
         });
-        let crops = !dst_rect.contains(matrix.map_rect(picture.cull_rect()).0);
-        if (through_paint || cut || crops)
+        let crops = || {
+            picture().is_some_and(|picture| {
+                !dst_rect.contains(matrix.map_rect(picture.cull_rect()).0)
+            })
+        };
+        if (through_paint || cut || crops())
             && !covers_beyond_the_draw(self.state.global_composite_operation)
         {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
-            let contents = entries.unwrap_or_else(|| {
-                Entries::new(
-                    vec![Layer::Picture(picture.clone())],
-                    vec![source],
-                )
-            });
+            let Some(contents) = entries.or_else(|| {
+                picture().map(|picture| {
+                    Entries::new(
+                        vec![Layer::Picture(picture.clone())],
+                        vec![source],
+                    )
+                })
+            }) else {
+                return;
+            };
             let shadow = self
                 .paint_for_shadow(&paint)
                 .map(|shadow| self.faint().drawable(&shadow).into_owned());
@@ -3507,6 +3533,9 @@ impl Context2D {
             return;
         }
 
+        let Some(picture) = picture() else {
+            return;
+        };
         let pixels = self.pixels_paint(&paint);
         self.render_to_canvas(
             &paint,
@@ -9203,14 +9232,14 @@ mod colour_recording_tests {
         layer::{Layer, REPLAYED_WATCH, ReplayedText, drawn_by},
     };
     use crate::{
-        export::{EncodeOptions, ImageFormat},
+        export::{EncodeOptions, ImageFormat, VectorFeatures},
         font::colr::assert_colour_text,
         paint::BlendMode,
         pixels::{ImageDataExport, PixelExportOptions},
         prelude::*,
         started,
     };
-    use skia_safe::Color;
+    use skia_safe::{Color, Rect as SkRect};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -9243,12 +9272,15 @@ mod colour_recording_tests {
 
     /// The ways a page is read, and how many recordings each asks for of
     /// the two runs a scene draws: none on its own pixels, nor as an SVG,
-    /// which embeds a colour glyph as pixels; the pixels' of each run drawn
-    /// into another canvas, which takes the page as a picture -- see
-    /// `Context2D::picture` -- and the document's of each as a PDF.
-    const READS: [(&str, usize); 4] = [
+    /// which embeds a colour glyph as pixels, nor drawn into another canvas,
+    /// which takes the page as its entries and records no picture of it --
+    /// see `Context2D::draw_picture_costing`; the pixels' of each run where
+    /// the page is taken as a picture -- see `Context2D::picture` -- and the
+    /// document's of each as a PDF.
+    const READS: [(&str, usize); 5] = [
         ("pixels", 0),
-        ("drawn into another canvas", 2),
+        ("drawn into another canvas", 0),
+        ("as a picture", 2),
         ("PDF", 2),
         ("SVG", 0),
     ];
@@ -9340,6 +9372,21 @@ mod colour_recording_tests {
             "drawn into another canvas" => {
                 let mut outer = self::canvas();
                 outer.context().draw_canvas(canvas, 3.0, 2.0);
+                outer
+                    .to_image_data(None, &premultiplied)
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec()
+            }
+            "as a picture" => {
+                let picture = canvas.context().inner.picture();
+                let mut outer = self::canvas();
+                outer.context().inner.draw_picture(
+                    &picture.expect("a picture"),
+                    &SkRect::from_wh(SIDE.0, SIDE.1),
+                    &SkRect::from_xywh(3.0, 2.0, SIDE.0, SIDE.1),
+                    VectorFeatures::PLAIN,
+                );
                 outer
                     .to_image_data(None, &premultiplied)
                     .expect("pixels")
