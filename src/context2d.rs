@@ -4870,8 +4870,9 @@ mod recorded_count_tests {
     };
 
     /// Gradient fills one after another, which a page keeps as one run,
-    /// count at least the path each records, on a CPU canvas and a GPU one
-    /// alike. The page's own check holds the count to a walk
+    /// count what each records: its path, which the route a GPU canvas
+    /// plays shares and which is counted once, on a CPU canvas and a GPU
+    /// one alike. The page's own check holds the count to a walk
     /// of its entries at each read, so a draw joining the run uncounted
     /// fails there; this holds the walk to the draws.
     #[test]
@@ -4917,11 +4918,7 @@ mod recorded_count_tests {
         let [Some(one), Some(more)] = cpu else {
             panic!("a CPU canvas");
         };
-        assert!(
-            more >= one + FILLS * path,
-            "{FILLS} more fills count {} bytes, short of a path each, {path}",
-            more - one
-        );
+        assert_eq!(more - one, FILLS * path, "a path a fill, counted once");
         let gpu = [1, 1 + FILLS].map(|fills| recorded(true, fills));
         if gpu[0].is_some() {
             assert_eq!(gpu, cpu, "a GPU canvas counts what a CPU canvas does");

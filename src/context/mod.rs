@@ -1413,11 +1413,20 @@ impl Context2D {
                 true => Recording::Pixels,
                 false => Recording::Shared,
             };
+            // Recorded for a document only where it draws apart from the
+            // pixels -- a shadow, or an exact paint of its own; a piece with
+            // no document plays its pixels for one, as a page's recordings
+            // that have not forked do -- see `PageRecorder::append_alike`.
+            // One recorded for every draw was 15% of a CPU canvas's time
+            // filling 2000 small gradients.
             let document = || {
-                dual.then(|| {
-                    self.recorded(&|canvas| draw(canvas, Recording::Document))
-                })
-                .flatten()
+                (dual && !alike)
+                    .then(|| {
+                        self.recorded(&|canvas| {
+                            draw(canvas, Recording::Document)
+                        })
+                    })
+                    .flatten()
             };
             // A path the effect reproduces is kept rather than recorded.
             let piece = match self.gradient_path(

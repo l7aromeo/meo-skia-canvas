@@ -1227,6 +1227,62 @@ fn consecutive_gradient_draws_share_an_entry() {
     assert_eq!(runs, vec![3, 1]);
 }
 
+/// On a page that keeps a recording for each kind of target, a gradient
+/// draw records one for a document only where it draws apart from the
+/// pixels -- casting its shadow itself, under a blend that covers beyond it,
+/// the shadow's paint taken by each recording for itself -- and otherwise
+/// plays its pixels for a document. A shadow cast apart, as a group of its
+/// own -- see `files_shadow_through_chain` -- leaves the draw alike. A
+/// document's bytes cannot tell the two apart at the precision they write a
+/// colour in, so the rule is held here, on the entries.
+#[test]
+fn a_gradient_draw_records_a_document_only_where_it_draws_apart() {
+    let (spec, _, _) = case(1);
+    let shader = CanvasShader {
+        inner: spec.native().expect("native"),
+        features: VectorFeatures::PLAIN,
+        gradient: Some(Arc::new(spec)),
+    };
+    let documents = |shadow: bool, blend: BlendMode| -> Vec<bool> {
+        let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
+        let ctx = canvas.context();
+        if shadow {
+            ctx.set_shadow_color_css("rgb(0 0 0 / 0.5)")
+                .expect("a colour");
+            ctx.set_shadow_offset(3.0, 2.0);
+        }
+        ctx.set_global_composite_operation(blend);
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(10.0, 10.0, 30.0, 20.0);
+        ctx.inner
+            .entries()
+            .layers
+            .iter()
+            .filter_map(|entry| match entry {
+                Layer::Gradient(op) => Some(op.draws.iter()),
+                _ => None,
+            })
+            .flatten()
+            .map(|piece| piece.document.is_some())
+            .collect()
+    };
+    assert_eq!(
+        documents(false, BlendMode::SourceOver),
+        vec![false],
+        "alike: no document"
+    );
+    assert_eq!(
+        documents(true, BlendMode::SourceOver),
+        vec![false],
+        "a shadow cast apart: no document"
+    );
+    assert_eq!(
+        documents(true, BlendMode::Copy),
+        vec![true],
+        "a shadow the draw casts itself: a document"
+    );
+}
+
 /// The sweep of the integration tests, about `center` and turned by `turn`
 /// degrees about it.
 fn sweep_turned(center: CanvasPoint, turn: f32) -> CanvasShader {
