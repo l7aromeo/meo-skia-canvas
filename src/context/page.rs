@@ -352,15 +352,20 @@ impl Drop for PageId {
 /// measured 50.
 pub struct PageRecorder {
     /// The recordings draws go into until they are filed: begun by the
-    /// first draw to reach them -- see [`Recorders::begun_in`] -- and
-    /// dropped as they are filed, so that a page drawn and then only read
-    /// holds none. A begun recorder holds its recording canvas, a device
-    /// and a bounding hierarchy whether or not anything is drawn into it,
-    /// which a page whose pixels the budget dropped would otherwise keep
-    /// until it is collected: 400 CPU canvases of 1000 by 800, each filled
-    /// once, read and held, held 16.8 KB of native memory apiece beside
-    /// their kept pages with their recorders begun, and 8.1 KB released.
+    /// first draw to reach them -- see [`Recorders::begun_in`] -- begun
+    /// again as they are filed, and dropped at the page's first read, so
+    /// that a page drawn and then read once holds none -- see
+    /// [`Self::release_recorders`]. A begun recorder holds its recording
+    /// canvas, a device and a bounding hierarchy whether or not anything is
+    /// drawn into it, which a page whose pixels the budget dropped would
+    /// otherwise keep until it is collected: 400 CPU canvases of 1000 by
+    /// 800, each filled once, read and held, held 16.8 KB of native memory
+    /// apiece beside their kept pages with their recorders begun, and 8.1
+    /// KB released.
     current: Option<Recorders>,
+    /// Whether the page has been read, which releases its recorders the
+    /// first time -- see [`Self::release_recorders`].
+    read: bool,
     /// Whether the page keeps a recording for each kind of target -- see
     /// [`Recorders`].
     dual: bool,
@@ -630,11 +635,10 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
-    /// Whether a page drops its recorders as it files them and as it is
-    /// read, on this thread: off, it begins its recordings again the moment
-    /// it files them, at depth 1 and unframed, and a read keeps them and the
-    /// spares -- the reference [`PageRecorder::release_recorders`] and the
-    /// lazy begin are held to.
+    /// Whether a page drops its recorders at its first read, on this thread:
+    /// off, a read keeps them and the spares, as a page did before it
+    /// dropped them -- the reference [`PageRecorder::release_recorders`] and
+    /// the begin that follows it are held to.
     pub(crate) static RELEASES_RECORDERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
@@ -1030,6 +1034,7 @@ impl PageRecorder {
 
         PageRecorder {
             current: None,
+            read: false,
             dual,
             layers: Arc::default(),
             features: Arc::default(),
@@ -1622,17 +1627,17 @@ impl PageRecorder {
         if !self.changed {
             return;
         }
-        // Dropped as they are filed: the next draw begins new ones.
-        if let Some(entry) = self.current.take().and_then(|mut recorders| {
-            recorders
-                .finish(|recorder| recorder.finish_recording_as_picture(None))
+        let bounds = self.bounds;
+        if let Some(entry) = self.current.as_mut().and_then(|recorders| {
+            let entry = recorders
+                .finish(|recorder| recorder.finish_recording_as_picture(None));
+            recorders.begin_with(bounds, true);
+            entry
         }) {
             layer.entries.push(entry);
             layer.entry_features.push(layer.current_features);
         }
         layer.current_features = VectorFeatures::PLAIN;
-        #[cfg(test)]
-        self.begun_again_eagerly();
         self.framed = false;
         self.changed = false;
         self.filtered = 0;
@@ -1947,8 +1952,8 @@ impl PageRecorder {
         // store layer as a drawable (so copies are deduplicated) wrapped in
         // a picture (so it can be sent to other threads)
         let bounds = self.bounds;
-        let filed = self.current.take().and_then(|mut recorders| {
-            recorders.finish(|recorder| {
+        let filed = self.current.as_mut().and_then(|recorders| {
+            let entry = recorders.finish(|recorder| {
                 recorder.finish_recording_as_drawable().and_then(
                     |mut drawable| {
                         let mut wrapper = PictureRecorder::new();
@@ -1958,7 +1963,9 @@ impl PageRecorder {
                         wrapper.finish_recording_as_picture(None)
                     },
                 )
-            })
+            });
+            recorders.begin_with(bounds, true);
+            entry
         });
         if let Some(entry) = filed {
             Arc::make_mut(&mut self.layers).push(entry);
@@ -1967,10 +1974,7 @@ impl PageRecorder {
         }
         self.isolated = None;
 
-        // The recordings were dropped as they were filed, and the next draw
-        // begins new ones, framed as the page then stands.
-        #[cfg(test)]
-        self.begun_again_eagerly();
+        // resume recording
         self.framed = false;
         self.changed = false;
         self.filtered = 0;
@@ -2464,12 +2468,17 @@ impl PageRecorder {
         }
     }
 
-    /// Drops the recorders the page keeps begun for draws to come, once
-    /// everything is filed: the page's own recordings, which framing for
-    /// the read may have begun again, and the spares a run and a cut draw
-    /// reuse -- see [`Spare`]. The next draw begins what it needs. A page
-    /// that is read and then dropped otherwise kept each recorder's canvas,
-    /// device and bounding hierarchy until it was collected.
+    /// At the page's first read, drops the recorders it keeps begun for
+    /// draws to come, once everything is filed: the page's own recordings
+    /// and the spares a run and a cut draw reuse -- see [`Spare`]. The next
+    /// draw begins what it needs. A page that is read and then dropped
+    /// otherwise kept each recorder's canvas, device and bounding hierarchy
+    /// until it was collected.
+    ///
+    /// The first read only: a page read again is being drawn and read by
+    /// turns, and keeps them. Dropped at every read, a frame of 600 by 400
+    /// filled twice, lettered and read 1x1 cost 24.4 microseconds on the CPU
+    /// where it cost 19.2 keeping them, a new recorder each frame.
     ///
     /// The frame's run keeps its own: a read splits it rather than ending
     /// it -- see [`Self::split_run`] -- and it goes on recording.
@@ -2478,7 +2487,7 @@ impl PageRecorder {
         if !RELEASES_RECORDERS.get() {
             return;
         }
-        if self.changed {
+        if std::mem::replace(&mut self.read, true) || self.changed {
             return;
         }
         if self.current.take().is_some() {
@@ -2487,21 +2496,6 @@ impl PageRecorder {
         }
         self.spare = None;
         self.cut_spare = None;
-    }
-
-    /// With [`RELEASES_RECORDERS`] off, begins the page's recordings again
-    /// as they are filed, at depth 1 and unframed, as a page did before it
-    /// dropped them.
-    #[cfg(test)]
-    fn begun_again_eagerly(&mut self) {
-        if RELEASES_RECORDERS.get() {
-            return;
-        }
-        let mut recorders = Recorders::new(self.bounds, self.dual);
-        recorders.each(|canvas, _| {
-            canvas.restore_to_count(1);
-        });
-        self.current = Some(recorders);
     }
 
     /// The page as filed: everything but the layers still open. The
@@ -8489,27 +8483,29 @@ mod tests {
             .expect("a raster readback")
     }
 
-    /// A read leaves the page holding no begun recorder: not its own
+    /// A page's first read leaves it holding no begun recorder: not its own
     /// recordings, nor the spares a run and a cut draw left for the next --
-    /// see [`PageRecorder::release_recorders`]. Draws after the read begin
-    /// what they need, under the transform and the clip the page then
-    /// holds, and paint what they would have had nothing read between.
+    /// see [`PageRecorder::release_recorders`]. A second read keeps what
+    /// the draws between began. Draws after a read begin what they need,
+    /// under the transform and the clip the page then holds, and paint what
+    /// they would have had nothing read between.
     ///
-    /// Three scenes, because a read releases by three routes. Ending on a
-    /// draw into the page's recording, the read files it and the run's
-    /// spare is left. Ending on a draw into a run with nothing else drawn
-    /// since the last read, the read files the run alone, and the page's
-    /// recording, begun to frame the run, has nothing to file. Ending on a
-    /// transform set with nothing drawn since the last read, the read itself
-    /// begins the page's recording to frame it, and the draw after the read,
-    /// with no state set between, has to be framed again.
+    /// Three scenes for the first read, because it releases by three
+    /// routes. Ending on a draw into the page's recording, the read files it
+    /// and the run's and the cut draw's spares are left. Ending on draws
+    /// into a run alone, the read files the run, and the page's recording,
+    /// begun to frame the run, has nothing to file. Ending on a transform
+    /// set with nothing drawn, the read itself begins the page's recording
+    /// to frame it, and the draw after the read, with no state set between,
+    /// has to be framed again.
     #[test]
-    fn a_read_leaves_the_page_no_begun_recorders() {
-        #[derive(Debug, Clone, Copy)]
+    fn a_first_read_leaves_the_page_no_begun_recorders() {
+        #[derive(Debug, Clone, Copy, PartialEq)]
         enum Ending {
             Page,
             Run,
             Frame,
+            SecondRead,
         }
         let side = 24.0;
         let whole = IRect::from_wh(side as i32, side as i32);
@@ -8528,48 +8524,72 @@ mod tests {
         let shifted = Matrix::translate((2.0, 1.0));
         let drawn = |ending: Ending, read_between: bool| {
             let mut recorder = PageRecorder::new(Rect::from_wh(side, side));
-            recorder.set_state(shifted, &Some(clip.clone()));
-            // Under the clip, so a run records it.
-            recorder.append(rect(0.0, 0.0, (200, 30, 40, 180)));
-            recorder.append_cut(
-                &clip,
-                shifted,
-                VectorFeatures::PLAIN,
-                rect(8.0, 8.0, (30, 160, 60, 200)),
-            );
-            // The frame ends, and the run leaves its recorders spare.
-            recorder.set_state(shifted, &None);
-            recorder.append(rect(10.0, 2.0, (40, 60, 220, 150)));
+            // A cut draw and a draw under the clip, so that a run records
+            // it and the cut draw leaves its recorders spare.
+            let clipped = |recorder: &mut PageRecorder| {
+                recorder.set_state(shifted, &Some(clip.clone()));
+                recorder.append_cut(
+                    &clip,
+                    shifted,
+                    VectorFeatures::PLAIN,
+                    rect(8.0, 8.0, (30, 160, 60, 200)),
+                );
+                recorder.append(rect(0.0, 0.0, (200, 30, 40, 180)));
+            };
             match ending {
-                Ending::Page => {}
-                Ending::Run => {
-                    read(&mut recorder, whole, 1.0);
-                    recorder.set_state(Matrix::default(), &Some(clip.clone()));
-                    recorder.append(rect(1.0, 9.0, (20, 200, 200, 140)));
+                Ending::Page | Ending::SecondRead => {
+                    clipped(&mut recorder);
+                    // The frame ends, and the run leaves its recorders spare.
+                    recorder.set_state(shifted, &None);
+                    recorder.append(rect(10.0, 2.0, (40, 60, 220, 150)));
                 }
+                Ending::Run => clipped(&mut recorder),
                 Ending::Frame => {
-                    read(&mut recorder, whole, 1.0);
                     recorder.set_state(Matrix::translate((3.0, 2.0)), &None);
                 }
+            }
+            if ending == Ending::SecondRead {
+                read(&mut recorder, whole, 1.0);
+                recorder.append(rect(1.0, 9.0, (20, 200, 200, 140)));
             }
             if read_between {
                 // The scene begins what the read releases, where it is
                 // begun before the read rather than by it.
                 let begun = match ending {
                     Ending::Page => {
-                        recorder.spare.is_some() && recorder.cut_spare.is_some()
+                        recorder.current.is_some()
+                            && recorder.spare.is_some()
+                            && recorder.cut_spare.is_some()
                     }
-                    Ending::Run => recorder.current.is_some(),
+                    Ending::Run => {
+                        recorder.current.is_some()
+                            && recorder.cut_spare.is_some()
+                    }
                     Ending::Frame => true,
+                    Ending::SecondRead => recorder.current.is_some(),
                 };
                 assert!(begun, "{ending:?}: the scene begins nothing");
                 read(&mut recorder, whole, 1.0);
-                for (held, what) in [
-                    (recorder.current.is_some(), "the page's recordings"),
-                    (recorder.spare.is_some(), "the run's spare"),
-                    (recorder.cut_spare.is_some(), "the cut draw's spare"),
-                ] {
-                    assert!(!held, "{ending:?}: {what} kept");
+                match ending {
+                    Ending::SecondRead => assert!(
+                        recorder.current.is_some(),
+                        "a second read released the page's recordings"
+                    ),
+                    _ => {
+                        for (held, what) in [
+                            (
+                                recorder.current.is_some(),
+                                "the page's recordings",
+                            ),
+                            (recorder.spare.is_some(), "the run's spare"),
+                            (
+                                recorder.cut_spare.is_some(),
+                                "the cut draw's spare",
+                            ),
+                        ] {
+                            assert!(!held, "{ending:?}: {what} kept");
+                        }
+                    }
                 }
             }
             // Under the state the scene ended in.
@@ -8580,7 +8600,9 @@ mod tests {
             recorder.append(rect(12.0, 12.0, (90, 20, 160, 210)));
             read(&mut recorder, whole, 1.0)
         };
-        for ending in [Ending::Page, Ending::Run, Ending::Frame] {
+        for ending in
+            [Ending::Page, Ending::Run, Ending::Frame, Ending::SecondRead]
+        {
             let read = drawn(ending, true);
             assert!(read.iter().any(|&byte| byte != 0), "nothing was drawn");
             assert!(
