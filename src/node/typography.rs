@@ -2207,10 +2207,10 @@ pub(crate) enum GlyphDraws {
 /// composites a blob's glyphs in order, each over the last, and draws the
 /// same bytes either way. On the GPU its glyphs are drawn in groups that
 /// share no pixel of the canvas -- see [`glyph_groups`]. Into a recording,
-/// or a document, which does not know the pixels it will be played onto
-/// nor at what scale, a glyph at a time, which is right at any scale. A run
-/// drawn from its outlines -- see [`draw_outlines`] -- is one path on
-/// either engine, and is left so.
+/// which does not know the pixels it will be played onto nor at what scale,
+/// a glyph at a time, which is right at any scale; for a document, whole --
+/// see [`WholeRuns`]. A run drawn from its outlines -- see [`draw_outlines`]
+/// -- is one path on either engine, and is left so.
 pub(crate) fn glyph_draws(paint: &Paint, canvas: &Canvas) -> GlyphDraws {
     if blends_by_coefficients(paint.blend_mode_or(SkBlendMode::SrcOver)) {
         return GlyphDraws::Whole;
@@ -2219,12 +2219,42 @@ pub(crate) fn glyph_draws(paint: &Paint, canvas: &Canvas) -> GlyphDraws {
     if let Some(draws) = GLYPH_DRAWS_FOR.get() {
         return draws;
     }
+    if WHOLE_RUNS.get() {
+        return GlyphDraws::Whole;
+    }
     if on_gpu(canvas) {
         GlyphDraws::Grouped
     } else if draws_on_cpu(canvas) {
         GlyphDraws::Whole
     } else {
         GlyphDraws::Each
+    }
+}
+
+thread_local! {
+    /// Whether runs are drawn whole on this thread, whatever their canvas
+    /// -- see [`WholeRuns`].
+    static WHOLE_RUNS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While held, every run on this thread is drawn whole, whatever its canvas
+/// -- see [`glyph_draws`]: a run recorded for a document, which a PDF or
+/// SVG viewer composites glyph by glyph itself. Drawn whole and drawn a
+/// glyph at a time, Oswald's "Hello Wq" overlapping under `multiply`
+/// rasterized alike through poppler and wrote the same SVG to the byte, so
+/// a document keeps a run as one text object rather than one for each
+/// glyph.
+pub(crate) struct WholeRuns(bool);
+
+impl WholeRuns {
+    pub(crate) fn hold() -> Self {
+        Self(WHOLE_RUNS.replace(true))
+    }
+}
+
+impl Drop for WholeRuns {
+    fn drop(&mut self) {
+        WHOLE_RUNS.set(self.0);
     }
 }
 

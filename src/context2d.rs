@@ -5333,7 +5333,8 @@ mod overlapping_glyph_tests {
         canvas::{BackendInfo, EngineKind},
         font::FontLibrary,
         node::typography::{
-            GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws, forget_laid_out,
+            GLYPH_DRAWS, GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws,
+            forget_laid_out,
         },
         paint::BlendMode::*,
     };
@@ -5579,6 +5580,169 @@ mod overlapping_glyph_tests {
             "bytes apart:\n{}",
             differing.join("\n")
         );
+    }
+
+    /// A run drawn straight onto the page in a blend that reads it costs
+    /// the CPU canvas what it did before glyphs were drawn apart: the page
+    /// keeps it whole and draws it again where it is played, whole on the
+    /// CPU, and on the GPU in groups, fewer draws than it has glyphs where
+    /// they do not all overlap.
+    #[test]
+    fn a_run_drawn_on_the_page_is_whole_on_the_cpu_and_grouped_on_the_gpu() {
+        let gpu = RenderingEngine::GPU.selectable();
+        let mut wrong = vec![];
+        for blend in [Multiply, Difference, Luminosity] {
+            for scene in SCENES {
+                GLYPHS_DRAWN_ALONE.set(0);
+                drawn(false, OSWALD, blend, scene);
+                if GLYPHS_DRAWN_ALONE.get() != 0 {
+                    wrong.push(format!(
+                        "CPU {blend:?} {scene:?}: {} glyphs drawn apart",
+                        GLYPHS_DRAWN_ALONE.get()
+                    ));
+                }
+                // Glyphs a quarter em apart share no pixel, so where no
+                // spacing pulls them together a run is drawn in fewer
+                // draws than it has glyphs.
+                if !gpu || scene.0 < 0.0 {
+                    continue;
+                }
+                GLYPHS_DRAWN_ALONE.set(0);
+                GLYPH_DRAWS.set(0);
+                drawn(true, OSWALD, blend, scene);
+                let (glyphs, draws) =
+                    (GLYPHS_DRAWN_ALONE.get(), GLYPH_DRAWS.get());
+                if glyphs == 0 || draws >= glyphs {
+                    wrong.push(format!(
+                        "GPU {blend:?} {scene:?}: {glyphs} glyphs in \
+                         {draws} draws"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A run kept to be drawn again where the page is played writes a PDF
+    /// and an SVG with its glyphs whole, the bytes a run drawn as one blob
+    /// writes -- see `typography::WholeRuns`. Drawn apart, the PDF differs
+    /// (a text object for each glyph) and is held to differ, so the
+    /// comparison can fail; the SVG writes the same bytes either way. A
+    /// canvas drawn into another first, which records the run for pixels
+    /// with its glyphs apart, writes the same document, on a page that keeps
+    /// a recording for documents of its own and on one that shares the
+    /// pixels' -- see `Context2D::files_as_replayed_text`.
+    #[test]
+    fn a_kept_run_writes_a_document_whole() {
+        use crate::{
+            context::REPLAYS_BLENDED_TEXT,
+            export::{EncodeOptions, ImageFormat},
+            pixels::PixelDepth,
+        };
+        let written = |replays: bool,
+                       draws: Option<GlyphDraws>,
+                       drawn_first: bool,
+                       depth: PixelDepth,
+                       scene: (f32, f32, f32, bool)| {
+            REPLAYS_BLENDED_TEXT.set(replays);
+            GLYPH_DRAWS_FOR.set(draws);
+            register();
+            forget_laid_out();
+            let options = CanvasOptions {
+                gpu: false,
+                color_type: depth,
+                ..CanvasOptions::default()
+            };
+            let mut canvas =
+                Canvas::with_options(W, H, options).expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            ctx.set_global_alpha(scene.1);
+            assert!(ctx.set_font_css(OSWALD.0));
+            ctx.set_letter_spacing(scene.0);
+            let ink = format!("rgba(40,90,160,{})", scene.2);
+            ctx.set_fill_style_css(&ink).expect("a colour");
+            ctx.set_stroke_style_css(&ink).expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, 70.0, None);
+            ctx.stroke_text(OSWALD.1, 10.0, 140.0, None);
+            if drawn_first {
+                let mut into = Canvas::new(W, H);
+                into.set_gpu(false);
+                into.context().draw_canvas(&mut canvas, 0.0, 0.0);
+            }
+            let mut bytes = |format| {
+                canvas
+                    .to_buffer(format, &EncodeOptions::default())
+                    .expect("encodes")
+            };
+            let written = (bytes(ImageFormat::Pdf), bytes(ImageFormat::Svg));
+            REPLAYS_BLENDED_TEXT.set(true);
+            GLYPH_DRAWS_FOR.set(None);
+            written
+        };
+        for (depth, scene) in [PixelDepth::Uint8, PixelDepth::F16]
+            .into_iter()
+            .flat_map(|depth| SCENES.map(|scene| (depth, scene)))
+        {
+            let whole =
+                written(false, Some(GlyphDraws::Whole), false, depth, scene);
+            let apart =
+                written(false, Some(GlyphDraws::Each), false, depth, scene);
+            assert!(
+                apart.0 != whole.0,
+                "{depth:?} {scene:?}: apart writes it whole"
+            );
+            for drawn_first in [false, true] {
+                let kept = written(true, None, drawn_first, depth, scene);
+                assert!(
+                    kept.0 == whole.0,
+                    "{depth:?} {scene:?} {drawn_first}: the PDF is not whole"
+                );
+                assert!(
+                    kept.1 == whole.1,
+                    "{depth:?} {scene:?} {drawn_first}: the SVG is not whole"
+                );
+            }
+        }
+    }
+
+    /// A plain run is kept to be drawn again where the page is played only
+    /// under a blend read in the shader: a canvas drawn into another asks
+    /// each run kept for a recording, which the watch counts, and asks none
+    /// of a run recorded as it was drawn.
+    #[test]
+    fn only_a_blend_read_in_the_shader_keeps_a_plain_run() {
+        use crate::context::layer::REPLAYED_WATCH;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let kept = |blend: BlendMode| {
+            register();
+            forget_laid_out();
+            let asked = Arc::new(AtomicUsize::new(0));
+            REPLAYED_WATCH
+                .with_borrow_mut(|watch| *watch = Some(Arc::clone(&asked)));
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css(OSWALD.0));
+            ctx.fill_text(OSWALD.1, 10.0, 70.0, None);
+            REPLAYED_WATCH.with_borrow_mut(|watch| *watch = None);
+            let mut into = Canvas::new(W, H);
+            into.set_gpu(false);
+            into.context().draw_canvas(&mut canvas, 0.0, 0.0);
+            asked.load(Ordering::Relaxed)
+        };
+        for blend in BY_COEFFICIENTS {
+            assert_eq!(kept(blend), 0, "{blend:?} keeps no run");
+        }
+        for blend in READ_IN_THE_SHADER {
+            assert_eq!(kept(blend), 1, "{blend:?} keeps the run");
+        }
     }
 
     #[test]

@@ -47,7 +47,7 @@ use crate::{
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
     export::{VectorFeatures, blend_features},
     filter::onto::{Onto, PageFilter},
-    font::GenericFamily,
+    font::{GenericFamily, colr::blends_by_coefficients},
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
     gpu::{self, RenderingEngine},
     gradient::{BoxedCanvasGradient, CanvasGradient},
@@ -1299,7 +1299,10 @@ impl Context2D {
                 f(canvas, paint_for(recording), Pass::Draw);
             }
         };
-        if let Some(run) = text.as_ref().and_then(|text| text.colour.clone())
+        let replayed = text
+            .as_ref()
+            .and_then(|text| text.colour.clone().or(text.blended.clone()));
+        if let Some(run) = replayed
             && self.files_as_replayed_text(
                 paint, exact, features, run, lines, &draw,
             )
@@ -1404,6 +1407,7 @@ impl Context2D {
             shadow,
             blend: beyond.then_some(blend),
             recording,
+            whole: OnceLock::new(),
             bounds: self.bounds,
             document,
             clip: None,
@@ -1788,6 +1792,7 @@ impl Context2D {
                     shadow: None,
                     blend: None,
                     recording: OnceLock::from(Some(recorded_as)),
+                    whole: OnceLock::new(),
                     bounds: self.bounds,
                     document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
@@ -2180,6 +2185,7 @@ impl Context2D {
             shadow: None,
             blend: None,
             recording: OnceLock::from(Some(recorded)),
+            whole: OnceLock::new(),
             bounds: self.bounds,
             document: document.map(layer::ReplayedRecording::recorded),
             clip: None,
@@ -3724,6 +3730,30 @@ impl Context2D {
                     faint,
                 }
             });
+            // The run kept whole, where it is drawn in a blend that reads the
+            // page in the shader, to draw its glyphs where the page is played
+            // back as that canvas draws them -- see
+            // `typography::glyph_draws`.
+            #[cfg(test)]
+            let replays = REPLAYS_BLENDED_TEXT.get();
+            #[cfg(not(test))]
+            let replays = true;
+            let blended = (replays
+                && !blends_by_coefficients(
+                    self.state.global_composite_operation,
+                ))
+            .then(|| {
+                let (run, offset, condensation) =
+                    typesetter.replayed(kept.as_deref());
+                Replay::Text {
+                    run,
+                    at: origin,
+                    offset,
+                    condensation,
+                    global_alpha,
+                    faint,
+                }
+            });
             // On a page that keeps a recording for pixels, text there takes
             // its colour exactly through a dye -- see `exact_text_paint` --
             // rather than the shader a fill takes: Skia sets a glyph mask's
@@ -3810,6 +3840,7 @@ impl Context2D {
                     ),
                     defer: Some(&defer),
                     colour,
+                    blended,
                     own_colours: &own_colours,
                 }),
                 |canvas, paint, pass| {
@@ -4327,6 +4358,11 @@ pub struct TextRun<'a> {
     /// itself, to draw them where the page is played back -- see
     /// [`Context2D::files_as_replayed_text`].
     pub colour: Option<Replay>,
+    /// The run kept whole where it is drawn in a blend that reads the page
+    /// in the shader, to draw its glyphs where the page is played back, as
+    /// that canvas draws them -- see `typography::glyph_draws` and
+    /// [`Context2D::files_as_replayed_text`].
+    pub blended: Option<Replay>,
     /// Whether the run holds a glyph the platform draws in its own colours
     /// -- see `font::platform_colour` -- asked only where the coverage route
     /// could otherwise take the run.
@@ -4550,6 +4586,12 @@ thread_local! {
     /// the other.
     pub(crate) static REPLAYED_RECORDED_AT_ONCE: Cell<bool> =
         const { Cell::new(false) };
+    /// Whether a run drawn in a blend that reads the page is kept whole to
+    /// be drawn again where it is played -- see [`TextRun::blended`]: off,
+    /// it is recorded as it is drawn, the mutant the tests of that route
+    /// are held against.
+    pub(crate) static REPLAYS_BLENDED_TEXT: Cell<bool> =
+        const { Cell::new(true) };
 }
 
 #[cfg(test)]

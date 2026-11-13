@@ -50,11 +50,14 @@ use crate::{
         run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
-    font::colr::{BatchScope, Format, ImageRoute, composite_onto, grow_sheets},
+    font::colr::{
+        BatchScope, Format, ImageRoute, blends_by_coefficients, composite_onto,
+        grow_sheets,
+    },
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
-        typography::{DrawnText, RunPaint},
+        typography::{DrawnText, RunPaint, WholeRuns},
         utils::{color_space_name, skia_paint_color_onto_own},
     },
     pixels::PixelColorSpace,
@@ -1584,6 +1587,11 @@ pub struct ReplayedText {
     /// something has asked for it -- see [`Self::recorded`]; its bounds are
     /// what the run reaches.
     pub recording: OnceLock<Option<Picture>>,
+    /// The run recorded whole for a document, on a page that keeps one
+    /// recording, where its paint reads the page and the recording for
+    /// pixels -- [`Self::recording`] -- draws its glyphs apart -- see
+    /// [`Self::recorded_for_document`].
+    pub whole: OnceLock<Option<Picture>>,
     /// The bounds of the page the run is recorded over.
     pub bounds: Rect,
     /// The run as recorded for a document, on a page that keeps a recording
@@ -1600,7 +1608,7 @@ pub struct ReplayedText {
 
 #[cfg(test)]
 thread_local! {
-    /// Where the colour runs filed on this thread count the recordings made
+    /// Where the runs filed on this thread count the recordings made
     /// of them when first asked for, on whichever thread makes them -- see
     /// [`ReplayedText::recorded`].
     pub(crate) static REPLAYED_WATCH: RefCell<
@@ -1729,11 +1737,23 @@ impl ReplayedText {
     }
 
     /// The run as recorded for a document, recorded now if nothing has
-    /// asked for it yet: its own on a page that keeps a recording for each
-    /// kind of target, the pixels' otherwise -- see [`Self::recorded`].
+    /// asked for it yet, its glyphs drawn whole -- see [`WholeRuns`]: in
+    /// the document's own paint on a page that keeps one; otherwise the
+    /// recording for pixels -- see [`Self::recorded`] -- where a blend by
+    /// coefficients draws its glyphs whole there too, and a recording of
+    /// its own where the recording for pixels draws them apart.
     pub(crate) fn recorded_for_document(&self) -> Option<&Picture> {
+        let _whole = WholeRuns::hold();
         let Some(document) = &self.document else {
-            return self.recorded();
+            if blends_by_coefficients(
+                self.paint.blend_mode_or(BlendMode::SrcOver),
+            ) {
+                return self.recorded();
+            }
+            return self
+                .whole
+                .get_or_init(|| self.record(&self.paint, self.shadow.as_ref()))
+                .as_ref();
         };
         document
             .picture
