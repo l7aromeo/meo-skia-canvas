@@ -15,8 +15,17 @@
 "use strict";
 
 const { execFileSync } = require("child_process"),
+  { join } = require("path"),
   { assert, describe, test } = require("../runner"),
-  { Canvas, Image, Path2D } = require("../../lib"),
+  {
+    Canvas,
+    CanvasGradient,
+    CanvasPattern,
+    DOMMatrix,
+    FontLibrary,
+    Image,
+    Path2D,
+  } = require("../../lib"),
   { CanvasRenderingContext2D: Ctx } = require("../../lib/classes/context"),
   { loadSkiaNode } = require("../../lib/binary.js"),
   // `ø` is deliberately not a registered symbol, so it is imported rather
@@ -512,6 +521,259 @@ describe("The JavaScript/Rust boundary", () => {
 
     const pixels = canvas.toBufferSync("raw");
     assert.equal(pixels[(50 * 100 + 50) * 4 + 3], 0, "still inside the gap");
+  });
+
+  //
+  // A gradient or a pattern set as a style is held by the context's state,
+  // not by a record: a recorded `fillRect` points at nothing, so a change to
+  // its style crosses straight into Rust while the fill is still only written
+  // down. Chrome dyes each fill with the style as it is when the fill is
+  // made. For the `addColorStop` case below it reads 123,129,101 at the
+  // middle of the top half and 197,30,91 at the middle of the bottom one;
+  // for the pattern, red at the left of the top half and blue at the left of
+  // the bottom one.
+  //
+  // Each case fills the top half, makes its change, and fills the bottom
+  // half, and each half is held to the same fill made on a canvas of its
+  // own, where nothing follows it -- on both engines, since the GPU draws a
+  // gradient by a route of its own.
+  //
+  const SIDE = 64,
+    HALF = SIDE / 2;
+
+  /** The raw bytes of a `SIDE`-square canvas, top half then bottom half. */
+  const halves = (canvas) => {
+    const raw = canvas.toBufferSync("raw");
+    return [raw.subarray(0, SIDE * HALF * 4), raw.subarray(SIDE * HALF * 4)];
+  };
+
+  /** Two fills on one canvas, with `change` made to their style between. */
+  const dyedAcross = (gpu, make, change) => {
+    const canvas = new Canvas(SIDE, SIDE);
+    canvas.gpu = gpu;
+    const ctx = canvas.getContext("2d");
+    const style = make(ctx);
+    ctx.fillStyle = style;
+    ctx.fillRect(0, 0, SIDE, HALF); // recorded, still pending
+    change(style);
+    ctx.fillRect(0, HALF, SIDE, HALF);
+    return halves(canvas);
+  };
+
+  /** The same two fills, each on a canvas of its own. */
+  const dyedApart = (gpu, make, change) =>
+    [0, HALF].map((y) => {
+      const canvas = new Canvas(SIDE, SIDE);
+      canvas.gpu = gpu;
+      const ctx = canvas.getContext("2d");
+      const style = make(ctx);
+      if (y) change(style);
+      ctx.fillStyle = style;
+      ctx.fillRect(0, y, SIDE, HALF);
+      return halves(canvas)[y ? 1 : 0];
+    });
+
+  /** Holds each half of `make` and `change` drawn across to it drawn apart. */
+  const assertDyedAsMade = (name, make, change) => {
+    for (const gpu of [false, true]) {
+      const engine = gpu ? "GPU" : "CPU";
+      const [top, bottom] = dyedAcross(gpu, make, change);
+      const [before, after] = dyedApart(gpu, make, change);
+      assert.ok(
+        !before.equals(after),
+        `${name} on the ${engine} changes what a fill paints`,
+      );
+      assert.ok(
+        top.equals(before),
+        `${name} on the ${engine} leaves the fill recorded before it alone`,
+      );
+      assert.ok(
+        bottom.equals(after),
+        `${name} on the ${engine} dyes the fill after it`,
+      );
+    }
+  };
+
+  // Every way a `CanvasGradient` changes after it is made, by the member
+  // that makes the change. The test after this one holds the list to the
+  // class, so a member added later fails there until it is here.
+  const GRADIENT_CHANGES = {
+    "addColorStop()": [
+      (ctx) => {
+        const gradient = ctx.createLinearGradient(0, 0, SIDE, 0);
+        gradient.addColorStop(0, "rgb(250 200 0)");
+        gradient.addColorStop(1, "rgb(0 60 200)");
+        return gradient;
+      },
+      (gradient) => gradient.addColorStop(0.5, "rgb(200 30 90)"),
+    ],
+    "colorInterpolationSpace =": [
+      (ctx) => {
+        const gradient = ctx.createLinearGradient(0, 0, SIDE, 0);
+        gradient.addColorStop(0, "rgb(255 0 0)");
+        gradient.addColorStop(1, "rgb(0 0 255)");
+        return gradient;
+      },
+      (gradient) => (gradient.colorInterpolationSpace = "oklab"),
+    ],
+    "interpolation =": [
+      (ctx) => {
+        const gradient = ctx.createLinearGradient(0, 0, SIDE, 0);
+        gradient.addColorStop(0, "rgb(255 0 0)");
+        gradient.addColorStop(1, "rgb(0 0 255)");
+        return gradient;
+      },
+      (gradient) => (gradient.interpolation = "oklab"),
+    ],
+    "hueInterpolationMethod =": [
+      (ctx) => {
+        const gradient = ctx.createLinearGradient(0, 0, SIDE, 0);
+        gradient.colorInterpolationSpace = "oklch";
+        gradient.addColorStop(0, "rgb(255 0 0)");
+        gradient.addColorStop(1, "rgb(0 0 255)");
+        return gradient;
+      },
+      (gradient) => (gradient.hueInterpolationMethod = "longer"),
+    ],
+    "hueInterpolation =": [
+      (ctx) => {
+        const gradient = ctx.createLinearGradient(0, 0, SIDE, 0);
+        gradient.colorInterpolationSpace = "oklch";
+        gradient.addColorStop(0, "rgb(255 0 0)");
+        gradient.addColorStop(1, "rgb(0 0 255)");
+        return gradient;
+      },
+      (gradient) => (gradient.hueInterpolation = "longer"),
+    ],
+    "alphaInterpolationMethod =": [
+      (ctx) => {
+        const gradient = ctx.createLinearGradient(0, 0, SIDE, 0);
+        gradient.alphaInterpolationMethod = "premultiplied";
+        gradient.addColorStop(0, "rgb(255 0 0 / 0)");
+        gradient.addColorStop(1, "rgb(0 0 255)");
+        return gradient;
+      },
+      (gradient) => (gradient.alphaInterpolationMethod = "unpremultiplied"),
+    ],
+  };
+
+  // The same for a `CanvasPattern`, which has one.
+  const PATTERN_CHANGES = {
+    "setTransform()": [
+      (ctx) => {
+        // Red on the left half of the tile and blue on the right, so that a
+        // shift of half a tile swaps them.
+        const tile = new Canvas(8, 8);
+        const paint = tile.getContext("2d");
+        paint.fillStyle = "rgb(255 0 0)";
+        paint.fillRect(0, 0, 4, 8);
+        paint.fillStyle = "rgb(0 0 255)";
+        paint.fillRect(4, 0, 4, 8);
+        return ctx.createPattern(tile, "repeat");
+      },
+      (pattern) => pattern.setTransform(new DOMMatrix().translate(4, 0)),
+    ],
+  };
+
+  test("dyes a fill with its gradient as it was when the call was made", () => {
+    for (const [name, [make, change]] of Object.entries(GRADIENT_CHANGES)) {
+      assertDyedAsMade(`CanvasGradient.${name}`, make, change);
+    }
+  });
+
+  test("dyes a fill with its pattern as it was when the call was made", () => {
+    for (const [name, [make, change]] of Object.entries(PATTERN_CHANGES)) {
+      assertDyedAsMade(`CanvasPattern.${name}`, make, change);
+    }
+
+    // And Chrome's own reading, which the comparison above cannot give: a
+    // fill that ignored the transform would agree with itself drawn apart.
+    for (const gpu of [false, true]) {
+      const [top, bottom] = dyedAcross(
+        gpu,
+        ...PATTERN_CHANGES["setTransform()"],
+      );
+      const left = (half) => [
+        ...half.subarray(10 * SIDE * 4, 10 * SIDE * 4 + 4),
+      ];
+      assert.deepEqual(left(top), [255, 0, 0, 255], "red before the transform");
+      assert.deepEqual(left(bottom), [0, 0, 255, 255], "blue after it");
+    }
+  });
+
+  //
+  // The font registry is read when a batch lands as well: a recorded
+  // `fillText` looks its family up then. Chrome draws text in the faces it
+  // has when the call is made, and a face added afterwards draws only the
+  // text after it.
+  //
+  const FACE = join(__dirname, "../assets/fonts/Monoton-Regular.woff");
+
+  /** Raw pixels of "Wg" in `font`, with `between` run while it is pending. */
+  const lettered = (font, between = () => {}) => {
+    const canvas = new Canvas(160, 60);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.font = font;
+    ctx.fillText("Wg", 10, 45); // recorded, still pending
+    between();
+    return canvas.toBufferSync("raw");
+  };
+
+  // Every way the registry changes, by the member that changes it.
+  const REGISTRY_CHANGES = {
+    "use()": () => {
+      const missing = lettered("40px NoSuchFamily718");
+      const drawn = lettered("40px Registered718", () =>
+        FontLibrary.use("Registered718", [FACE]),
+      );
+      const face = lettered("40px Registered718");
+      assert.ok(!face.equals(missing), "the face draws apart from a fallback");
+      assert.ok(
+        drawn.equals(missing),
+        "text drawn before the family is registered keeps the fallback",
+      );
+    },
+    "reset()": () => {
+      FontLibrary.use("Removed718", [FACE]);
+      const face = lettered("40px Removed718");
+      const drawn = lettered("40px Removed718", () => FontLibrary.reset());
+      const missing = lettered("40px Removed718");
+      assert.ok(!face.equals(missing), "the face draws apart from a fallback");
+      assert.ok(
+        drawn.equals(face),
+        "text drawn before the family is removed keeps its face",
+      );
+    },
+  };
+
+  test("draws text in the faces registered when the call was made", () => {
+    for (const check of Object.values(REGISTRY_CHANGES)) check();
+  });
+
+  test("accounts for every way something a batch reads changes", () => {
+    // What a batch reads that no record points at: a context's styles, and
+    // the font registry. Each member that changes one is in a table above
+    // with a case of its own, so one added later fails here until it is.
+    // The registry's members that only answer are named here instead.
+    const READS = { "has()": true, "family()": true };
+    for (const [name, prototype, changes] of [
+      ["CanvasGradient", CanvasGradient.prototype, GRADIENT_CHANGES],
+      ["CanvasPattern", CanvasPattern.prototype, PATTERN_CHANGES],
+      ["FontLibrary", Object.getPrototypeOf(FontLibrary), REGISTRY_CHANGES],
+    ]) {
+      for (const key of Object.getOwnPropertyNames(prototype)) {
+        if (key === "constructor") continue;
+        const spec = Object.getOwnPropertyDescriptor(prototype, key);
+        const isMethod = typeof spec.value === "function";
+        if (!isMethod && !spec.set) continue; // a read-only property
+        const op = isMethod ? `${key}()` : `${key} =`;
+        assert.ok(
+          changes[op] || READS[op],
+          `${name}.${op} is not tested against a draw recorded before it`,
+        );
+      }
+    }
   });
 
   test("carries a drawing longer than the buffer it records into", () => {
