@@ -33,6 +33,8 @@ use std::{
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
+#[cfg(all(test, debug_assertions))]
+use crate::context::layer::ENTRIES_WALKED;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::gpu::unpremultiply as gpu_unpremultiply;
 use crate::{
@@ -46,9 +48,9 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Entries, Group, Layer, LayerRec, PatternDraw, ReplayedText, Target,
-            TileScope, holds_a_cut, in_document_space, play_entries,
-            tiles_exactly,
+            Entries, Group, Layer, LayerRec, PatternDraw, RecordedCount,
+            ReplayedText, Target, TileScope, holds_a_cut, in_document_space,
+            play_entries, tiles_exactly,
         },
         resident::{Place, SharedSurface},
     },
@@ -351,7 +353,21 @@ impl Drop for PageId {
 /// across every size, as they were before `opsz` followed the size,
 /// measured 50.
 pub struct PageRecorder {
-    current: Recorders,
+    /// The recordings draws go into until they are filed: begun by the
+    /// first draw to reach them -- see [`Recorders::begun_in`] -- begun
+    /// again as they are filed, and dropped at each read, so that a page
+    /// drawn and then read holds none -- see
+    /// [`Self::release_recorders`]. A begun recorder holds its recording
+    /// canvas, a device and a bounding hierarchy whether or not anything is
+    /// drawn into it, which a page whose pixels the budget dropped would
+    /// otherwise keep until it is collected: 400 CPU canvases of 1000 by
+    /// 800, each filled once, read and held, held 16.8 KB of native memory
+    /// apiece beside their kept pages with their recorders begun, and 8.1
+    /// KB released.
+    current: Option<Recorders>,
+    /// Whether the page keeps a recording for each kind of target -- see
+    /// [`Recorders`].
+    dual: bool,
     /// The recording so far, shared with every [`Page`] taken of it since
     /// it last grew, so that taking a page copies a pointer whatever its
     /// length. Growing it copies the list only while a page taken before
@@ -437,6 +453,15 @@ pub struct PageRecorder {
     /// holds besides is filed in its [`OpenLayer`] -- see
     /// [`PageRecorder::open_layer`].
     open: Vec<OpenLayer>,
+    /// What the pictures filed among `layers` and the open layers' entries
+    /// hold -- see [`Self::recorded_bytes`] -- added to as each entry is
+    /// filed and as a picture recorded when first played is recorded, and
+    /// begun again with the page's content. Kept rather than worked out at
+    /// each read: summed over every entry at each read, a 600 by 400 canvas
+    /// filled twice, lettered and read each frame took 32.5 microseconds a
+    /// frame over its 2,000th to 4,000th frames and 233 over its 38,000th to
+    /// 40,000th, each frame filing entries every later read walked.
+    recorded: RecordedCount,
 }
 
 /// A `saveLayer` open on a [`PageRecorder`].
@@ -601,10 +626,10 @@ struct Recorders {
 #[cfg(test)]
 thread_local! {
     /// How many times a page's recordings were finished on this thread --
-    /// see [`Recorders::finish`] -- and dropped and begun again instead --
-    /// see [`Recorders::restart`].
+    /// see [`Recorders::finish`] -- and dropped unfinished instead, by a
+    /// clear -- see [`PageRecorder::set_bounds`].
     pub(crate) static FINISHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    pub(crate) static RESTARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -616,9 +641,49 @@ thread_local! {
     pub(crate) static FORKS_LAZILY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether a page drops its recorders at each read, on this thread:
+    /// off, a read keeps them and the spares, as a page did before it
+    /// dropped them -- the reference [`PageRecorder::release_recorders`] and
+    /// the begin that follows it are held to.
+    pub(crate) static RELEASES_RECORDERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether [`PageRecorder::recorded_bytes`] holds its count to a walk of
+    /// the page on this thread: off only where a test counts the entries
+    /// the count itself walks -- see `ENTRIES_WALKED` -- which the
+    /// walk would add to.
+    pub(crate) static COUNT_HELD_TO_WALK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// How many times [`PageRecorder::recorded_bytes`] yields for a picture
+/// another thread has recorded to be counted, in a build with debug
+/// assertions, before it calls the count short: the addition follows the
+/// picture by a few instructions, and a thousand yields leave it far more
+/// room than that without hanging a test on a count that will never come.
+#[cfg(debug_assertions)]
+const COUNT_CATCH_UP_TRIES: usize = 1000;
+
 impl Recorders {
     fn new(bounds: Rect, dual: bool) -> Self {
         Self::new_with(bounds, dual, true)
+    }
+
+    /// The recordings in `slot`, begun in `bounds` at depth 2 where it
+    /// holds none -- see `PageRecorder::current`.
+    ///
+    /// Free of the page rather than a method on it, so that a caller can
+    /// hold another of the page's fields -- the clip it frames them under
+    /// -- while it records.
+    fn begun_in(
+        slot: &mut Option<Self>,
+        bounds: Rect,
+        dual: bool,
+    ) -> &mut Self {
+        slot.get_or_insert_with(|| Self::new(bounds, dual))
     }
 
     /// As [`Self::new`], the pixels recording with a bounding hierarchy where
@@ -709,28 +774,6 @@ impl Recorders {
             });
         }
         true
-    }
-
-    fn begin(&mut self, bounds: Rect) {
-        self.begin_with(bounds, true);
-    }
-
-    /// Drops what every recording holds and begins them again in `bounds`,
-    /// for a page whose content is erased.
-    ///
-    /// New recorders rather than finished ones: finishing a recording
-    /// optimizes it and bounds every draw in it, for a picture nothing would
-    /// keep. A new recorder costs about 0.1 microseconds, where finishing
-    /// one holding 200 rects cost 11.7 more than dropping it, and one holding
-    /// 2,000 cost 115 more.
-    fn restart(&mut self, bounds: Rect) {
-        #[cfg(test)]
-        RESTARTS.set(RESTARTS.get() + 1);
-        self.pixels = PictureRecorder::new();
-        if let Some(document) = &mut self.document {
-            *document = PictureRecorder::new();
-        }
-        self.begin(bounds);
     }
 
     /// Begins every recording in `bounds`: the pixels with a bounding
@@ -965,6 +1008,81 @@ impl PageRecorder {
         self.surface.borrow().resident_bytes()
     }
 
+    /// The bytes this page holds in pixels with a GPU page's multisample
+    /// buffer, as the budget the pages on a thread keep to counts them. See
+    /// [`RecordingSurface::budgeted_bytes`].
+    pub fn budgeted_bytes(&self) -> usize {
+        self.surface.borrow().budgeted_bytes()
+    }
+
+    /// The bytes the pictures of this page's recording hold, filed so far
+    /// among its layers and in any `saveLayer` still open -- see
+    /// [`Layer::recorded_bytes`] -- as counted while they were filed and
+    /// recorded, which costs the same however long the recording is. What
+    /// is being recorded and not yet filed is not counted: a read files it,
+    /// and the binding asks after a read.
+    ///
+    /// A build with debug assertions holds the count to the walk it stands
+    /// for at every call -- see [`Self::walked_bytes`].
+    pub fn recorded_bytes(&self) -> usize {
+        let counted = self.recorded.bytes();
+        #[cfg(debug_assertions)]
+        self.hold_count_to_walk(counted);
+        counted
+    }
+
+    /// The bytes the pictures of this page's recording hold, summed over
+    /// every entry: what [`Self::recorded_bytes`] counts as entries are
+    /// filed.
+    #[cfg(debug_assertions)]
+    fn walked_bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .chain(self.open.iter().flat_map(|layer| layer.entries.iter()))
+            .map(Layer::recorded_bytes)
+            .sum()
+    }
+
+    /// Panics where `counted`, read just before, is not what a walk of the
+    /// page finds. A picture an export records on another thread is counted
+    /// after it is in place, so the count may trail a walk for as long as
+    /// that takes and never leads it: it is held to be no more than the
+    /// walk at once, and to reach it within [`COUNT_CATCH_UP_TRIES`] yields.
+    #[cfg(debug_assertions)]
+    fn hold_count_to_walk(&self, counted: usize) {
+        #[cfg(test)]
+        if !COUNT_HELD_TO_WALK.get() {
+            return;
+        }
+        #[cfg(test)]
+        let walked_before = ENTRIES_WALKED.get();
+        let walked = self.walked_bytes();
+        #[cfg(test)]
+        ENTRIES_WALKED.set(walked_before);
+        assert!(
+            counted <= walked,
+            "the page counts {counted} bytes recorded, past the {walked} \
+             its entries hold"
+        );
+        let caught_up = (0..COUNT_CATCH_UP_TRIES).any(|_| {
+            std::thread::yield_now();
+            self.recorded.bytes() >= walked
+        });
+        assert!(
+            caught_up,
+            "the page counts {} bytes recorded, short of the {walked} its \
+             entries hold",
+            self.recorded.bytes()
+        );
+    }
+
+    /// Adds what `entry` holds to the page's count, and has what it records
+    /// when first played add to it then -- see [`Layer::count_into`].
+    fn count(&self, entry: &Layer) {
+        entry.count_into(&self.recorded);
+        self.recorded.add(entry.recorded_bytes());
+    }
+
     /// Shares what the page's canvas reports to the JavaScript engine with
     /// the budget the pages on this thread keep to, so that the engine is told
     /// when the budget drops the page -- see [`Place::reports_through`].
@@ -996,7 +1114,8 @@ impl PageRecorder {
         let id = Self::mint_id();
 
         PageRecorder {
-            current: Recorders::new(bounds, dual),
+            current: None,
+            dual,
             layers: Arc::default(),
             features: Arc::default(),
             changed: false,
@@ -1019,6 +1138,7 @@ impl PageRecorder {
             place: Place::new(),
             replay_cost: 0,
             open: Vec::new(),
+            recorded: RecordedCount::default(),
         }
     }
 
@@ -1075,7 +1195,7 @@ impl PageRecorder {
                 if !alike {
                     self.fork_current();
                 }
-                self.current.each(f);
+                self.current().each(f);
                 self.changed = true;
             }
         }
@@ -1096,7 +1216,7 @@ impl PageRecorder {
         }
         self.close_run();
         self.fork_current();
-        self.current.each(|canvas, recording| {
+        self.current().each(|canvas, recording| {
             canvas.restore_to_count(1);
             f(canvas, recording);
         });
@@ -1113,7 +1233,13 @@ impl PageRecorder {
     /// Whether this page keeps a recording for each kind of target -- see
     /// [`Recorders`].
     pub fn dual(&self) -> bool {
-        self.current.dual()
+        self.dual
+    }
+
+    /// The page's recordings, begun where it holds none -- see
+    /// [`Self::current`](PageRecorder#structfield.current).
+    fn current(&mut self) -> &mut Recorders {
+        Recorders::begun_in(&mut self.current, self.bounds, self.dual)
     }
 
     /// Erases the page's content, in place.
@@ -1122,7 +1248,11 @@ impl PageRecorder {
     /// `reset()`, an opaque fill that covers the canvas, and a `clearRect`
     /// that does -- and a resize goes through [`Self::update_bounds`]
     /// instead. The page keeps everything but what it recorded: its
-    /// recordings are dropped and begun again, see [`Recorders::restart`].
+    /// recordings are dropped unfinished, and the next draw begins new ones.
+    /// Finishing a recording optimizes it and bounds every draw in it, for a
+    /// picture nothing would keep: finishing one holding 200 rects cost 11.7
+    /// microseconds more than dropping it, and one holding 2,000 cost 115
+    /// more.
     ///
     /// The identity has to change where anything was recorded: an opaque
     /// fill covering the canvas comes through here too, so a loop that fills
@@ -1152,15 +1282,17 @@ impl PageRecorder {
         self.cut_spare = None;
 
         self.bounds = bounds;
-        self.current.restart(bounds);
+        #[cfg(test)]
+        DROPS.set(DROPS.get() + 1);
+        self.current = None;
         self.framed = false;
-        self.current.each(|canvas, _| {
-            canvas.save(); // start at depth 2
-        });
         // Replaced rather than cleared, so that a page taken before keeps
         // what it was given.
         self.layers = Arc::default();
         self.features = Arc::default();
+        // A count of its own, which what the old content records when an
+        // export first plays it adds to rather than to this one's.
+        self.recorded = RecordedCount::default();
         self.changed = false;
         self.isolated = None;
         self.filtered = 0;
@@ -1263,7 +1395,7 @@ impl PageRecorder {
             && self.run.is_none()
         {
             let bbh = !self.open.is_empty();
-            let dual = self.current.dual();
+            let dual = self.dual;
             let bounds = self.bounds;
             let spare = self
                 .spare
@@ -1282,21 +1414,23 @@ impl PageRecorder {
     /// no run holds them -- see [`Self::framed_bare`].
     fn frame_current(&mut self) {
         let (matrix, clip, bare) = (self.matrix, &self.clip, self.framed_bare);
-        self.current.each(|canvas, _| {
-            canvas.restore_to_count(1);
-            canvas.save();
-            if bare {
-                return;
-            }
-            if let Some(clip) = clip {
-                canvas.clip_path(
-                    clip,
-                    ClipOp::Intersect,
-                    true, /* antialias */
-                );
-            }
-            canvas.set_matrix(&matrix.into());
-        });
+        Recorders::begun_in(&mut self.current, self.bounds, self.dual).each(
+            |canvas, _| {
+                canvas.restore_to_count(1);
+                canvas.save();
+                if bare {
+                    return;
+                }
+                if let Some(clip) = clip {
+                    canvas.clip_path(
+                        clip,
+                        ClipOp::Intersect,
+                        true, /* antialias */
+                    );
+                }
+                canvas.set_matrix(&matrix.into());
+            },
+        );
     }
 
     /// Forks `current` -- see [`Recorders::fork`] -- for a draw that
@@ -1307,12 +1441,13 @@ impl PageRecorder {
     /// matrix rather than by none: finishing 5000 fills cost 0.43 ms where
     /// recorded twice from the start it cost 0.29.
     fn fork_current(&mut self) {
-        if !self.current.fork(self.changed) {
+        let drawn = self.changed;
+        if !self.current().fork(drawn) {
             return;
         }
         match self.framed {
             true => self.frame_current(),
-            false => self.current.each(|canvas, _| {
+            false => self.current().each(|canvas, _| {
                 canvas.save(); // start at depth 2
             }),
         }
@@ -1322,6 +1457,14 @@ impl PageRecorder {
     /// asking `features` of a vector backend for it, or among the contents
     /// of the innermost open `saveLayer`, which asks for them in turn.
     fn file_entry(&mut self, entry: Layer, features: VectorFeatures) {
+        self.count(&entry);
+        self.file_counted(entry, features);
+    }
+
+    /// Files `entry` as [`Self::file_entry`] does, its bytes counted already:
+    /// a closed layer's group, whose entries were counted as they were
+    /// filed in it.
+    fn file_counted(&mut self, entry: Layer, features: VectorFeatures) {
         match self.open.last_mut() {
             Some(layer) => {
                 layer.entries.push(entry);
@@ -1383,7 +1526,7 @@ impl PageRecorder {
             self.fork_current();
         }
         let clip = &run.clip;
-        self.current.each(|canvas, recording| {
+        self.current().each(|canvas, recording| {
             let picture = match (&entry, recording) {
                 (Layer::Picture(picture), _) => picture,
                 (Layer::Targeted(pair), Recording::Document) => &pair.1,
@@ -1501,7 +1644,10 @@ impl PageRecorder {
                 .features
                 .with(layer.features.nested())
                 .with(rec_features);
-            self.file_group(group, features.with(VectorFeatures::LAYER));
+            self.file_counted(
+                Layer::Group(Arc::new(group)),
+                features.with(VectorFeatures::LAYER),
+            );
         }
         self.restore();
     }
@@ -1576,15 +1722,19 @@ impl PageRecorder {
         if !self.changed {
             return;
         }
-        if let Some(entry) = self
-            .current
-            .finish(|recorder| recorder.finish_recording_as_picture(None))
-        {
+        let bounds = self.bounds;
+        if let Some(entry) = self.current.as_mut().and_then(|recorders| {
+            let entry = recorders
+                .finish(|recorder| recorder.finish_recording_as_picture(None));
+            recorders.begin_with(bounds, true);
+            entry
+        }) {
+            entry.count_into(&self.recorded);
+            self.recorded.add(entry.recorded_bytes());
             layer.entries.push(entry);
             layer.entry_features.push(layer.current_features);
         }
         layer.current_features = VectorFeatures::PLAIN;
-        self.current.begin(self.bounds);
         self.framed = false;
         self.changed = false;
         self.filtered = 0;
@@ -1899,17 +2049,23 @@ impl PageRecorder {
         // store layer as a drawable (so copies are deduplicated) wrapped in
         // a picture (so it can be sent to other threads)
         let bounds = self.bounds;
-        if let Some(entry) = self.current.finish(|recorder| {
-            recorder
-                .finish_recording_as_drawable()
-                .and_then(|mut drawable| {
-                    let mut wrapper = PictureRecorder::new();
-                    wrapper
-                        .begin_recording(bounds, true)
-                        .draw_drawable(&mut drawable, None);
-                    wrapper.finish_recording_as_picture(None)
-                })
-        }) {
+        let filed = self.current.as_mut().and_then(|recorders| {
+            let entry = recorders.finish(|recorder| {
+                recorder.finish_recording_as_drawable().and_then(
+                    |mut drawable| {
+                        let mut wrapper = PictureRecorder::new();
+                        wrapper
+                            .begin_recording(bounds, true)
+                            .draw_drawable(&mut drawable, None);
+                        wrapper.finish_recording_as_picture(None)
+                    },
+                )
+            });
+            recorders.begin_with(bounds, true);
+            entry
+        });
+        if let Some(entry) = filed {
+            self.count(&entry);
             Arc::make_mut(&mut self.layers).push(entry);
             Arc::make_mut(&mut self.features)
                 .push(self.isolated.unwrap_or(VectorFeatures::PLAIN));
@@ -1917,7 +2073,6 @@ impl PageRecorder {
         self.isolated = None;
 
         // resume recording
-        self.current.begin(self.bounds);
         self.framed = false;
         self.changed = false;
         self.filtered = 0;
@@ -1998,7 +2153,7 @@ impl PageRecorder {
                     if !alike {
                         self.fork_current();
                     }
-                    self.current.each(f);
+                    self.current().each(f);
                     self.changed = true;
                     if self.filled_with_filtered(features) {
                         self.file_current();
@@ -2037,7 +2192,7 @@ impl PageRecorder {
         if !alike {
             self.fork_current();
         }
-        self.current.each(f);
+        self.current().each(f);
         self.changed = true;
         if self.filled_with_filtered(features) {
             self.close_run();
@@ -2283,7 +2438,8 @@ impl PageRecorder {
                 && last_features.is_none_or(|last| *last == features)
                 && let Some(op) = Arc::get_mut(op)
             {
-                op.extend(drawn);
+                let added = op.extend(drawn);
+                self.recorded.add(added);
                 if let Some(layer) = self.open.last_mut() {
                     layer.features = layer.features.with(features);
                 }
@@ -2389,6 +2545,10 @@ impl PageRecorder {
     /// replays the open layers and nothing filed -- see [`Page::cache_key`].
     pub fn page(&mut self) -> Page {
         let filed = self.filed_page();
+        // Every read and export a test makes holds the page's count to a
+        // walk of it, as the binding's report does in a debug build.
+        #[cfg(test)]
+        self.recorded_bytes();
         let Some(drawn) = self.open_layers_entry() else {
             return filed;
         };
@@ -2411,6 +2571,38 @@ impl PageRecorder {
         }
     }
 
+    /// At a read, drops the recorders the page keeps begun for draws to
+    /// come, once everything is filed: the page's own recordings and the
+    /// spares a run and a cut draw reuse -- see [`Spare`]. The next draw
+    /// begins what it needs. A page that is read and then dropped otherwise
+    /// kept each recorder's canvas, device and bounding hierarchy until it
+    /// was collected.
+    ///
+    /// At every read, not the first alone: a page drawn and read by turns
+    /// begins a recorder each frame for it, and that costs nothing it can be
+    /// timed by. A frame of 600 by 400 filled twice, lettered and read 1x1
+    /// took 19.22 microseconds on the CPU dropping them at every read, 19.10
+    /// dropping them at the first read only and 18.72 to 18.91 on main, which
+    /// keeps them: medians of 11 rounds, inside one another's spread.
+    ///
+    /// The frame's run keeps its own: a read splits it rather than ending
+    /// it -- see [`Self::split_run`] -- and it goes on recording.
+    fn release_recorders(&mut self) {
+        #[cfg(test)]
+        if !RELEASES_RECORDERS.get() {
+            return;
+        }
+        if self.changed {
+            return;
+        }
+        if self.current.take().is_some() {
+            self.framed = false;
+            self.reframe();
+        }
+        self.spare = None;
+        self.cut_spare = None;
+    }
+
     /// The page as filed: everything but the layers still open. The
     /// recording in progress, and what the frame's run holds as a piece of
     /// it, are filed first where no layer is open; while one is, everything
@@ -2420,6 +2612,7 @@ impl PageRecorder {
             self.settle();
             self.split_run();
             self.flush();
+            self.release_recorders();
         }
         Page {
             layers: Arc::clone(&self.layers),
@@ -7610,12 +7803,12 @@ mod tests {
                 .expect("a canvas");
             let ctx = cleared.context();
             draw(ctx);
-            let (finishes, restarts) = (FINISHES.get(), RESTARTS.get());
+            let (finishes, drops) = (FINISHES.get(), DROPS.get());
             ctx.clear_rect(0.0, 0.0, 64.0, 64.0);
             assert_eq!(
-                (FINISHES.get() - finishes, RESTARTS.get() - restarts),
+                (FINISHES.get() - finishes, DROPS.get() - drops),
                 (0, 1),
-                "{space:?}: dropped and begun again, not finished"
+                "{space:?}: dropped, not finished"
             );
             ctx.set_fill_style(RgbaLinear::from_srgb8(200, 40, 120, 0.7));
             ctx.fill_rect(10.0, 10.0, 20.0, 20.0);
@@ -7645,12 +7838,12 @@ mod tests {
             .expect("a canvas");
             let ctx = part.context();
             draw(ctx);
-            let restarts = RESTARTS.get();
+            let drops = DROPS.get();
             ctx.clear_rect(0.0, 0.0, 32.0, 64.0);
             assert_eq!(
-                RESTARTS.get(),
-                restarts,
-                "{space:?}: half a page is kept, not restarted"
+                DROPS.get(),
+                drops,
+                "{space:?}: half a page is kept, not dropped"
             );
         }
     }
@@ -8393,6 +8586,122 @@ mod tests {
         recorder
             .pixels(crop, opts, RenderingEngine::CPU)
             .expect("a raster readback")
+    }
+
+    /// A read leaves the page holding no begun recorder: not its own
+    /// recordings, nor the spares a run and a cut draw left for the next --
+    /// see [`PageRecorder::release_recorders`] -- and a second read drops
+    /// what the draws between began, as the first does. Draws after a read
+    /// begin what they need,
+    /// under the transform and the clip the page then holds, and paint what
+    /// they would have had nothing read between.
+    ///
+    /// Three scenes for the first read, because it releases by three
+    /// routes. Ending on a draw into the page's recording, the read files it
+    /// and the run's and the cut draw's spares are left. Ending on draws
+    /// into a run alone, the read files the run, and the page's recording,
+    /// begun to frame the run, has nothing to file. Ending on a transform
+    /// set with nothing drawn, the read itself begins the page's recording
+    /// to frame it, and the draw after the read, with no state set between,
+    /// has to be framed again.
+    #[test]
+    fn a_read_leaves_the_page_no_begun_recorders() {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum Ending {
+            Page,
+            Run,
+            Frame,
+            SecondRead,
+        }
+        let side = 24.0;
+        let whole = IRect::from_wh(side as i32, side as i32);
+        let clip = Path::rect(Rect::from_xywh(3.0, 3.0, 14.0, 14.0), None);
+        let paint = |rgba: (u8, u8, u8, u8)| {
+            let mut paint = Paint::default();
+            paint.set_argb(rgba.3, rgba.0, rgba.1, rgba.2);
+            paint
+        };
+        let rect = |x: f32, y: f32, rgba| {
+            move |canvas: &SkCanvas, _: Recording| {
+                canvas
+                    .draw_rect(Rect::from_xywh(x, y, 10.0, 10.0), &paint(rgba));
+            }
+        };
+        let shifted = Matrix::translate((2.0, 1.0));
+        let drawn = |ending: Ending, read_between: bool| {
+            let mut recorder = PageRecorder::new(Rect::from_wh(side, side));
+            // A cut draw and a draw under the clip, so that a run records
+            // it and the cut draw leaves its recorders spare.
+            let clipped = |recorder: &mut PageRecorder| {
+                recorder.set_state(shifted, &Some(clip.clone()));
+                recorder.append_cut(
+                    &clip,
+                    shifted,
+                    VectorFeatures::PLAIN,
+                    rect(8.0, 8.0, (30, 160, 60, 200)),
+                );
+                recorder.append(rect(0.0, 0.0, (200, 30, 40, 180)));
+            };
+            match ending {
+                Ending::Page | Ending::SecondRead => {
+                    clipped(&mut recorder);
+                    // The frame ends, and the run leaves its recorders spare.
+                    recorder.set_state(shifted, &None);
+                    recorder.append(rect(10.0, 2.0, (40, 60, 220, 150)));
+                }
+                Ending::Run => clipped(&mut recorder),
+                Ending::Frame => {
+                    recorder.set_state(Matrix::translate((3.0, 2.0)), &None);
+                }
+            }
+            if ending == Ending::SecondRead {
+                read(&mut recorder, whole, 1.0);
+                recorder.append(rect(1.0, 9.0, (20, 200, 200, 140)));
+            }
+            if read_between {
+                // The scene begins what the read releases, where it is
+                // begun before the read rather than by it.
+                let begun = match ending {
+                    Ending::Page => {
+                        recorder.current.is_some()
+                            && recorder.spare.is_some()
+                            && recorder.cut_spare.is_some()
+                    }
+                    Ending::Run => {
+                        recorder.current.is_some()
+                            && recorder.cut_spare.is_some()
+                    }
+                    Ending::Frame => true,
+                    Ending::SecondRead => recorder.current.is_some(),
+                };
+                assert!(begun, "{ending:?}: the scene begins nothing");
+                read(&mut recorder, whole, 1.0);
+                for (held, what) in [
+                    (recorder.current.is_some(), "the page's recordings"),
+                    (recorder.spare.is_some(), "the run's spare"),
+                    (recorder.cut_spare.is_some(), "the cut draw's spare"),
+                ] {
+                    assert!(!held, "{ending:?}: {what} kept");
+                }
+            }
+            // Under the state the scene ended in.
+            recorder.append(rect(6.0, 11.0, (120, 240, 60, 160)));
+            recorder.set_state(shifted, &Some(clip.clone()));
+            recorder.append(rect(5.0, 5.0, (250, 200, 20, 120)));
+            recorder.set_state(Matrix::default(), &None);
+            recorder.append(rect(12.0, 12.0, (90, 20, 160, 210)));
+            read(&mut recorder, whole, 1.0)
+        };
+        for ending in
+            [Ending::Page, Ending::Run, Ending::Frame, Ending::SecondRead]
+        {
+            let read = drawn(ending, true);
+            assert!(read.iter().any(|&byte| byte != 0), "nothing was drawn");
+            assert!(
+                read == drawn(ending, false),
+                "{ending:?}: a read between draws changed what they paint"
+            );
+        }
     }
 
     /// A first read answers, whatever destination format the GPU surface

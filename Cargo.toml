@@ -357,6 +357,7 @@ rustfft = "6.4.1"
 # what a crate build downloads.
 [target.'cfg(target_os = "linux")'.dependencies]
 skia-safe = { version = "=0.156.0", features = ["embed-freetype", "freetype-woff2"] }
+libc = "0.2"
 
 # `font_library` subsets WOFF and WOFF2 faces here because Windows has no
 # system API that reads them; the other platforms hand the bytes to the OS.

@@ -183,4 +183,5 @@ module.exports = {
   PER_PASS,
   afterEachPass,
   judgedMemory,
+  processMemory,
 };
