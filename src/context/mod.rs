@@ -7831,7 +7831,7 @@ mod tests {
 
 #[cfg(test)]
 mod release_tests {
-    //! A page drops its recorders at its first read and begins them again
+    //! A page drops its recorders at each read and begins them again
     //! at the next draw -- see `page::PageRecorder::release_recorders`. A
     //! scene of draws and reads is held to what it leaves with the recorders
     //! kept, as a page kept them before, and to what it leaves with no read
