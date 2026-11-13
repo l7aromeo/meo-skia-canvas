@@ -5325,14 +5325,16 @@ mod run_painter_tests {
 mod overlapping_glyph_tests {
     //! The glyphs of one run drawn into one another under a blend that reads
     //! the page in the shader -- see
-    //! `node::typography::draws_glyph_by_glyph`.
+    //! `node::typography::glyph_draws`.
     use super::*;
     use std::iter::zip;
 
     use crate::{
         canvas::{BackendInfo, EngineKind},
         font::FontLibrary,
-        node::typography::{GLYPHS_DRAWN_ALONE, WHOLE_RUNS, forget_laid_out},
+        node::typography::{
+            GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws, forget_laid_out,
+        },
         paint::BlendMode::*,
     };
 
@@ -5553,19 +5555,20 @@ mod overlapping_glyph_tests {
                 .flat_map(|run| SCENES.map(|scene| (run, scene)))
             {
                 GLYPHS_DRAWN_ALONE.set(0);
+                GLYPH_DRAWS_FOR.set(Some(GlyphDraws::Each));
                 let alone = drawn(false, run, blend, scene);
-                // Each draw a glyph at a time, into each recording the page
-                // keeps -- two, for pixels and for a document, where the
-                // draw is translucent.
+                GLYPH_DRAWS_FOR.set(None);
+                // Each glyph drawn alone, in every recording and onto every
+                // canvas the run is drawn on.
                 let (glyphs, each) = (GLYPHS_DRAWN_ALONE.get(), run.2);
                 assert!(
-                    glyphs >= 2 * each && glyphs % each == 0,
+                    glyphs >= each && glyphs % each == 0,
                     "{} {blend:?} {scene:?}: {glyphs} glyphs drawn alone",
                     run.1
                 );
-                WHOLE_RUNS.set(true);
+                GLYPH_DRAWS_FOR.set(Some(GlyphDraws::Whole));
                 let whole = drawn(false, run, blend, scene);
-                WHOLE_RUNS.set(false);
+                GLYPH_DRAWS_FOR.set(None);
                 if alone != whole {
                     differing.push(format!("{} {blend:?} {scene:?}", run.1));
                 }

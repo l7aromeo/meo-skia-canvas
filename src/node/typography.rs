@@ -6,6 +6,7 @@ use crate::{
     cache_map::{CacheMap, CacheSet},
     context::{
         State,
+        blur_mask::{draws_on_cpu, on_gpu},
         faint::Faint,
         run_mask::release_cached_runs,
         typesetting::{Typography, forget_typographies},
@@ -36,9 +37,9 @@ use crate::{
 use neon::prelude::*;
 use skia_safe::{
     BlendMode as SkBlendMode, Canvas, Color4f, Font, FontMetrics, FourByteTag,
-    GlyphId, Matrix, Paint, PaintJoin, PaintStyle, Path as SkPath,
-    PathBuilder as SkPathBuilder, Point, Rect, TextBlob, TextBlobBuilder,
-    Typeface,
+    GlyphId, IRect, Matrix, Paint, PaintJoin, PaintStyle, Path as SkPath,
+    PathBuilder as SkPathBuilder, Point, Rect, RoundOut, TextBlob,
+    TextBlobBuilder, Typeface,
     font::Edging,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
@@ -793,8 +794,8 @@ impl RunPaint {
     /// pixels that do with a faint paint what `faint` says. A run in a face
     /// whose colour glyphs this library draws is drawn without its blob,
     /// which may be `None` for it -- see [`Self::built_plain_blobs`] -- and
-    /// a run drawn a glyph at a time leaves its blob unused -- see
-    /// [`draws_glyph_by_glyph`].
+    /// a run whose glyphs are drawn apart leaves its blob unused -- see
+    /// [`glyph_draws`].
     fn draw_runs(
         &self,
         canvas: &Canvas,
@@ -826,8 +827,8 @@ impl RunPaint {
                 continue;
             };
             flush_batch(canvas);
-            match drawn_as_outlines(canvas, &run.font, shear) {
-                true => draw_outlines(
+            if drawn_as_outlines(canvas, &run.font, shear) {
+                draw_outlines(
                     canvas,
                     &run.font,
                     &run.glyphs,
@@ -835,19 +836,22 @@ impl RunPaint {
                     shear,
                     at,
                     &paint,
-                ),
-                false if draws_glyph_by_glyph(&paint) => draw_each_glyph(
-                    canvas,
-                    &run.font,
-                    &run.glyphs,
-                    &run.positions,
-                    shear,
-                    at,
-                    &paint,
-                ),
-                false => {
+                );
+                continue;
+            }
+            match glyph_draws(&paint, canvas) {
+                GlyphDraws::Whole => {
                     canvas.draw_text_blob(blob, at, &paint);
                 }
+                _ => draw_glyphs_apart(
+                    canvas,
+                    &run.font,
+                    &run.glyphs,
+                    &run.positions,
+                    shear,
+                    at,
+                    &paint,
+                ),
             }
         }
     }
@@ -1544,12 +1548,18 @@ thread_local! {
     /// How many times [`RunPaint::built_blobs`] has built a run's blobs on
     /// this thread.
     pub(crate) static BLOB_BUILDS: Cell<usize> = const { Cell::new(0) };
-    /// A mutant of [`draws_glyph_by_glyph`] that draws every run as one
-    /// blob, whatever its blend, on this thread.
-    pub(crate) static WHOLE_RUNS: Cell<bool> = const { Cell::new(false) };
-    /// How many glyphs [`draw_each_glyph`] has drawn on this thread.
+    /// How [`glyph_draws`] draws every run in a blend that reads the page,
+    /// whatever its canvas, on this thread, where set: as one blob, the
+    /// mutant the GPU's pixels are held against, or apart, which the CPU's
+    /// bytes are held to.
+    pub(crate) static GLYPH_DRAWS_FOR: Cell<Option<GlyphDraws>> =
+        const { Cell::new(None) };
+    /// How many glyphs [`draw_glyphs_apart`] has drawn on this thread.
     pub(crate) static GLYPHS_DRAWN_ALONE: Cell<usize> =
         const { Cell::new(0) };
+    /// How many draws [`draw_glyphs_apart`] has made of them on this
+    /// thread: one for each group, or one for each glyph.
+    pub(crate) static GLYPH_DRAWS: Cell<usize> = const { Cell::new(0) };
     /// How far, in the units a run is laid out in, [`RunPaint::reach`]
     /// draws its answer in on this thread: a mutant, a reach that cuts ink,
     /// for the checks on it to refuse.
@@ -2160,11 +2170,24 @@ pub(crate) fn draw_glyphs(
     }
 }
 
-/// Whether a run of glyphs in `paint` is drawn a glyph at a time -- see
-/// [`draw_each_glyph`] -- rather than as one blob: where `paint`'s blend
-/// reads the page in the shader, past the blends a GPU does in its
-/// fixed-function stage -- see `font::colr::blends_by_coefficients`. Those
-/// are `globalCompositeOperation`'s 14 from `multiply` to `luminosity`.
+/// How the glyphs of a run are drawn onto a canvas -- see [`glyph_draws`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GlyphDraws {
+    /// As one blob, as Skia draws a run.
+    Whole,
+    /// In groups of consecutive glyphs no two of which ink a pixel of the
+    /// canvas in common, a blob and a draw for each group -- see
+    /// [`glyph_groups`].
+    Grouped,
+    /// A glyph at a time, a blob and a draw for each.
+    Each,
+}
+
+/// How a run of glyphs in `paint` is drawn onto `canvas`: as one blob
+/// unless `paint`'s blend reads the page in the shader, past the blends a
+/// GPU does in its fixed-function stage -- see
+/// `font::colr::blends_by_coefficients`. Those are
+/// `globalCompositeOperation`'s 14 from `multiply` to `luminosity`.
 ///
 /// Where glyphs overlap, the CPU canvas composites each over what the
 /// glyphs before it left, as Chrome's CPU and GPU canvases both do. Ganesh
@@ -2172,33 +2195,44 @@ pub(crate) fn draw_glyphs(
 /// these blends, with neither framebuffer fetch nor a texture barrier --
 /// Metal's Ganesh turns on neither, in `src/gpu/ganesh/mtl/GrMtlCaps.mm` --
 /// every quad reads one copy of the page taken before the operation and
-/// writes its result over the pixel. One glyph's composite over the page as it
-/// stood before the text then replaced the others' where they overlapped:
-/// Oswald's "Hello Wq" at 48px with `letterSpacing` -12px stood 213 levels from
-/// the CPU canvas under `multiply`. A blob for each glyph is a draw for each,
-/// and Ganesh copies the page again for each, after the one before it has
-/// landed: drawn so, the same run stood 3 levels from the CPU canvas under
-/// any of the 14, as `source-over` does.
+/// writes its result over the pixel. One glyph's composite over the page as
+/// it stood before the text then replaced the others' where they
+/// overlapped: Oswald's "Hello Wq" at 48px with `letterSpacing` -12px stood
+/// 213 levels from the CPU canvas under `multiply`. A draw lands before the
+/// next one copies the page, so glyphs that share no pixel can share a
+/// draw, and drawn so, the same run stood 3 levels from the CPU canvas
+/// under any of the 14, as `source-over` does.
 ///
-/// The choice is made where the draw is recorded, which does not know
-/// whether it will be played on a GPU, so the CPU canvas draws the glyphs
-/// one at a time as well. Its raster composites a blob's glyphs in order,
-/// each over the last, so it draws the same bytes either way. A run drawn
-/// from its outlines -- see [`draw_outlines`] -- is one path on either
-/// engine, and is left so.
-pub(crate) fn draws_glyph_by_glyph(paint: &Paint) -> bool {
-    #[cfg(test)]
-    if WHOLE_RUNS.get() {
-        return false;
+/// So the choice is the canvas's. On the CPU a run is one blob: its raster
+/// composites a blob's glyphs in order, each over the last, and draws the
+/// same bytes either way. On the GPU its glyphs are drawn in groups that
+/// share no pixel of the canvas -- see [`glyph_groups`]. Into a recording,
+/// or a document, which does not know the pixels it will be played onto
+/// nor at what scale, a glyph at a time, which is right at any scale. A run
+/// drawn from its outlines -- see [`draw_outlines`] -- is one path on
+/// either engine, and is left so.
+pub(crate) fn glyph_draws(paint: &Paint, canvas: &Canvas) -> GlyphDraws {
+    if blends_by_coefficients(paint.blend_mode_or(SkBlendMode::SrcOver)) {
+        return GlyphDraws::Whole;
     }
-    !blends_by_coefficients(paint.blend_mode_or(SkBlendMode::SrcOver))
+    #[cfg(test)]
+    if let Some(draws) = GLYPH_DRAWS_FOR.get() {
+        return draws;
+    }
+    if on_gpu(canvas) {
+        GlyphDraws::Grouped
+    } else if draws_on_cpu(canvas) {
+        GlyphDraws::Whole
+    } else {
+        GlyphDraws::Each
+    }
 }
 
 /// Draws `glyphs` in `font` at `positions` from `origin`, sheared by
-/// `shear`, in `paint`, as [`sheared_blob`]'s glyphs, each glyph a blob and
-/// a draw of its own, in the order the run holds them -- see
-/// [`draws_glyph_by_glyph`].
-pub(crate) fn draw_each_glyph(
+/// `shear`, in `paint`, as [`sheared_blob`]'s glyphs, apart as
+/// [`glyph_draws`] says for `canvas` -- grouped or a glyph at a time -- in
+/// the order the run holds them.
+pub(crate) fn draw_glyphs_apart(
     canvas: &Canvas,
     font: &Font,
     glyphs: &[GlyphId],
@@ -2207,19 +2241,96 @@ pub(crate) fn draw_each_glyph(
     origin: Point,
     paint: &Paint,
 ) {
+    let groups = match glyph_draws(paint, canvas) {
+        GlyphDraws::Grouped => glyph_groups(&pixels_inked(
+            canvas, font, glyphs, positions, shear, origin, paint,
+        )),
+        GlyphDraws::Whole | GlyphDraws::Each => {
+            (0..glyphs.len()).map(|at| at..at + 1).collect()
+        }
+    };
     #[cfg(test)]
-    GLYPHS_DRAWN_ALONE.set(GLYPHS_DRAWN_ALONE.get() + glyphs.len());
-    for (glyph, at) in zip(glyphs, positions) {
-        let one = sheared_blob(
+    {
+        GLYPHS_DRAWN_ALONE.set(GLYPHS_DRAWN_ALONE.get() + glyphs.len());
+        GLYPH_DRAWS.set(GLYPH_DRAWS.get() + groups.len());
+    }
+    for group in groups {
+        let blob = sheared_blob(
             font,
-            std::slice::from_ref(glyph),
-            std::slice::from_ref(at),
+            &glyphs[group.clone()],
+            &positions[group],
             *shear,
         );
-        if let Some(blob) = one {
+        if let Some(blob) = blob {
             canvas.draw_text_blob(&blob, origin, paint);
         }
     }
+}
+
+/// The pixels of `canvas` each of `glyphs` can ink, drawn as
+/// [`draw_glyphs_apart`] draws them: its box in `font`, stroked as `paint`
+/// strokes it, placed, sheared by `shear`, mapped under the canvas's
+/// transform and rounded out to whole pixels, which holds every pixel an
+/// anti-aliased edge touches. `None` for a glyph that inks nothing.
+fn pixels_inked(
+    canvas: &Canvas,
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: &Shear,
+    origin: Point,
+    paint: &Paint,
+) -> Vec<Option<IRect>> {
+    let mut boxes = vec![Rect::new_empty(); glyphs.len()];
+    font.get_bounds(glyphs, &mut boxes, Some(paint));
+    let mut to_device = canvas.local_to_device_as_3x3();
+    to_device.pre_translate(origin);
+    if let Shear::By(shear) = shear {
+        to_device.pre_concat(shear);
+    }
+    zip(boxes, positions)
+        .map(|(glyph, &at)| {
+            (!glyph.is_empty())
+                .then(|| device_pixels(glyph.with_offset(at), &to_device))
+        })
+        .collect()
+}
+
+/// The whole pixels `local` covers under `to_device`: mapped, and rounded
+/// out, so that a pixel an edge crosses any part of is among them.
+fn device_pixels(local: Rect, to_device: &Matrix) -> IRect {
+    RoundOut::<IRect>::round_out(&to_device.map_rect(local).0)
+}
+
+/// The runs of consecutive glyphs, inking `inked`'s pixels, that are drawn
+/// together: each glyph joins the group before it unless a pixel it inks
+/// is one any glyph of that group inks, wherever in the group that glyph
+/// stands -- the first and third of three can overlap past a narrow second
+/// -- and a glyph inking nothing joins any group.
+fn glyph_groups(inked: &[Option<IRect>]) -> Vec<Range<usize>> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut taken: Vec<IRect> = Vec::new();
+    for (at, pixels) in inked.iter().enumerate() {
+        let Some(pixels) = pixels else {
+            continue;
+        };
+        if taken.iter().any(|other| shares_a_pixel(other, pixels)) {
+            groups.push(start..at);
+            start = at;
+            taken.clear();
+        }
+        taken.push(*pixels);
+    }
+    if start < inked.len() {
+        groups.push(start..inked.len());
+    }
+    groups
+}
+
+/// Whether two sets of whole pixels have one in common.
+fn shares_a_pixel(a: &IRect, b: &IRect) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
 /// What the colour glyphs among `runs`, each a font and its glyphs, ask of a
@@ -2284,7 +2395,7 @@ pub(crate) fn draws_colour_glyphs(font: &Font) -> bool {
 /// drawn nothing, where the face has no such table.
 ///
 /// The glyphs are drawn in order, the plain ones between two colour glyphs
-/// as one blob -- or a glyph at a time, where [`draws_glyph_by_glyph`] says
+/// as one blob -- or apart, where [`glyph_draws`] says
 /// -- and the colour ones between two plain glyphs together, so that where
 /// they overlap the later one lies on top as it would in one blob.
 pub(crate) fn draw_colour_run(
@@ -2310,10 +2421,11 @@ pub(crate) fn draw_colour_run(
     let Some(run) = ColourRun::of(&sheared, paint) else {
         return false;
     };
+    let draws = glyph_draws(paint, canvas);
     let plain = |from: usize, to: usize| {
-        if from < to && draws_glyph_by_glyph(paint) {
+        if from < to && draws != GlyphDraws::Whole {
             flush_batch(canvas);
-            draw_each_glyph(
+            draw_glyphs_apart(
                 canvas,
                 &sheared,
                 &glyphs[from..to],
@@ -2903,12 +3015,12 @@ impl<'a> Typesetter<'a> {
     /// needs its runs, and from its runs, lines between them, where it is
     /// decorated or `oblique`, where `canvas` may shear a run past what
     /// FreeType draws -- see [`may_draw_outlines`] -- or where `paint` draws
-    /// a glyph at a time -- see [`draws_glyph_by_glyph`].
+    /// its glyphs apart on `canvas` -- see [`glyph_draws`].
     pub fn drawn_once(&self, paint: &Paint, canvas: &Canvas) -> DrawnRun {
         let layout = self.layout(paint);
         let plain = !may_draw_outlines(canvas, FAKE_ITALIC_SKEW)
             && !holds_colour_runs(&layout.paragraph)
-            && !draws_glyph_by_glyph(paint);
+            && glyph_draws(paint, canvas) == GlyphDraws::Whole;
         match (self.decoration(1.0), self.oblique) {
             (None, None) if plain => DrawnRun::Plain(layout),
             (decoration, _) => {
@@ -6490,5 +6602,185 @@ mod laid_out {
             kept(&format!("once {}", SEEN_ONCE - 1)),
             "where the last is not"
         );
+    }
+}
+
+#[cfg(test)]
+mod glyph_group_tests {
+    //! Which glyphs of a run a GPU canvas draws together -- see
+    //! [`glyph_groups`] -- and that the pixels a glyph is taken to ink hold
+    //! every pixel it does ink -- see [`pixels_inked`].
+
+    use super::{
+        FAKE_ITALIC_SKEW, Shear, device_pixels, glyph_groups, pixels_inked,
+        sheared_blob,
+    };
+    use skia_safe::{
+        AlphaType, Color, ColorType, Data, Font, FontHinting, FontMgr, IRect,
+        ImageInfo, Matrix, Paint, PaintStyle, Point, Rect, surfaces,
+    };
+    use std::ops::Range;
+
+    const OSWALD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    );
+
+    /// The whole pixels from `left` to `right` along one row.
+    fn span(left: i32, right: i32) -> Option<IRect> {
+        Some(IRect::new(left, 0, right, 1))
+    }
+
+    #[test]
+    fn a_glyph_joins_its_group_unless_it_shares_a_pixel_with_any_glyph_in_it() {
+        for (inked, want, case) in [
+            (
+                vec![span(0, 10), span(10, 20)],
+                vec![Range { start: 0, end: 2 }],
+                "touching on a pixel's edge",
+            ),
+            (
+                vec![span(0, 11), span(10, 20)],
+                vec![0..1, 1..2],
+                "sharing a column",
+            ),
+            (
+                vec![span(0, 10), span(30, 40), span(5, 15)],
+                vec![0..2, 2..3],
+                "the first and third sharing pixels past the second",
+            ),
+            (
+                vec![span(0, 10), None, span(10, 20)],
+                vec![Range { start: 0, end: 3 }],
+                "a glyph that inks nothing between",
+            ),
+        ] {
+            assert_eq!(glyph_groups(&inked), want, "{case}");
+        }
+    }
+
+    #[test]
+    fn glyphs_share_a_pixel_where_their_edges_meet_inside_it() {
+        let shares = |a: Rect, b: Rect, scale: f32| {
+            let to_device = Matrix::scale((scale, scale));
+            let (a, b) =
+                (device_pixels(a, &to_device), device_pixels(b, &to_device));
+            glyph_groups(&[Some(a), Some(b)]).len() == 1
+        };
+        let at = |left: f32, right: f32| Rect::new(left, 0.0, right, 1.0);
+        for (a, b, scale, apart, case) in [
+            (
+                at(0.0, 10.0),
+                at(10.0, 20.0),
+                1.0,
+                false,
+                "on a pixel's edge",
+            ),
+            (at(0.0, 10.5), at(10.5, 20.0), 1.0, true, "inside a pixel"),
+            (at(0.0, 10.25), at(10.0, 20.0), 1.0, true, "a quarter over"),
+            (at(0.0, 7.0), at(7.0, 20.0), 1.0, false, "at 7, unscaled"),
+            (at(0.0, 7.0), at(7.0, 20.0), 1.5, true, "at 7, at 1.5"),
+        ] {
+            assert_eq!(!shares(a, b, scale), apart, "{case}");
+        }
+    }
+
+    /// Each glyph of an oblique run, filled and stroked, drawn alone at
+    /// density 1.5 under each hinting and with subpixel positions on and
+    /// off, inks no pixel outside the pixels it is taken to ink.
+    #[test]
+    fn a_glyphs_pixels_hold_every_pixel_it_inks() {
+        let typeface = FontMgr::new()
+            .new_from_data(
+                Data::new_copy(&std::fs::read(OSWALD).expect("Oswald")),
+                None,
+            )
+            .expect("a face");
+        let shear = Shear::By(Matrix::skew((FAKE_ITALIC_SKEW, 0.0)));
+        let (width, height) = (420, 160);
+        let mut surface =
+            surfaces::raster_n32_premul((width, height)).expect("a surface");
+        let origin = Point::new(12.0, 70.0);
+        let mut outside = Vec::new();
+        for hinting in [FontHinting::None, FontHinting::Normal] {
+            for subpixel in [false, true] {
+                for style in [PaintStyle::Fill, PaintStyle::Stroke] {
+                    let mut font = Font::from_typeface(typeface.clone(), 48.0);
+                    font.set_hinting(hinting).set_subpixel(subpixel);
+                    let mut paint = Paint::default();
+                    paint
+                        .set_anti_alias(true)
+                        .set_style(style)
+                        .set_stroke_width(3.0)
+                        .set_color(Color::BLACK);
+                    let glyphs = font.str_to_glyphs_vec("Hello Wq");
+                    let mut advances = vec![0.0; glyphs.len()];
+                    font.get_widths(&glyphs, &mut advances);
+                    let positions: Vec<Point> = advances
+                        .iter()
+                        .scan(0.0, |x, advance| {
+                            let at = Point::new(*x, 0.0);
+                            *x += advance - 6.0;
+                            Some(at)
+                        })
+                        .collect();
+                    let canvas = surface.canvas();
+                    canvas.reset_matrix();
+                    canvas.scale((1.5, 1.5));
+                    let inked = pixels_inked(
+                        canvas, &font, &glyphs, &positions, &shear, origin,
+                        &paint,
+                    );
+                    for (at, pixels) in inked.iter().enumerate() {
+                        let canvas = surface.canvas();
+                        canvas.clear(Color::TRANSPARENT);
+                        let blob = sheared_blob(
+                            &font,
+                            &glyphs[at..=at],
+                            &positions[at..=at],
+                            shear,
+                        );
+                        if let Some(blob) = blob {
+                            canvas.draw_text_blob(&blob, origin, &paint);
+                        }
+                        let info = ImageInfo::new(
+                            (width, height),
+                            ColorType::Alpha8,
+                            AlphaType::Premul,
+                            None,
+                        );
+                        let mut alpha = vec![0u8; (width * height) as usize];
+                        assert!(surface.image_snapshot().read_pixels(
+                            &info,
+                            &mut alpha,
+                            width as usize,
+                            (0, 0),
+                            skia_safe::image::CachingHint::Allow,
+                        ));
+                        let stray = alpha
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &a)| a > 0)
+                            .map(|(i, _)| (i as i32 % width, i as i32 / width))
+                            .filter(|&(x, y)| {
+                                !pixels.is_some_and(|p| {
+                                    p.left <= x
+                                        && x < p.right
+                                        && p.top <= y
+                                        && y < p.bottom
+                                })
+                            })
+                            .count();
+                        if stray > 0 {
+                            outside.push(format!(
+                                "{hinting:?} subpixel {subpixel} {style:?} \
+                                 glyph {at}: {stray} pixels outside {pixels:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(outside.is_empty(), "{}", outside.join("\n"));
     }
 }
