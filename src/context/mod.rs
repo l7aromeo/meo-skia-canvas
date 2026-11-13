@@ -1277,6 +1277,7 @@ impl Context2D {
                 exact,
                 features,
                 text.as_ref(),
+                gradient.is_some(),
                 &f,
                 None,
             )
@@ -1296,6 +1297,7 @@ impl Context2D {
                 paint,
                 features,
                 text.as_ref(),
+                gradient.is_some(),
                 &f,
             );
         // A draw under a filter of its own whose shadow is filed apart is
@@ -1307,6 +1309,7 @@ impl Context2D {
                 exact,
                 features,
                 text.as_ref(),
+                gradient.is_some(),
                 &f,
                 self.exact_steps(),
             )
@@ -1520,11 +1523,15 @@ impl Context2D {
     /// a CanvasKit filter, which Skia's layer runs in the draw's own units;
     /// and for one under a blend that covers beyond it, which
     /// `render_to_canvas` composites with its shadow through one layer.
+    /// `gradient` says the draw is dyed by a gradient, whose alpha the shadow
+    /// casts, which a GPU canvas then makes on the CPU for the chain -- see
+    /// [`Self::chain_input`].
     fn files_shadow_through_chain<F>(
         &self,
         paint: &Paint,
         features: VectorFeatures,
         text: Option<&TextRun>,
+        gradient: bool,
         f: &F,
     ) -> bool
     where
@@ -1603,6 +1610,7 @@ impl Context2D {
         let Some((entry, reach)) = entry else {
             return false;
         };
+        let entry = self.chain_input(gradient, entry);
         // The group composites through the blend, and a document through
         // Skia's shadow filter in the colour it names, of what the draw's
         // own filter makes.
@@ -1652,6 +1660,44 @@ impl Context2D {
     /// eight-bit page, in a process where a GPU can play one.
     fn files_gradients(&self) -> bool {
         !self.composites_in_floats() && !RenderingEngine::never_gpu()
+    }
+
+    /// `entry`, a draw recorded for a chain to run -- see
+    /// [`Self::files_through_chain`] -- as a run a GPU canvas draws in the
+    /// CPU's bytes, where the draw is dyed by a gradient: made on the CPU
+    /// onto the chain's layer -- see `layer::OnGpu::Raster` -- rather than
+    /// by Ganesh's own gradient, which the chain would otherwise blur, tint
+    /// or cast a shadow from up to four levels off what a CPU canvas runs it
+    /// on. Not the effect, whose image covers only the page, where a chain
+    /// reads past it: a blur draws in what lies beyond the page's edge.
+    /// Any other entry, and any on a page that files no gradient draws, as
+    /// it is.
+    fn chain_input(&self, gradient: bool, entry: Layer) -> Layer {
+        #[cfg(test)]
+        let gradient = gradient && FILES_GRADIENTS.get();
+        if !gradient || !self.files_gradients() {
+            return entry;
+        }
+        let (pixels, document) = match entry {
+            Layer::Picture(pixels) => (pixels, None),
+            Layer::Targeted(pair) => {
+                let (pixels, document) = Arc::unwrap_or_clone(pair);
+                (pixels, Some(document))
+            }
+            entry => return entry,
+        };
+        Layer::Gradient(Arc::new(layer::GradientDraw {
+            draws: vec![layer::GradientPiece {
+                gpu: layer::OnGpu::Raster {
+                    layers: vec![pixels.clone()],
+                    blend: BlendMode::SrcOver,
+                    beyond: false,
+                },
+                pixels: layer::GradientPixels::Recorded(pixels),
+                document,
+            }],
+            clip: None,
+        }))
     }
 
     /// `draw`, recorded on its own under the canvas's transform.
@@ -2292,13 +2338,17 @@ impl Context2D {
     /// `steps`, where given, is the chain run instead of the one
     /// [`Self::draw_chain`] picks: the whole of the draw's filter, for a
     /// draw whose shadow is filed as a group of its own -- see
-    /// `render_to_canvas` -- which is then filed casting none.
+    /// `render_to_canvas` -- which is then filed casting none. `gradient`
+    /// says the draw is dyed by a gradient, which a GPU canvas then makes on
+    /// the CPU for the chain -- see [`Self::chain_input`].
+    #[allow(clippy::too_many_arguments)]
     fn files_through_chain<F>(
         &self,
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
         text: Option<&TextRun>,
+        gradient: bool,
         f: &F,
         steps: Option<Arc<[Step]>>,
     ) -> bool
@@ -2438,7 +2488,8 @@ impl Context2D {
                 Some(colour_entry(run, recorded, Some(document)))
             }
             (entry, _) => entry,
-        };
+        }
+        .map(|entry| self.chain_input(gradient, entry));
         // A run of text in one flat colour that the coverage route could
         // play is drawn once more, in its colour opaque, through the paint
         // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
@@ -3363,6 +3414,7 @@ impl Context2D {
             &paint,
             features,
             None,
+            self.state.dye(style).gradient().is_some(),
             &|canvas, paint, _| {
                 self.fill_or_stroke(canvas, path, paint, style, mark.as_ref());
             },
@@ -3990,7 +4042,9 @@ impl Context2D {
                     &self.faint().drawable(paint),
                 );
             };
-            self.files_shadow_through_chain(&paint, features, None, &draw)
+            self.files_shadow_through_chain(
+                &paint, features, None, false, &draw,
+            )
         };
         if cast_apart {
             let (color, space) = self.state.shadow_color.clone();
