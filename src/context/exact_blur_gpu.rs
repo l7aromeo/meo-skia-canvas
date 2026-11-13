@@ -336,6 +336,7 @@ uniform float bilinear;
 uniform float gain;
 uniform float w;
 uniform float h;
+uniform float shadowOnly;
 float4 tinted(float2 q) {
     float4 x = float4(blurred.eval(q));
     float t = ca * ((x.r + x.g) / 255);
@@ -368,15 +369,16 @@ float4 main(float2 position) {
     // textures alike.
     float2 inside = step(edge, px) * (float2(1) - step(end, px));
     d *= inside.x * inside.y;
-    float4 s = floor(float4(src.eval(p)) * 255 + 0.5) / 255;
+    float4 s = (1 - shadowOnly) * floor(float4(src.eval(p)) * 255 + 0.5) / 255;
     float4 v = s + d * (1 - s.a);
     return clamp(floor(v * 255 * gain + 0.5), 0, 255) / 255;
 }
 "#;
 
 /// How many floats [`SHADOW`] declares as uniforms, in the order it declares
-/// them: `r`, `g`, `b`, `ca`, `ox`, `oy`, `bilinear`, `gain`, `w` and `h`.
-const SHADOW_UNIFORMS: usize = 10;
+/// them: `r`, `g`, `b`, `ca`, `ox`, `oy`, `bilinear`, `gain`, `w`, `h` and
+/// `shadowOnly`.
+const SHADOW_UNIFORMS: usize = 11;
 
 thread_local! {
     /// [`SHADOW`], compiled once per thread.
@@ -388,9 +390,10 @@ thread_local! {
 /// columns by the passes [`blur`] makes, its value and remainder packed,
 /// tinted to `rgb` at `alpha` of it, moved by `offset` and composited under
 /// `image` by [`SHADOW`], scaled by `gain` and rounded once to `image`'s own
-/// 8-bit type. The bytes are those the CPU makes in floats but on exact
-/// ties. `None` for a layer that is not 8 bits a channel, and wherever
-/// [`blur`] gives `None`, all of which the CPU takes.
+/// 8-bit type. With `shadow_only`, the shadow by itself, without `image`
+/// over it. The bytes are those the CPU makes in floats but on exact ties.
+/// `None` for a layer that is not 8 bits a channel, and wherever [`blur`]
+/// gives `None`, all of which the CPU takes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shadow(
     context: &mut RecordingContext,
@@ -400,6 +403,7 @@ pub(crate) fn shadow(
     (ox, oy): (f32, f32),
     ([r, g, b], alpha): ([f32; 3], f32),
     gain: f32,
+    shadow_only: bool,
 ) -> Option<Image> {
     let out_type = image.color_type();
     if !matches!(out_type, ColorType::RGBA8888 | ColorType::BGRA8888) {
@@ -457,6 +461,7 @@ pub(crate) fn shadow(
         gain,
         width as f32,
         height as f32,
+        if shadow_only { 1.0 } else { 0.0 },
     ];
     let uniforms: Vec<u8> =
         uniforms.iter().flat_map(|v| v.to_ne_bytes()).collect();

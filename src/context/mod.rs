@@ -1236,15 +1236,28 @@ impl Context2D {
             (Recording::Pixels, Some(exact)) => exact,
             _ => paint,
         };
+        // A run holding colour glyphs casts its shadow where it is filed --
+        // see `Self::files_as_colour_text`.
+        let colour_run =
+            text.as_ref().is_some_and(|text| text.colour.is_some());
+        let cast_apart = !colour_run
+            && self.files_shadow_through_chain(
+                paint,
+                features,
+                text.as_ref(),
+                &f,
+            );
+        let casts = self.casts_shadow() && !cast_apart;
         // Which recording it is reaches the draw only through `paint_for`
         // and the shadow's paint, so with no shadow and no exact paint apart
         // from the plain one it draws the same in each -- see
         // `PageRecorder::append_alike`.
-        let alike = !self.casts_shadow() && exact.is_none_or(|e| e == paint);
+        let alike = !casts && exact.is_none_or(|e| e == paint);
         let render_shadow =
             |canvas: &SkCanvas, paint: &Paint, recording: Recording| {
-                if let Some((shadow_paint, pass)) =
-                    self.paint_for_shadow_in(paint, recording, lines)
+                if let Some((shadow_paint, pass)) = casts
+                    .then(|| self.paint_for_shadow_in(paint, recording, lines))
+                    .flatten()
                 {
                     canvas.save();
                     canvas.set_matrix(
@@ -1305,7 +1318,165 @@ impl Context2D {
         {
             return;
         }
+        // A shadow filed as a group of its own leaves a draw with no filter
+        // of its own nothing an image filter does: it asked for one only for
+        // the shadow -- see `Self::vector_features` -- and counted as a
+        // filtered entry, a GPU playback paced its flushes by the draw's ops
+        // as well as by the shadow's group.
+        let features = match cast_apart && paint.image_filter().is_none() {
+            true => features.without(VectorFeatures::IMAGE_FILTER),
+            false => features,
+        };
         self.append_draw(features, alike, draw);
+    }
+
+    /// Whether a draw made now casts its shadow through a chain -- see
+    /// [`Self::files_shadow_through_chain`]: one casting a shadow, under no
+    /// CanvasKit filter, through a blend that covers no more than it.
+    fn casts_shadow_through_chain(&self) -> bool {
+        self.casts_shadow()
+            && self.state.skia_image_filter.is_none()
+            && !covers_beyond_the_draw(self.state.global_composite_operation)
+    }
+
+    /// Whether a run of text drawn now is played through a chain, its own
+    /// filter's or the one its shadow is cast through, and so answers what
+    /// it can ink, which bounds the chain's layer: a picture of text is
+    /// bounded by the clip, and a shadow's chain run over the page's every
+    /// pixel took about 3 ms a line of 28px text on the CPU, where one
+    /// bounded by the line's ink takes about 0.15.
+    fn chains_text(&self) -> bool {
+        self.draw_chain(true).is_some() || self.casts_shadow_through_chain()
+    }
+
+    /// Files a draw's `shadowColor` shadow as a group of its own, cast
+    /// through a chain on pixels -- see [`Self::shadow_steps`] -- before
+    /// the draw: the draw recorded in the paint it casts in, once for each
+    /// recording the page keeps, under the transform it is made under, and
+    /// the group moved by the shadow's offset. Through Skia's shadow filter
+    /// the blur was three box blurs from a standard deviation of 2 on the
+    /// CPU, up to 8.7 levels off the Gaussian, and Ganesh's scaled-down
+    /// blur past 4 on the GPU. A document composites the group through
+    /// Skia's shadow filter, as it drew the shadow before.
+    ///
+    /// `false`, filing nothing, for a draw casting no shadow; for one under
+    /// a filter of its own, CSS or CanvasKit, which Skia's layer runs; and
+    /// for one under a blend that covers beyond it, which
+    /// `render_to_canvas` composites with its shadow through one layer.
+    fn files_shadow_through_chain<F>(
+        &self,
+        paint: &Paint,
+        features: VectorFeatures,
+        text: Option<&TextRun>,
+        f: &F,
+    ) -> bool
+    where
+        F: Fn(&SkCanvas, &Paint, Pass),
+    {
+        if !self.casts_shadow_through_chain() {
+            return false;
+        }
+        // The filter's steps the shadow is cast after, where the draw is
+        // under one.
+        let lines = text.is_some_and(|text| text.lines);
+        let dual = self.recorder.borrow().dual();
+        // The recording the shadow's pixels and its document are each cast
+        // in: the page's two where it keeps two, and its one otherwise.
+        let (pixels, document) = match dual {
+            true => (Recording::Pixels, Recording::Document),
+            false => (Recording::Shared, Recording::Shared),
+        };
+        let (Some(pixels_cast), Some(document_cast)) = (
+            self.shadow_cast_in(paint, pixels, lines),
+            self.shadow_cast_in(paint, document, lines),
+        ) else {
+            return false;
+        };
+        let steps = self.shadow_steps(&pixels_cast);
+        let offset = self.state.shadow_offset;
+        // Recorded over the page, as far again as the blur reaches, and
+        // back along the offset, which brings a draw off the page onto it.
+        let bounds = self.bounds.with_outset(
+            canvas_reach(&steps, &self.state.matrix)
+                + Vector::new(offset.x.abs(), offset.y.abs()),
+        );
+        let reached = text.map(|text| text.reached);
+        let record = |cast: &CanvasShadow| {
+            let mut drawn = cast.paint.clone();
+            drawn
+                .set_image_filter(None)
+                .set_blend_mode(BlendMode::SrcOver);
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(bounds, true);
+            canvas.set_matrix(&self.state.matrix.into());
+            if let Some(reached) = reached {
+                reached.set(None);
+            }
+            f(canvas, &drawn, cast.pass);
+            let reach = reached.and_then(Cell::get);
+            recorder
+                .finish_recording_as_picture(None)
+                .map(|picture| (picture, reach))
+        };
+        let entry = match dual {
+            false => record(&pixels_cast)
+                .map(|(picture, reach)| (Layer::Picture(picture), reach)),
+            true => record(&pixels_cast).zip(record(&document_cast)).map(
+                |((pixels, pixels_reach), (document, document_reach))| {
+                    let reach =
+                        pixels_reach.zip(document_reach).map(|(mut a, b)| {
+                            a.join(b);
+                            a
+                        });
+                    (Layer::Targeted(Arc::new((pixels, document))), reach)
+                },
+            ),
+        };
+        let Some((entry, reach)) = entry else {
+            return false;
+        };
+        // The group composites through the blend, and a document through
+        // Skia's shadow filter in the colour it names, of what the draw's
+        // own filter makes.
+        let mut through = Paint::default();
+        through
+            .set_anti_alias(true)
+            .set_blend_mode(self.state.global_composite_operation)
+            .set_image_filter(image_filters::drop_shadow_only(
+                (0.0, 0.0),
+                (document_cast.sigma.x, document_cast.sigma.y),
+                document_cast.colour,
+                document_cast.space.clone(),
+                None,
+                None,
+            ));
+        // The draw inside asks for what its paint does, less the filter and
+        // the blend, which the group composites through.
+        let drawn = features.without(
+            VectorFeatures::IMAGE_FILTER
+                .with(VectorFeatures::BLEND_MODE)
+                .with(VectorFeatures::UNMATCHED_BLEND)
+                .with(VectorFeatures::MASKED_BLEND),
+        );
+        self.with_recorder(|mut recorder| {
+            recorder.append_group(
+                Composite::Chain {
+                    steps,
+                    rec: LayerRec {
+                        paint: Some(through),
+                        ..LayerRec::default()
+                    },
+                    reach,
+                    coverage: None,
+                },
+                None,
+                Matrix::new_identity(),
+                [(entry, drawn)].into_iter().collect(),
+                features,
+                offset,
+            );
+        });
+        true
     }
 
     /// Files a run of text holding colour glyphs as a
@@ -1556,6 +1727,7 @@ impl Context2D {
         // shadow's colour multiplied it: a pattern of a canvas cast up
         // to a level from a pattern of its pixels. A document plays the
         // draw as recorded, at its alpha, under the shadow as named.
+        let through_alpha = through.alpha_f();
         let moves = self.casts_shadow()
             && through.alpha_f() < 1.0
             && through.color_filter().is_none()
@@ -1608,12 +1780,36 @@ impl Context2D {
         // pixels where the shadow's colour took it, the draw without it.
         let mut cast = Paint::default();
         cast.set_anti_alias(true);
+        // On pixels the shadow is cast through the exact chain, in the
+        // colour the pixels' shadow takes -- see `Self::shadow_steps` --
+        // where the draw has no filter of its own; under one, Skia's layer
+        // casts it.
+        let shadow_steps = match paint.image_filter().is_none() {
+            true => {
+                let mut pixels_cast = cast.clone();
+                if moves {
+                    pixels_cast.set_alpha_f(through_alpha);
+                }
+                self.shadow_cast_in(&pixels_cast, Recording::Shared, lines)
+                    .map(|cast| self.shadow_steps(&cast))
+            }
+            false => None,
+        };
         let shadow = self.paint_for_shadow(&cast).map(|shadow| {
-            Composite::Layer(LayerRec {
+            let rec = LayerRec {
                 paint: Some(shadow),
                 pixels_paint: pixels_shadow,
                 ..LayerRec::default()
-            })
+            };
+            match shadow_steps {
+                Some(steps) => Composite::Chain {
+                    steps,
+                    rec,
+                    reach: None,
+                    coverage: None,
+                },
+                None => Composite::Layer(rec),
+            }
         });
         let offset = self.state.shadow_offset;
         let identity = Matrix::new_identity();
@@ -2562,6 +2758,17 @@ impl Context2D {
         });
         path.set_fill_type(rule.unwrap_or(PathFillType::Winding));
 
+        // A flat rectangle's shadow is a blurred rectangle, filed as a
+        // `BlurOp`, whose blur has a closed form -- see `blur_mask` -- and
+        // the draw is made without it.
+        if self.files_rect_shadow(&path, style) {
+            let (color, space) = self.state.shadow_color.clone();
+            self.state.shadow_color.0.a = 0.0;
+            self.draw_path(Some(path), style, rule);
+            self.state.shadow_color = (color, space);
+            return;
+        }
+
         // if path will fill the whole canvas and paint/blend are fully
         // opaque...
         if matches!(style, PaintStyle::Fill | PaintStyle::StrokeAndFill)
@@ -3069,6 +3276,14 @@ impl Context2D {
                 .map(|shadow| self.faint().drawable(&shadow).into_owned());
             let offset = self.state.shadow_offset;
             let steps = self.exact_steps();
+            // The shadow is cast through the exact chain on pixels where the
+            // source is drawn through no filter of its own; under one, Skia's
+            // layer casts it.
+            let cast = match steps.is_none() && paint.image_filter().is_none() {
+                true => self.shadow_cast_in(&paint, Recording::Shared, false),
+                false => None,
+            };
+            let shadow_steps = cast.map(|cast| self.shadow_steps(&cast));
             // The pixels composite the canvas through its colour filter
             // built for them -- see `Self::pixels_paint`.
             let pixels = self.pixels_paint(&drawn);
@@ -3082,7 +3297,11 @@ impl Context2D {
                         pixels_paint,
                         ..LayerRec::default()
                     };
-                    let composite = match steps.clone().filter(|_| own) {
+                    let chain = match own {
+                        true => steps.clone(),
+                        false => shadow_steps.clone(),
+                    };
+                    let composite = match chain {
                         Some(steps) => Composite::Chain {
                             steps,
                             rec,
@@ -3751,7 +3970,7 @@ impl Context2D {
             // first time it is drawn it is laid out as runs to answer it,
             // which draw what `Paragraph::paint` does.
             let reached = Cell::new(None);
-            let chained = self.draw_chain(true).is_some();
+            let chained = self.chains_text();
             // A kept run is drawn when a target first plays it, from the
             // blobs it keeps for the paint -- see `layer::DeferredPicture` --
             // as the draw below would have drawn it: at its offset, not
@@ -4087,6 +4306,69 @@ impl Context2D {
         plain.then_some(sigma)
     }
 
+    /// Files the `shadowColor` shadow of a fill of `path` in `style` as a
+    /// [`BlurOp`](layer::BlurOp) of its own, before the fill, where it is a
+    /// blurred rectangle in one flat colour: a filled rectangle the
+    /// transform keeps one, dyed by a colour, on an sRGB page, under a blur
+    /// of [`RECT_SHADOW_FROM_SIGMA`] or more and a blend that composites
+    /// only where it lands. The op's blur of a rectangle is
+    /// worked in closed form on both engines; through the shadow's chain the
+    /// same rectangle was rasterised and convolved. `false`, filing nothing,
+    /// for any other draw.
+    ///
+    /// The shadow's colour takes the fill's alpha, its colour's and the
+    /// global one: a flat fill's coverage is its rectangle's, so the
+    /// shadow's alpha is the product, rounded once by the op.
+    fn files_rect_shadow(&self, path: &Path, style: PaintStyle) -> bool {
+        let plain = self.casts_shadow()
+            && self.state.shadow_blur / 2.0 >= RECT_SHADOW_FROM_SIGMA
+            && PixelColorSpace::matching(&self.canvas_color_space)
+                == Some(PixelColorSpace::Srgb)
+            && style == PaintStyle::Fill
+            && self.state.global_composite_operation == BlendMode::SrcOver
+            && self.state.filter.is_none()
+            && matches!(self.state.dye(style), Dye::Color(..))
+            && self.state.texture(style).is_none()
+            && self.state.skia_image_filter.is_none()
+            && self.state.skia_mask_filter.is_none()
+            && self.state.skia_color_filter.is_none()
+            && self.state.matrix.rect_stays_rect();
+        let Some(rect) = plain.then(|| path.is_rect()).flatten() else {
+            return false;
+        };
+        let fill = self.paint_for_blur(style);
+        let (named, space) = &self.state.shadow_color;
+        let colour = Color4f {
+            a: named.a * fill.alpha_f(),
+            ..*named
+        };
+        let mut paint = fill;
+        paint.set_color4f(colour, Some(space));
+        // Not placed on the bytes a fill of the colour stores, as a blurred
+        // fill's colour is -- see `blur_mask::draw_rect`: the shadow is the
+        // colour times the blurred coverage, rounded once, and placed it
+        // was scaled throughout by its alpha's rounding, 77 where a shadow
+        // of `rgba(0, 0, 0, 0.3)` is 76.5. On an sRGB page Skia converts the
+        // colour to the page's space unchanged.
+        let sigma = self.state.shadow_blur / 2.0;
+        let draw =
+            BlurDraw::of(path, Some(rect), &paint, sigma, self.faint()).cast();
+        let matrix = Matrix::concat(
+            &Matrix::translate(self.state.shadow_offset),
+            &self.state.matrix,
+        );
+        let clip = self.state.clip.as_ref();
+        self.with_recorder(|mut recorder| {
+            recorder.append_blur(
+                draw,
+                matrix,
+                clip,
+                VectorFeatures::MASK_FILTER,
+            );
+        });
+        true
+    }
+
     /// What `paint_for_drawing` makes for a draw [`Self::blurs_as_op`] lets
     /// through, less the filters: the state's paint, dither, the colour with
     /// the global alpha in it, and `style`.
@@ -4211,6 +4493,47 @@ impl Context2D {
         recording: Recording,
         lines: bool,
     ) -> Option<(Paint, Pass)> {
+        self.shadow_cast_in(base_paint, recording, lines)
+            .map(|cast| {
+                let mut paint = cast.paint;
+                paint.set_image_filter(image_filters::drop_shadow_only(
+                    (0.0, 0.0),
+                    (cast.sigma.x, cast.sigma.y),
+                    cast.colour,
+                    cast.space,
+                    None,
+                    None,
+                ));
+                (paint, cast.pass)
+            })
+    }
+
+    /// The chain a draw's `shadowColor` shadow is cast through on pixels,
+    /// in the colour `cast` names: the exact Gaussian of the draw's
+    /// coverage, of a standard deviation half the `shadowBlur` in canvas
+    /// pixels whatever the transform, as the HTML Standard sets it, made by
+    /// itself -- see [`Step::Shadow`]. Its offset is none: the group the
+    /// draw is cast in is moved by the shadow's offset, so that the draw is
+    /// rasterized where its shadow lies.
+    fn shadow_steps(&self, cast: &CanvasShadow) -> Arc<[Step]> {
+        Arc::from([Step::Shadow {
+            offset: Vector::default(),
+            sigma: self.state.shadow_blur / 2.0,
+            colour: cast.named,
+            space: cast.named_space.clone(),
+            shadow_only: true,
+        }])
+    }
+
+    /// What [`Self::paint_for_shadow_in`] makes, before Skia's shadow filter
+    /// is put on the paint: the paint the draw casts in, how it is drawn,
+    /// and the shadow's colour as `recording` places it.
+    fn shadow_cast_in(
+        &self,
+        base_paint: &Paint,
+        recording: Recording,
+        lines: bool,
+    ) -> Option<CanvasShadow> {
         let (shadow_color, shadow_space) = &self.state.shadow_color;
         let mut shadow_blur = self.state.shadow_blur;
         if !self.casts_shadow() {
@@ -4284,19 +4607,65 @@ impl Context2D {
                 .or_else(|| bytes.clone().and_then(on_bytes)),
             Recording::Shared => bytes.clone().and_then(on_bytes),
         };
-        let (shadow_color, shadow_space) = placed.unwrap_or_else(|| {
+        let (colour, space) = placed.unwrap_or_else(|| {
             skia_paint_color_onto(named, shadow_space, &self.canvas_color_space)
         });
-        paint.set_image_filter(image_filters::drop_shadow_only(
-            (0.0, 0.0),
-            (sigma.x, sigma.y),
-            shadow_color,
-            shadow_space,
-            None,
-            None,
-        ));
-        Some((paint, pass))
+        Some(CanvasShadow {
+            paint,
+            pass,
+            colour,
+            space,
+            named,
+            named_space: shadow_space.clone(),
+            sigma,
+        })
     }
+}
+
+/// The standard deviation from which a rectangle's shadow is cast as a
+/// `BlurOp` -- see `Context2D::files_rect_shadow` -- and below which it is
+/// cast through the shadow's chain.
+///
+/// Measured, not chosen: the GPU works a blurred rectangle's closed form
+/// per fragment in floats, and a 60 by 40 rectangle at (60.3, 25.6) under
+/// `blur()` landed this far off it, in levels, where the CPU is within 0.500
+/// at every sigma:
+///
+/// ```text
+/// sigma   0.25   0.5    1      1.5    2      3      4      5      >5
+/// GPU     0.859  0.669  0.629  0.627  0.555  0.575  0.563  0.558  <=0.558
+/// ```
+///
+/// The chain is the exact Gaussian on either engine. #708 is the GPU closed
+/// form's precision, which `blur()` shares; once it holds a rectangle to
+/// half a level and its rounding at every sigma, this falls to zero.
+const RECT_SHADOW_FROM_SIGMA: f32 = 5.0;
+
+/// A draw's `shadowColor` shadow as one recording casts it -- see
+/// `Context2D::shadow_cast_in`.
+struct CanvasShadow {
+    /// The paint the draw is drawn in to cast its shadow: its own, its alpha
+    /// moved into `colour` where `pass` says so.
+    paint: Paint,
+    /// How the draw is drawn to cast it.
+    pass: Pass,
+    /// The shadow's colour, unpremultiplied, in `space`, as the recording
+    /// places it for Skia's shadow filter, whose conversion of a colour can
+    /// move a product off the level it rounds to -- see
+    /// `Context2D::paint_for_shadow_in`.
+    colour: Color4f,
+    space: ColorSpace,
+    /// The colour as named, unpremultiplied, in `named_space`, the alpha the
+    /// draw's paint moved into it included: what a chain tints with, whose
+    /// own conversion is exact and whose product is rounded once -- see
+    /// `chain::tint_colour`. Placed on a level instead, a translucent
+    /// shadow's every blurred value was scaled by that level's error.
+    named: Color4f,
+    named_space: ColorSpace,
+    /// Its standard deviation along each axis in the draw's own units, as
+    /// Skia's shadow filter takes it: half the `shadowBlur`, undone by the
+    /// transform's scale.
+    sigma: Point,
 }
 
 /// What a run of text hands [`Context2D::render_to_canvas`] beside its draw.
@@ -4911,6 +5280,20 @@ mod tests {
             (DEFAULT_TEXT_CONTRAST, DEFAULT_TEXT_GAMMA),
             (200.0, 100.0),
         )
+    }
+
+    /// A run of text casting a shadow answers what it can ink, as one
+    /// under a filter does, so that its shadow's chain is bounded by the
+    /// run rather than by the clip; a run casting none, under no filter,
+    /// does not work it out.
+    #[test]
+    fn a_shadowed_run_bounds_its_chain() {
+        let mut ctx = context();
+        assert!(!ctx.chains_text(), "a plain run");
+        ctx.state.shadow_color =
+            (Color4f::new(0.0, 0.0, 0.0, 0.6), ColorSpace::new_srgb());
+        ctx.state.shadow_blur = 6.0;
+        assert!(ctx.chains_text(), "a shadowed run");
     }
 
     /// Every float page is drawn on the CPU, so that its pixels take the
@@ -6019,14 +6402,18 @@ mod tests {
                 ctx.line_to(101.4, 69.8);
                 ctx.stroke();
             }),
-            ("a shadow, offset and blurred", false, |ctx| {
+            // A rectangle's shadow is a blurred rectangle of its own --
+            // see `Context2D::files_rect_shadow` -- which a piece bounds.
+            ("a shadow, offset and blurred", true, |ctx| {
                 ctx.set_shadow_color_css("rgb(20 140 60)")
                     .expect("a colour");
                 ctx.set_shadow_offset(6.5, 4.25);
                 ctx.set_shadow_blur(5.0);
                 ctx.fill_rect(70.4, 45.6, 18.3, 12.7);
             }),
-            ("a shadow offset, unblurred", false, |ctx| {
+            // The draw is filed apart from its shadow's group, and asks
+            // for no filter of its own -- see `render_to_canvas`.
+            ("a shadow offset, unblurred", true, |ctx| {
                 ctx.set_shadow_color_css("rgb(20 140 60)")
                     .expect("a colour");
                 ctx.set_shadow_offset(7.5, 5.25);

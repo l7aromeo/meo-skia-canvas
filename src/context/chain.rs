@@ -62,11 +62,17 @@ pub enum Step {
     /// `colour` blurred by the exact Gaussian of `sigma` and moved by
     /// `offset`, both in canvas pixels. `colour` is unpremultiplied, in
     /// `space`.
+    ///
+    /// `shadow_only` leaves out what the step before left, so the step makes
+    /// the shadow by itself: a `shadowColor` shadow, which the canvas
+    /// composites apart from the draw that casts it, and which the HTML
+    /// Standard blurs, offsets and colours as a `drop-shadow()` is.
     Shadow {
         offset: Vector,
         sigma: f32,
         colour: Color4f,
         space: ColorSpace,
+        shadow_only: bool,
     },
     /// A Skia image filter, its lengths in the local units of the draw it
     /// filters, as on the layer Skia opens for it: run by drawing the step
@@ -647,6 +653,7 @@ impl Drawn {
                     sigma,
                     colour,
                     space,
+                    shadow_only,
                 } => shadowed(
                     context.as_mut(),
                     &image,
@@ -654,6 +661,7 @@ impl Drawn {
                     (sigma * scale.0, sigma * scale.1),
                     (*colour, space),
                     gain,
+                    *shadow_only,
                 ),
                 Step::Image { filter, .. } => {
                     imaged(context.as_mut(), &image, filter, &layer, gain)
@@ -1473,7 +1481,9 @@ fn filtered(
 
 /// `image` over its shadow, scaled by `gain`, in `image`'s own pixel type:
 /// its alpha in `colour`, blurred by the exact Gaussian of `sigma` along
-/// rows and columns and moved by `offset`, all in layer pixels.
+/// rows and columns and moved by `offset`, all in layer pixels. With
+/// `shadow_only`, the shadow by itself, without `image` over it -- see
+/// [`Step::Shadow`].
 ///
 /// Made in floats on the CPU -- the tint, the blur and the two composited
 /// -- and rounded once into `image`'s type, by [`rounded_once`]: an
@@ -1493,16 +1503,111 @@ fn shadowed(
     sigma: (f32, f32),
     colour: (Color4f, &ColorSpace),
     gain: f32,
+    shadow_only: bool,
 ) -> Option<Image> {
     if let Some(context) = context.as_deref_mut()
-        && let Some(on_gpu) =
-            shadowed_on_gpu(context, image, offset, sigma, colour, gain)
+        && let Some(on_gpu) = shadowed_on_gpu(
+            context,
+            image,
+            offset,
+            sigma,
+            colour,
+            gain,
+            shadow_only,
+        )
     {
         return Some(on_gpu);
     }
-    let composed =
-        shadow_composed(context.as_deref(), image, offset, sigma, colour)?;
+    if shadow_only
+        && offset == Vector::default()
+        && let Some(alone) =
+            shadow_of_alpha(context.as_deref(), image, sigma, colour, gain)
+    {
+        return Some(alone);
+    }
+    let composed = shadow_composed(
+        context.as_deref(),
+        image,
+        offset,
+        sigma,
+        colour,
+        shadow_only,
+    )?;
     rounded_once(&composed, image.image_info(), gain)
+}
+
+/// [`shadowed`] by itself on an eight-bit layer, unmoved: a canvas's own
+/// shadow, whose group is moved by its offset instead -- see
+/// `Context2D::shadow_steps` -- made from the layer's alpha bytes. The
+/// same sums [`shadow_composed`] makes, without what they are composed
+/// with: an eight-bit alpha is read as the float the source drawn into
+/// floats holds, the tint is [`tinted_alpha`]'s, and a shadow drawn onto a
+/// cleared float surface comes back as itself, so the result is the same to
+/// the bit. It is two fewer float copies of the layer and one fewer surface.
+///
+/// `None` for anything else, for [`shadow_composed`] to make.
+fn shadow_of_alpha(
+    context: Option<&Gpu>,
+    image: &Image,
+    sigma: (f32, f32),
+    (colour, space): (Color4f, &ColorSpace),
+    gain: f32,
+) -> Option<Image> {
+    let bytes = matches!(
+        image.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    let blurred = sigma.0 > 0.0 || sigma.1 > 0.0;
+    if !(bytes && blurred) {
+        return None;
+    }
+    let raster = to_raster(context, image)?;
+    let named = tint_colour(colour, space, raster.image_info());
+    let pixmap = raster.peek_pixels()?;
+    let (w, h) = (raster.width() as usize, raster.height() as usize);
+    let row = pixmap.row_bytes();
+    let pixels = pixmap.bytes()?;
+    // The alpha is the fourth byte of a pixel in either byte order, made a
+    // float as Skia's raster pipeline loads a byte, by a multiply.
+    let alpha: Vec<f32> = pixels
+        .chunks(row)
+        .take(h)
+        .flat_map(|line| line[..w * 4].as_chunks::<4>().0.iter())
+        .map(|px| f32::from(px[3]) * (1.0 / 255.0))
+        .collect();
+    let alpha = exact_blur::blur_alpha(alpha, w, h, sigma.0, sigma.1);
+    let info = raster
+        .image_info()
+        .with_color_type(ColorType::RGBAF32)
+        .with_alpha_type(AlphaType::Premul);
+    // Tinted as `shadow_composed` tints: by `tinted_alpha` where the tint
+    // is named, and otherwise the alpha alone through Skia's blend.
+    let pixel = |a: f32| match named {
+        Some((rgb, tint_alpha)) => tinted_alpha(rgb, tint_alpha, a),
+        None => [0.0, 0.0, 0.0, a],
+    };
+    let shadow = baked_image(&info, |out, stride| {
+        out.chunks_mut(stride).zip(alpha.chunks(w)).for_each(
+            |(line, values)| {
+                line.as_chunks_mut::<16>()
+                    .0
+                    .iter_mut()
+                    .zip(values)
+                    .for_each(|(px, &a)| {
+                        px.as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(pixel(a))
+                            .for_each(|(out, v)| *out = v.to_ne_bytes());
+                    });
+            },
+        );
+    })?;
+    let shadow = match named {
+        Some(_) => shadow,
+        None => filtered(None, &shadow, &tint(named, colour, space)?, 1.0)?,
+    };
+    rounded_once(&shadow, image.image_info(), gain)
 }
 
 /// [`shadowed`] made on the GPU `image` lives on, through
@@ -1527,6 +1632,7 @@ fn shadowed_on_gpu(
     sigma: (f32, f32),
     (colour, space): (Color4f, &ColorSpace),
     gain: f32,
+    shadow_only: bool,
 ) -> Option<Image> {
     let blurred = sigma.0 > 0.0 || sigma.1 > 0.0;
     let bytes = matches!(
@@ -1546,6 +1652,7 @@ fn shadowed_on_gpu(
         (offset.x, offset.y),
         tint,
         gain,
+        shadow_only,
     )
 }
 
@@ -1558,11 +1665,13 @@ fn shadowed_on_gpu(
     _: (f32, f32),
     _: (Color4f, &ColorSpace),
     _: f32,
+    _: bool,
 ) -> Option<Image> {
     match *context {}
 }
 
-/// [`shadowed`]'s image over its shadow, in floats, before it is rounded.
+/// [`shadowed`]'s image over its shadow, or the shadow by itself where
+/// `shadow_only`, in floats, before it is rounded.
 ///
 /// On an eight-bit layer the shadow is the source's alpha alone, blurred
 /// in f32 and then tinted -- by [`tinted_alpha`] where [`tint_colour`]
@@ -1579,6 +1688,7 @@ fn shadow_composed(
     offset: Vector,
     sigma: (f32, f32),
     (colour, space): (Color4f, &ColorSpace),
+    shadow_only: bool,
 ) -> Option<Image> {
     let raster = to_raster(context, image)?;
     let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
@@ -1642,7 +1752,9 @@ fn shadow_composed(
             sampling,
             None,
         );
-        canvas.draw_image(&source, (0, 0), None);
+        if !shadow_only {
+            canvas.draw_image(&source, (0, 0), None);
+        }
     })?;
     Some(composed)
 }
@@ -2180,6 +2292,7 @@ mod tests {
             sigma,
             colour: Color4f::new(0.0, 0.0, 0.0, 1.0),
             space: ColorSpace::new_srgb(),
+            shadow_only: false,
         }
     }
 
@@ -2260,6 +2373,7 @@ mod tests {
             Vector::new(2.0, 2.0),
             (1.0, 1.0),
             (Color4f::new(1.0, 0.0, 0.0, 1.0), &ColorSpace::new_srgb()),
+            false,
         )
         .expect("a shadow");
         for (what, image) in [("coloured", &coloured), ("shadowed", &shadowed)]
@@ -3312,8 +3426,9 @@ mod tests {
     fn a_shadow_keeps_every_bit_it_was_drawn_with() {
         let mut differing = Vec::new();
         let runs = shadow_sweep(|name, image, offset, sigma, colour, gain| {
-            let ours = shadowed(None, image, offset, sigma, colour, gain)
-                .expect("a shadow");
+            let ours =
+                shadowed(None, image, offset, sigma, colour, gain, false)
+                    .expect("a shadow");
             let theirs = shadowed_as_drawn(image, offset, sigma, colour, gain)
                 .expect("a shadow");
             let info = ours.image_info();
@@ -3410,6 +3525,7 @@ mod tests {
                                 offset,
                                 sigma,
                                 (colour, &srgb),
+                                false,
                             )
                             .expect("a shadow");
                             let theirs = composed_as_drawn(
@@ -3615,6 +3731,68 @@ mod tests {
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     const GPU_TIE_LEVELS: f64 = 1e-3;
 
+    /// A shadow made by itself from a layer's alpha bytes lands the bytes
+    /// the shadow the general route composes does, to the byte: on each
+    /// eight-bit kind, through a named tint and through Skia's blend, at
+    /// every sigma and gain.
+    #[test]
+    fn a_shadow_made_from_alpha_bytes_is_the_composed_one() {
+        use super::shadow_of_alpha;
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let kinds = [
+            (ColorType::RGBA8888, &srgb),
+            (ColorType::BGRA8888, &srgb),
+            (ColorType::RGBA8888, &p3),
+        ];
+        let colours = [
+            Color4f::new(0.0, 0.0, 0.0, 1.0),
+            Color4f::new(0.78, 0.16, 0.35, 0.6),
+            Color4f::new(1.0, 1.0, 1.0, 0.3),
+        ];
+        let mut compared = 0;
+        for (kind, space) in kinds {
+            for scene in [0, 1] {
+                let image = layer(40, 36, kind, space, scene);
+                let info = image.image_info();
+                for sigma in [(0.5, 0.5), (2.0, 2.0), (6.0, 6.0), (1.5, 4.0)] {
+                    for colour in colours {
+                        for gain in [1.0, 0.7] {
+                            let ours = shadow_of_alpha(
+                                None,
+                                &image,
+                                sigma,
+                                (colour, &srgb),
+                                gain,
+                            )
+                            .expect("a shadow");
+                            let composed = shadow_composed(
+                                None,
+                                &image,
+                                Vector::default(),
+                                sigma,
+                                (colour, &srgb),
+                                true,
+                            )
+                            .expect("a shadow");
+                            let theirs = rounded_once(&composed, info, gain)
+                                .expect("rounded");
+                            assert_eq!(
+                                bytes_of(&ours, info),
+                                bytes_of(&theirs, info),
+                                "{kind:?} {scene} {sigma:?} {colour:?} {gain}"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 2 * 4 * 3 * 2);
+    }
+
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     #[test]
     fn an_eight_bit_gpu_shadow_is_the_cpus_but_on_ties() {
@@ -3688,7 +3866,13 @@ mod tests {
                 for sigma in sigmas {
                     for offset in offsets {
                         for colour in colours {
-                            for gain in [1.0, 0.7] {
+                            // The shadow under its image, and alone.
+                            for (gain, shadow_only) in [
+                                (1.0, false),
+                                (0.7, false),
+                                (1.0, true),
+                                (0.7, true),
+                            ] {
                                 let Some(gpu) = shadowed_on_gpu(
                                     &mut context,
                                     &texture,
@@ -3696,6 +3880,7 @@ mod tests {
                                     sigma,
                                     (colour, &srgb),
                                     gain,
+                                    shadow_only,
                                 ) else {
                                     // A blur reaching past four times its
                                     // line is the CPU's: the 7-wide layer
@@ -3719,6 +3904,7 @@ mod tests {
                                     offset,
                                     sigma,
                                     (colour, &srgb),
+                                    shadow_only,
                                 )
                                 .expect("a shadow");
                                 let floats = floats_of(&composed);
@@ -3771,13 +3957,15 @@ mod tests {
             "{flips} of {values} bytes in {runs} shadows round apart, the \
              farthest {nearest} levels from a tie"
         );
-        assert_eq!(runs + to_cpu, 4 * 3 * 8 * 4 * 5 * 2);
+        // Four kinds, three scenes, eight sigmas, four offsets, five colours,
+        // and two gains for the shadow under its image and two alone.
+        assert_eq!(runs + to_cpu, 4 * 3 * 8 * 4 * 5 * 4);
         // The GPU made every shadow but those on the 7-wide layer at sigmas
         // 4.75, 6 and 8, on each of four kinds, which its reach refuses: a
         // sweep that fell back to the CPU throughout would compare the CPU
         // with itself.
-        assert_eq!(to_cpu, 4 * 3 * 4 * 5 * 2);
-        assert_eq!(runs, 4 * 3 * 8 * 4 * 5 * 2 - to_cpu);
+        assert_eq!(to_cpu, 4 * 3 * 4 * 5 * 4);
+        assert_eq!(runs, 4 * 3 * 8 * 4 * 5 * 4 - to_cpu);
         assert!(
             wrong.is_empty(),
             "{} bytes apart off a tie, first {:?}",
@@ -3947,6 +4135,7 @@ mod shared_tests {
             sigma,
             colour: Color4f::new(0.0, 0.0, 0.3, 0.6),
             space: ColorSpace::new_srgb(),
+            shadow_only: false,
         }]
     }
 

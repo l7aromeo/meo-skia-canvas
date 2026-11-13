@@ -1338,6 +1338,33 @@ transform's scale and the filtered draw is turned onto the page. On an F16
 or F32 page that is a layer of the page's own floats, where Skia's would be
 eight bits a channel; beside a CSS filter it is Skia's layer on any page.
 
+**A `shadowColor` shadow is the exact Gaussian blur of what casts it, and
+Chrome's is not.** The HTML Standard casts the shadow from the draw's alpha
+in `shadowColor`, blurred by a Gaussian whose standard deviation is half the
+`shadowBlur`, in canvas pixels whatever the transform. Here it is that, made
+from the draw's own pixels and rounded once, as a `drop-shadow()` is: within
+half a level on 8-bit pixels on either engine. Chrome for Testing
+158.0.8127.18 headless approximates the blur, on its raster canvas by up to
+12.5 levels. A black triangle on a 560 by 300 canvas, worst levels from the
+exact shadow of Chrome's own unshadowed triangle:
+
+        shadowBlur          2       4       8      12      24
+        here             0.50    0.50    0.50    0.50    0.50
+        Chrome raster   12.49   11.33    8.38    8.97    3.97
+        Chrome GPU       0.84    0.86    0.99    1.87    2.17
+
+A filled rectangle in a flat colour, untransformed and unfiltered, casts the
+closed form of its blurred rectangle once the standard deviation reaches 5 --
+see `RECT_SHADOW_FROM_SIGMA` -- and not the Gaussian of the rectangle as
+Skia rasterises it, whose edges step in quarters of a pixel. Below 5 the
+GPU's closed form is more than half a level off (#708), and the rectangle
+casts its shadow as any other draw does.
+
+Five shadows are still Skia's: one cast by a draw under a CSS filter, one
+under a `globalCompositeOperation` that composites the whole canvas, one
+under a CanvasKit filter, one cast by a run holding colour glyphs, and every
+shadow in a PDF or SVG document. Each blur is Skia's.
+
 **On an eight-bit sRGB canvas a shadow stores the exact product of its colour
 and its alpha, on either engine, and Chrome's do not all.** `shadowColor`, a
 CSS `drop-shadow()` and a CanvasKit drop shadow store the product rounded

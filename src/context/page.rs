@@ -11069,7 +11069,21 @@ mod tests {
             if grouped {
                 ctx.save_layer_with(0.8, None, None);
             }
-            ctx.fill_rect(x as f32 + 0.3, y as f32 + 0.6, 10.0, 8.0);
+            match scene {
+                // A triangle, whose shadow is a group of its own: a
+                // rectangle's is a blurred rectangle, which opens no layer
+                // -- see `Context2D::files_rect_shadow`.
+                1 => {
+                    let (x, y) = (x as f32 + 0.3, y as f32 + 0.6);
+                    ctx.begin_path();
+                    ctx.move_to(x, y);
+                    ctx.line_to(x + 10.0, y + 1.5);
+                    ctx.line_to(x + 4.0, y + 8.0);
+                    ctx.close_path();
+                    ctx.fill(crate::path::FillRule::NonZero);
+                }
+                _ => ctx.fill_rect(x as f32 + 0.3, y as f32 + 0.6, 10.0, 8.0),
+            }
             if grouped {
                 ctx.restore();
             }
@@ -11141,14 +11155,13 @@ mod tests {
     /// it flushes more often, but no more than five times as often. A page
     /// of `saveLayer` groups flushes every so many groups, inside one more
     /// group as well, and a page of pattern fills every so many of the
-    /// layers each is filed as: three under a shadow, the shadow's group
-    /// and the two image-filtered draws, and two under `source-in`, its two
-    /// groups. Rects under a CSS `drop-shadow()`, each a group whose chain
-    /// shares layers with the others', flush every so many groups, and the
-    /// flushes fall among the chains, no more than that many between two:
-    /// counted after the whole run, they came out the same in number with
-    /// every chain before the first. Twice the draws make twice the flushes,
-    /// within one,
+    /// layers each is filed as: two under a shadow, the shadow's group and
+    /// the draw's, and two under `source-in`, its two groups. Rects under a CSS
+    /// `drop-shadow()`, each a group whose chain shares layers with the
+    /// others', flush every so many groups, and the flushes fall among the
+    /// chains, no more than that many between two: counted after the whole
+    /// run, they came out the same in number with every chain before the
+    /// first. Twice the draws make twice the flushes, within one,
     /// and a page of a few never flushes before its read.
     #[test]
     fn a_gpu_playback_flushes_every_so_many_offscreen_layers() {
@@ -11179,8 +11192,7 @@ mod tests {
                     (n / per..=5 * n / per).contains(&once),
                     "scene {scene}: {once}"
                 ),
-                6 => assert_eq!(once, 3 * n / per, "scene {scene}"),
-                7 => assert_eq!(once, 2 * n / per, "scene {scene}"),
+                6 | 7 => assert_eq!(once, 2 * n / per, "scene {scene}"),
                 _ => assert_eq!(once, n / per, "scene {scene}"),
             }
             let (twice, _) = flushed(scene, 2 * n);

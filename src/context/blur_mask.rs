@@ -763,18 +763,29 @@ pub(crate) fn on_gpu(_canvas: &SkCanvas) -> bool {
 /// only on a surface in its space: a page played onto another, as a canvas
 /// drawn into one in another space is, is painted `color` converted into
 /// that one.
+///
+/// With `product`, as a shadow is drawn, the colour times the blurred
+/// coverage is rounded once wherever the rectangle lands, its interior
+/// included; without it, on the GPU the colour is drawn as a fill draws it
+/// through the coverage, so that the interior stores a fill's bytes. The
+/// CPU bakes the product wherever `exact` is not given.
 pub(crate) fn draw_rect(
     canvas: &SkCanvas,
     rect: Rect,
     sigma: f32,
     color: Color4f,
     exact: Option<&ExactColour>,
+    product: bool,
 ) -> bool {
     let sigma = f64::from(sigma);
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     if on_gpu(canvas) {
-        return draw_on_gpu(canvas, rect, sigma, color, exact);
+        return draw_on_gpu(canvas, rect, sigma, color, exact, product);
     }
+    // The CPU bakes the product wherever `exact` is not given, so a build
+    // with no GPU backend has nothing to do with it.
+    #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+    let _ = product;
     let target = canvas.image_info();
     let space = target.color_space();
     let exact = exact.filter(|exact| space.as_ref() == Some(&exact.space));
@@ -892,6 +903,7 @@ fn draw_on_gpu(
     sigma: f64,
     color: Color4f,
     exact: Option<&ExactColour>,
+    product: bool,
 ) -> bool {
     let k = (sigma * std::f64::consts::SQRT_2) as f32;
     let uniforms: Vec<u8> = [rect.left, rect.top, rect.right, rect.bottom, k]
@@ -919,6 +931,19 @@ fn draw_on_gpu(
             paint
                 .set_shader(shaders::blend(BlendMode::SrcIn, shader, colour))
                 .set_alpha_f(alpha);
+            canvas.draw_rect(extent, &paint);
+        }
+        // A shadow's colour times its coverage, rounded once: `SrcIn` keeps
+        // the colour's shader at the coverage's alpha, the colour's alpha as
+        // given. Drawn as a fill, a shadow of `rgba(0, 0, 0, 0.3)` was 77
+        // through, the fill's byte, where its product is 76.5 times the
+        // coverage.
+        None if product => {
+            paint.set_shader(shaders::blend(
+                BlendMode::SrcIn,
+                shader,
+                shaders::color_in_space(color, ColorSpace::new_srgb()),
+            ));
             canvas.draw_rect(extent, &paint);
         }
         // Without one, the colour is drawn as a fill draws it, as the

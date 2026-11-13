@@ -3294,19 +3294,34 @@ fn play_shared_chains(
     target: Target,
     paced: bool,
 ) -> Option<usize> {
-    let leading: Vec<Leading<'_>> = entries
-        .iter()
-        .map_while(|entry| match entry {
+    // Each leading entry with the index of the entry it is, and of the one
+    // after it that a shadow cast alone is followed by, which it takes.
+    let mut leading: Vec<(Leading<'_>, usize, Option<usize>)> = Vec::new();
+    let mut at = 0;
+    while let Some(entry) = entries.get(at) {
+        let lead = match entry {
             Layer::Group(group) => group
                 .shared_chain(canvas, target)
-                .map(|chain| Leading::Group(group, chain)),
+                .map(|chain| Leading::Group(group, chain, None)),
             Layer::Blur(op) => op
                 .shared_chain(canvas, target)
                 .map(|(chain, paths)| Leading::Blur(op, chain, paths)),
             _ => None,
-        })
-        .collect();
-    let chains: usize = leading.iter().map(Leading::chains).sum();
+        };
+        let Some(mut lead) = lead else { break };
+        let mut after = None;
+        if let Leading::Group(_, chain, then) = &mut lead
+            && casts_alone(&chain.steps)
+            && let Some(next) = entries.get(at + 1)
+            && draws_plainly(next)
+        {
+            *then = Some(next);
+            after = Some(at + 1);
+        }
+        leading.push((lead, at, after));
+        at = after.unwrap_or(at) + 1;
+    }
+    let chains: usize = leading.iter().map(|(lead, ..)| lead.chains()).sum();
     if chains < 2 {
         return None;
     }
@@ -3316,13 +3331,17 @@ fn play_shared_chains(
     }
     let to_device = canvas.local_to_device_as_3x3();
     let mut run = Run::default();
-    for ((entry, layer_entry), features) in
-        leading.iter().zip(entries).zip(features)
-    {
+    for (entry, index, after) in &leading {
         for member in entry.members(&to_device) {
             let Some(plan) =
                 chain::plan(canvas, member.steps, member.content, member.depth)
             else {
+                // A chain with nothing to work on composites nothing, and
+                // what it is followed by lands after the chains before it.
+                if let Some(then) = member.then {
+                    std::mem::take(&mut run).play(canvas, target);
+                    then.playback(canvas, target);
+                }
                 continue;
             };
             let layer = match run.layer_for(&plan) {
@@ -3335,7 +3354,10 @@ fn play_shared_chains(
             run.push(Chained { member, plan }, layer);
         }
         if paced {
-            let layers = offscreen_layers(layer_entry, *features);
+            let layers = std::iter::once(*index)
+                .chain(*after)
+                .map(|i| offscreen_layers(&entries[i], features[i]))
+                .sum();
             if pacing::due(layers) {
                 std::mem::take(&mut run).play(canvas, target);
             }
@@ -3343,7 +3365,31 @@ fn play_shared_chains(
         }
     }
     run.play(canvas, target);
-    Some(leading.len())
+    Some(at)
+}
+
+/// Whether a chain of `steps` casts a shadow alone -- see [`Step::Shadow`]:
+/// the group of a draw's `shadowColor` shadow, which the draw that casts it
+/// follows as an entry of its own.
+fn casts_alone(steps: &[Step]) -> bool {
+    matches!(
+        steps.last(),
+        Some(Step::Shadow {
+            shadow_only: true,
+            ..
+        })
+    )
+}
+
+/// Whether `entry` draws onto the canvas as it is played, through no layer
+/// or chain of its own: what a run of chains can play between two of its
+/// composites -- see [`play_shared_chains`] -- since no chain reads the
+/// canvas it is drawn onto.
+fn draws_plainly(entry: &Layer) -> bool {
+    matches!(
+        entry,
+        Layer::Picture(_) | Layer::Targeted(_) | Layer::Deferred(_)
+    )
 }
 
 /// The most layers a [`Run`] keeps open at once. Chosen, not measured: two
@@ -3430,6 +3476,9 @@ impl<'a> Run<'a> {
                 }
                 None => {}
             }
+            if let Some(then) = chained.member.then {
+                then.playback(canvas, target);
+            }
         }
     }
 }
@@ -3443,7 +3492,9 @@ struct SharedChain {
 /// An entry [`play_shared_chains`] plays: a group through a chain, or a
 /// blurred draw whose blur is a chain for each of its `paths`.
 enum Leading<'a> {
-    Group(&'a Group, SharedChain),
+    /// A group through a chain, and the entry played after its result
+    /// where the group casts a shadow alone -- see [`casts_alone`].
+    Group(&'a Group, SharedChain, Option<&'a Layer>),
     Blur(&'a BlurOp, BlurChain, Vec<Path>),
 }
 
@@ -3460,7 +3511,7 @@ impl Leading<'_> {
     /// that maps the entry's coordinates to the device by `to_device`.
     fn members(&self, to_device: &Matrix) -> Vec<Member<'_>> {
         match self {
-            Leading::Group(group, SharedChain { steps, paint }) => {
+            Leading::Group(group, SharedChain { steps, paint }, then) => {
                 let content = group.chain_content(
                     None,
                     &Matrix::new_identity(),
@@ -3475,6 +3526,7 @@ impl Leading<'_> {
                     content,
                     depth: Depth::Floats,
                     paint,
+                    then: *then,
                 }]
             }
             Leading::Blur(op, chain, paths) => paths
@@ -3485,6 +3537,7 @@ impl Leading<'_> {
                     content: Some(op.content(path)),
                     depth: chain.depth,
                     paint: &chain.gain,
+                    then: None,
                 })
                 .collect(),
         }
@@ -3493,13 +3546,16 @@ impl Leading<'_> {
 
 /// One chain [`play_shared_chains`] runs: what it draws into its layer, its
 /// steps, what bounds what it draws, the depth of its layer and the paint
-/// it composites through, whose alpha the last step takes.
+/// it composites through, whose alpha the last step takes; and `then`, the
+/// entry played as it is right after its result is composited -- the draw
+/// that casts a shadow the chain makes alone.
 struct Member<'a> {
     draw: Draw<'a>,
     steps: &'a [Step],
     content: Option<Rect>,
     depth: Depth,
     paint: &'a Paint,
+    then: Option<&'a Layer>,
 }
 
 /// What a [`Member`] draws into its layer: a group's entries, or one path
@@ -3918,8 +3974,18 @@ impl BlurDraw {
                 sigma,
                 faint,
                 exact: None,
+                product: false,
             },
         }
+    }
+
+    /// This draw as a shadow casts it: its colour times the blurred
+    /// coverage, rounded once, rather than the coverage of a fill of the
+    /// colour, whose interior stores the fill's bytes -- see
+    /// [`blur_mask::draw_rect`].
+    pub fn cast(mut self) -> Self {
+        self.paint.product = true;
+        self
     }
 
     /// This draw, painted as pixels in `exact` where it is given -- see
@@ -3951,6 +4017,10 @@ struct BlurPaint {
     /// The colour held exactly in the page's space, on a page that keeps a
     /// recording for pixels, which the op paints with when played as pixels.
     exact: Option<ExactColour>,
+    /// Whether the colour times the blurred coverage is rounded once, as a
+    /// shadow's is, rather than the colour drawn as a fill through the
+    /// coverage -- see [`BlurDraw::cast`].
+    product: bool,
 }
 
 /// A run of blurred rectangles, or one blurred path, in one flat colour and
@@ -4555,6 +4625,7 @@ impl BlurOp {
                     sigma,
                     self.paint.color,
                     exact,
+                    self.paint.product,
                 );
             }
         });

@@ -330,6 +330,7 @@ impl Filter {
                         sigma: *blur,
                         colour,
                         space,
+                        shadow_only: false,
                     })
                 }
             })
