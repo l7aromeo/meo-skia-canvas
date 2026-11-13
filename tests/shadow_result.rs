@@ -64,15 +64,8 @@ fn rectangle(ctx: &mut Context2D) {
 
 /// How far an 8-bit alpha of a rectangle's shadow may lie from its closed
 /// form, as `tests/blur_rect.rs` holds a blurred rectangle: half a level
-/// for rounding and a hundredth for the arithmetic on the CPU, and on the
-/// GPU, which works the blur per fragment and leaves it a half-precision
-/// float, half a unit in the last place of one just below 1 on top.
-fn rect_tolerance(gpu: bool) -> f64 {
-    match gpu {
-        true => 0.5 + 255.0 / 4096.0 + 0.001,
-        false => 0.51,
-    }
-}
+/// for rounding and a hundredth for the arithmetic, on either engine.
+const RECT_TOLERANCE: f64 = 0.51;
 
 /// The shadow of [`RECT`] blurred by `sigma`: the interval across blurred
 /// times the interval down, each averaged over a pixel -- the closed form a
@@ -319,18 +312,20 @@ fn shadow_alone(
     Some(alpha(&mut canvas))
 }
 
-/// The standard deviation from which a rectangle's shadow is its closed
-/// form -- `RECT_SHADOW_FROM_SIGMA` in `src/context/mod.rs` -- and below
-/// which it is the exact Gaussian of the coverage Skia rasterises it to.
-const RECT_FROM_SIGMA: f64 = 5.0;
+/// Whether `name`'s shadow is a rectangle's closed form -- see
+/// `Context2D::files_rect_shadow` -- rather than the exact Gaussian of the
+/// coverage Skia rasterises it to: an untransformed rectangle's, blurred.
+fn closed_form(name: &str, sigma: f64) -> bool {
+    name == "rectangle" && sigma > 0.0
+}
 
 /// What `draw`'s shadow alone should be: its coverage `drawn`, blurred by
 /// the exact Gaussian of half `blur`, scaled by the shadow's alpha and the
-/// global alpha, inside the clip. A rectangle's, from
-/// [`RECT_FROM_SIGMA`], is its closed form.
+/// global alpha, inside the clip; a rectangle's, its closed form -- see
+/// [`closed_form`].
 fn reference(name: &str, drawn: &[f64], blur: f32, cast: Cast) -> Vec<f64> {
     let sigma = f64::from(blur) / 2.0;
-    let closed = name == "rectangle" && sigma >= RECT_FROM_SIGMA;
+    let closed = closed_form(name, sigma);
     let blurred = match closed {
         true => rect_shadow(sigma),
         false => sampled(drawn, SIZE.0 as usize, sigma),
@@ -360,8 +355,7 @@ fn off_the_gaussian(cast: Cast, blurs: &[f32]) -> Vec<String> {
                     continue;
                 };
                 let reference = reference(name, &drawn, blur, cast);
-                let closed = name == "rectangle"
-                    && f64::from(blur) / 2.0 >= RECT_FROM_SIGMA;
+                let closed = closed_form(name, f64::from(blur) / 2.0);
                 let misses = match closed {
                     true => shadow
                         .iter()
@@ -369,7 +363,7 @@ fn off_the_gaussian(cast: Cast, blurs: &[f32]) -> Vec<String> {
                         .enumerate()
                         .filter(|(_, (a, r))| {
                             (f64::from(**a) - **r * 255.0).abs()
-                                > rect_tolerance(gpu)
+                                > RECT_TOLERANCE
                         })
                         .map(|(i, (a, r))| (i, *a, r * 255.0))
                         .collect(),

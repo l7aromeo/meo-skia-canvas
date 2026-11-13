@@ -4463,18 +4463,19 @@ impl Context2D {
     /// [`BlurOp`](layer::BlurOp) of its own, before the fill, where it is a
     /// blurred rectangle in one flat colour: a filled rectangle the
     /// transform keeps one, dyed by a colour, on an sRGB page, under a blur
-    /// of [`RECT_SHADOW_FROM_SIGMA`] or more and a blend that composites
-    /// only where it lands. The op's blur of a rectangle is
-    /// worked in closed form on both engines; through the shadow's chain the
-    /// same rectangle was rasterised and convolved. `false`, filing nothing,
-    /// for any other draw.
+    /// and a blend that composites only where it lands. The op's blur of a
+    /// rectangle is worked in closed form, and both engines draw it from the
+    /// same profiles -- see `blur_mask::draw_rect`; through the shadow's
+    /// chain the same rectangle was rasterised and convolved. `false`,
+    /// filing nothing, for any other draw, and for a shadow with no blur,
+    /// which the op does not draw exactly and the chain does.
     ///
     /// The shadow's colour takes the fill's alpha, its colour's and the
     /// global one: a flat fill's coverage is its rectangle's, so the
     /// shadow's alpha is the product, rounded once by the op.
     fn files_rect_shadow(&self, path: &Path, style: PaintStyle) -> bool {
         let plain = self.casts_shadow()
-            && self.state.shadow_blur / 2.0 >= RECT_SHADOW_FROM_SIGMA
+            && self.state.shadow_blur > 0.0
             && PixelColorSpace::matching(&self.canvas_color_space)
                 == Some(PixelColorSpace::Srgb)
             && style == PaintStyle::Fill
@@ -4504,8 +4505,7 @@ impl Context2D {
         // of `rgba(0, 0, 0, 0.3)` is 76.5. On an sRGB page Skia converts the
         // colour to the page's space unchanged.
         let sigma = self.state.shadow_blur / 2.0;
-        let draw =
-            BlurDraw::of(path, Some(rect), &paint, sigma, self.faint()).cast();
+        let draw = BlurDraw::of(path, Some(rect), &paint, sigma, self.faint());
         let matrix = Matrix::concat(
             &Matrix::translate(self.state.shadow_offset),
             &self.state.matrix,
@@ -4778,25 +4778,6 @@ impl Context2D {
         })
     }
 }
-
-/// The standard deviation from which a rectangle's shadow is cast as a
-/// `BlurOp` -- see `Context2D::files_rect_shadow` -- and below which it is
-/// cast through the shadow's chain.
-///
-/// Measured, not chosen: the GPU works a blurred rectangle's closed form
-/// per fragment in floats, and a 60 by 40 rectangle at (60.3, 25.6) under
-/// `blur()` landed this far off it, in levels, where the CPU is within 0.500
-/// at every sigma:
-///
-/// ```text
-/// sigma   0.25   0.5    1      1.5    2      3      4      5      >5
-/// GPU     0.859  0.669  0.629  0.627  0.555  0.575  0.563  0.558  <=0.558
-/// ```
-///
-/// The chain is the exact Gaussian on either engine. #708 is the GPU closed
-/// form's precision, which `blur()` shares; once it holds a rectangle to
-/// half a level and its rounding at every sigma, this falls to zero.
-const RECT_SHADOW_FROM_SIGMA: f32 = 5.0;
 
 /// A draw's `shadowColor` shadow as one recording casts it -- see
 /// `Context2D::shadow_cast_in`.

@@ -1146,9 +1146,11 @@ standard deviation is the length given. Blurring a rectangle by it gives the
 product of the blurred interval across and the blurred interval down, which
 has a closed form, and a flat-colour rectangle that stays one on the device is
 drawn here as exactly that, averaged over each pixel: within half a level on
-8-bit pixels on the CPU engine, within 0.56 of one on the GPU engine, whose
-fragments hand the value on as a half float, and to the surface's precision on
-F16 and F32. On an 8-bit canvas the blur scales the bytes a fill of the colour
+8-bit pixels on either engine, the GPU landing the CPU's bytes, and to the
+surface's precision on F16 and F32. Both engines draw the same profiles,
+worked on the CPU: the GPU's own `exp` and division, working them per
+fragment, put a rectangle up to 0.86 of a level off at a sigma of 0.25 and
+over half a level at every sigma. On an 8-bit canvas the blur scales the bytes a fill of the colour
 stores, as a blurred path's does, so that its interior stores what the fill
 does: 128 of `rgba(0, 0, 0, 0.5)`, where the alpha as given stored 127. Chrome 152 approximates it, and its two canvases approximate it
 differently. A black 60 by 40 rectangle at a fractional position, worst levels
@@ -1357,11 +1359,9 @@ exact shadow of Chrome's own unshadowed triangle:
         Chrome GPU       0.84    0.86    0.99    1.87    2.17
 
 A filled rectangle in a flat colour, untransformed and unfiltered, casts the
-closed form of its blurred rectangle once the standard deviation reaches 5 --
-see `RECT_SHADOW_FROM_SIGMA` -- and not the Gaussian of the rectangle as
-Skia rasterises it, whose edges step in quarters of a pixel. Below 5 the
-GPU's closed form is more than half a level off (#708), and the rectangle
-casts its shadow as any other draw does.
+closed form of its blurred rectangle, as `blur()` draws one -- see the entry
+on a blurred rectangle -- and not the Gaussian of the rectangle as Skia
+rasterises it, whose edges step in quarters of a pixel.
 
 The shadow of a filtered draw is cast from what the filter makes, and the
 shadow is not filtered, as the HTML Standard orders the two and as Chrome

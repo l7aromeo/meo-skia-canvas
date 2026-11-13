@@ -21,9 +21,19 @@
 //! sprite: Skia draws an alpha-only image in a colour through its shader
 //! pipeline at about 1.5 ns a pixel, and a sprite of the same pixels at
 //! about 0.3. Baked pixels are kept by [`RectKey`], so the same rectangle
-//! drawn again costs the sprite alone. On the GPU the blur is worked per
-//! fragment by [`RECT_BLUR_SKSL`], which costs less there than uploading a
-//! texture.
+//! drawn again costs the sprite alone.
+//!
+//! On the GPU the profiles are the CPU's, worked here in `f64` and kept as
+//! `f32`, and each axis is handed over as a one-pixel-high texture: the
+//! fragment shader [`RECT_BLUR_SKSL`] multiplies the two at its pixel by the
+//! colour and rounds the product as [`bake`] does. Worked per fragment on
+//! the GPU instead, from `erfc` and `exp`, the profile lay up to 0.86 of a
+//! level off the exact blur at a sigma of 0.25 and over half a level at every
+//! sigma, where the same arithmetic in `f32` on the CPU is within half: the
+//! GPU's own transcendentals and division are less precise than `f32`, and
+//! Ganesh then stores the colour in half precision, a sixteenth of a level
+//! near 1. The interior is drawn as the CPU draws it -- see
+//! [`draw_interior`].
 
 use std::sync::{Arc, LazyLock};
 
@@ -33,7 +43,7 @@ use skia_safe::{
     ColorType, IPoint, IRect, Image, ImageInfo, Paint, Rect, shaders,
 };
 #[cfg(any(feature = "metal", feature = "vulkan"))]
-use skia_safe::{ClipOp, Data, RuntimeEffect};
+use skia_safe::{Data, RuntimeEffect, SamplingOptions, TileMode};
 
 use crate::{
     cache_store::{Budget, Store, StoreKey, Stored},
@@ -128,14 +138,20 @@ const SERIES_BELOW: f64 = 0.1;
 
 /// `k (G(d1 / k) - G(d0 / k))` for distances `d0` and `d1` from an edge,
 /// where `G(u) = u erf(u) + e^(-u^2) / sqrt(pi)` is the antiderivative of
-/// `erf`: the edge's share of a pixel spanning those distances.
+/// `erf`: the edge's share of a pixel spanning those distances. `above`
+/// is [`above_abs`] of a distance over `k`, which the caller works out once
+/// for each pixel boundary and two pixels share.
 ///
 /// Close to the edge against `k`, from the series
 /// `G(u) = (1 + u^2 - u^4 / 6 + u^6 / 30 - u^8 / 168 + ...) / sqrt(pi)`,
 /// whose n-th coefficient is `(-1)^(n+1) / (n! (2n - 1))`, taken to its
-/// `u^6` term; past it, as `|u|` and what `G` lies above it -- see
-/// [`above_abs`].
-fn edge_share(d0: f64, d1: f64, k: f64) -> f64 {
+/// `u^6` term; past it, as `|u|` and what `G` lies above it.
+fn edge_share(
+    (d0, d1): (f64, f64),
+    k: f64,
+    above: impl Fn(usize) -> f64,
+    (i0, i1): (usize, usize),
+) -> f64 {
     if d0.max(d1) < SERIES_BELOW * k {
         let k2 = k * k;
         let (q0, q1) = (d0 * d0 / k2, d1 * d1 / k2);
@@ -143,21 +159,31 @@ fn edge_share(d0: f64, d1: f64, k: f64) -> f64 {
         k * FRAC_1_SQRT_PI
             * (term(1, 1.0) + term(2, -1.0 / 6.0) + term(3, 1.0 / 30.0))
     } else {
-        (d1 - d0) + k * (above_abs(d1 / k) - above_abs(d0 / k))
+        (d1 - d0) + k * (above(i1) - above(i0))
     }
 }
 
 /// The interval `[a, b]` blurred by `sigma`, averaged over each of `n` pixels
-/// from zero: pixel `i` covers `[i, i + 1)`.
+/// from zero: pixel `i` covers `[i, i + 1)`. Each boundary's [`above_abs`]
+/// is worked out once, for both pixels it bounds: an `erfc` and an `exp` an
+/// edge and a boundary, half what a pixel at a time takes, and the same
+/// value either way.
 fn profile(n: usize, a: f64, b: f64, sigma: f64) -> Vec<f32> {
     let k = sigma * std::f64::consts::SQRT_2;
-    let edge = |x0: f64, x1: f64, e: f64| {
-        edge_share((x0 - e).abs(), (x1 - e).abs(), k)
+    let above = |e: f64| -> Vec<f64> {
+        (0..=n)
+            .map(|j| above_abs((j as f64 - e).abs() / k))
+            .collect()
+    };
+    let (above_a, above_b) = (above(a), above(b));
+    let edge = |i: usize, e: f64, kept: &[f64]| {
+        let (x0, x1) = (i as f64, i as f64 + 1.0);
+        edge_share(((x0 - e).abs(), (x1 - e).abs()), k, |j| kept[j], (i, i + 1))
     };
     (0..n)
         .map(|i| {
-            let (x0, x1) = (i as f64, i as f64 + 1.0);
-            ((edge(x0, x1, a) - edge(x0, x1, b)) / 2.0).clamp(0.0, 1.0) as f32
+            ((edge(i, a, &above_a) - edge(i, b, &above_b)) / 2.0)
+                .clamp(0.0, 1.0) as f32
         })
         .collect()
 }
@@ -279,19 +305,9 @@ impl Baked {
             _ => ColorType::RGBAF32,
         };
         let bytes = matches!(kind, ColorType::RGBA8888 | ColorType::BGRA8888);
-        let interior =
-            (!across.flat.is_empty() && !down.flat.is_empty()).then(|| {
-                let flat = IRect::new(
-                    across.flat.start as i32,
-                    down.flat.start as i32,
-                    across.flat.end as i32,
-                    down.flat.end as i32,
-                );
-                match bytes {
-                    true => widened(flat, across, down, color),
-                    false => flat,
-                }
-            });
+        let interior = interior_of(across, down, color, bytes);
+        let coverage = interior.map(|(_, coverage)| coverage);
+        let interior = interior.map(|(r, _)| r);
         // On 8-bit pixels, the columns and rows every pixel of which bakes to
         // a zero byte are left out: they draw nothing, and on a wide
         // rectangle at a small sigma they were a sixth of what was blitted.
@@ -354,21 +370,9 @@ impl Baked {
             .iter()
             .map(|(image, _)| image.image_info().compute_min_byte_size())
             .sum();
-        // An 8-bit interior whose bytes are full coverage's is filled at
-        // full coverage, to the same bytes: Skia fills an opaque colour as a
-        // memset and a nearly opaque one by blending each pixel, about six
-        // times as long at 600 by 400.
-        let coverage = across.middle() * down.middle();
-        let byte = |c: f32| color.map(|v| (v * c * 255.0 + 0.5) as u8);
-        let eight_bit =
-            matches!(kind, ColorType::RGBA8888 | ColorType::BGRA8888);
-        let coverage = match eight_bit && byte(coverage) == byte(1.0) {
-            true => 1.0,
-            false => coverage,
-        };
         Some(Baked {
             bands,
-            interior: interior.map(|r| (r, coverage)),
+            interior: interior.zip(coverage),
             bytes,
         })
     }
@@ -387,6 +391,66 @@ impl Baked {
             canvas.draw_image(image, origin + *at, None);
         });
         if let Some((rect, coverage)) = self.interior {
+            draw_interior(
+                canvas,
+                rect.with_offset(origin),
+                coverage,
+                color,
+                exact,
+            );
+        }
+    }
+}
+
+/// The interior of the rectangle of `across` and `down` in `color`,
+/// premultiplied, from the extent's origin, and the coverage it is filled
+/// at: the run where both profiles are flat, on 8-bit pixels widened while
+/// it bakes to the same bytes -- see [`widened`]. `None` where either
+/// profile has no flat run.
+///
+/// An 8-bit interior whose bytes are full coverage's is filled at full
+/// coverage, to the same bytes: Skia fills an opaque colour as a memset and
+/// a nearly opaque one by blending each pixel, about six times as long at
+/// 600 by 400.
+fn interior_of(
+    across: &Axis,
+    down: &Axis,
+    color: [f32; 4],
+    eight_bit: bool,
+) -> Option<(IRect, f32)> {
+    if across.flat.is_empty() || down.flat.is_empty() {
+        return None;
+    }
+    let flat = IRect::new(
+        across.flat.start as i32,
+        down.flat.start as i32,
+        across.flat.end as i32,
+        down.flat.end as i32,
+    );
+    let rect = match eight_bit {
+        true => widened(flat, across, down, color),
+        false => flat,
+    };
+    let coverage = across.middle() * down.middle();
+    let byte = |c: f32| color.map(|v| (v * c * 255.0 + 0.5) as u8);
+    let coverage = match eight_bit && byte(coverage) == byte(1.0) {
+        true => 1.0,
+        false => coverage,
+    };
+    Some((rect, coverage))
+}
+
+/// Fills `rect`, in device pixels, at `coverage` in `color`, or in `exact`
+/// placed at its alpha: the rectangle's interior, as both engines draw it.
+fn draw_interior(
+    canvas: &SkCanvas,
+    rect: IRect,
+    coverage: f32,
+    color: Color4f,
+    exact: Option<&ExactColour>,
+) {
+    {
+        {
             let fill =
                 Color4f::new(color.r, color.g, color.b, color.a * coverage);
             // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
@@ -423,7 +487,7 @@ impl Baked {
                 }
             }
             paint.set_anti_alias(false);
-            canvas.draw_irect(rect.with_offset(origin), &paint);
+            canvas.draw_irect(rect, &paint);
         }
     }
 }
@@ -612,107 +676,173 @@ pub(crate) fn release_cached_masks() {
     MASKS.lock().release();
 }
 
-/// The blurred rectangle, per fragment, in device pixels: `rect` is the
-/// device rectangle's left, top, right and bottom, and `k` is
-/// `sigma * sqrt(2)`. Its coverage goes out as a premultiplied white: under
-/// `SrcIn` with an exact colour, or as the clip shader a fill of the draw's
-/// colour is drawn through -- see [`draw_on_gpu`].
+/// The blurred rectangle at a fragment, in device pixels: the colour,
+/// premultiplied in the page's space, times the profile across at the
+/// fragment's column and the profile down at its row, read from the rows
+/// of a texture the CPU made -- see [`encoded`] -- whose first texels lie
+/// at `origin`. Where `levels` is not zero, as on 8-bit pixels, the product is
+/// rounded to them as [`bake`] rounds it, before Ganesh stores it at half
+/// precision: a value on the grid of levels survives that within 0.06 of a
+/// level, and the store's own rounding then lands on it.
 ///
-/// `erfc` is Numerical Recipes' Chebyshev fit, whose fractional error is
-/// below 1.2e-7 everywhere -- the precision of the `float` it runs in. Each
-/// axis's pixel average is worked one of three ways, by what a `float` keeps
-/// of it:
-///
-/// - Close to both edges against `k`, from the series, as [`edge_share`] works
-///   it and for the same reason, which a `float` meets far sooner than a
-///   `double` does. Each power's difference is taken as `q1 - q0` times a sum,
-///   with `q1 - q0` itself a product: the squares of neighbouring distances
-///   agree in most of a `float`'s digits, and their difference was otherwise
-///   off by 3e-5 of itself.
-/// - For a blur under four pixels, from the antiderivative, as [`edge_share`]
-///   works it past the series.
-/// - Otherwise by three-point Gauss-Legendre over `erf` across the pixel, each
-///   difference of two `erf`s taken as one of two `erfc`s on the side where
-///   both are small. The antiderivative's difference across a pixel cancels by
-///   about `k`, and in a `float` that was 1.2e-4 off at a sigma of 700 and
-///   1.6e-3 at 1e4; the quadrature stays within 2e-7 from a sigma of 4 up, and
-///   the antiderivative within 5e-7 below it, where the quadrature's own error
-///   grows -- 4e-6 at a sigma of 1.
+/// It works no profile itself. The GPU's `exp`, `erfc` and division are less
+/// precise than an `f32`, and the profile worked from them per fragment lay
+/// up to 0.86 of a level off the exact blur at a sigma of 0.25, where the
+/// same arithmetic in `f32` on the CPU is within half a level.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 const RECT_BLUR_SKSL: &str = "
-uniform float4 rect;
-uniform float k;
+uniform shader profiles;
+uniform float2 origin;
+uniform float4 colour;
+uniform float levels;
 
-const float FRAC_1_SQRT_PI = 0.5641895835;
-
-float erfc_nr(float z) {
-    float t = 1.0 / (1.0 + 0.5 * z);
-    float p = -0.82215223 + t * 0.17087277;
-    p = 1.48851587 + t * p;
-    p = -1.13520398 + t * p;
-    p = 0.27886807 + t * p;
-    p = -0.18628806 + t * p;
-    p = 0.09678418 + t * p;
-    p = 0.37409196 + t * p;
-    p = 1.00002368 + t * p;
-    p = -1.26551223 + t * p;
-    return t * exp(-z * z + p);
-}
-
-float above_abs(float v) {
-    return exp(-v * v) * FRAC_1_SQRT_PI - v * erfc_nr(v);
-}
-
-float edge(float x0, float x1, float e) {
-    float d0 = abs(x0 - e);
-    float d1 = abs(x1 - e);
-    if (max(d0, d1) < 0.1 * k) {
-        float q0 = (d0 / k) * (d0 / k);
-        float q1 = (d1 / k) * (d1 / k);
-        float dq = ((d1 - d0) / k) * ((d1 + d0) / k);
-        float s = dq * (1.0
-            - (q1 + q0) / 6.0
-            + (q1 * q1 + q1 * q0 + q0 * q0) / 30.0);
-        return k * FRAC_1_SQRT_PI * s;
-    }
-    return (d1 - d0) + k * (above_abs(d1 / k) - above_abs(d0 / k));
-}
-
-// erf(z1) - erf(z2) for z1 > z2, never subtracting two values near 1.
-float erf_diff(float z1, float z2) {
-    if (z2 >= 0.0) {
-        return erfc_nr(z2) - erfc_nr(z1);
-    }
-    if (z1 <= 0.0) {
-        return erfc_nr(-z1) - erfc_nr(-z2);
-    }
-    return 2.0 - erfc_nr(z1) - erfc_nr(-z2);
-}
-
-// The Gauss-Legendre nodes either side of a pixel's centre, sqrt(3/5) / 2.
-const float NODE = 0.3872983346;
-
-// From this k, a sigma of 4, the quadrature is closer than the
-// antiderivative.
-const float QUADRATURE_FROM = 5.656854249;
-
-float profile(float x, float a, float b) {
-    float x0 = x - 0.5;
-    float x1 = x + 0.5;
-    float far = max(max(abs(x0 - a), abs(x1 - a)), max(abs(x0 - b), abs(x1 - b)));
-    if (far < 0.1 * k || k < QUADRATURE_FROM) {
-        return clamp((edge(x0, x1, a) - edge(x0, x1, b)) * 0.5, 0.0, 1.0);
-    }
-    float s = (5.0 / 18.0) * erf_diff((x - NODE - a) / k, (x - NODE - b) / k)
-        + (8.0 / 18.0) * erf_diff((x - a) / k, (x - b) / k)
-        + (5.0 / 18.0) * erf_diff((x + NODE - a) / k, (x + NODE - b) / k);
-    return clamp(s * 0.5, 0.0, 1.0);
+// A profile value from its texel: 24 bits of fixed point, most significant
+// byte in red. Ganesh hands the texel over in half precision, which holds a
+// byte's level to well within half a level, so rounding recovers it.
+float profile(half4 t) {
+    float3 k = floor(float3(t.rgb) * 255.0 + 0.5);
+    return (k.r * 65536.0 + k.g * 256.0 + k.b) / 16777215.0;
 }
 
 half4 main(float2 p) {
-    return half4(profile(p.x, rect.x, rect.z) * profile(p.y, rect.y, rect.w));
+    float a = profile(profiles.eval(float2(p.x - origin.x, 0.5)));
+    float d = profile(profiles.eval(float2(p.y - origin.y, 1.5)));
+    float4 v = (colour * a) * d;
+    if (levels > 0.0) {
+        v = floor(v * levels + 0.5) / levels;
+    }
+    return half4(v);
 }
 ";
+
+/// The largest value [`RECT_BLUR_SKSL`]'s 24-bit fixed point holds: a
+/// profile value `v` is kept as `v * PROFILE_SCALE` rounded, within 3e-8 of
+/// it, under the `f32` profile's own precision near 1.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+const PROFILE_SCALE: f32 = ((1u32 << 24) - 1) as f32;
+
+/// How many axes, and how many pairs' textures, a thread keeps -- see
+/// [`kept_axis`] and [`profiles_of`].
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+const AXES_KEPT: usize = 512;
+
+/// A rectangle's two profiles as [`RECT_BLUR_SKSL`] reads them: a texture
+/// two pixels high, `across` in the first row and `down` in the second,
+/// the shorter padded with zeros nothing reads, each texel a profile value
+/// in 24-bit fixed point, opaque and in no colour space so that nothing
+/// converts it. One texture rather than one an axis: a new rectangle
+/// uploads once, and Skia builds one child for the shader.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn encoded(across: &[f32], down: &[f32]) -> Option<Image> {
+    let width = across.len().max(down.len());
+    let row = |profile: &[f32]| {
+        profile
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(0.0))
+            .take(width)
+            .flat_map(|v| {
+                let n = (v.clamp(0.0, 1.0) * PROFILE_SCALE).round() as u32;
+                [(n >> 16) as u8, (n >> 8) as u8, n as u8, u8::MAX]
+            })
+            .collect::<Vec<u8>>()
+    };
+    let texels: Vec<u8> = [row(across), row(down)].concat();
+    let info = ImageInfo::new(
+        (width as i32, 2),
+        ColorType::RGBA8888,
+        AlphaType::Opaque,
+        None,
+    );
+    started::raster_from_data(&info, Data::new_copy(&texels), width * 4)
+}
+
+/// What an axis is kept by: its edges from the window's origin, as the
+/// profile takes them, the window's length, the sigma and the tolerance
+/// its flat run is found to, as bits. Not where the window lies: the
+/// profile is the same wherever the edges keep their place in it.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct AxisKey {
+    edges: [u64; 2],
+    len: usize,
+    sigma: u64,
+    flat: u32,
+}
+
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+thread_local! {
+    /// The axes this thread drew last, so that a rectangle with an axis
+    /// drawn before works that profile out no more. Cleared whole past
+    /// [`AXES_KEPT`].
+    static AXES: std::cell::RefCell<std::collections::HashMap<AxisKey, std::rc::Rc<Axis>>> =
+        std::cell::RefCell::default();
+
+    /// The textures of the pairs of axes this thread drew last, so that a
+    /// rectangle drawn again uploads nothing: Skia keeps a texture for an
+    /// image as long as the image lives. Cleared whole past [`AXES_KEPT`].
+    static PROFILES: std::cell::RefCell<std::collections::HashMap<(AxisKey, AxisKey), Image>> =
+        std::cell::RefCell::default();
+}
+
+/// The axis of `[lo, hi]` over `span`, blurred by `sigma` and drawn to
+/// `precision`, and what it is kept by: worked out once and kept -- see
+/// [`AXES`]. Worked out on every draw, the profiles' `erfc` and `exp` led
+/// the profile of a page of a hundred small rectangles of eight sizes drawn
+/// over and over.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn kept_axis(
+    lo: f32,
+    hi: f32,
+    sigma: f64,
+    precision: Precision,
+    span: (i32, i32),
+) -> (std::rc::Rc<Axis>, AxisKey) {
+    let origin = f64::from(span.0);
+    let key = AxisKey {
+        edges: [f64::from(lo) - origin, f64::from(hi) - origin]
+            .map(f64::to_bits),
+        len: (span.1 - span.0) as usize,
+        sigma: sigma.to_bits(),
+        flat: precision.flat_tolerance.to_bits(),
+    };
+    let axis = AXES.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        if let Some(axis) = kept.get(&key) {
+            return axis.clone();
+        }
+        let axis =
+            std::rc::Rc::new(Axis::within(lo, hi, sigma, precision, span));
+        if kept.len() >= AXES_KEPT {
+            kept.clear();
+        }
+        kept.insert(key, axis.clone());
+        axis
+    });
+    (axis, key)
+}
+
+/// The texture of the axes kept as `across` and `down`, made once for the
+/// pair and kept -- see [`PROFILES`].
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn profiles_of(
+    (across, across_key): (&Axis, AxisKey),
+    (down, down_key): (&Axis, AxisKey),
+) -> Option<Image> {
+    PROFILES.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        let key = (across_key, down_key);
+        if let Some(image) = kept.get(&key) {
+            return Some(image.clone());
+        }
+        let image = encoded(&across.profile, &down.profile)?;
+        if kept.len() >= AXES_KEPT {
+            kept.clear();
+        }
+        kept.insert(key, image.clone());
+        Some(image)
+    })
+}
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 thread_local! {
@@ -764,28 +894,19 @@ pub(crate) fn on_gpu(_canvas: &SkCanvas) -> bool {
 /// drawn into one in another space is, is painted `color` converted into
 /// that one.
 ///
-/// With `product`, as a shadow is drawn, the colour times the blurred
-/// coverage is rounded once wherever the rectangle lands, its interior
-/// included; without it, on the GPU the colour is drawn as a fill draws it
-/// through the coverage, so that the interior stores a fill's bytes. The
-/// CPU bakes the product wherever `exact` is not given.
+/// Both engines draw the same pixels: the colour times the two profiles,
+/// rounded once as [`bake`] rounds it, around an interior drawn as a fill of
+/// the colour -- see [`draw_interior`]. The CPU bakes them into sprites; the
+/// GPU works the same product per fragment from the same profiles -- see
+/// [`RECT_BLUR_SKSL`].
 pub(crate) fn draw_rect(
     canvas: &SkCanvas,
     rect: Rect,
     sigma: f32,
     color: Color4f,
     exact: Option<&ExactColour>,
-    product: bool,
 ) -> bool {
     let sigma = f64::from(sigma);
-    #[cfg(any(feature = "metal", feature = "vulkan"))]
-    if on_gpu(canvas) {
-        return draw_on_gpu(canvas, rect, sigma, color, exact, product);
-    }
-    // The CPU bakes the product wherever `exact` is not given, so a build
-    // with no GPU backend has nothing to do with it.
-    #[cfg(not(any(feature = "metal", feature = "vulkan")))]
-    let _ = product;
     let target = canvas.image_info();
     let space = target.color_space();
     let exact = exact.filter(|exact| space.as_ref() == Some(&exact.space));
@@ -833,6 +954,40 @@ pub(crate) fn draw_rect(
         ..key
     };
     let origin = IPoint::new(cols.0, rows.0);
+    // An exact colour placed at its alpha, as a fill of it is: on an
+    // eight-bit page, on the bytes the fill stores, so that the blur scales
+    // those, as a blurred path's does -- see `layer::BlurOp::result_chain` --
+    // and the interior stores what the fill does. Scaled at the alpha as
+    // given, the interior of `rgba(0, 0, 0, 0.5)` lay just under 127.5 and
+    // stored 127, where a fill stores 128.
+    let premul = || match exact {
+        Some(exact) => {
+            let (placed, alpha) = exact.at(color.a);
+            let [r, g, b] = placed.rgb.map(|c| c * alpha);
+            Some([r, g, b, alpha])
+        }
+        None => premultiplied(color, &target),
+    };
+    #[cfg(any(feature = "metal", feature = "vulkan"))]
+    if on_gpu(canvas) {
+        let (across, across_key) =
+            kept_axis(rect.left, rect.right, sigma, precision, cols);
+        let (down, down_key) =
+            kept_axis(rect.top, rect.bottom, sigma, precision, rows);
+        let (Some(profiles), Some(premul)) = (
+            profiles_of((&across, across_key), (&down, down_key)),
+            premul(),
+        ) else {
+            return false;
+        };
+        return draw_on_gpu(
+            canvas,
+            origin,
+            (&across, &down, profiles),
+            premul,
+            &target,
+        );
+    }
     // The profiles only on a miss: a kept bake is drawn without them.
     let kept = MASKS.lock().get(&key);
     let baked = match kept {
@@ -842,22 +997,7 @@ pub(crate) fn draw_rect(
                 Axis::within(rect.left, rect.right, sigma, precision, cols);
             let down =
                 Axis::within(rect.top, rect.bottom, sigma, precision, rows);
-            // An exact colour placed at its alpha, as a fill of it is: on an
-            // eight-bit page, on the bytes the fill stores, so that the blur
-            // scales those, as a blurred path's does -- see
-            // `layer::BlurOp::result_chain` -- and the interior stores what the
-            // fill does. Scaled at the alpha as given, the interior of
-            // `rgba(0, 0, 0, 0.5)` lay just under 127.5 and stored 127, where
-            // a fill stores 128.
-            let premul = match exact {
-                Some(exact) => {
-                    let (placed, alpha) = exact.at(color.a);
-                    let [r, g, b] = placed.rgb.map(|c| c * alpha);
-                    Some([r, g, b, alpha])
-                }
-                None => premultiplied(color, &target),
-            };
-            let Some(premul) = premul else {
+            let Some(premul) = premul() else {
                 return false;
             };
             let Some(baked) = Baked::make(&across, &down, premul, &target)
@@ -894,72 +1034,76 @@ fn premultiplied(color: Color4f, target: &ImageInfo) -> Option<[f32; 4]> {
     Some([channel(0), channel(4), channel(8), channel(12)])
 }
 
-/// [`draw_rect`] on a GPU surface: the blur worked per fragment over the
-/// rectangle's extent.
+/// [`RECT_BLUR_SKSL`] over `profiles`, the texture of both axes, whose
+/// first texels lie at `origin` in device pixels, in `premul`, rounded to
+/// `levels` where they are not zero.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn rect_blur_shader(
+    profiles: Image,
+    origin: (f32, f32),
+    premul: [f32; 4],
+    levels: f32,
+) -> Option<skia_safe::Shader> {
+    let nearest = SamplingOptions::default();
+    // Raw: the texels are numbers, which a colour-managed shader would
+    // convert from sRGB into the page's space -- 58 levels off on a
+    // linear page.
+    let profiles = profiles.to_raw_shader(
+        (TileMode::Decal, TileMode::Decal),
+        nearest,
+        None,
+    )?;
+    let uniforms: Vec<u8> = [origin.0, origin.1]
+        .into_iter()
+        .chain(premul)
+        .chain([levels])
+        .flat_map(f32::to_ne_bytes)
+        .collect();
+    RECT_BLUR.with(|effect| {
+        effect.as_ref().and_then(|e| {
+            e.make_shader(Data::new_copy(&uniforms), &[profiles.into()], None)
+        })
+    })
+}
+
+/// [`draw_rect`] on a GPU surface, in one draw: every pixel of the extent
+/// the profiles `across` and `down` span from `at` worked per fragment by
+/// [`RECT_BLUR_SKSL`], in `premul`, the colour premultiplied in `target`'s
+/// space, and rounded to its levels where it holds bytes. A kept axis is
+/// the same wherever its window lies, so the window's place is the draw's.
+///
+/// The interior too: at full coverage both profiles read exactly one, and
+/// the product rounded to a level is the byte a fill of the colour stores.
+/// Filled apart, as the CPU fills it, a rectangle was two draws, and drawn
+/// as the four bands about the interior as well, Skia built the shader's
+/// program four times a rectangle; a page of a hundred small ones took 1.6
+/// times what one draw does.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 fn draw_on_gpu(
     canvas: &SkCanvas,
-    rect: Rect,
-    sigma: f64,
-    color: Color4f,
-    exact: Option<&ExactColour>,
-    product: bool,
+    at: IPoint,
+    (across, down, profiles): (&Axis, &Axis, Image),
+    premul: [f32; 4],
+    target: &ImageInfo,
 ) -> bool {
-    let k = (sigma * std::f64::consts::SQRT_2) as f32;
-    let uniforms: Vec<u8> = [rect.left, rect.top, rect.right, rect.bottom, k]
-        .into_iter()
-        .flat_map(f32::to_ne_bytes)
-        .collect();
-    let shader = RECT_BLUR.with(|effect| {
-        effect
-            .as_ref()
-            .and_then(|e| e.make_shader(Data::new_copy(&uniforms), &[], None))
-    });
-    let Some(shader) = shader else {
+    let levels = match target.color_type() {
+        ColorType::RGBA8888 | ColorType::BGRA8888 => f32::from(u8::MAX),
+        _ => 0.0,
+    };
+    let extent = IRect::new(
+        at.x,
+        at.y,
+        at.x + across.profile.len() as i32,
+        at.y + down.profile.len() as i32,
+    );
+    let origin = (at.x as f32, at.y as f32);
+    let Some(shader) = rect_blur_shader(profiles, origin, premul, levels)
+    else {
         return false;
     };
-    let reach = (FLOAT_PRECISION.tail_sigmas * sigma).ceil() as f32 + 1.0;
-    let extent = rect.with_outset((reach, reach));
     let mut paint = Paint::default();
-    match exact
-        .map(|exact| exact.at(color.a))
-        .and_then(|(exact, alpha)| Some((exact.shader()?, alpha)))
-    {
-        // The exact colour where the coverage is: `SrcIn` keeps the
-        // colour's shader at the coverage's alpha.
-        Some((colour, alpha)) => {
-            paint
-                .set_shader(shaders::blend(BlendMode::SrcIn, shader, colour))
-                .set_alpha_f(alpha);
-            canvas.draw_rect(extent, &paint);
-        }
-        // A shadow's colour times its coverage, rounded once: `SrcIn` keeps
-        // the colour's shader at the coverage's alpha, the colour's alpha as
-        // given. Drawn as a fill, a shadow of `rgba(0, 0, 0, 0.3)` was 77
-        // through, the fill's byte, where its product is 76.5 times the
-        // coverage.
-        None if product => {
-            paint.set_shader(shaders::blend(
-                BlendMode::SrcIn,
-                shader,
-                shaders::color_in_space(color, ColorSpace::new_srgb()),
-            ));
-            canvas.draw_rect(extent, &paint);
-        }
-        // Without one, the colour is drawn as a fill draws it, as the
-        // paint's own colour, and the blur is its coverage, through a clip
-        // shader: the interior then stores a fill's bytes. Through a `SrcIn`
-        // colour filter over the coverage instead, a product within 0.05 of
-        // a tie rounded the other way from a fill's -- 9 and 14 of 510
-        // off-grid colours on 8-bit Rec. 2020 PQ and HLG pages.
-        None => {
-            paint.set_color4f(color, &ColorSpace::new_srgb());
-            canvas.save();
-            canvas.clip_shader(shader, ClipOp::Intersect);
-            canvas.draw_rect(extent, &paint);
-            canvas.restore();
-        }
-    }
+    paint.set_shader(shader).set_anti_alias(false);
+    canvas.draw_irect(extent, &paint);
     true
 }
 
@@ -1019,169 +1163,88 @@ mod tests {
         }
     }
 
-    /// The interval `[a, b]` blurred with `k = sigma * sqrt(2)`, averaged
-    /// over pixel `i` by the midpoint rule over `erf` -- no antiderivative --
-    /// with each difference of two `erf`s taken from `erfc` where both lie
-    /// near 1, so that a faint pixel keeps its digits in `f64`. The rule's
-    /// error is at most `max |f''| / (24 steps^2)`, and `|f''|` at most
-    /// `0.97 / k^2`: under 9e-7 at a sigma of 0.3, and smaller for every
-    /// larger one.
+    /// [`RECT_BLUR_SKSL`] drawn over `across` and `down` from their first
+    /// pixels, in `premul`, onto a raster surface of 8-bit pixels with no
+    /// colour space. Skia runs a runtime effect on the CPU too, in `f32`, so
+    /// this checks the shader's reading of its textures and its rounding
+    /// without a GPU, on the profiles the GPU is handed.
     #[cfg(any(feature = "metal", feature = "vulkan"))]
-    fn pixel_mean(i: usize, a: f64, b: f64, k: f64) -> f64 {
-        let steps = 512;
-        let difference = |z1: f64, z2: f64| match (z1, z2) {
-            (_, z2) if z2 >= 0.0 => libm::erfc(z2) - libm::erfc(z1),
-            (z1, _) if z1 <= 0.0 => libm::erfc(-z1) - libm::erfc(-z2),
-            _ => libm::erf(z1) - libm::erf(z2),
-        };
-        (0..steps)
-            .map(|s| {
-                let x = i as f64 + (s as f64 + 0.5) / steps as f64;
-                difference((x - a) / k, (x - b) / k) / 2.0
-            })
-            .sum::<f64>()
-            / steps as f64
-    }
-
-    /// [`RECT_BLUR_SKSL`]'s first `n` pixels along a row, for the interval
-    /// `[a, b]` across and `[top, bottom]` down, blurred with `k`. Skia runs
-    /// a runtime effect on a raster surface too, in 32-bit floats, so this
-    /// reaches every branch of it without a GPU: Ganesh rounds a draw's
-    /// source to eight bits, which no float a shader gives survives, and a
-    /// float canvas does not composite there -- see
-    /// `RenderingEngine::can_composite`.
-    #[cfg(any(feature = "metal", feature = "vulkan"))]
-    fn shader_row(
-        n: usize,
-        across: [f32; 2],
-        down: [f32; 2],
-        k: f64,
-    ) -> Vec<f32> {
-        let effect = RuntimeEffect::make_for_shader(RECT_BLUR_SKSL, None)
-            .expect("the shader compiles");
-        let uniforms: Vec<u8> =
-            [across[0], down[0], across[1], down[1], k as f32]
-                .into_iter()
-                .flat_map(f32::to_ne_bytes)
-                .collect();
-        let mut paint = Paint::default();
-        paint.set_shader(
-            effect
-                .make_shader(Data::new_copy(&uniforms), &[], None)
-                .expect("a shader"),
-        );
-        paint.set_blend_mode(BlendMode::Src);
+    fn shaded(across: &Axis, down: &Axis, premul: [f32; 4]) -> Vec<u8> {
+        let (w, h) = (across.profile.len(), down.profile.len());
+        let profiles =
+            encoded(&across.profile, &down.profile).expect("a texture");
+        let shader =
+            rect_blur_shader(profiles, (0.0, 0.0), premul, f32::from(u8::MAX))
+                .expect("a shader");
         let info = ImageInfo::new(
-            (n as i32, 1),
-            ColorType::RGBAF32,
+            (w as i32, h as i32),
+            ColorType::RGBA8888,
             AlphaType::Premul,
             None,
         );
         let mut surface =
             started::raster(&info, None, None).expect("a surface");
+        let mut paint = Paint::default();
+        paint.set_shader(shader).set_blend_mode(BlendMode::Src);
         surface.canvas().draw_paint(&paint);
-        let mut bytes = vec![0u8; n * 16];
-        assert!(surface.read_pixels(&info, &mut bytes, n * 16, (0, 0)));
+        let mut bytes = vec![0u8; w * h * 4];
+        assert!(surface.read_pixels(&info, &mut bytes, w * 4, (0, 0)));
         bytes
-            .as_chunks::<16>()
-            .0
-            .iter()
-            .map(|p| f32::from_ne_bytes([p[12], p[13], p[14], p[15]]))
-            .collect()
     }
 
-    /// Whether every distance from pixel `i` to `a` and to `b` is under the
-    /// shader's series bound, `0.1 k`.
+    /// How near a half-level the bake's value has to lie for the shader to
+    /// round it apart: the two multiply in another order, and the texture
+    /// holds a profile value to 24 bits of fixed point where the bake holds
+    /// it as an `f32`.
     #[cfg(any(feature = "metal", feature = "vulkan"))]
-    fn near_both(i: usize, a: f32, b: f32, k: f64) -> bool {
-        [a, b].into_iter().all(|e| {
-            let e = f64::from(e);
-            let (d0, d1) = ((i as f64 - e).abs(), (i as f64 + 1.0 - e).abs());
-            d0.max(d1) < 0.1 * k
-        })
-    }
+    const SHADED_TIE: f32 = 1e-3;
 
-    /// How far the shader's series may lie from the exact share, as a
-    /// fraction of it: four units in the last place of a `float`, its own
-    /// arithmetic. The series' smallest term moves a share by 1e-5 at the
-    /// bound, and the unfactored difference of squares lay 3e-5 off.
-    #[cfg(any(feature = "metal", feature = "vulkan"))]
-    const SHADER_SERIES_TOLERANCE: f64 = 2e-6;
-
-    /// The shader's series against [`pixel_mean`] on the pixels close
-    /// enough to both edges against `k` that each takes the series. At a
-    /// sigma of 640 the distances reach the series' bound, where its `u^4`
-    /// and `u^6` terms move a share by up to 1e-4 and 1e-5 of itself; past
-    /// 1e4 the other forms cancel to nothing and the series alone draws the
-    /// faint blur.
+    /// The shader draws the bake's bytes: the colour times the two profiles,
+    /// rounded once, at every pixel of the extent, for a rectangle off the
+    /// pixel grid at sigmas from under a pixel to past the bake's own
+    /// window, in an opaque colour and a translucent one. Worked from
+    /// `erfc` and `exp` on the GPU instead, the profile lay up to 0.86 of a
+    /// level off the exact blur.
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     #[test]
-    fn the_shader_takes_a_share_near_its_edge_from_the_series() {
-        let n = 200;
-        // The pixels' row, `[0, 1)`, sits inside the interval down.
-        let (a, b, top, bottom) = (10.25f32, 90.5f32, -30.0f32, 30.0f32);
-        for sigma in [640.0, 700.0, 1e4, 1e6, 1e12] {
-            let k = sigma * std::f64::consts::SQRT_2;
-            let row = shader_row(n, [a, b], [top, bottom], k);
-            let down = pixel_mean(0, f64::from(top), f64::from(bottom), k);
-            let pixels: Vec<usize> =
-                (0..n).filter(|i| near_both(*i, a, b, k)).collect();
-            assert!(pixels.len() >= n / 2, "{sigma}: {} pixels", pixels.len());
-            for i in pixels {
-                let want = pixel_mean(i, f64::from(a), f64::from(b), k) * down;
-                assert!(
-                    (f64::from(row[i]) - want).abs()
-                        < SHADER_SERIES_TOLERANCE * want,
-                    "sigma {sigma}, pixel {i}: {} against {want}",
-                    row[i]
+    fn the_shader_draws_what_the_bake_does() {
+        let colours = [[0.0, 0.0, 0.0, 1.0], [0.42, 0.11, 0.33, 0.6]];
+        for sigma in [0.25, 1.0, 4.0, 12.0, 40.0] {
+            let across = Axis::of(10.3, 70.85, sigma, BYTE_PRECISION);
+            let down = Axis::of(5.6, 33.2, sigma, BYTE_PRECISION);
+            let (w, h) = (across.profile.len(), down.profile.len());
+            for premul in colours {
+                let mut baked = vec![0u8; w * h * 4];
+                bake(
+                    &across,
+                    &down,
+                    IRect::new(0, 0, w as i32, h as i32),
+                    premul,
+                    ColorType::RGBA8888,
+                    &mut baked,
+                    w * 4,
                 );
-            }
-        }
-    }
-
-    /// How far the shader may lie from the exact share past the series, on
-    /// Skia's CPU. Its raster pipeline takes `exp` from `approx_pow2`, a
-    /// rational fit good to about 1e-5 of itself, and that sets what the CPU
-    /// gives: 4.4e-5 at most across the sigmas below, where the same
-    /// arithmetic with an exact `exp` is within 5e-7. The antiderivative the
-    /// quadrature replaced lies 7.5e-4 off at a sigma of 100 and 6e-2 at 1e4
-    /// here, and the quadrature on its own 9e-4 off at a sigma of 0.3.
-    #[cfg(any(feature = "metal", feature = "vulkan"))]
-    const SHADER_FAR_TOLERANCE: f64 = 1e-4;
-
-    /// The shader against [`pixel_mean`] on every pixel of the blur's reach
-    /// that does not take the series: from the antiderivative under a sigma
-    /// of 4 and by quadrature from there, across a rectangle narrower than
-    /// a pixel's reach, one a pixel wide and one far wider than the blur.
-    #[cfg(any(feature = "metal", feature = "vulkan"))]
-    #[test]
-    fn the_shader_works_a_share_away_from_its_edge_by_quadrature() {
-        let n = 4096;
-        for sigma in [0.3, 1.0, 2.0, 4.0, 8.0, 40.0, 100.0, 700.0, 3000.0, 1e4]
-        {
-            let k = sigma * std::f64::consts::SQRT_2;
-            let reach = 6.0 * sigma + 2.0;
-            for (a, b) in
-                [(1000.25f32, 1080.5f32), (1100.5, 1101.5), (1000.0, 3000.0)]
-            {
-                let row = shader_row(n, [a, b], [-1e6, 1e6], k);
-                let pixels: Vec<usize> = (0..n)
-                    .filter(|i| {
-                        let x = *i as f64;
-                        x + 1.0 >= f64::from(a) - reach
-                            && x <= f64::from(b) + reach
-                            && !near_both(*i, a, b, k)
+                let shaded = shaded(&across, &down, premul);
+                let apart: Vec<(usize, u8, u8)> = baked
+                    .iter()
+                    .zip(&shaded)
+                    .enumerate()
+                    .filter(|(i, (b, s))| {
+                        let (x, y) = ((i / 4) % w, (i / 4) / w);
+                        let exact = premul[i % 4]
+                            * 255.0
+                            * across.profile[x]
+                            * down.profile[y];
+                        b != s && (exact.fract() - 0.5).abs() > SHADED_TIE
                     })
+                    .map(|(i, (b, s))| (i, *b, *s))
                     .collect();
-                assert!(!pixels.is_empty(), "sigma {sigma}, [{a}, {b}]");
-                for i in pixels {
-                    let want = pixel_mean(i, f64::from(a), f64::from(b), k);
-                    assert!(
-                        (f64::from(row[i]) - want).abs() < SHADER_FAR_TOLERANCE,
-                        "sigma {sigma}, [{a}, {b}], pixel {i}: {} against {want}",
-                        row[i]
-                    );
-                }
+                assert!(
+                    apart.is_empty(),
+                    "sigma {sigma}, {premul:?}: {} bytes apart, first {:?}",
+                    apart.len(),
+                    &apart[..apart.len().min(4)]
+                );
             }
         }
     }

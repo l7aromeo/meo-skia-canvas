@@ -3974,18 +3974,8 @@ impl BlurDraw {
                 sigma,
                 faint,
                 exact: None,
-                product: false,
             },
         }
-    }
-
-    /// This draw as a shadow casts it: its colour times the blurred
-    /// coverage, rounded once, rather than the coverage of a fill of the
-    /// colour, whose interior stores the fill's bytes -- see
-    /// [`blur_mask::draw_rect`].
-    pub fn cast(mut self) -> Self {
-        self.paint.product = true;
-        self
     }
 
     /// This draw, painted as pixels in `exact` where it is given -- see
@@ -4017,10 +4007,6 @@ struct BlurPaint {
     /// The colour held exactly in the page's space, on a page that keeps a
     /// recording for pixels, which the op paints with when played as pixels.
     exact: Option<ExactColour>,
-    /// Whether the colour times the blurred coverage is rounded once, as a
-    /// shadow's is, rather than the colour drawn as a fill through the
-    /// coverage -- see [`BlurDraw::cast`].
-    product: bool,
 }
 
 /// A run of blurred rectangles, or one blurred path, in one flat colour and
@@ -4625,7 +4611,6 @@ impl BlurOp {
                     sigma,
                     self.paint.color,
                     exact,
-                    self.paint.product,
                 );
             }
         });
