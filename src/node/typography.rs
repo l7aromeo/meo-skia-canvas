@@ -2331,8 +2331,8 @@ pub(crate) fn draw_glyphs_apart(
 ///   of a glyph's pixels outside it.
 /// - Under any other transform, and for a paint with a mask filter, whose reach
 ///   does not scale with the font, the box at the font's own size, mapped there
-///   -- and under a transform that turns or skews, grown by
-///   [`TURNED_STRIKE_REACH`].
+///   -- and under any transform but a scale alike on both axes, grown by
+///   [`MAPPED_STRIKE_REACH`].
 fn pixels_inked(
     canvas: &Canvas,
     font: &Font,
@@ -2394,9 +2394,9 @@ fn pixels_inked(
     if let Shear::By(shear) = shear {
         to_device.pre_concat(shear);
     }
-    let reach = match device.is_scale_translate() {
-        true => 0,
-        false => TURNED_STRIKE_REACH,
+    let reach = match uniform_scale(&device) {
+        Some(_) => 0,
+        None => MAPPED_STRIKE_REACH,
     };
     zip(boxes, positions)
         .map(|(glyph, &at)| {
@@ -2409,20 +2409,27 @@ fn pixels_inked(
 }
 
 /// The pixels past its box -- at the font's own size, mapped and rounded out
-/// -- that a glyph drawn from a strike under a transform that turns or skews
-/// can ink: one, measured on FreeType, where Oswald at 48px under a scale of
-/// 1.5 turned 10 degrees inked up to two pixels one pixel past that box under
-/// every hinting, unhinted included, so not by hinting. The cause is not
-/// traced. A scale unlike on the two axes, which does not turn, inked none
-/// past it at 16px and 48px.
-const TURNED_STRIKE_REACH: i32 = 1;
+/// -- that a glyph drawn from a strike under a transform other than a scale
+/// alike on both axes can ink: one, measured, with the cause not traced. On
+/// FreeType, Oswald at 48px under a scale of 1.5 turned 10 degrees inked up to
+/// two pixels one past that box under every hinting, unhinted included, so
+/// not by hinting. On CoreText, which does not hint, Oswald at 16px and 48px
+/// under a scale of 1.5 by 1.2 and stroked 20 wide inked one pixel past it.
+const MAPPED_STRIKE_REACH: i32 = 1;
 
 /// The device size past which Skia draws a glyph from its outline rather
-/// than from a strike: the memory limit in `SkStrikeSpec::ShouldDrawAsPath`.
+/// than from a strike: `memoryLimit` in `SkStrikeSpec::ShouldDrawAsPath`,
+/// `src/core/SkStrikeSpec.cpp`, in the Skia skia-safe 0.156.0 builds. Read
+/// from that source, since skia-safe exposes neither the value nor the
+/// decision. The containment test draws unscaled at one pixel either side of
+/// it, so a change to it in Skia fails that test.
 const OUTLINE_TEXT_SIZE: f32 = 256.0;
 
 /// The size Skia takes a glyph's outline at to draw it as one, scaling it to
-/// the size drawn: `SkFontPriv::kCanonicalTextSizeForPaths`.
+/// the size drawn: `SkFontPriv::kCanonicalTextSizeForPaths`,
+/// `src/core/SkFontPriv.h`, in the Skia skia-safe 0.156.0 builds, applied by
+/// `SkFont::setupForAsPaths`. Read from that source; skia-safe does not
+/// expose it.
 const OUTLINE_STRIKE_SIZE: f32 = 64.0;
 
 /// Whether Skia draws `font`'s glyphs in `paint` under `device` from their
@@ -6905,8 +6912,10 @@ mod glyph_group_tests {
     /// The width the containment test strokes at: wide enough that, past
     /// the size Skia draws a glyph from its outline, a stroke left out of the
     /// glyph's box reaches past it even on CoreText, whose box there, taken
-    /// at 64px and scaled up, stands up to four pixels wide of the outline.
-    const STROKE_WIDTH: f32 = 9.0;
+    /// at 64px and scaled up, stands up to about four pixels wide of the
+    /// outline -- so that a box taken on the wrong side of
+    /// `OUTLINE_TEXT_SIZE` fails here as well as on FreeType.
+    const STROKE_WIDTH: f32 = 20.0;
 
     /// Every hinting a font takes, since FreeType moves a glyph's edges by
     /// each differently.
@@ -6944,9 +6953,17 @@ mod glyph_group_tests {
         let mut outside = Vec::new();
         for (manager, typeface) in typefaces.iter().enumerate() {
             for (transform, matrix) in TRANSFORMS {
-                for (size, text) in
-                    [(16.0, "Hello Wq"), (48.0, "Hello Wq"), (200.0, "Wq")]
-                {
+                for (size, text) in [
+                    (16.0, "Hello Wq"),
+                    (48.0, "Hello Wq"),
+                    (200.0, "Wq"),
+                    // Either side of `OUTLINE_TEXT_SIZE`, unscaled: the
+                    // run is sheared by `FAKE_ITALIC_SKEW`, so its text
+                    // reaches 256 device pixels at 256 / hypot(1, 1/4),
+                    // 248.35px.
+                    (248.0, "Wq"),
+                    (249.0, "Wq"),
+                ] {
                     for hinting in HINTINGS {
                         for subpixel in [false, true] {
                             for (style, blur) in [
