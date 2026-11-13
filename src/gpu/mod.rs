@@ -123,6 +123,16 @@ impl Engine {
         )
     }
 
+    pub fn sample_count(
+        _info: &ImageInfo,
+        _opts: &ExportOptions,
+    ) -> Result<usize, String> {
+        unreachable!(
+            "no GPU backend is compiled in, so `RenderingEngine` answers \
+             every sample-count request itself and never reaches this signature"
+        )
+    }
+
     pub fn with_direct_context(_f: impl FnOnce(Option<&mut DirectContext>)) {
         unreachable!(
             "no GPU backend is compiled in, so there is no direct context to \
@@ -511,6 +521,22 @@ impl RenderingEngine {
                 image_info.height(),
                 image_info.color_type()
             )),
+        }
+    }
+
+    /// The samples a pixel [`Self::make_surface`] gives a page of
+    /// `image_info` under `opts`: Ganesh's multisample count, and none on
+    /// the CPU or on Graphite, which takes no count from a page -- see
+    /// `graphite::make_surface`. Zero where the GPU answers nothing, as it
+    /// would then make no surface either.
+    pub fn sample_count(
+        &self,
+        image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> usize {
+        match self {
+            Self::GPU => Engine::sample_count(image_info, opts).unwrap_or(0),
+            Self::Graphite | Self::CPU => 0,
         }
     }
 

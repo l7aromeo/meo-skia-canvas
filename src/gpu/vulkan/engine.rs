@@ -494,6 +494,15 @@ impl VulkanEngine {
     ) -> Result<Surface, String> {
         Self::with_context(|ctx| ctx.surface(image_info, opts))
     }
+
+    /// The samples a pixel [`Self::make_surface`] asks Ganesh for, for a page
+    /// of `image_info` under `opts`.
+    pub fn sample_count(
+        image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> Result<usize, String> {
+        Self::with_context(|ctx| ctx.sample_count(image_info, opts))
+    }
 }
 
 #[allow(dead_code)]
@@ -659,6 +668,17 @@ impl VulkanContext {
         })
     }
 
+    /// The samples a pixel [`Self::surface`] asks for: what `opts` names, or
+    /// the default [`ExportOptions::msaa_from`] picks, among the counts the
+    /// device supports for the page's colour type.
+    fn sample_count(
+        &self,
+        image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> Result<usize, String> {
+        opts.msaa_from(&self.msaa_for_color_type(image_info.color_type()))
+    }
+
     /// Computes valid MSAA sample counts for a given color type.
     fn msaa_for_color_type(&self, color_type: ColorType) -> Vec<usize> {
         let max_sample_count = self
@@ -694,7 +714,7 @@ impl VulkanContext {
         opts: &ExportOptions,
     ) -> Result<Surface, String> {
         self.last_use = Instant::now();
-        let msaa = self.msaa_for_color_type(image_info.color_type());
+        let samples = self.sample_count(image_info, opts)?;
         // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
         // Re-check: run a_read_between_draws_changes_no_later_pixel on Mali
         //
@@ -715,7 +735,7 @@ impl VulkanContext {
             &mut self.context,
             Budgeted::Yes,
             image_info,
-            Some(opts.msaa_from(&msaa)?),
+            Some(samples),
             SurfaceOrigin::BottomLeft,
             Some(&opts.surface_props()),
             false,

@@ -8,13 +8,17 @@
 //!
 //! So each object that owns native memory keeps an [`External`], reports what
 //! it holds through `napi_adjust_external_memory` as that changes, and
-//! releases the same amount in its finalizer. What one object reports is what
-//! it releases, on the engine instance that owns it, so the totals net to zero
-//! per isolate -- a worker thread's canvases count against that worker.
+//! releases what it still reports in its finalizer. Memory freed for an
+//! object by something else -- a canvas's page, dropped by the budget the
+//! pages on a thread keep to during another canvas's read -- is released by
+//! the next report any object on the thread makes, and the object's own count
+//! goes to nothing with it -- see [`Reported`]. Every report and release is
+//! made on the engine instance that owns the object, so the totals net to
+//! zero per isolate -- a worker thread's canvases count against that worker.
 
-use std::sync::OnceLock;
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::{cell::Cell, rc::Rc, sync::OnceLock};
 
 use neon::{
     context::Context,
@@ -77,32 +81,73 @@ fn adjust() -> Option<AdjustExternalMemory> {
 /// releases exactly that.
 #[derive(Debug, Default)]
 pub(crate) struct External {
-    reported: i64,
+    reported: Reported,
+}
+
+/// What one object has told the engine it holds, shared with what can free
+/// that memory without the object's own call: the budget the pages on a
+/// thread keep to, which drops one canvas's page during another's read --
+/// see `context::resident`.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Reported(Rc<Cell<i64>>);
+
+thread_local! {
+    /// What objects on this thread reported and has since been freed by
+    /// something other than their own call -- see [`Reported::freed`] --
+    /// and that the engine has not yet been told of.
+    static FREED: Cell<i64> = const { Cell::new(0) };
+}
+
+impl Reported {
+    /// Records that what this reported has been freed elsewhere. The engine
+    /// is told at the next report any object on this thread makes, and the
+    /// object goes on from nothing, so that its finalizer releases only what
+    /// it reports after.
+    pub fn freed(&self) {
+        let bytes = self.0.replace(0);
+        FREED.set(FREED.get() + bytes);
+    }
+}
+
+/// Tells the engine `change`, answering whether it took it.
+fn tell<'a, C: Context<'a>>(cx: &mut C, change: i64) -> bool {
+    let Some(adjust) = adjust() else {
+        return false;
+    };
+    let mut total = 0;
+    // SAFETY: `cx` is a live Neon context, so the env it hands over is the
+    // engine this call runs on, and Neon only runs a context on that engine's
+    // own thread. `total` is a valid place for the result.
+    let status = unsafe { adjust(cx.to_raw(), change, &mut total) };
+    let told = status == Status::Ok;
+    #[cfg(debug_assertions)]
+    if told {
+        REPORTED.fetch_add(change, Ordering::Relaxed);
+    }
+    told
 }
 
 impl External {
+    /// What this object has reported, to share with what can free it -- see
+    /// [`Reported`].
+    pub fn reported(&self) -> Reported {
+        self.reported.clone()
+    }
+
     /// Tells the engine this object now holds `bytes`, by reporting the change
-    /// since the last call. Nothing is reported when nothing changed, and a
-    /// change the engine refuses is retried by the next call rather than
-    /// counted.
+    /// since the last call, and tells it what objects on this thread have had
+    /// freed for them since the last report. Nothing is reported when nothing
+    /// changed, and a change the engine refuses is retried by the next call
+    /// rather than counted.
     pub fn hold<'a, C: Context<'a>>(&mut self, cx: &mut C, bytes: usize) {
-        let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
-        let change = bytes - self.reported;
-        if change == 0 {
-            return;
+        let freed = FREED.get();
+        if freed != 0 && tell(cx, -freed) {
+            FREED.set(FREED.get() - freed);
         }
-        let Some(adjust) = adjust() else {
-            return;
-        };
-        let mut total = 0;
-        // SAFETY: `cx` is a live Neon context, so the env it hands over is the
-        // engine this call runs on, and Neon only runs a context on that
-        // engine's own thread. `total` is a valid place for the result.
-        let status = unsafe { adjust(cx.to_raw(), change, &mut total) };
-        if status == Status::Ok {
-            self.reported = bytes;
-            #[cfg(debug_assertions)]
-            REPORTED.fetch_add(change, Ordering::Relaxed);
+        let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
+        let change = bytes - self.reported.0.get();
+        if change != 0 && tell(cx, change) {
+            self.reported.0.set(bytes);
         }
     }
 
