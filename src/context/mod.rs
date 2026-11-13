@@ -132,8 +132,16 @@ const TRANSPARENT: Color = Color::TRANSPARENT;
 /// canvases of 1000 by 800 with a context, nothing drawn, held 4,800 bytes
 /// apiece more than 400 without one: 3,680 in eleven allocations of this
 /// crate's own, 640 Skia's paragraph style, 448 its path builder and 32 a
-/// text style. `tests/suite/external-memory.test.js` holds it against the
-/// process's growth in memory as contexts are made.
+/// text style.
+///
+/// One figure for every platform, since the allocators count the same
+/// allocations apart only by how they round them. Batches of 4,000 such
+/// canvases, by the C allocator's own count of bytes in use: 4,590 to
+/// 4,613 a context on glibc 2.43 (arm64 Linux), whose chunks carry an
+/// 8-byte header at 16-byte alignment, and 5,001 to 5,045 on macOS, whose
+/// small allocations round to 16 bytes. This stands at 1.04 of the one and
+/// 0.95 of the other. `tests/suite/external-memory.test.js` holds it to
+/// that count within a tenth.
 pub(crate) const CONTEXT_BYTES: usize = 4_800;
 
 /// The most grid positions a texture may be stamped at in a single draw.

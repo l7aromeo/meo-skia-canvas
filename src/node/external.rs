@@ -16,6 +16,10 @@
 //! made on the engine instance that owns the object, so the totals net to
 //! zero per isolate -- a worker thread's canvases count against that worker.
 
+#[cfg(all(debug_assertions, target_os = "linux", target_env = "gnu"))]
+use libc::mallinfo2;
+#[cfg(all(debug_assertions, target_os = "macos"))]
+use libc::{malloc_statistics_t, malloc_zone_statistics};
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{cell::Cell, rc::Rc, sync::OnceLock};
@@ -172,4 +176,45 @@ impl External {
 #[cfg(debug_assertions)]
 pub fn reported_memory(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(REPORTED.load(Ordering::Relaxed) as f64))
+}
+
+/// The bytes the C allocator holds in use for the process, by its own
+/// count: what the tests hold a report against -- see `CONTEXT_BYTES` --
+/// since what a process holds in pages does not follow what it allocates.
+/// On glibc, 4,000 canvases with a context held 4,590 to 4,613 bytes each
+/// by this count over nine batches, where the resident set grew by 854 to
+/// 5,890, as earlier batches' freed pages were reused or the heap grew.
+///
+/// Exported by debug builds on glibc and macOS only, where the allocator
+/// answers: glibc's `mallinfo2`, its chunks in use in every arena and its
+/// mapped ones, headers included, and macOS's `malloc_zone_statistics`
+/// over every zone.
+#[cfg(all(
+    debug_assertions,
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
+))]
+pub fn malloc_in_use(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    Ok(cx.number(malloc_bytes_in_use() as f64))
+}
+
+#[cfg(all(debug_assertions, target_os = "linux", target_env = "gnu"))]
+fn malloc_bytes_in_use() -> usize {
+    // SAFETY: `mallinfo2` takes nothing and returns its counts by value; it
+    // reads the allocator's own bookkeeping under its arena locks.
+    let info = unsafe { mallinfo2() };
+    info.uordblks + info.hblkhd
+}
+
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn malloc_bytes_in_use() -> usize {
+    let mut stats = malloc_statistics_t {
+        blocks_in_use: 0,
+        size_in_use: 0,
+        max_size_in_use: 0,
+        size_allocated: 0,
+    };
+    // SAFETY: a null zone asks for every zone's counts, summed, and
+    // `stats` is a live struct of the type the call writes.
+    unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut stats) };
+    stats.size_in_use
 }

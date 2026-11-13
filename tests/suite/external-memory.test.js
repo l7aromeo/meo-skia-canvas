@@ -22,8 +22,7 @@ const { assert, describe, test } = require("../runner"),
   { runInNewContext } = require("node:vm"),
   { setImmediate: turn } = require("node:timers/promises"),
   { Canvas, Image } = require("../../lib"),
-  { skiaNode } = require("../../lib/classes/neon"),
-  { processMemory } = require("../support/live-canvases");
+  { skiaNode } = require("../../lib/classes/neon");
 
 // The suite runs without `--expose-gc`; a context made after the flag is set
 // carries `gc`.
@@ -86,19 +85,42 @@ const drawn = (/** @type {number} */ fills) => {
 };
 
 /**
- * Contexts made for a measurement of the process's memory: enough that
- * what they hold, about 5 KB each, stands well clear of the memory a
- * process moves by on its own between two readings.
+ * Contexts made for a measurement of what the C allocator holds: enough
+ * that what they hold, about 5 KB each, stands well clear of what the
+ * process allocates on its own between two readings.
  */
 const CONTEXTS = 4000;
 
 /**
- * How far what a context reports may stand from what the process grows by
- * natively for each, as a share of that growth. Measured on this Mac at
- * 0.78 to 0.91 over ten batches; a context reporting nothing, or twice what
- * it holds, lands outside.
+ * How far what a context reports may stand from what the C allocator
+ * counts in use for each, as a share of that count. `CONTEXT_BYTES`, 4,800,
+ * stood at 1.04 of glibc's count (4,590 to 4,613 over nine batches) and at
+ * 0.95 of macOS's (5,001 to 5,045); a context reporting nothing, or twice
+ * what it holds, lands outside.
  */
-const CONTEXT_SHARE = [0.6, 1.4];
+const CONTEXT_SHARE = [0.9, 1.1];
+
+/**
+ * The C allocator's count of bytes in use, `__mallocInUse`, which debug
+ * builds on glibc and macOS export. A debug build there that lacks it fails
+ * rather than skips, so that a broken export cannot switch the check off.
+ */
+const glibc = process.report?.getReport().header.glibcVersionRuntime;
+const allocatorAnswers = process.platform === "darwin" || Boolean(glibc);
+const allocatorWhy =
+  why ??
+  (allocatorAnswers
+    ? null
+    : `skipped: ${process.platform} without glibc has no allocator count to read`);
+
+/** Native buffers held to show the allocator's count moves by what is held. */
+const HELD_BUFFERS = 4000;
+
+/**
+ * Each held buffer's bytes: past the size a `Buffer` takes from Node's
+ * shared pool, so that each is an allocation of its own.
+ */
+const HELD_BUFFER_BYTES = 4096;
 
 /** Fills drawn on a page whose recording is to weigh something. */
 const FILLS = 1000;
@@ -301,31 +323,68 @@ describe("Native memory reported to V8", () => {
     },
   );
 
-  // `CONTEXT_BYTES` is a measurement, and goes stale when what a context
-  // holds changes. Held against what the process grows by natively as
-  // contexts are made and kept: a batch of canvases with contexts against
-  // one of canvases alone, the engine's own heap taken out of each, within
-  // a share either way, since allocators round and the binding keeps a
-  // little of its own for each object.
   test(
-    "reports about what a context holds, by the process's growth",
+    "has the C allocator's count where a debug build exports it",
     { skip: why ?? false },
+    () => {
+      assert.equal(
+        typeof skiaNode.__mallocInUse === "function",
+        allocatorAnswers,
+        `__mallocInUse is exported on ${process.platform}` +
+          (glibc ? ` with glibc ${glibc}` : ""),
+      );
+    },
+  );
+
+  // The instrument the next test reads, shown to move by what is held:
+  // buffers of native memory, none of which this addon reports.
+  test(
+    "the C allocator's count moves by the native memory held",
+    { skip: allocatorWhy ?? false },
+    async () => {
+      await settled();
+      const before = skiaNode.__mallocInUse();
+      const held = Array.from({ length: HELD_BUFFERS }, () =>
+        Buffer.alloc(HELD_BUFFER_BYTES),
+      );
+      await settled();
+      const counted = skiaNode.__mallocInUse() - before;
+      const expected = HELD_BUFFERS * HELD_BUFFER_BYTES;
+      assert.ok(
+        counted >= expected * CONTEXT_SHARE[0] &&
+          counted <= expected * CONTEXT_SHARE[1],
+        `${held.length} buffers of ${HELD_BUFFER_BYTES} bytes moved the ` +
+          `count by ${counted}`,
+      );
+    },
+  );
+
+  // `CONTEXT_BYTES` is a measurement, and goes stale when what a context
+  // holds changes. Held against what the C allocator counts in use as
+  // contexts are made and kept: a batch of canvases with contexts against
+  // one of canvases alone, within a share either way, since allocators
+  // round and the binding keeps a little of its own for each object. Not
+  // against what the process holds in pages: on glibc that moved by 854 to
+  // 5,890 bytes a context over nine batches, as pages freed earlier were
+  // reused or the heap grew, where the allocator's count moved by 4,590 to
+  // 4,613.
+  test(
+    "reports about what a context holds, by the allocator's count",
+    { skip: allocatorWhy ?? false },
     async () => {
       const live = [];
-      /** What the process grows by natively for each canvas `make` makes. */
-      const grownFor = async (/** @type {() => Canvas} */ make) => {
+      /** What the allocator holds in use for each canvas `make` makes. */
+      const allocatedFor = async (/** @type {() => Canvas} */ make) => {
         await settled();
-        const memory = processMemory();
-        const heap = process.memoryUsage().heapTotal;
+        const before = skiaNode.__mallocInUse();
         for (let i = 0; i < CONTEXTS; i++) live.push(make());
         await settled();
-        const engine = process.memoryUsage().heapTotal - heap;
-        return (processMemory() - memory - engine) / CONTEXTS;
+        return (skiaNode.__mallocInUse() - before) / CONTEXTS;
       };
-      const bare = await grownFor(cpuCanvas);
+      const bare = await allocatedFor(cpuCanvas);
       const before = await settled();
-      const grown =
-        (await grownFor(() => {
+      const allocated =
+        (await allocatedFor(() => {
           const canvas = cpuCanvas();
           // Nothing drawn, so that the context is all a canvas reports.
           canvas.getContext("2d");
@@ -334,10 +393,10 @@ describe("Native memory reported to V8", () => {
       const reported = ((await settled()) - before) / CONTEXTS;
       assert.equal(reported, CONTEXT_BYTES, "each context reports itself");
       assert.ok(
-        reported >= grown * CONTEXT_SHARE[0] &&
-          reported <= grown * CONTEXT_SHARE[1],
-        `each context reports ${reported} bytes where the process grew ` +
-          `natively by ${Math.round(grown)} for each`,
+        reported >= allocated * CONTEXT_SHARE[0] &&
+          reported <= allocated * CONTEXT_SHARE[1],
+        `each context reports ${reported} bytes where the allocator counts ` +
+          `${Math.round(allocated)} in use for each`,
       );
       assert.equal(live.length, 2 * CONTEXTS);
     },
