@@ -20,7 +20,7 @@ use skia_safe::{
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 pub mod api;
@@ -1655,7 +1655,7 @@ impl Context2D {
             shadow,
             blend: beyond.then_some(blend),
             recording,
-            whole: OnceLock::new(),
+            whole: LazyPicture::default(),
             bounds: self.bounds,
             document,
             clip: None,
@@ -2107,7 +2107,7 @@ impl Context2D {
                     shadow: None,
                     blend: None,
                     recording: LazyPicture::from(Some(recorded_as)),
-                    whole: OnceLock::new(),
+                    whole: LazyPicture::default(),
                     bounds: self.bounds,
                     document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
@@ -2500,7 +2500,7 @@ impl Context2D {
             shadow: None,
             blend: None,
             recording: LazyPicture::from(Some(recorded)),
-            whole: OnceLock::new(),
+            whole: LazyPicture::default(),
             bounds: self.bounds,
             document: document.map(layer::ReplayedRecording::recorded),
             clip: None,

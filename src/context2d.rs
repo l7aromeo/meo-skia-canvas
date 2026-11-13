@@ -6075,6 +6075,63 @@ mod overlapping_glyph_tests {
         }
     }
 
+    /// The picture a document records of a kept run with its glyphs whole,
+    /// on a page that keeps one recording for every target, as a float page
+    /// does -- see `layer::ReplayedText::whole` -- counts in what the page
+    /// holds once a document has recorded it: the count rises by its bytes
+    /// and no more, and a build with debug assertions holds that count to a
+    /// walk of the page.
+    #[test]
+    fn a_kept_runs_whole_recording_counts_in_what_the_page_holds() {
+        use crate::context::layer::Layer;
+        register();
+        forget_laid_out();
+        let options = CanvasOptions {
+            gpu: false,
+            color_type: PixelDepth::F16,
+            ..CanvasOptions::default()
+        };
+        let mut canvas = Canvas::with_options(W, H, options).expect("a canvas");
+        let held = |canvas: &mut Canvas| {
+            let mut held = 0;
+            canvas.context().inner.with_recorder(|recorder| {
+                held = recorder.recorded_bytes();
+            });
+            held
+        };
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W, H);
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css(OSWALD.0));
+        ctx.set_letter_spacing(-12.0);
+        ctx.set_fill_style_css("rgba(40,90,160,0.5)")
+            .expect("a colour");
+        ctx.fill_text(OSWALD.1, 10.0, 70.0, None);
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a read");
+        let before = held(&mut canvas);
+        canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("encodes");
+        let after = held(&mut canvas);
+        let page = canvas.context().inner.page();
+        let whole: usize = page
+            .layers
+            .iter()
+            .filter_map(|layer| match layer {
+                Layer::ReplayedText(text) => Some(text.whole.bytes()),
+                _ => None,
+            })
+            .sum();
+        assert!(whole > 0, "a document recorded the run whole");
+        assert_eq!(
+            after - before,
+            whole,
+            "the page holds {after} bytes after a document recorded the run \
+             whole, {before} before"
+        );
+    }
+
     /// A plain run is kept to be drawn again where the page is played only
     /// under a blend read in the shader: a canvas drawn into another asks
     /// each run kept for a recording, which the watch counts, and asks none

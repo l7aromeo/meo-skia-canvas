@@ -167,7 +167,8 @@ impl Layer {
     /// no draws.
     ///
     /// A picture recorded only when a target first plays it -- a deferred
-    /// run, a replayed run's recording -- counts once it has been recorded.
+    /// run, a replayed run's recordings for pixels and for a document --
+    /// counts once it has been recorded.
     /// Left out: a blur's geometry and the filter it makes at playback,
     /// which hold no pixels, and a pattern's source, which is another
     /// canvas's page, reported by that canvas.
@@ -205,6 +206,7 @@ impl Layer {
             }
             Layer::ReplayedText(text) => {
                 recorded(&text.recording)
+                    + recorded(&text.whole)
                     + text
                         .document
                         .as_ref()
@@ -233,6 +235,7 @@ impl Layer {
             }
             Layer::ReplayedText(text) => {
                 text.recording.count_into(count);
+                text.whole.count_into(count);
                 if let Some(document) = &text.document {
                     document.picture.count_into(count);
                 }
@@ -1774,7 +1777,7 @@ pub struct ReplayedText {
     /// recording, where its paint reads the page and the recording for
     /// pixels -- [`Self::recording`] -- draws its glyphs apart -- see
     /// [`Self::recorded_for_document`].
-    pub whole: OnceLock<Option<Picture>>,
+    pub whole: LazyPicture,
     /// The bounds of the page the run is recorded over.
     pub bounds: Rect,
     /// The run as recorded for a document, on a page that keeps a recording
@@ -1932,10 +1935,9 @@ impl ReplayedText {
             ) {
                 return self.recorded();
             }
-            return self
-                .whole
-                .get_or_init(|| self.record(&self.paint, self.shadow.as_ref()))
-                .as_ref();
+            return self.whole.get_or_record(|| {
+                self.record(&self.paint, self.shadow.as_ref())
+            });
         };
         document.picture.get_or_record(|| {
             self.record(&document.paint, document.shadow.as_ref())
