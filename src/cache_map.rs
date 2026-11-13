@@ -92,11 +92,22 @@ impl<K, V, const SETS: usize, const WAYS: usize> KeptSets<K, V, SETS, WAYS> {
         K: Borrow<Q>,
         Q: PartialEq + ?Sized,
     {
+        self.find(hash, |kept| kept.borrow() == key)
+    }
+
+    /// The answer kept for the key `is_key` accepts, in the set `hash`
+    /// names: for a key compared with what it was made from rather than
+    /// with a key built for the lookup.
+    pub(crate) fn find(
+        &self,
+        hash: u64,
+        is_key: impl Fn(&K) -> bool,
+    ) -> Option<&V> {
         self.entries
             .get(Self::set(hash))?
             .iter()
             .flatten()
-            .find(|(kept, _)| kept.borrow() == key)
+            .find(|(kept, _)| is_key(kept))
             .map(|(_, value)| value)
     }
 

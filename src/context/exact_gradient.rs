@@ -38,6 +38,10 @@
 //! `highp` pipeline rounds once, after blending), more stops than the
 //! largest effect holds, and Skia's degenerate shapes.
 
+#[cfg(test)]
+use std::cell::Cell;
+use std::cell::RefCell;
+
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, FilterMode, IRect,
     ImageInfo, Matrix, MipmapMode, Paint, PictureRecorder, Pixmap, Point, Rect,
@@ -50,7 +54,11 @@ use skia_safe::{
     images,
 };
 
-use crate::{shader::GradientColorSpace, started};
+use crate::{
+    cache_map::{GOLDEN_RATIO_64, KeptSets},
+    shader::GradientColorSpace,
+    started,
+};
 
 /// What a gradient is laid out on.
 #[derive(Clone, Debug, PartialEq)]
@@ -219,7 +227,41 @@ impl GradientSpec {
     /// the effect cannot reproduce the CPU -- see the module's notes. Exact
     /// only where Ganesh draws it as an aliased rectangle on whole pixels --
     /// see [`Self::sampled`].
+    ///
+    /// The answer is the one this thread last made for a gradient whose
+    /// every number is the same to the bit, on the same page at the same
+    /// alpha, where [`EXACTS`] still keeps it: a page redrawn every frame
+    /// makes each of its gradients afresh, as a Canvas API caller makes a
+    /// new `CanvasGradient` for every draw, and making one reads its stops
+    /// through a colour conversion and uploads its uniforms.
     pub fn exact(&self, page: &ColorSpace, alpha: f32) -> Option<Shader> {
+        let alpha = alpha.to_bits();
+        let hash = exact_hash(self, page, alpha);
+        let is_key = |key: &ExactKey| key.is_for(self, page, alpha);
+        #[cfg(test)]
+        let keeps = KEEPS_EXACTS.get();
+        #[cfg(not(test))]
+        let keeps = true;
+        if keeps
+            && let Some(kept) =
+                EXACTS.with_borrow(|kept| kept.find(hash, is_key).cloned())
+        {
+            return kept;
+        }
+        let made = self.made(page, f32::from_bits(alpha));
+        let key = ExactKey {
+            spec: self.clone(),
+            page: page.clone(),
+            alpha,
+        };
+        EXACTS.with_borrow_mut(|kept| kept.file(hash, key, made.clone()));
+        made
+    }
+
+    /// [`Self::exact`], made afresh.
+    fn made(&self, page: &ColorSpace, alpha: f32) -> Option<Shader> {
+        #[cfg(test)]
+        EXACTS_MADE.set(EXACTS_MADE.get() + 1);
         let layout = Layout::of(self)?;
         let ramp = Ramp::of(self, page)?;
         // The `highp` pipeline premultiplies, scales and blends in floats
@@ -244,6 +286,129 @@ impl GradientSpec {
             )
         })
     }
+
+    /// Every number this is made from but its colour space, as bits: the
+    /// kind of geometry, whether there is a local matrix, the interpolation
+    /// and the two lists' lengths first, so that no two descriptions give
+    /// one sequence, then the geometry, the matrix, the colours and the
+    /// positions.
+    fn words(&self) -> impl Iterator<Item = u64> + '_ {
+        let (kind, geometry) = match self.geometry {
+            Geometry::Linear { start, end } => {
+                (0, [start.x, start.y, end.x, end.y, 0.0, 0.0])
+            }
+            Geometry::Radial { center, radius } => {
+                (1, [center.x, center.y, radius, 0.0, 0.0, 0.0])
+            }
+            Geometry::Conical {
+                start,
+                start_radius,
+                end,
+                end_radius,
+            } => (
+                2,
+                [start.x, start.y, start_radius, end.x, end.y, end_radius],
+            ),
+            Geometry::Sweep { center, start, end } => {
+                (3, [center.x, center.y, start, end, 0.0, 0.0])
+            }
+        };
+        let local = self.local.map(|local| {
+            let mut nine = [0.0; 9];
+            local.get_9(&mut nine);
+            nine
+        });
+        let Interpolation {
+            in_premul,
+            color_space,
+            hue_method,
+        } = self.interpolation;
+        let numbers = geometry
+            .into_iter()
+            .chain(local.into_iter().flatten())
+            .chain(self.colors.iter().flat_map(|c| [c.r, c.g, c.b, c.a]))
+            .chain(self.positions.iter().copied())
+            .map(|number| u64::from(number.to_bits()));
+        [
+            kind,
+            u64::from(local.is_some()),
+            self.space as u64,
+            in_premul as u64,
+            color_space as u64,
+            hue_method as u64,
+            self.colors.len() as u64,
+            self.positions.len() as u64,
+        ]
+        .into_iter()
+        .chain(numbers)
+    }
+}
+
+/// How many sets of shaders [`GradientSpec::exact`] keeps on a thread, and
+/// how many a set holds: 256 shaders, chosen for a page of a few dozen
+/// distinct gradients redrawn every frame -- 50 in the scene it was sized
+/// on, which fall into 64 sets of 4 with almost none pushed out. A shader
+/// holds its uniforms and its key the gradient's stops: about half a KiB
+/// for a gradient of a few stops, so about 128 KiB a thread once full, and
+/// about 14 KiB for one of 256 stops, the most the effect takes, 3.5 MiB a
+/// thread were every shader kept one. Each thread keeps its own, so a page
+/// played back on a rayon worker, as an export plays its pages, fills that
+/// worker's. A shader filed over another is made again when it is next
+/// asked for, which costs what making it always did.
+const EXACT_SETS: usize = 64;
+const EXACT_WAYS: usize = 4;
+
+/// What [`GradientSpec::exact`] made a shader from: the gradient, the
+/// page's space and the paint's alpha, as bits.
+struct ExactKey {
+    spec: GradientSpec,
+    page: ColorSpace,
+    alpha: u32,
+}
+
+impl ExactKey {
+    /// Whether this is the key of `spec` on `page` at the alpha whose bits
+    /// are `alpha`: every number the same to the bit, and every colour
+    /// space equal.
+    fn is_for(
+        &self,
+        spec: &GradientSpec,
+        page: &ColorSpace,
+        alpha: u32,
+    ) -> bool {
+        self.alpha == alpha
+            && self.spec.words().eq(spec.words())
+            && self.spec.color_space == spec.color_space
+            && self.page == *page
+    }
+}
+
+/// Where [`EXACTS`] files the key of `spec` on `page` at the alpha whose
+/// bits are `alpha`: its words and the two spaces' hashes, each folded in
+/// and multiplied by [`GOLDEN_RATIO_64`].
+fn exact_hash(spec: &GradientSpec, page: &ColorSpace, alpha: u32) -> u64 {
+    spec.words()
+        .chain([spec.color_space.hash(), page.hash(), u64::from(alpha)])
+        .fold(0, |hash, word| (hash ^ word).wrapping_mul(GOLDEN_RATIO_64))
+}
+
+/// The shaders [`GradientSpec::exact`] has made, each `None` where it could
+/// make none, filed by [`exact_hash`].
+type Exacts = KeptSets<ExactKey, Option<Shader>, EXACT_SETS, EXACT_WAYS>;
+
+thread_local! {
+    /// The shaders [`GradientSpec::exact`] has made on this thread.
+    static EXACTS: RefCell<Exacts> = const { RefCell::new(KeptSets::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many shaders [`GradientSpec::exact`] has made on this thread
+    /// rather than found kept.
+    pub(crate) static EXACTS_MADE: Cell<usize> = const { Cell::new(0) };
+    /// Whether [`GradientSpec::exact`] takes a shader kept: off, every
+    /// shader is made afresh, the reference the kept ones are held to.
+    pub(crate) static KEEPS_EXACTS: Cell<bool> = const { Cell::new(true) };
 }
 
 /// How `t` is computed, in the order the CPU's stages compute it.

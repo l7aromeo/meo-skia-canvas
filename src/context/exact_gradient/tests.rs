@@ -612,6 +612,138 @@ fn a_plain_gradient_is_covered() {
     assert!(spec.exact(&page, 1.0).is_some(), "shader");
 }
 
+/// The gradient the kept-shader tests draw: a sweep turned by a local
+/// matrix, so that every field of the key changes what it draws.
+fn kept_case() -> GradientSpec {
+    let center = CanvasPoint::new(SIDE as f32 / 2.0, SIDE as f32 / 3.0);
+    sweep_turned(center, 20.0)
+        .gradient
+        .as_deref()
+        .expect("a description")
+        .clone()
+}
+
+/// [`GradientSpec::exact`] of `spec` on `page` at `alpha`, filled over a
+/// CPU canvas at an alpha of 1, as a page draws it; and whether it was made
+/// rather than found kept. Made afresh where `keeps` is false.
+fn kept_drawn(
+    spec: &GradientSpec,
+    page: PixelColorSpace,
+    alpha: f32,
+    keeps: bool,
+) -> (Vec<u8>, bool) {
+    let space = page.to_skia_color_space().expect("the page's space");
+    let before = EXACTS_MADE.get();
+    KEEPS_EXACTS.set(keeps);
+    let shader = spec.exact(&space, alpha);
+    KEEPS_EXACTS.set(true);
+    let shader = shader.expect("an effect");
+    let made = EXACTS_MADE.get() > before;
+    let bytes = drawn(false, page, &shader, 1.0).expect("a CPU canvas");
+    (bytes, made)
+}
+
+/// A gradient drawn again takes the shader made for it the first time and
+/// draws what one made afresh draws; one that differs from it only in the
+/// paint's alpha, the page's space or its local matrix is made for itself.
+#[test]
+fn a_kept_effect_draws_what_a_fresh_one_does() {
+    let spec = kept_case();
+    let page = PixelColorSpace::Srgb;
+    let (first, made) = kept_drawn(&spec, page, 1.0, true);
+    assert!(made, "the first is made");
+    let (again, made) = kept_drawn(&spec.clone(), page, 1.0, true);
+    assert!(!made, "the same gradient again is kept");
+    let (fresh, _) = kept_drawn(&spec, page, 1.0, false);
+    assert!(
+        again == fresh && first == fresh,
+        "a kept shader draws as fresh"
+    );
+
+    // Turned by half of the sweep's period of 60 degrees, which swaps its
+    // two colours.
+    let mut turned = spec.clone();
+    turned.local = Some(Matrix::rotate_deg_pivot(
+        50.0,
+        (SIDE as f32 / 2.0, SIDE as f32 / 3.0),
+    ));
+    let variants = [
+        ("alpha", spec.clone(), page, 0.5),
+        ("page", spec.clone(), PixelColorSpace::DisplayP3, 1.0),
+        ("local matrix", turned, page, 1.0),
+    ];
+    for (field, variant, page, alpha) in variants {
+        let (kept, made) = kept_drawn(&variant, page, alpha, true);
+        assert!(made, "{field}: a variant is made for itself");
+        let (fresh, _) = kept_drawn(&variant, page, alpha, false);
+        // The control: the field changes the bytes, or a shader kept
+        // across it could not be seen.
+        assert_ne!(fresh, first, "{field}: the variant draws apart");
+        assert!(kept == fresh, "{field}: the variant draws as fresh");
+        let (again, made) = kept_drawn(&variant, page, alpha, true);
+        assert!(!made && again == fresh, "{field}: the variant is kept");
+    }
+}
+
+/// A change to one field of a gradient.
+type Change = fn(&mut GradientSpec);
+
+/// A kept shader's key takes only a gradient the same in every field, on
+/// the same page at the same alpha: each field changed alone is refused.
+#[test]
+fn a_kept_effect_is_found_only_by_its_own_key() {
+    let spec = kept_case();
+    let srgb = ColorSpace::new_srgb();
+    let alpha = 1f32.to_bits();
+    let key = ExactKey {
+        spec: spec.clone(),
+        page: srgb.clone(),
+        alpha,
+    };
+    assert!(key.is_for(&spec.clone(), &srgb, alpha), "its own key");
+    let p3 = PixelColorSpace::DisplayP3
+        .to_skia_color_space()
+        .expect("P3");
+    assert!(!key.is_for(&spec, &srgb, 0.5f32.to_bits()), "alpha");
+    assert!(!key.is_for(&spec, &p3, alpha), "page");
+    let changed: [(&str, Change); 9] = [
+        ("geometry", |spec| {
+            if let Geometry::Sweep { end, .. } = &mut spec.geometry {
+                *end = 180.0;
+            }
+        }),
+        ("kind of geometry", |spec| {
+            spec.geometry = Geometry::Radial {
+                center: Point::new(0.0, 0.0),
+                radius: 360.0,
+            };
+        }),
+        ("local matrix", |spec| {
+            spec.local = Some(Matrix::rotate_deg(21.0));
+        }),
+        ("no local matrix", |spec| spec.local = None),
+        ("a colour", |spec| spec.colors[1].g += 1.0 / 1024.0),
+        ("a position", |spec| spec.positions[1] += 1.0 / 1024.0),
+        ("colour space", |spec| {
+            spec.color_space = PixelColorSpace::DisplayP3
+                .to_skia_color_space()
+                .expect("P3");
+        }),
+        ("space", |spec| spec.space = GradientColorSpace::SrgbLinear),
+        ("interpolation", |spec| {
+            spec.interpolation.in_premul = match spec.interpolation.in_premul {
+                InPremul::Yes => InPremul::No,
+                _ => InPremul::Yes,
+            };
+        }),
+    ];
+    for (field, change) in changed {
+        let mut other = spec.clone();
+        change(&mut other);
+        assert!(!key.is_for(&other, &srgb, alpha), "{field}");
+    }
+}
+
 /// A pixel whose centre lies exactly on a hard stop takes the colour added
 /// last, as the CPU's `gradient` stage counts `t >= stop` and as Chrome's
 /// CPU canvas draws it, and the effect stores the CPU's bytes there with
