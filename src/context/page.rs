@@ -45,9 +45,9 @@ use crate::{
         chain::pool::{LayerScope, PlaneScope},
         faint::composited,
         layer::{
-            BlurDraw, BlurOp, ClipData, Clipped, ColourText, Composite,
-            Coverage, CutOp, Entries, Group, Layer, LayerRec, PatternDraw,
-            Target, TileScope, holds_a_cut, in_document_space, play_entries,
+            BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
+            Entries, Group, Layer, LayerRec, PatternDraw, ReplayedText, Target,
+            TileScope, holds_a_cut, in_document_space, play_entries,
             tiles_exactly,
         },
         resident::{Place, SharedSurface},
@@ -2178,21 +2178,21 @@ impl PageRecorder {
     }
 
     /// Files `text`, a run of text holding colour glyphs -- see
-    /// [`ColourText`] -- under `clip`, the frame's clip, as a tile is filed
+    /// [`ReplayedText`] -- under `clip`, the frame's clip, as a tile is filed
     /// by [`Self::append_tile`].
-    pub fn append_colour_text(
+    pub fn append_replayed_text(
         &mut self,
-        text: Arc<ColourText>,
+        text: Arc<ReplayedText>,
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
         self.append_under_clip(
             |clip| match clip {
-                None => Layer::ColourText(text),
+                None => Layer::ReplayedText(text),
                 Some(clip) => {
                     let mut text = Arc::unwrap_or_clone(text);
                     text.clip = Some(clip);
-                    Layer::ColourText(Arc::new(text))
+                    Layer::ReplayedText(Arc::new(text))
                 }
             },
             clip,
@@ -10730,7 +10730,7 @@ mod tests {
                     Layer::Clipped(_) => "clipped",
                     Layer::Pattern(_) => "tile",
                     Layer::Deferred(_) => "deferred",
-                    Layer::ColourText(_) => "colour text",
+                    Layer::ReplayedText(_) => "colour text",
                 })
                 .collect();
             kinds.join(" ")

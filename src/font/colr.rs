@@ -1689,7 +1689,7 @@ thread_local! {
 /// made on the CPU in its format, at the transform of the canvas they are
 /// drawn on, rather than composited through a layer from their paint
 /// graphs: the route a run of text takes where a page is played onto pixels
-/// -- see `layer::ColourText`. Skia draws a colour glyph the same way, from
+/// -- see `layer::ReplayedText`. Skia draws a colour glyph the same way, from
 /// an image its scaler context made on the CPU (`generateImage` in
 /// `skia/src/ports/SkTypeface_fontations.cpp`), on a raster device and a GPU
 /// one alike.

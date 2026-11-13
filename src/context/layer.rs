@@ -98,8 +98,8 @@ pub enum Layer {
     /// [`DeferredPicture`]: as a picture once recorded.
     Deferred(Arc<DeferredPicture>),
     /// A run of text holding colour glyphs, drawn again where it is played
-    /// back on pixels -- see [`ColourText`].
-    ColourText(Arc<ColourText>),
+    /// back on pixels -- see [`ReplayedText`].
+    ReplayedText(Arc<ReplayedText>),
 }
 
 impl Layer {
@@ -122,7 +122,7 @@ impl Layer {
                     picture.playback(canvas);
                 }
             }
-            Layer::ColourText(text) => text.playback(canvas, target),
+            Layer::ReplayedText(text) => text.playback(canvas, target),
         }
     }
 
@@ -151,7 +151,7 @@ impl Layer {
                     picture.cull_rect()
                 }),
             ),
-            Layer::ColourText(text) => Some(text.reach()),
+            Layer::ReplayedText(text) => Some(text.reach()),
         }
     }
 }
@@ -1562,7 +1562,7 @@ impl Replay {
 /// such; so do pixels played into a recording, which does not know the
 /// pixels it will be played onto.
 #[derive(Clone, Debug)]
-pub struct ColourText {
+pub struct ReplayedText {
     /// The transform the run was drawn under.
     pub matrix: Matrix,
     /// The run kept whole, to draw on pixels; `None` for a draw that cannot
@@ -1575,7 +1575,7 @@ pub struct ColourText {
     /// it has no replay: the raster it is rasterized into.
     pub inked: Rect,
     /// The shadow the run casts on pixels, drawn beneath it.
-    pub shadow: Option<ColourShadow>,
+    pub shadow: Option<ReplayedShadow>,
     /// The blend a layer holding the run and its shadow composites through,
     /// where the blend covers beyond the draw -- see
     /// `Context2D::render_to_canvas`.
@@ -1588,12 +1588,12 @@ pub struct ColourText {
     pub bounds: Rect,
     /// The run as recorded for a document, on a page that keeps a recording
     /// for each kind of target -- see `page::Recorders` -- where it differs.
-    pub document: Option<ColourRecording>,
+    pub document: Option<ReplayedRecording>,
     /// The clip the run was drawn under, in device pixels of the recording,
     /// where it is not a piece of a run that applies it -- see [`Clipped`].
     pub clip: Option<Data>,
     /// Where the thread that filed it counts the recordings
-    /// [`Self::recorded`] makes -- see [`COLOUR_WATCH`].
+    /// [`Self::recorded`] makes -- see [`REPLAYED_WATCH`].
     #[cfg(test)]
     pub watch: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
@@ -1602,26 +1602,26 @@ pub struct ColourText {
 thread_local! {
     /// Where the colour runs filed on this thread count the recordings made
     /// of them when first asked for, on whichever thread makes them -- see
-    /// [`ColourText::recorded`].
-    pub(crate) static COLOUR_WATCH: RefCell<
+    /// [`ReplayedText::recorded`].
+    pub(crate) static REPLAYED_WATCH: RefCell<
         Option<Arc<std::sync::atomic::AtomicUsize>>,
     > = const { RefCell::new(None) };
 }
 
-/// A [`ColourText`]'s recording for a document: the paints the run and its
+/// A [`ReplayedText`]'s recording for a document: the paints the run and its
 /// shadow are recorded in, and the picture once something has asked for it
-/// -- see [`ColourText::recorded`].
+/// -- see [`ReplayedText::recorded`].
 #[derive(Clone, Debug)]
-pub struct ColourRecording {
+pub struct ReplayedRecording {
     /// What the run is recorded in.
     pub paint: Paint,
     /// The shadow recorded beneath the run.
-    pub shadow: Option<ColourShadow>,
+    pub shadow: Option<ReplayedShadow>,
     /// The picture, once recorded.
     pub picture: OnceLock<Option<Picture>>,
 }
 
-impl ColourRecording {
+impl ReplayedRecording {
     /// `picture`, recorded already.
     pub(crate) fn recorded(picture: Picture) -> Self {
         Self {
@@ -1633,7 +1633,7 @@ impl ColourRecording {
 
     /// The run in `paint`, `shadow` beneath it, recorded when first asked
     /// for.
-    pub(crate) fn later(paint: Paint, shadow: Option<ColourShadow>) -> Self {
+    pub(crate) fn later(paint: Paint, shadow: Option<ReplayedShadow>) -> Self {
         Self {
             paint,
             shadow,
@@ -1642,17 +1642,17 @@ impl ColourRecording {
     }
 }
 
-/// The shadow a [`ColourText`] casts: the run in the shadow's paint, which
+/// The shadow a [`ReplayedText`] casts: the run in the shadow's paint, which
 /// is the run's own at full alpha where the shadow's colour took the
 /// `globalAlpha`, moved by the shadow's offset in the page's own units.
 #[derive(Clone, Debug)]
-pub struct ColourShadow {
+pub struct ReplayedShadow {
     pub paint: Paint,
     pub replay: Replay,
     pub offset: Vector,
 }
 
-impl ColourText {
+impl ReplayedText {
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         // Its runs join a batch only where nothing of its own lies between
         // them and the page: no clip, no layer for a blend, no shadow
@@ -1748,7 +1748,7 @@ impl ColourText {
     fn record(
         &self,
         paint: &Paint,
-        shadow: Option<&ColourShadow>,
+        shadow: Option<&ReplayedShadow>,
     ) -> Option<Picture> {
         #[cfg(test)]
         if let Some(watch) = &self.watch {
@@ -3065,7 +3065,7 @@ impl Clipped {
                 Layer::Deferred(deferred) => {
                     deferred.picture().and_then(drawn_by)
                 }
-                Layer::ColourText(text) => Some(text.reach()),
+                Layer::ReplayedText(text) => Some(text.reach()),
                 entry => entry.reach(),
             }?;
             if !within.intersect(self.bounds) {
@@ -3214,7 +3214,7 @@ pub(crate) fn play_entries(
     let mut at = 0;
     while at < entries.len() {
         match &entries[at] {
-            Layer::ColourText(_) if target == Target::Pixels => {
+            Layer::ReplayedText(_) if target == Target::Pixels => {
                 batch.get_or_insert_with(|| BatchScope::open(canvas));
             }
             _ => batch = None,
@@ -3740,7 +3740,7 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         | Layer::Targeted(_)
         | Layer::Pattern(_)
         | Layer::Deferred(_)
-        | Layer::ColourText(_) => false,
+        | Layer::ReplayedText(_) => false,
     })
 }
 
@@ -3753,13 +3753,13 @@ pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
         Layer::Targeted(_) => true,
         Layer::Deferred(deferred) => deferred.is_pair(),
-        Layer::ColourText(text) => text.is_pair(),
+        Layer::ReplayedText(text) => text.is_pair(),
         Layer::Cut(op) => op.documents.is_some(),
         Layer::Group(group) => holds_a_pair(&group.contents.layers),
         Layer::Clipped(piece) => match &piece.entry {
             Layer::Targeted(_) => true,
             Layer::Deferred(deferred) => deferred.is_pair(),
-            Layer::ColourText(text) => text.is_pair(),
+            Layer::ReplayedText(text) => text.is_pair(),
             Layer::Cut(op) => op.documents.is_some(),
             _ => false,
         },
