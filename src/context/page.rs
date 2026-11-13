@@ -1009,6 +1009,24 @@ impl Spare {
     const IDLE_FRAMES: u32 = 64;
 }
 
+/// The most ops a page's recording can hold and be filed as it is finished,
+/// rather than wrapped in a picture holding it as one op. Chosen, not
+/// derived: any value from 4 to about 64 measured the same, and 16 sits
+/// inside that range.
+///
+/// It trades the wrapper's cost against culling. The wrapper is what lets a
+/// canvas drawn into another under a clip replay only what the clip shows;
+/// "a clipped nested draw costs the region, not the page", in
+/// `tests/suite/canvas.test.js`, holds that side, and fails with nothing
+/// wrapped. The wrapper costs a recorder begun and finished for every
+/// recording the page files, and where gradient fills alternate with flat
+/// ones each flat fill is a recording of 4 ops: a frame of 2000 of each
+/// took 13.6 ms with them wrapped and 12.6 unwrapped. Unwrapped, a clipped
+/// draw of a nested source holding up to 32 fills cost what wrapped did,
+/// 0.40 to 0.45 ms; 128 fills cost 0.48 against 0.40, and 2000 cost 0.90
+/// against 0.42.
+const UNWRAPPED_OPS: usize = 16;
+
 impl PageRecorder {
     /// The bytes this page holds in pixels. See
     /// [`RecordingSurface::resident_bytes`].
@@ -2057,20 +2075,21 @@ impl PageRecorder {
             return;
         }
 
-        // store layer as a drawable (so copies are deduplicated) wrapped in
-        // a picture (so it can be sent to other threads)
+        // Wrapped in a picture of its own where it holds more than a few
+        // ops, which is what lets a canvas drawn into another under a clip
+        // replay only what the clip shows -- see `UNWRAPPED_OPS`.
         let bounds = self.bounds;
         let filed = self.current.as_mut().and_then(|recorders| {
             let entry = recorders.finish(|recorder| {
-                recorder.finish_recording_as_drawable().and_then(
-                    |mut drawable| {
-                        let mut wrapper = PictureRecorder::new();
-                        wrapper
-                            .begin_recording(bounds, true)
-                            .draw_drawable(&mut drawable, None);
-                        wrapper.finish_recording_as_picture(None)
-                    },
-                )
+                let picture = recorder.finish_recording_as_picture(None)?;
+                if picture.approximate_op_count() <= UNWRAPPED_OPS {
+                    return Some(picture);
+                }
+                let mut wrapper = PictureRecorder::new();
+                wrapper
+                    .begin_recording(bounds, true)
+                    .draw_picture(&picture, None, None);
+                wrapper.finish_recording_as_picture(None)
             });
             recorders.begin_with(bounds, true);
             entry
