@@ -129,6 +129,7 @@ enum StepKey {
         sigma: u32,
         colour: [u32; 4],
         space: (u32, u32),
+        shadow_only: bool,
     },
 }
 
@@ -146,12 +147,14 @@ impl StepKey {
                 sigma,
                 colour,
                 space,
+                shadow_only,
             } => Self::Shadow {
                 offset: [offset.x, offset.y].map(f32::to_bits),
                 sigma: sigma.to_bits(),
                 colour: [colour.r, colour.g, colour.b, colour.a]
                     .map(f32::to_bits),
                 space: (space.to_xyzd50_hash().0, space.transfer_fn_hash()),
+                shadow_only: *shadow_only,
             },
             Step::Image { .. } => return None,
         })
@@ -862,6 +865,7 @@ mod tests {
                     sigma,
                     colour,
                     space,
+                    shadow_only: false,
                 }
             };
         let black = Color4f::new(0.0, 0.0, 0.0, 1.0);
@@ -898,6 +902,16 @@ mod tests {
             !found(shadow(1.0, 2.0, black, ColorSpace::new_srgb_linear())),
             "another space"
         );
+        // A shadow cast alone leaves out the image a `drop-shadow()` draws
+        // over it, so the two make different results from one input.
+        let shadow_only = Step::Shadow {
+            offset: Vector::new(1.0, 2.0),
+            sigma: 2.0,
+            colour: black,
+            space: ColorSpace::new_srgb(),
+            shadow_only: true,
+        };
+        assert!(!found(shadow_only), "the shadow without its image");
     }
 
     /// The sharp coverage of `rect` on a CPU page `size`, for a blur of
