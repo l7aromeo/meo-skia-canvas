@@ -953,10 +953,23 @@ impl Svg {
         self.dom.root().set_color(rgba_linear_to_skia_color(color));
     }
 
+    /// The surface [`Self::rasterize`] draws into: eight-bit sRGB, so that
+    /// what the document draws over itself blends in sRGB values, as Chrome
+    /// renders an SVG image and as the canvas blends. In linear light, black
+    /// at half opacity over red read 188 where Chrome reads 127.
+    fn surface_info(width: u32, height: u32) -> ImageInfo {
+        ImageInfo::new(
+            (width as i32, height as i32),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        )
+    }
+
     /// Rasterizes the document into an [`Image`] of the given dimensions.
     ///
     /// The document is fitted to those dimensions, then drawn into a
-    /// transparent linear-light sRGB surface and snapshotted. The fit is
+    /// transparent eight-bit sRGB surface and snapshotted. The fit is
     /// uniform and centred -- `preserveAspectRatio`'s own `xMidYMid meet` --
     /// so a 3-by-2 document in a 2-by-1 box inks 150 by 100 of it and is
     /// never distorted.
@@ -1005,12 +1018,7 @@ impl Svg {
         self.dom
             .set_container_size(SkSize::new(width as f32, height as f32));
 
-        let info = ImageInfo::new(
-            (width as i32, height as i32),
-            ColorType::RGBAF16,
-            AlphaType::Premul,
-            ColorSpace::new_srgb_linear(),
-        );
+        let info = Self::surface_info(width, height);
         let mut surface =
             started::raster(&info, None, None).ok_or_else(|| {
                 Error::DecodeImage {
@@ -3159,6 +3167,103 @@ mod tests {
         );
     }
 
+    /// An SVG blends what it draws over itself in sRGB, as Chrome renders an
+    /// SVG image and as the canvas blends.
+    ///
+    /// Black over an opaque red ground three ways: at `fill-opacity` 0.5,
+    /// covering half a pixel, and both at once. Chrome 158 draws the
+    /// document as an `<img>`, from a data URL and from a blob alike, into a
+    /// canvas reading 127, 128 and 191 -- the arithmetic of sRGB values.
+    /// Blended in linear light they read 188, 188 and 225.
+    #[test]
+    fn an_svg_blends_its_layers_in_srgb_as_chrome_does() {
+        /// The red channel Chrome 158 reads from the probe below, pixel by
+        /// pixel; every pixel is opaque and holds no green or blue.
+        const CHROME_RED: [u8; 4] = [255, 127, 128, 191];
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="1">
+<rect width="4" height="1" fill="rgb(255,0,0)"/>
+<rect x="1" width="1" height="1" fill="black" fill-opacity="0.5"/>
+<rect x="2" width="0.5" height="1" fill="black"/>
+<rect x="3" width="0.5" height="1" fill="black" fill-opacity="0.5"/>
+</svg>"#;
+        let image = Svg::parse(xml)
+            .expect("valid SVG")
+            .rasterize(4, 1)
+            .expect("rasterizes");
+        let info = ImageInfo::new(
+            (4, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let mut pixels = [0u8; 16];
+        assert!(
+            image.inner.read_pixels(
+                &info,
+                &mut pixels,
+                16,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ),
+            "the surface reads back"
+        );
+        let want: Vec<u8> = CHROME_RED
+            .iter()
+            .flat_map(|&red| [red, 0, 0, u8::MAX])
+            .collect();
+        assert_eq!(pixels.to_vec(), want);
+    }
+
+    /// Translucent over translucent blends in sRGB too, where the result
+    /// stays translucent and is unpremultiplied on the way out.
+    ///
+    /// Black at `fill-opacity` 0.6 over red at 0.6, on nothing. Chrome 156
+    /// draws the document as an `<img>` into a canvas reading 73, 0, 0, 214
+    /// where they overlap and each alone where it does not. Blended in
+    /// linear light the overlap reads 146.
+    #[test]
+    fn an_svg_blends_translucent_over_translucent_in_srgb_as_chrome_does() {
+        /// What Chrome 156 reads at each pixel below, unpremultiplied: the
+        /// overlap, red alone and black alone.
+        const CHROME: [((i32, i32), [u8; 4]); 3] = [
+            ((10, 0), [73, 0, 0, 214]),
+            ((10, 30), [255, 0, 0, 153]),
+            ((60, 0), [0, 0, 0, 153]),
+        ];
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">
+<rect width="40" height="40" fill="red" fill-opacity="0.6"/>
+<rect width="80" height="20" fill="black" fill-opacity="0.6"/>
+</svg>"#;
+        let image = Svg::parse(xml)
+            .expect("valid SVG")
+            .rasterize(80, 40)
+            .expect("rasterizes");
+        let info = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let got: Vec<_> = CHROME
+            .iter()
+            .map(|&(at, _)| {
+                let mut pixel = [0u8; 4];
+                assert!(
+                    image.inner.read_pixels(
+                        &info,
+                        &mut pixel,
+                        4,
+                        at,
+                        skia_safe::image::CachingHint::Allow,
+                    ),
+                    "the surface reads back"
+                );
+                (at, pixel)
+            })
+            .collect();
+        assert_eq!(got, CHROME.to_vec());
+    }
+
     /// Rasterizing does not leave the document resized behind it.
     ///
     /// The scaling is done by resolving the root against the container, which
@@ -4595,12 +4700,7 @@ mod tests {
         else {
             panic!("the binding records the document");
         };
-        let info = ImageInfo::new(
-            (width as i32, height as i32),
-            ColorType::RGBAF16,
-            AlphaType::Premul,
-            ColorSpace::new_srgb_linear(),
-        );
+        let info = Svg::surface_info(width, height);
         let mut surface =
             started::raster(&info, None, None).expect("a surface");
         surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
