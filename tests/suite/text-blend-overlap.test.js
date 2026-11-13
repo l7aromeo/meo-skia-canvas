@@ -57,6 +57,13 @@ describe("Glyphs drawn into one another under a blend that reads the page", () =
   // the 10 levels the least of the scenes stood drawn whole on Metal.
   const bound = (stroke, device) =>
     !/llvmpipe/.test(device) ? (stroke ? 5 : 3) : 8;
+  // How far the Palettes face's em may measure from 40px at 40px: a 64th
+  // of a pixel, the unit FreeType lays text out in. FreeType on Linux
+  // reports it 2^-15 short, 39.999969482421875; macOS reports 40.
+  const EM_TOLERANCE = 1 / 64;
+  // How many tolerances the fallback face must stand from the em, so that
+  // no face the check could mistake for the Palettes one passes it.
+  const GAP_OVER_TOLERANCE = 100;
 
   beforeEach(() => {
     FontLibrary.use("OverlapOswald", [OSWALD]);
@@ -94,7 +101,19 @@ describe("Glyphs drawn into one another under a blend that reads the page", () =
       ctx.font = font;
       return ctx.measureText("A").width;
     };
-    assert.equal(advance("40px OverlapPalettes"), 40);
+    // The Palettes face's "A" advances one em. The fallback's stands far
+    // from it -- 26.68px at 40px on macOS -- and the check is good only
+    // while it does, so the gap is measured here rather than assumed.
+    const palettes = advance("40px OverlapPalettes");
+    const fallback = advance("40px OverlapNowhere");
+    assert.ok(
+      Math.abs(fallback - 40) > GAP_OVER_TOLERANCE * EM_TOLERANCE,
+      `the fallback's "A" is ${fallback}px, too near 40 to tell the faces apart`,
+    );
+    assert.ok(
+      Math.abs(palettes - 40) <= EM_TOLERANCE,
+      `"A" is ${palettes}px, not the Palettes face's 40px em`,
+    );
     assert.notEqual(
       advance("48px OverlapOswald"),
       advance("48px OverlapNowhere"),
