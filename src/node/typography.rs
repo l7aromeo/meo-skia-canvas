@@ -6656,10 +6656,11 @@ mod glyph_group_tests {
         FAKE_ITALIC_SKEW, Shear, device_pixels, glyph_groups, pixels_inked,
         sheared_blob,
     };
+    use crate::started;
     use skia_safe::{
         AlphaType, BlurStyle, Color, ColorType, Data, Font, FontHinting,
         FontMgr, IRect, ImageInfo, MaskFilter, Matrix, Paint, PaintStyle,
-        Point, Rect, surfaces,
+        Point, Rect,
     };
     use std::ops::Range;
 
@@ -6746,7 +6747,7 @@ mod glyph_group_tests {
         let shear = Shear::By(Matrix::skew((FAKE_ITALIC_SKEW, 0.0)));
         let (width, height) = (420, 160);
         let mut surface =
-            surfaces::raster_n32_premul((width, height)).expect("a surface");
+            started::raster_n32_premul((width, height)).expect("a surface");
         let origin = Point::new(12.0, 70.0);
         let mut outside = Vec::new();
         for hinting in [FontHinting::None, FontHinting::Normal] {
