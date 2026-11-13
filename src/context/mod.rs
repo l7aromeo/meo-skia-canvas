@@ -1359,9 +1359,16 @@ impl Context2D {
     /// blur past 4 on the GPU. A document composites the group through
     /// Skia's shadow filter, as it drew the shadow before.
     ///
+    /// A draw under a CSS filter casts the shadow of what the filter makes,
+    /// as the HTML Standard orders the two: the chain runs the filter's
+    /// steps and then the shadow's, on the draw recorded without the filter,
+    /// and a document composites the group through Skia's shadow filter
+    /// taking the CSS filter as its input. Through Skia's layer, the filter's
+    /// blur and the shadow's were each Skia's approximation.
+    ///
     /// `false`, filing nothing, for a draw casting no shadow; for one under
-    /// a filter of its own, CSS or CanvasKit, which Skia's layer runs; and
-    /// for one under a blend that covers beyond it, which
+    /// a CanvasKit filter, which Skia's layer runs in the draw's own units;
+    /// and for one under a blend that covers beyond it, which
     /// `render_to_canvas` composites with its shadow through one layer.
     fn files_shadow_through_chain<F>(
         &self,
@@ -1378,6 +1385,13 @@ impl Context2D {
         }
         // The filter's steps the shadow is cast after, where the draw is
         // under one.
+        let filter = match paint.image_filter() {
+            Some(_) => match self.exact_steps() {
+                Some(steps) => steps,
+                None => return false,
+            },
+            None => Arc::from([]),
+        };
         let lines = text.is_some_and(|text| text.lines);
         let dual = self.recorder.borrow().dual();
         // The recording the shadow's pixels and its document are each cast
@@ -1392,7 +1406,11 @@ impl Context2D {
         ) else {
             return false;
         };
-        let steps = self.shadow_steps(&pixels_cast);
+        let steps: Arc<[Step]> = filter
+            .iter()
+            .cloned()
+            .chain(self.shadow_steps(&pixels_cast).iter().cloned())
+            .collect();
         let offset = self.state.shadow_offset;
         // Recorded over the page, as far again as the blur reaches, and
         // back along the offset, which brings a draw off the page onto it.
@@ -1447,7 +1465,7 @@ impl Context2D {
                 (document_cast.sigma.x, document_cast.sigma.y),
                 document_cast.colour,
                 document_cast.space.clone(),
-                None,
+                paint.image_filter(),
                 None,
             ));
         // The draw inside asks for what its paint does, less the filter and
@@ -1667,7 +1685,13 @@ impl Context2D {
         // Recorded over the page and as far again as the filter and the
         // shadow reach: a picture keeps nothing of a draw past its bounds,
         // and a draw off the page can cast its shadow onto it.
-        let chain = steps.as_ref().map_or(Vector::default(), |steps| {
+        // The filter's reach is the chain's where the draw runs one, and its
+        // steps' where only the shadow does.
+        let filter_steps = match paint.image_filter() {
+            Some(_) => steps.clone().or_else(|| self.exact_steps()),
+            None => None,
+        };
+        let chain = filter_steps.as_ref().map_or(Vector::default(), |steps| {
             canvas_reach(steps, &self.state.matrix)
         });
         let shadow = match self.casts_shadow() {
@@ -1778,23 +1802,33 @@ impl Context2D {
         };
         // The shadow of what its group holds, its alpha already in it; on
         // pixels where the shadow's colour took it, the draw without it.
+        // Cast from what the draw's filter makes, as the HTML Standard
+        // orders the two.
         let mut cast = Paint::default();
-        cast.set_anti_alias(true);
+        cast.set_anti_alias(true)
+            .set_image_filter(paint.image_filter());
         // On pixels the shadow is cast through the exact chain, in the
         // colour the pixels' shadow takes -- see `Self::shadow_steps` --
-        // where the draw has no filter of its own; under one, Skia's layer
-        // casts it.
-        let shadow_steps = match paint.image_filter().is_none() {
-            true => {
-                let mut pixels_cast = cast.clone();
-                if moves {
-                    pixels_cast.set_alpha_f(through_alpha);
-                }
-                self.shadow_cast_in(&pixels_cast, Recording::Shared, lines)
-                    .map(|cast| self.shadow_steps(&cast))
-            }
-            false => None,
+        // after the steps of the draw's own filter where it has one; under
+        // a filter with no steps of its own, from what Skia's layer makes.
+        let cast_steps = match paint.image_filter() {
+            Some(_) => filter_steps,
+            None => Some(Arc::from([])),
         };
+        let shadow_steps = cast_steps.and_then(|filter_steps| {
+            let mut pixels_cast = cast.clone();
+            if moves {
+                pixels_cast.set_alpha_f(through_alpha);
+            }
+            self.shadow_cast_in(&pixels_cast, Recording::Shared, lines)
+                .map(|cast| {
+                    filter_steps
+                        .iter()
+                        .chain(self.shadow_steps(&cast).iter())
+                        .cloned()
+                        .collect::<Arc<[Step]>>()
+                })
+        });
         let shadow = self.paint_for_shadow(&cast).map(|shadow| {
             let rec = LayerRec {
                 paint: Some(shadow),
@@ -3276,14 +3310,26 @@ impl Context2D {
                 .map(|shadow| self.faint().drawable(&shadow).into_owned());
             let offset = self.state.shadow_offset;
             let steps = self.exact_steps();
-            // The shadow is cast through the exact chain on pixels where the
-            // source is drawn through no filter of its own; under one, Skia's
-            // layer casts it.
-            let cast = match steps.is_none() && paint.image_filter().is_none() {
-                true => self.shadow_cast_in(&paint, Recording::Shared, false),
-                false => None,
+            // The shadow is cast through the exact chain on pixels: after
+            // the steps of the source's own filter where it has one, which
+            // it is cast from, as the HTML Standard orders the two. Under a
+            // filter with no steps of its own, it is cast from the filtered
+            // source Skia's layer makes.
+            let cast_steps = match paint.image_filter() {
+                Some(_) => steps.clone(),
+                None => Some(Arc::from([])),
             };
-            let shadow_steps = cast.map(|cast| self.shadow_steps(&cast));
+            let shadow_steps = cast_steps.and_then(|filter_steps| {
+                self.shadow_cast_in(&paint, Recording::Shared, false).map(
+                    |cast| {
+                        filter_steps
+                            .iter()
+                            .chain(self.shadow_steps(&cast).iter())
+                            .cloned()
+                            .collect::<Arc<[Step]>>()
+                    },
+                )
+            });
             // The pixels composite the canvas through its colour filter
             // built for them -- see `Self::pixels_paint`.
             let pixels = self.pixels_paint(&drawn);
@@ -4496,12 +4542,16 @@ impl Context2D {
         self.shadow_cast_in(base_paint, recording, lines)
             .map(|cast| {
                 let mut paint = cast.paint;
+                // Cast from what the draw's own filter makes, which the shadow
+                // filter takes as its input, as the HTML Standard orders the
+                // two.
+                let filtered = paint.image_filter();
                 paint.set_image_filter(image_filters::drop_shadow_only(
                     (0.0, 0.0),
                     (cast.sigma.x, cast.sigma.y),
                     cast.colour,
                     cast.space,
-                    None,
+                    filtered,
                     None,
                 ));
                 (paint, cast.pass)

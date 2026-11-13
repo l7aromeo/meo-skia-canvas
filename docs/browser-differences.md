@@ -1360,10 +1360,20 @@ Skia rasterises it, whose edges step in quarters of a pixel. Below 5 the
 GPU's closed form is more than half a level off (#708), and the rectangle
 casts its shadow as any other draw does.
 
-Five shadows are still Skia's: one cast by a draw under a CSS filter, one
-under a `globalCompositeOperation` that composites the whole canvas, one
-under a CanvasKit filter, one cast by a run holding colour glyphs, and every
-shadow in a PDF or SVG document. Each blur is Skia's.
+The shadow of a filtered draw is cast from what the filter makes, and the
+shadow is not filtered, as the HTML Standard orders the two and as Chrome
+does on both its canvases: a black draw through `invert(1)` casts its red
+`shadowColor` red, not cyan, and one through `drop-shadow(30px 0 0 blue)`
+casts a black shadow of the draw and of its copy, with no blue. Through `blur(2px)`
+the shadow here is within 0.6 of a level of the exact shadow of the exact
+filtered draw at a `shadowBlur` of 4, 8 and 16, the filtered draw being
+held as pixels between the two; Chrome's raster canvas is 9.33, 7.84 and
+5.47 off, its GPU canvas 1.05, 1.12 and 1.24.
+
+Four shadows are still Skia's: one under a `globalCompositeOperation` that
+composites the whole canvas, one under a CanvasKit filter, one cast by a run
+holding colour glyphs, and every shadow in a PDF or SVG document. Each is
+cast from what the draw's filter makes, and each blur is Skia's.
 
 **On an eight-bit sRGB canvas a shadow stores the exact product of its colour
 and its alpha, on either engine, and Chrome's do not all.** `shadowColor`, a

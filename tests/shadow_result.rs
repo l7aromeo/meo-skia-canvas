@@ -127,6 +127,15 @@ fn pattern_triangle(ctx: &mut Context2D) {
     filled_triangle(ctx);
 }
 
+/// Text filled in a canvas's pattern: a draw the pattern's own route takes,
+/// shadow and all, where a path files its shadow before it.
+fn pattern_text(ctx: &mut Context2D) {
+    let pattern =
+        ctx.create_pattern_from_canvas(&mut striped(), PatternRepeat::Repeat);
+    ctx.set_fill_pattern(&pattern);
+    text(ctx);
+}
+
 fn drawn_canvas(ctx: &mut Context2D) {
     let mut source = Canvas::new(80.0, 60.0);
     let inner = source.context();
@@ -162,6 +171,16 @@ const SOURCES: [(&str, Draw); 9] = [
     ("canvas pattern", pattern_triangle),
     ("drawn canvas", drawn_canvas),
 ];
+
+/// A `drop-shadow()` that moves what it casts by whole pixels, in a colour
+/// no shadow here is cast in.
+const DROP_SHADOW: &str = "drop-shadow(30px 0 0 blue)";
+
+/// `draw` under the CSS filter `filter`.
+fn under(filter: &str, ctx: &mut Context2D, draw: Draw) {
+    ctx.set_filter_css(filter).expect("a filter");
+    draw(ctx);
+}
 
 /// A 40px image whose alpha varies across it, so a shadow has structure to
 /// spread and not only an edge.
@@ -450,4 +469,141 @@ fn a_draw_casting_a_shadow_lands_the_bytes_it_does_casting_none() {
         }
     }
     assert!(wrong.is_empty(), "the draw moved: {wrong:#?}");
+}
+
+#[test]
+fn a_filtered_draw_casts_the_shadow_of_what_its_filter_makes() {
+    // The standard filters the draw and casts the shadow from what the
+    // filter makes: the draw's coverage blurred by the filter, held as
+    // pixels -- rounded to a level -- and blurred again by the shadow, or
+    // not at all where the shadow is not blurred. Each source takes a route
+    // of its own: a path, a canvas's pattern under a path and under text, a
+    // drawn canvas.
+    let filter_sigma = 2.0f64;
+    let sources: [(&str, Draw); 4] = [
+        ("filled triangle", filled_triangle),
+        ("canvas pattern", pattern_triangle),
+        ("text in a canvas pattern", pattern_text),
+        ("drawn canvas", drawn_canvas),
+    ];
+    let mut wrong = vec![];
+    for gpu in [false, true] {
+        for (name, draw) in sources {
+            let Some(drawn) = coverage(gpu, draw) else {
+                continue;
+            };
+            let filtered: Vec<f64> =
+                sampled(&drawn, SIZE.0 as usize, filter_sigma)
+                    .into_iter()
+                    .map(|v| (v * 255.0).round() / 255.0)
+                    .collect();
+            for blur in [0.0f32, 4.0, 12.0] {
+                let mut canvas = page(gpu).expect("the same engine");
+                let ctx = canvas.context();
+                ctx.set_fill_style_css("black").expect("a colour");
+                ctx.set_filter_css(&format!("blur({filter_sigma}px)"))
+                    .expect("a filter");
+                ctx.set_shadow_color_css("black").expect("a colour");
+                ctx.set_shadow_blur(blur);
+                ctx.set_shadow_offset(AWAY, 0.0);
+                ctx.translate(-AWAY, 0.0);
+                draw(ctx);
+                let shadow = alpha(&mut canvas);
+                let reference = match blur {
+                    0.0 => filtered.clone(),
+                    _ => sampled(
+                        &filtered,
+                        SIZE.0 as usize,
+                        f64::from(blur) / 2.0,
+                    ),
+                };
+                let misses = misses(&shadow, &reference);
+                if !misses.is_empty() {
+                    wrong.push(format!(
+                        "gpu {gpu}, {name}, shadowBlur {blur}: {} pixels off, \
+                         first {:?}",
+                        misses.len(),
+                        &misses[..misses.len().min(3)],
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "off the shadow of the filtered draw: {wrong:#?}"
+    );
+}
+
+/// The pixels of a black triangle's shadow alone, in red, under the CSS
+/// filter `filter` and the blend `blend`, on `gpu`'s engine.
+fn filtered_shadow(
+    gpu: bool,
+    filter: &str,
+    blend: BlendMode,
+) -> Option<Vec<u8>> {
+    let mut canvas = page(gpu)?;
+    let ctx = canvas.context();
+    ctx.set_global_composite_operation(blend);
+    ctx.set_fill_style_css("black").expect("a colour");
+    ctx.set_filter_css(filter).expect("a filter");
+    ctx.set_shadow_color_css("red").expect("a colour");
+    ctx.set_shadow_offset(AWAY, 0.0);
+    ctx.translate(-AWAY, 0.0);
+    filled_triangle(ctx);
+    let data = ctx
+        .get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+        .expect("pixels");
+    Some(data.pixels().to_vec())
+}
+
+#[test]
+fn a_shadow_is_cast_after_the_filter_and_is_not_filtered() {
+    // The HTML Standard filters the draw and casts the shadow from the
+    // result: a filter that does not commute with a shadow shows the order.
+    // The shadow of a draw through `invert(1)` is in the shadow's colour,
+    // where the filter run after it would turn red to cyan; the shadow of
+    // one through a `drop-shadow()` holds both the draw and its copy, all
+    // in the shadow's colour, where the filter run after it would add a
+    // blue copy of the shadow. Under a blend that composites the whole
+    // canvas the shadow is Skia's, and the order is the same.
+    let mut wrong = vec![];
+    for gpu in [false, true] {
+        let Some(copy) =
+            coverage(gpu, |ctx| under(DROP_SHADOW, ctx, filled_triangle))
+        else {
+            continue;
+        };
+        for blend in [BlendMode::SourceOver, BlendMode::Copy] {
+            let shadow = filtered_shadow(gpu, "invert(1)", blend)
+                .expect("the same engine");
+            let opaque = shadow.chunks(4).filter(|p| p[3] == 255);
+            let not_red = opaque.clone().filter(|p| p[..3] != [255, 0, 0]);
+            if opaque.count() == 0 || not_red.count() > 0 {
+                wrong.push(format!(
+                    "gpu {gpu}, {blend:?}: the shadow of a draw through \
+                     invert(1) is not red"
+                ));
+            }
+            let shadow = filtered_shadow(gpu, DROP_SHADOW, blend)
+                .expect("the same engine");
+            let tinted = shadow
+                .chunks(4)
+                .filter(|p| p[3] > 0 && p[..3] != [255, 0, 0])
+                .count();
+            let apart = shadow
+                .chunks(4)
+                .zip(&copy)
+                .filter(|(p, c)| f64::from(p[3]) != (**c * 255.0).round())
+                .count();
+            if tinted > 0 || apart > 0 {
+                wrong.push(format!(
+                    "gpu {gpu}, {blend:?}: the shadow of a draw through \
+                     {DROP_SHADOW} has {tinted} pixels not red and {apart} \
+                     whose alpha is not the filtered draw's"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "the filter and the shadow: {wrong:#?}");
 }
