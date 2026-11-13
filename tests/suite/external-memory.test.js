@@ -4,7 +4,8 @@
 
 // What a canvas or an image holds natively is reported to V8 as external
 // memory, and released when the object is finalized, so the engine schedules
-// collections by it. These read what this addon has reported and the engine
+// collections by it: a canvas's page in pixels, with a GPU page's
+// multisample buffer, and its recording, as Skia estimates its pictures. These read what this addon has reported and the engine
 // accepted, through `__reportedMemory`, which debug builds alone export:
 // against a release binary they are skipped by name. The engine's own total,
 // which `napi_adjust_external_memory` returns, cannot stand in for it: it
@@ -43,6 +44,48 @@ const HELD_BYTES = 146_209;
 /** The bytes a 32-bit pixel takes. */
 const PIXEL_BYTES = 4;
 
+/** What one page of `SIDE` holds in pixels. */
+const PAGE_BYTES = SIDE[0] * SIDE[1] * PIXEL_BYTES;
+
+/**
+ * The samples a GPU page takes for each pixel where nothing asks otherwise:
+ * the default 4x of `lib/classes/canvas.js`, kept in a buffer beside the
+ * page's own pixels.
+ */
+const DEFAULT_SAMPLES = 4;
+
+/**
+ * A canvas of `SIDE` on the CPU, whose page holds `PAGE_BYTES` and nothing
+ * beside them: a GPU page keeps a sample buffer too, which the GPU test
+ * counts.
+ */
+const cpuCanvas = () => {
+  const canvas = new Canvas(SIDE[0], SIDE[1]);
+  canvas.gpu = false;
+  return canvas;
+};
+
+/**
+ * A CPU canvas with `fills` rectangles filled on it and read back, so that
+ * its page and its recording are both reported.
+ */
+const drawn = (/** @type {number} */ fills) => {
+  const canvas = cpuCanvas();
+  const ctx = canvas.getContext("2d");
+  for (let i = 0; i < fills; i++) ctx.fillRect(i % 900, (i * 7) % 700, 80, 40);
+  ctx.getImageData(0, 0, SIDE[0], SIDE[1]);
+  return canvas;
+};
+
+/** Fills drawn on a page whose recording is to weigh something. */
+const FILLS = 1000;
+
+/**
+ * The least one fill can add to a recording: the rectangle it fills, four
+ * 32-bit floats, whatever else Skia's record of the draw holds.
+ */
+const FILL_RECORD_BYTES = 16;
+
 /**
  * What this addon has reported once everything collectable has been
  * collected and finalized. Neon runs a finalizer only once the event loop
@@ -65,13 +108,14 @@ describe("Native memory reported to V8", () => {
       const before = await settled();
       // Held only through this array, so that emptying it is what lets the
       // canvas go: a variable naming it or its context would keep it.
-      const live = [new Canvas(SIDE[0], SIDE[1])];
+      // Nothing drawn, so that the recording holds nothing and the page is
+      // all there is to count.
+      const live = [cpuCanvas()];
       const held = Buffer.alloc(HELD_BYTES);
-      live[0].getContext("2d").fillRect(10, 10, 80, 40);
       live[0].getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
       assert.equal(
         (await settled()) - before,
-        SIDE[0] * SIDE[1] * PIXEL_BYTES,
+        PAGE_BYTES,
         "the page a live canvas holds",
       );
 
@@ -90,11 +134,11 @@ describe("Native memory reported to V8", () => {
     { skip: why ?? false },
     async () => {
       const before = await settled();
-      const canvas = new Canvas(SIDE[0], SIDE[1]);
+      const canvas = cpuCanvas();
       canvas.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
       assert.equal(
         (await settled()) - before,
-        SIDE[0] * SIDE[1] * PIXEL_BYTES,
+        PAGE_BYTES,
         "the page kept before the resize",
       );
       canvas.width = SIDE[0];
@@ -114,15 +158,15 @@ describe("Native memory reported to V8", () => {
     "stops counting a page the budget drops, and releases it once",
     { skip: why ?? false },
     async () => {
-      const page = SIDE[0] * SIDE[1] * PIXEL_BYTES;
+      const page = PAGE_BYTES;
       const before = await settled();
       // A budget of one page: the second canvas's read drops the first's.
       skiaNode.__setPageBudget(page);
       try {
-        const live = [new Canvas(SIDE[0], SIDE[1])];
+        const live = [cpuCanvas()];
         live[0].getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
         assert.equal((await settled()) - before, page, "the first page");
-        const second = new Canvas(SIDE[0], SIDE[1]);
+        const second = cpuCanvas();
         second.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
         assert.equal(
           (await settled()) - before,
@@ -139,6 +183,91 @@ describe("Native memory reported to V8", () => {
       } finally {
         skiaNode.__setPageBudget(null);
       }
+    },
+  );
+
+  test(
+    "counts what a canvas's recording holds, by what is drawn",
+    { skip: why ?? false },
+    async () => {
+      const before = await settled();
+      const live = [drawn(1)];
+      const one = (await settled()) - before - PAGE_BYTES;
+      assert.ok(one > 0, `one fill's recording counts: ${one} bytes`);
+      live.push(drawn(FILLS));
+      const many = (await settled()) - before - 2 * PAGE_BYTES - one;
+      assert.ok(
+        many - one >= (FILLS - 1) * FILL_RECORD_BYTES,
+        `${FILLS} fills' recording counts ${many} bytes, one fill's ${one}`,
+      );
+      live.length = 0;
+      assert.equal(
+        (await settled()) - before,
+        0,
+        "what stays counted once the canvases are finalized",
+      );
+    },
+  );
+
+  // The budget drops a page's pixels and never its recording, so a canvas
+  // whose page was dropped still counts what it recorded until it is
+  // finalized.
+  test(
+    "keeps counting a dropped page's recording until it is finalized",
+    { skip: why ?? false },
+    async () => {
+      const before = await settled();
+      skiaNode.__setPageBudget(PAGE_BYTES);
+      try {
+        // Drawn through `drawn`, so that no variable here names its
+        // context and keeps the canvas alive.
+        const live = [drawn(FILLS)];
+        const recorded = (await settled()) - before - PAGE_BYTES;
+        assert.ok(recorded > 0, `the recording counts: ${recorded} bytes`);
+        const second = cpuCanvas();
+        second.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
+        assert.equal(
+          (await settled()) - before,
+          PAGE_BYTES + recorded,
+          "the first page dropped, its recording and the second page kept",
+        );
+        live.pop();
+        assert.equal(
+          (await settled()) - before,
+          PAGE_BYTES,
+          "what the dropped canvas's finalizer releases",
+        );
+        assert.equal(second.width, SIDE[0]);
+      } finally {
+        skiaNode.__setPageBudget(null);
+      }
+    },
+  );
+
+  test(
+    "counts a GPU page's multisample buffer",
+    {
+      skip:
+        why ??
+        (new Canvas(1, 1).engine.renderer != "GPU" ? "no GPU here" : false),
+    },
+    async () => {
+      const before = await settled();
+      const live = [new Canvas(SIDE[0], SIDE[1])];
+      live[0].gpu = true;
+      live[0].getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
+      assert.equal(live[0].engine.renderer, "GPU", "the canvas is on the GPU");
+      assert.equal(
+        (await settled()) - before,
+        PAGE_BYTES * (1 + DEFAULT_SAMPLES),
+        "the page and a sample buffer of four of it",
+      );
+      live.pop();
+      assert.equal(
+        (await settled()) - before,
+        0,
+        "what stays counted once the canvas is finalized",
+      );
     },
   );
 

@@ -154,6 +154,61 @@ impl Layer {
             Layer::ColourText(text) => Some(text.reach()),
         }
     }
+
+    /// What the pictures this entry keeps hold, as Skia estimates each --
+    /// `SkPicture::approximateBytesUsed`, which a picture works out once,
+    /// when it is finished, so this costs a call for each picture and walks
+    /// no draws.
+    ///
+    /// A picture recorded only when a target first plays it -- a deferred
+    /// run, a colour run's recording -- counts once it has been recorded.
+    /// Left out: a blur's geometry and the filter it makes at playback,
+    /// which hold no pixels, and a pattern's source, which is another
+    /// canvas's page, reported by that canvas.
+    pub(crate) fn recorded_bytes(&self) -> usize {
+        let recorded = |picture: &OnceLock<Option<Picture>>| {
+            picture
+                .get()
+                .and_then(Option::as_ref)
+                .map_or(0, Picture::approximate_bytes_used)
+        };
+        match self {
+            Layer::Picture(picture) => picture.approximate_bytes_used(),
+            Layer::Blur(_) => 0,
+            Layer::Group(group) => group
+                .contents
+                .layers
+                .iter()
+                .map(Layer::recorded_bytes)
+                .sum(),
+            Layer::Targeted(pictures) => {
+                pictures.0.approximate_bytes_used()
+                    + pictures.1.approximate_bytes_used()
+            }
+            Layer::Cut(op) => op
+                .draws
+                .iter()
+                .chain(op.documents.iter().flatten())
+                .map(Picture::approximate_bytes_used)
+                .sum(),
+            Layer::Clipped(piece) => piece.entry.recorded_bytes(),
+            Layer::Pattern(tile) => tile.plain.approximate_bytes_used(),
+            Layer::Deferred(deferred) => {
+                recorded(&deferred.pixels.picture)
+                    + deferred
+                        .document
+                        .as_ref()
+                        .map_or(0, |document| recorded(&document.picture))
+            }
+            Layer::ColourText(text) => {
+                recorded(&text.recording)
+                    + text
+                        .document
+                        .as_ref()
+                        .map_or(0, |document| recorded(&document.picture))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

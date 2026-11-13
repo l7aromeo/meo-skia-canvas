@@ -965,6 +965,25 @@ impl PageRecorder {
         self.surface.borrow().resident_bytes()
     }
 
+    /// The bytes this page holds in pixels with a GPU page's multisample
+    /// buffer, as the budget the pages on a thread keep to counts them. See
+    /// [`RecordingSurface::budgeted_bytes`].
+    pub fn budgeted_bytes(&self) -> usize {
+        self.surface.borrow().budgeted_bytes()
+    }
+
+    /// The bytes the pictures of this page's recording hold, filed so far
+    /// among its layers and in any `saveLayer` still open -- see
+    /// [`Layer::recorded_bytes`]. What is being recorded and not yet filed
+    /// is not counted: a read files it, and the binding asks after a read.
+    pub fn recorded_bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .chain(self.open.iter().flat_map(|layer| layer.entries.iter()))
+            .map(Layer::recorded_bytes)
+            .sum()
+    }
+
     /// Shares what the page's canvas reports to the JavaScript engine with
     /// the budget the pages on this thread keep to, so that the engine is told
     /// when the budget drops the page -- see [`Place::reports_through`].

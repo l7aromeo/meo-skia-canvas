@@ -145,9 +145,11 @@ const DEFAULT_FONT_SIZE: f32 = 10.0;
 
 pub type BoxedContext2D = JsBox<RefCell<Context2D>>;
 impl Finalize for Context2D {
-    /// Releases what this context told the engine its page holds.
+    /// Releases what this context told the engine its page and its
+    /// recording hold.
     fn finalize<'a, C: Context<'a>>(mut self, cx: &mut C) {
         self.external.release(cx);
+        self.recording_external.release(cx);
     }
 }
 
@@ -188,9 +190,14 @@ pub struct Context2D {
     /// matching `canvas.restore()` to composite the layer.
     layers: Vec<bool>,
     pub path: PathBuilder,
-    /// What the JavaScript engine has been told this context's page holds.
-    /// See [`Context2D::report_resident`].
+    /// What the JavaScript engine has been told this context's page holds
+    /// in pixels. See [`Context2D::report_resident`].
     external: External,
+    /// What the JavaScript engine has been told this context's recording
+    /// holds: apart from `external`, because the budget the pages on a
+    /// thread keep to drops a page's pixels and never its recording. See
+    /// [`Context2D::report_resident`].
+    recording_external: External,
 }
 
 /// A picture-backed image with its pixels taken now.
@@ -655,25 +662,42 @@ impl Context2D {
             layers: vec![],
             state: State::default(),
             external,
+            recording_external: External::default(),
         }
     }
 
-    /// Tells the JavaScript engine what this context's page holds in pixels
-    /// now, so that a collection is scheduled by the native memory a
-    /// canvas holds and not only by its small JavaScript object.
+    /// Tells the JavaScript engine what this context holds natively now, so
+    /// that a collection is scheduled by the memory a canvas holds and not
+    /// only by its small JavaScript object: its page's pixels, a GPU page's
+    /// multisample buffer with them -- see
+    /// `page::RecordingSurface::budgeted_bytes` -- and its recording -- see
+    /// [`PageRecorder::recorded_bytes`].
     ///
     /// Called by the binding after a read, which builds the page surface or
-    /// its tiles, and after a resize, which drops them, and released in the
-    /// finalizer. A drawing that clears the whole page drops them too and is
-    /// counted at the next of those, so the engine is told too much in
-    /// between and never too little. The budget the pages on a thread keep to
-    /// drops them, for a page read only once, when another page's read takes
-    /// the thread past it -- see [`resident`] -- and the engine is told of that
-    /// by the next report any canvas or image on the thread makes, through
-    /// the count this shares with the page -- see `External::reported`.
+    /// its tiles and files what was drawn, and after a resize, which drops
+    /// them, and released in the finalizer. A drawing that clears the whole
+    /// page drops them too and is counted at the next of those, so the
+    /// engine is told too much in between and never too little. The budget
+    /// the pages on a thread keep to drops the pixels, for a page read only
+    /// once, when another page's read takes the thread past it -- see
+    /// [`resident`] -- and the engine is told of that by the next report any
+    /// canvas or image on the thread makes, through the count the pixels
+    /// share with the page -- see `External::reported`. The recording is
+    /// reported apart, since the budget never drops it: a canvas whose page
+    /// was dropped still holds its recording until it is finalized, and the
+    /// engine is told so until then.
+    ///
+    /// Not told: what a canvas holds beside its pages and its pictures --
+    /// the recordings it is in the middle of and the objects around them.
+    /// A dropped CPU canvas of 1000 by 800 read once held about 24 KB
+    /// resident where its pictures came to about 1.2 KB.
     pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
-        let bytes = self.recorder.borrow().resident_bytes();
-        self.external.hold(cx, bytes);
+        let recorder = self.recorder.borrow();
+        let (pixels, recorded) =
+            (recorder.budgeted_bytes(), recorder.recorded_bytes());
+        drop(recorder);
+        self.external.hold(cx, pixels);
+        self.recording_external.hold(cx, recorded);
     }
 
     pub fn in_local_coordinates(&mut self, x: f32, y: f32) -> Point {
