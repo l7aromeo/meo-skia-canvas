@@ -58,6 +58,11 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildScriptLogs,
+  buildScriptRuns,
+  profileBuildDirs,
+} from "./cargo-build-dir.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 /**
@@ -580,11 +585,12 @@ function worktreeTreeName(worktree) {
 
 /**
  * The names of the trees a skia-bindings out-dir in `worktree`'s target was
- * built from: each `output` that skia-bindings' build script wrote names its
- * source in a `cargo:rerun-if-changed=` line, and one under `cache` names the
- * tree. A target holds an out-dir per configuration it has built, and keeps
- * linking against it, so its tree is in use whatever the worktree's patch
- * list names now. Both `debug`-style profiles and a target triple's are read.
+ * built from: each stdout that skia-bindings' build script wrote, see
+ * scripts/cargo-build-dir.mjs, names its source in a `cargo:rerun-if-changed=`
+ * line, and one under `cache` names the tree. A target holds an out-dir per
+ * configuration it has built, and keeps linking against it, so its tree is in
+ * use whatever the worktree's patch list names now. Both `debug`-style profiles
+ * and a target triple's are read.
  *
  * Only that line is read. The `ninja: Entering directory` line names the
  * out-dir under the worktree's own target, not the source, and the compile
@@ -600,29 +606,11 @@ export function treesBuiltFrom(worktree, cache = cacheRoot()) {
   );
   const names = new Set();
   const target = join(worktree, "target");
-  const listed = (dir) => {
-    try {
-      return readdirSync(dir, { withFileTypes: true }).filter((e) =>
-        e.isDirectory(),
-      );
-    } catch (error) {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
-      throw error;
-    }
-  };
-  // `target/<profile>/build`, or `target/<triple>/<profile>/build`.
-  const builds = listed(target).flatMap((first) => [
-    join(target, first.name, "build"),
-    ...listed(join(target, first.name)).map((second) =>
-      join(target, first.name, second.name, "build"),
-    ),
-  ]);
-  for (const build of builds) {
-    for (const outDir of listed(build)) {
-      if (!outDir.name.startsWith("skia-bindings-")) continue;
+  for (const build of profileBuildDirs(target)) {
+    for (const run of buildScriptRuns(build, "skia-bindings")) {
       let text;
       try {
-        text = readFileSync(join(build, outDir.name, "output"), "utf8");
+        text = readFileSync(buildScriptLogs(run).output, "utf8");
       } catch (error) {
         if (error.code === "ENOENT") continue;
         throw error;

@@ -111,12 +111,17 @@ fn parallel(work: usize, from: usize) -> bool {
 
 /// Whether [`direct`] leaves a line of +0.0 as it is, and [`down`] leaves
 /// out rows of +0.0 in a lane that may.
+#[cfg(not(test))]
 fn skips_empty_lines() -> bool {
-    #[cfg(test)]
-    if PLAIN_SCHEDULE.with(Cell::get) {
-        return false;
-    }
     true
+}
+
+/// Whether [`direct`] leaves a line of +0.0 as it is, and [`down`] leaves
+/// out rows of +0.0 in a lane that may: not on a thread a test has set
+/// [`PLAIN_SCHEDULE`] on.
+#[cfg(test)]
+fn skips_empty_lines() -> bool {
+    !PLAIN_SCHEDULE.with(Cell::get)
 }
 
 /// Runs `op` on each `len`-long chunk of `data`, with a state `init` makes
@@ -313,8 +318,8 @@ impl Planes {
                 .map(|(_, plane)| plane)
         };
         // A plane of +0.0 blurs to itself, and is left where it is.
-        for c in 0..4 {
-            if let Some(plane) = self.source[c].and_then(plane_of) {
+        for (c, source) in self.source.iter().enumerate() {
+            if let Some(plane) = source.and_then(plane_of) {
                 pixels
                     .iter_mut()
                     .skip(c)
