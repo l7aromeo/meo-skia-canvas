@@ -5327,10 +5327,14 @@ mod overlapping_glyph_tests {
     //! the page in the shader -- see
     //! `node::typography::glyph_draws`.
     use super::*;
+    use skia_safe::{
+        AlphaType, ColorType, Data, Image, ImageInfo, image::CachingHint,
+    };
     use std::iter::zip;
 
     use crate::{
         canvas::{BackendInfo, EngineKind},
+        export::{EncodeOptions, ImageFormat},
         filter::BlurStyle,
         font::FontLibrary,
         node::typography::{
@@ -5775,6 +5779,113 @@ mod overlapping_glyph_tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// The page of [`drawn_on_route`]'s plain route, under `blend`, read
+    /// smaller than it was drawn: drawn at half its size into a canvas on
+    /// the GPU where `gpu`, or exported as a PNG at a density of three
+    /// quarters by a canvas on the GPU where `gpu`.
+    fn read_smaller(gpu: bool, read: &str, blend: BlendMode) -> Vec<u8> {
+        register();
+        forget_laid_out();
+        let mut source = Canvas::new(W, H);
+        source.set_gpu(gpu && read == "density");
+        {
+            let ctx = source.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css(OSWALD.0));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            for y in [70.0, 140.0] {
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+            }
+        }
+        if read == "density" {
+            let options = EncodeOptions {
+                density: SMALLER_DENSITY,
+                ..EncodeOptions::default()
+            };
+            let png =
+                source.to_buffer(ImageFormat::Png, &options).expect("a PNG");
+            let engine = source.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            let image = Image::from_encoded(Data::new_copy(&png))
+                .expect("the PNG decodes");
+            let info = ImageInfo::new(
+                image.dimensions(),
+                ColorType::RGBA8888,
+                AlphaType::Unpremul,
+                None,
+            );
+            let mut pixels = vec![0u8; info.compute_min_byte_size()];
+            assert!(image.read_pixels(
+                &info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0),
+                CachingHint::Allow,
+            ));
+            return pixels;
+        }
+        let mut into = Canvas::new(W, H);
+        into.set_gpu(gpu);
+        let ctx = into.context();
+        ctx.draw_canvas_sized(&mut source, 0.0, 0.0, W / 2.0, H / 2.0);
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        let engine = into.engine_kind();
+        assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+        bytes
+    }
+
+    /// The density [`read_smaller`] exports at: under one, so that the
+    /// page is played onto fewer pixels than it was drawn for.
+    const SMALLER_DENSITY: f32 = 0.75;
+
+    /// A run played smaller than it was drawn -- drawn into another canvas
+    /// at half its size, or exported at a density under one -- blends its
+    /// glyphs on the GPU as on the CPU, by the bounds of
+    /// [`every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu`]: its
+    /// glyphs grouped by the pixels they ink where they are played, not
+    /// where they were drawn.
+    #[test]
+    fn a_run_read_smaller_blends_its_glyphs_on_the_gpu_as_on_the_cpu() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let bound = match on_llvmpipe() {
+            true => UNMEASURED_LEVELS,
+            false => METAL_FILL_LEVELS,
+        };
+        let mut wrong = vec![];
+        for read in ["drawn into a canvas", "density"] {
+            let source_over = most_apart(
+                &read_smaller(false, read, SourceOver),
+                &read_smaller(true, read, SourceOver),
+            );
+            for blend in [Multiply, Difference, Luminosity] {
+                let most = most_apart(
+                    &read_smaller(false, read, blend),
+                    &read_smaller(true, read, blend),
+                );
+                if most > (source_over + BLEND_ROUNDING).max(bound) {
+                    wrong.push(format!(
+                        "{read} {blend:?}: {most} levels, past {source_over} \
+                         under source-over and {bound}"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A run kept to be drawn again where the page is played writes a PDF
     /// and an SVG with its glyphs whole, the bytes a run drawn as one blob
     /// writes -- see `typography::WholeRuns`. Drawn apart, the PDF differs
@@ -5786,10 +5897,7 @@ mod overlapping_glyph_tests {
     /// pixels' -- see `Context2D::files_as_replayed_text`.
     #[test]
     fn a_kept_run_writes_a_document_whole() {
-        use crate::{
-            context::REPLAYS_BLENDED_TEXT,
-            export::{EncodeOptions, ImageFormat},
-        };
+        use crate::context::REPLAYS_BLENDED_TEXT;
         let written = |replays: bool,
                        draws: Option<GlyphDraws>,
                        drawn_first: bool,
