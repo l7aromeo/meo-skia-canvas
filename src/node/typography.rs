@@ -3295,34 +3295,38 @@ impl<'a> Typesetter<'a> {
         alignment_factor * self.width + spacing_step * self.leading_spacing()
     }
 
-    /// How far a centred or right-aligned run moves for the whitespace it
-    /// ends in, which SkParagraph leaves out of the line it aligns.
+    /// How far a run moves for the whitespace it ends in, which SkParagraph
+    /// leaves out of the line it aligns.
     ///
     /// The canvas aligns the whole run, its advance with every trailing
-    /// space and that space's spacing, as Chrome does: a centred `"a "`
-    /// stands half a space left of `"a"`. SkParagraph aligns a line by its
-    /// width without the whitespace it ends in, which hangs, so the run is
-    /// moved by the share of the difference its alignment takes. A wrapped
-    /// run's lines hang their trailing spaces as CSS lines do, and keep
-    /// SkParagraph's alignment. Left to right only: a right-to-left run's
-    /// trailing space is at its visual start, and no browser measurement
-    /// says where Chrome puts it.
+    /// space and that space's spacing, as Chrome does. SkParagraph aligns a
+    /// line by its width without the whitespace it ends in, which hangs past
+    /// the line's logical end: on the right of a left-to-right line, so a
+    /// centred `"a "` moves half a space left and a right-aligned one a
+    /// whole space; on the left of a right-to-left one, so there the run
+    /// moves right, a whole space when aligned left and half when centred,
+    /// and its trailing space comes to stand at the anchor -- Chrome 158's
+    /// `fillText` measured both ways. The width aligned by is the line's
+    /// own: a line of nothing but whitespace aligns as nothing wide, though
+    /// `longest_line` reports the whitespace's width for it. A wrapped run's
+    /// lines hang their trailing spaces as CSS lines do, and keep
+    /// SkParagraph's alignment.
     fn trailing_space_shift(&self, paragraph: &Paragraph) -> f32 {
+        if self.text_wrap || !self.text.ends_with(char::is_whitespace) {
+            return 0.0;
+        }
         let share = match self.gravity() {
             TextAlign::Center => 0.5,
             TextAlign::Right => 1.0,
-            _ => return 0.0,
+            _ => 0.0,
         };
-        let applies = !self.text_wrap
-            && self.graf_style().text_direction() == TextDirection::LTR
-            && self.text.ends_with(char::is_whitespace);
-        match applies {
-            true => {
-                -share
-                    * (self.signed_advance(paragraph)
-                        - paragraph.longest_line())
-            }
-            false => 0.0,
+        let aligned = paragraph
+            .get_line_metrics_at(0)
+            .map_or_else(|| paragraph.longest_line(), |line| line.width as f32);
+        let hanging = self.signed_advance(paragraph) - aligned;
+        match self.graf_style().text_direction() {
+            TextDirection::LTR => -share * hanging,
+            TextDirection::RTL => (1.0 - share) * hanging,
         }
     }
 

@@ -1,0 +1,70 @@
+{
+  "about": "measureText`s actualBoundingBoxLeft and actualBoundingBoxRight for right-to-left runs of text ending in whitespace, which stands at the visual start of the run, in `font` with `letterSpacing` of `spacing` px, aligned `align`: `inkBoxes`. Read by tests/native_context2d.rs and tests/suite/text.test.js.",
+  "source": "Chrome Headless Shell 158.0.8127.18 on macOS, 2026-11-13: Chrome`s canvas measureText, in Oswald 16px.",
+  "font": "16px Oswald",
+  "inkBoxes": [
+    {
+      "text": "ab ",
+      "align": "left",
+      "spacing": 0,
+      "left": -4.34,
+      "right": 16.94
+    },
+    {
+      "text": "ab  ",
+      "align": "left",
+      "spacing": 0,
+      "left": -8,
+      "right": 20.61
+    },
+    {
+      "text": "ab  ",
+      "align": "left",
+      "spacing": 4,
+      "left": -16,
+      "right": 32.61
+    },
+    {
+      "text": "ab ",
+      "align": "center",
+      "spacing": 0,
+      "left": 4.48,
+      "right": 8.13
+    },
+    {
+      "text": "ab  ",
+      "align": "center",
+      "spacing": 0,
+      "left": 2.65,
+      "right": 9.96
+    },
+    {
+      "text": "ab  ",
+      "align": "center",
+      "spacing": 4,
+      "left": 2.65,
+      "right": 13.96
+    },
+    {
+      "text": "ab ",
+      "align": "right",
+      "spacing": 0,
+      "left": 13.3,
+      "right": -0.69
+    },
+    {
+      "text": "ab  ",
+      "align": "right",
+      "spacing": 0,
+      "left": 13.3,
+      "right": -0.69
+    },
+    {
+      "text": "ab  ",
+      "align": "right",
+      "spacing": 4,
+      "left": 21.3,
+      "right": -4.69
+    }
+  ]
+}

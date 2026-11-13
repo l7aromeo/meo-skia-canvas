@@ -14053,3 +14053,63 @@ fn a_family_registered_again_moves_the_baselines_with_the_glyphs() {
     assert_ne!(wanted, before, "the two faces place their baselines apart");
     assert_eq!(after, wanted, "the new face's baselines");
 }
+
+/// The cases of `tests/assets/cases/text-trailing-whitespace.json`, which
+/// `tests/suite/text.test.js` reads too.
+fn trailing_whitespace_cases() -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(
+            "tests/assets/cases/text-trailing-whitespace.json",
+        )
+        .expect("the case file is readable"),
+    )
+    .expect("the case file is JSON")
+}
+
+/// Sets `ctx` to draw a case of the file at `spacing` px, `align`ed, in
+/// direction `dir`, as the file spells them.
+fn set_case(ctx: &mut Context2D, spacing: f64, align: &str, dir: &str) {
+    assert!(ctx.set_font_css(&format!("16px {}", oswald())));
+    ctx.set_letter_spacing(spacing as f32);
+    ctx.set_text_align(match align {
+        "left" => TextAlign::Left,
+        "right" => TextAlign::Right,
+        "center" => TextAlign::Center,
+        other => panic!("no alignment {other}"),
+    });
+    ctx.set_direction(match dir {
+        "ltr" => TextDirection::LeftToRight,
+        "rtl" => TextDirection::RightToLeft,
+        other => panic!("no direction {other}"),
+    });
+}
+
+/// The spaces a right-to-left run ends in stand at its visual start, so
+/// its glyphs stand a whole run of them in from where a left-aligned run
+/// starts and half of it from where a centred one does: measure_text's ink
+/// box is Chrome's for every row of the case file.
+#[test]
+fn a_right_to_left_runs_trailing_spaces_stand_at_its_start() {
+    let cases = trailing_whitespace_cases();
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for row in cases["inkBoxes"].as_array().expect("ink boxes") {
+        let text = row["text"].as_str().expect("a text");
+        let align = row["align"].as_str().expect("an alignment");
+        let spacing = row["spacing"].as_f64().expect("a spacing");
+        set_case(ctx, spacing, align, "rtl");
+        let m = ctx.measure_text(text, None);
+        let (left, right) = (
+            row["left"].as_f64().expect("a left") as f32,
+            row["right"].as_f64().expect("a right") as f32,
+        );
+        assert!(
+            (m.actual_bounding_box_left - left).abs() < 0.02
+                && (m.actual_bounding_box_right - right).abs() < 0.02,
+            "{text:?} at {spacing}px {align}: {}, {} for Chrome's {left}, \
+             {right}",
+            m.actual_bounding_box_left,
+            m.actual_bounding_box_right
+        );
+    }
+}

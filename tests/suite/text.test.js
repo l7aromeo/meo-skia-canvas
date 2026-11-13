@@ -3745,3 +3745,40 @@ describe("text on the GPU draws the same whatever fonts were registered before i
     }
   }
 });
+
+// A canvas aligns the whole of a run, the whitespace it ends in included, and
+// the whitespace a right-to-left run ends in stands at its visual start, as in
+// Chrome. tests/assets/cases/text-trailing-whitespace.json holds the cases and
+// where Chrome was measured, and tests/native_context2d.rs reads it too.
+describe("Text that ends in whitespace", () => {
+  const cases = require("../assets/cases/text-trailing-whitespace.json");
+  // Before each test, since the tests before these reset the library.
+  beforeEach(() =>
+    FontLibrary.use("Oswald", [
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]),
+  );
+
+  // The spaces a right-to-left run ends in stand at its visual start, so
+  // the glyphs stand a whole run of them in from where a left-aligned run
+  // starts and half of it in from where a centred one does.
+  test("a right-to-left run's trailing spaces stand at its start", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const { text, align, spacing, left, right } of cases.inkBoxes) {
+      Object.assign(ctx, {
+        font: cases.font,
+        letterSpacing: `${spacing}px`,
+        textAlign: align,
+        direction: "rtl",
+      });
+      const m = ctx.measureText(text);
+      const what = `${JSON.stringify(text)} at ${spacing}px ${align}`;
+      assert.ok(
+        Math.abs(m.actualBoundingBoxLeft - left) < 0.02 &&
+          Math.abs(m.actualBoundingBoxRight - right) < 0.02,
+        `${what}: ${m.actualBoundingBoxLeft}, ${m.actualBoundingBoxRight} ` +
+          `for Chrome's ${left}, ${right}`,
+      );
+    }
+  });
+});
