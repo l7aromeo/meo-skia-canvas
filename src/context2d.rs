@@ -4855,6 +4855,70 @@ mod font_value_tests {
 }
 
 #[cfg(test)]
+mod recorded_count_tests {
+    use super::*;
+    use crate::context::{layer::ENTRIES_WALKED, page::COUNT_HELD_TO_WALK};
+
+    /// Frames the animation is drawn and read for: enough that a count
+    /// walking the recording at each read, which grows by a few entries a
+    /// frame, walks two orders of magnitude more at the end than at the
+    /// start.
+    const FRAMES: usize = 20_000;
+
+    /// Frames at each end whose reads are counted.
+    const WINDOW: usize = 100;
+
+    /// A canvas drawn and read each frame for [`FRAMES`] frames, the
+    /// recording growing by its draws, reports what it holds in as many
+    /// steps at the end as at the start: the count is kept as entries are
+    /// filed rather than walked at each read. Counted in entries asked of
+    /// -- see `layer::ENTRIES_WALKED` -- not in time.
+    #[test]
+    fn a_read_counts_the_recording_in_the_same_steps_however_long_it_is() {
+        COUNT_HELD_TO_WALK.set(false);
+        let mut canvas = Canvas::new(600.0, 400.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css("16px sans-serif"));
+        let mut walked = [0usize; 2];
+        let mut reported = 0;
+        for frame in 0..FRAMES {
+            let colour = if frame % 2 == 1 { "#c03010" } else { "#203040" };
+            ctx.set_fill_style_css(colour).expect("a colour");
+            ctx.fill_rect((frame % 500) as f32, 20.0, 80.0, 40.0);
+            ctx.fill_rect(40.0, (frame % 300) as f32, 60.0, 60.0);
+            ctx.fill_text(&format!("frame {frame}"), 20.0, 380.0, None);
+            let before = ENTRIES_WALKED.get();
+            ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a read");
+            ctx.inner.with_recorder(|recorder| {
+                reported = recorder.recorded_bytes();
+            });
+            let window = match frame {
+                f if f < WINDOW => Some(0),
+                f if f >= FRAMES - WINDOW => Some(1),
+                _ => None,
+            };
+            if let Some(window) = window {
+                walked[window] += ENTRIES_WALKED.get() - before;
+            }
+        }
+        COUNT_HELD_TO_WALK.set(true);
+        // The count, held at last to a walk of the whole recording.
+        ctx.inner.with_recorder(|recorder| {
+            recorder.recorded_bytes();
+        });
+        assert!(reported > 0, "the recording holds pictures to count");
+        assert!(walked[0] > 0, "a read files entries, which are counted");
+        assert!(
+            walked[1] <= walked[0],
+            "the last {WINDOW} reads asked {} entries, the first {}",
+            walked[1],
+            walked[0]
+        );
+    }
+}
+
+#[cfg(test)]
 mod compounding_tests {
     use super::*;
     use crate::filter::FilterOp;

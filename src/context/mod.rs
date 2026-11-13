@@ -20,7 +20,7 @@ use skia_safe::{
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 pub mod api;
@@ -77,8 +77,8 @@ use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
-    Entries, ExactColour, Group, Layer, LayerRec, Replay, coverage_files,
-    holds_a_cut, holds_a_pair, reach_the_clip,
+    Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
+    coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use run_mask::Kept;
@@ -122,6 +122,28 @@ pub(crate) enum ShadowPart {
 const BLACK: Color = Color::BLACK;
 const TRANSPARENT: Color = Color::TRANSPARENT;
 
+/// The native memory a context holds whatever is drawn on it, which
+/// [`Context2D::report_resident`] tells the engine beside its page and its
+/// recording.
+///
+/// Measured, not derived, so it goes stale when what a context holds
+/// changes: the state, the path and the rest of [`Context2D`]. With heap
+/// and MallocStackLogging on a debug build for arm64 macOS, 400 CPU
+/// canvases of 1000 by 800 with a context, nothing drawn, held 4,800 bytes
+/// apiece more than 400 without one: 3,680 in eleven allocations of this
+/// crate's own, 640 Skia's paragraph style, 448 its path builder and 32 a
+/// text style.
+///
+/// One figure for every platform, since the allocators count the same
+/// allocations apart only by how they round them. Batches of 4,000 such
+/// canvases, by the C allocator's own count of bytes in use: 4,590 to
+/// 4,613 a context on glibc 2.43 (arm64 Linux), whose chunks carry an
+/// 8-byte header at 16-byte alignment, and 5,001 to 5,045 on macOS, whose
+/// small allocations round to 16 bytes. This stands at 1.04 of the one and
+/// 0.95 of the other. `tests/suite/external-memory.test.js` holds it to
+/// that count within a tenth.
+pub(crate) const CONTEXT_BYTES: usize = 4_800;
+
 /// The most grid positions a texture may be stamped at in a single draw.
 ///
 /// Skia spends on the order of a hundred bytes on each, so this is several
@@ -145,9 +167,10 @@ const DEFAULT_FONT_SIZE: f32 = 10.0;
 
 pub type BoxedContext2D = JsBox<RefCell<Context2D>>;
 impl Finalize for Context2D {
-    /// Releases what this context told the engine its page holds.
+    /// Releases what this context told the engine it holds.
     fn finalize<'a, C: Context<'a>>(mut self, cx: &mut C) {
         self.external.release(cx);
+        self.beside_page.release(cx);
     }
 }
 
@@ -188,9 +211,15 @@ pub struct Context2D {
     /// matching `canvas.restore()` to composite the layer.
     layers: Vec<bool>,
     pub path: PathBuilder,
-    /// What the JavaScript engine has been told this context's page holds.
-    /// See [`Context2D::report_resident`].
+    /// What the JavaScript engine has been told this context's page holds
+    /// in pixels. See [`Context2D::report_resident`].
     external: External,
+    /// What the JavaScript engine has been told this context holds beside
+    /// its page's pixels: its recording, and [`CONTEXT_BYTES`] for itself.
+    /// Apart from `external`, because the budget the pages on a thread keep
+    /// to drops a page's pixels and never these. See
+    /// [`Context2D::report_resident`].
+    beside_page: External,
 }
 
 /// A picture-backed image with its pixels taken now.
@@ -655,25 +684,38 @@ impl Context2D {
             layers: vec![],
             state: State::default(),
             external,
+            beside_page: External::default(),
         }
     }
 
-    /// Tells the JavaScript engine what this context's page holds in pixels
-    /// now, so that a collection is scheduled by the native memory a
-    /// canvas holds and not only by its small JavaScript object.
+    /// Tells the JavaScript engine what this context holds natively now, so
+    /// that a collection is scheduled by the memory a canvas holds and not
+    /// only by its small JavaScript object: its page's pixels, a GPU page's
+    /// multisample buffer with them -- see
+    /// `page::RecordingSurface::budgeted_bytes` -- its recording -- see
+    /// [`PageRecorder::recorded_bytes`] -- and itself, [`CONTEXT_BYTES`].
     ///
-    /// Called by the binding after a read, which builds the page surface or
-    /// its tiles, and after a resize, which drops them, and released in the
-    /// finalizer. A drawing that clears the whole page drops them too and is
-    /// counted at the next of those, so the engine is told too much in
-    /// between and never too little. The budget the pages on a thread keep to
-    /// drops them, for a page read only once, when another page's read takes
-    /// the thread past it -- see [`resident`] -- and the engine is told of that
-    /// by the next report any canvas or image on the thread makes, through
-    /// the count this shares with the page -- see `External::reported`.
+    /// Called by the binding as the context is made, after a read, which
+    /// builds the page surface or its tiles and files what was drawn, and
+    /// after a resize, which drops them, and released in the finalizer. A
+    /// drawing that clears the whole page drops them too and is counted at
+    /// the next of those, so the engine is told too much in between and
+    /// never too little; what is drawn between them is told late. The
+    /// budget the pages on a thread keep to drops the pixels, for a page
+    /// read only once, when another page's read takes the thread past it --
+    /// see [`resident`] -- and the engine is told of that by the next report
+    /// any canvas or image on the thread makes, through the count the pixels
+    /// share with the page -- see `External::reported`. The recording and
+    /// the context itself are reported apart, since the budget drops
+    /// neither: a canvas whose page was dropped still holds them until it is
+    /// finalized, and the engine is told so until then.
     pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
-        let bytes = self.recorder.borrow().resident_bytes();
-        self.external.hold(cx, bytes);
+        let recorder = self.recorder.borrow();
+        let (pixels, recorded) =
+            (recorder.budgeted_bytes(), recorder.recorded_bytes());
+        drop(recorder);
+        self.external.hold(cx, pixels);
+        self.beside_page.hold(cx, recorded + CONTEXT_BYTES);
     }
 
     pub fn in_local_coordinates(&mut self, x: f32, y: f32) -> Point {
@@ -1573,7 +1615,7 @@ impl Context2D {
         };
         let (drawn, shadow) = paints(pixels);
         #[cfg_attr(not(test), expect(unused_mut))]
-        let mut recording = OnceLock::new();
+        let mut recording = LazyPicture::default();
         #[cfg_attr(not(test), expect(unused_mut))]
         let mut document = dual.then(|| {
             let (paint, shadow) = paints(Recording::Document);
@@ -1591,7 +1633,7 @@ impl Context2D {
             let Some(recorded) = record(pixels) else {
                 return false;
             };
-            recording = OnceLock::from(Some(recorded));
+            recording = LazyPicture::from(Some(recorded));
             if dual {
                 let Some(recorded) = record(Recording::Document) else {
                     return false;
@@ -2056,7 +2098,7 @@ impl Context2D {
                     inked: Rect::new_empty(),
                     shadow: None,
                     blend: None,
-                    recording: OnceLock::from(Some(recorded_as)),
+                    recording: LazyPicture::from(Some(recorded_as)),
                     bounds: self.bounds,
                     document: document.map(layer::ColourRecording::recorded),
                     clip: None,
@@ -2448,7 +2490,7 @@ impl Context2D {
             inked,
             shadow: None,
             blend: None,
-            recording: OnceLock::from(Some(recorded)),
+            recording: LazyPicture::from(Some(recorded)),
             bounds: self.bounds,
             document: document.map(layer::ColourRecording::recorded),
             clip: None,
@@ -7783,6 +7825,134 @@ mod tests {
                     "{space:?} {depth:?} {canvas}: the same pixels and PDF"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    //! A page drops its recorders at each read and begins them again
+    //! at the next draw -- see `page::PageRecorder::release_recorders`. A
+    //! scene of draws and reads is held to what it leaves with the recorders
+    //! kept, as a page kept them before, and to what it leaves with no read
+    //! between its draws, on either engine.
+
+    use super::page::RELEASES_RECORDERS;
+    use crate::prelude::*;
+
+    const SIDE: (f32, f32) = (120.0, 80.0);
+
+    /// Reads the whole page, as a script reading back a frame does.
+    fn read(ctx: &mut Context2D) {
+        ctx.get_image_data(0.0, 0.0, SIDE.0, SIDE.1)
+            .expect("a read");
+    }
+
+    /// Draws between reads, `between` called where a read may stand: under
+    /// the state the last draw left, inside a clip a run records, after a
+    /// transform set with nothing drawn inside the clip and outside it,
+    /// around an unclipped
+    /// `putImageData` and a shadow, and over three frames of an animation
+    /// that clears part of the page each frame.
+    fn scene(ctx: &mut Context2D, between: &dyn Fn(&mut Context2D)) {
+        let colour = |r, g, b, a| RgbaLinear::from_srgb8(r, g, b, a);
+        ctx.set_fill_style(colour(200, 40, 120, 0.7));
+        ctx.fill_rect(5.0, 5.0, 40.0, 30.0);
+        between(ctx);
+        ctx.fill_rect(30.0, 20.0, 40.0, 30.0);
+        ctx.save();
+        ctx.translate(20.0, 10.0);
+        ctx.rotate(0.3);
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, 50.0, 40.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.set_global_alpha(0.6);
+        ctx.fill_rect(-10.0, -10.0, 80.0, 80.0);
+        between(ctx);
+        ctx.set_fill_style(colour(30, 160, 60, 0.8));
+        ctx.fill_rect(10.0, 10.0, 30.0, 30.0);
+        between(ctx);
+        ctx.translate(5.0, 5.0);
+        between(ctx);
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.restore();
+        // A transform set with nothing drawn since a read, read, and drawn
+        // under with no state set between: outside a clip, so that the
+        // page's own recording, not a run, frames the draw.
+        between(ctx);
+        ctx.translate(7.0, 3.0);
+        between(ctx);
+        ctx.fill_rect(2.0, 50.0, 14.0, 14.0);
+        ctx.reset_transform();
+        let block = ctx.get_image_data(0.0, 0.0, 40.0, 40.0).expect("a read");
+        ctx.scale(1.5, 1.25);
+        ctx.put_image_data(&block, 60.0, 30.0).expect("a write");
+        between(ctx);
+        ctx.fill_rect(4.0, 40.0, 10.0, 10.0);
+        ctx.set_shadow_color(colour(0, 0, 90, 0.9));
+        ctx.set_shadow_blur(4.0);
+        ctx.fill_rect(50.0, 5.0, 20.0, 20.0);
+        between(ctx);
+        ctx.set_shadow_blur(0.0);
+        for frame in 0..3 {
+            let x = 70.0 + frame as f32 * 6.0;
+            ctx.clear_rect(60.0, 0.0, 40.0, 30.0);
+            ctx.fill_rect(x, 8.0, 12.0, 12.0);
+            between(ctx);
+        }
+    }
+
+    /// What the scene leaves on an eight-bit sRGB page on the engine `gpu`
+    /// names -- its pixels, and its PDF -- with the page releasing its
+    /// recorders or keeping them, and with a read or nothing where the
+    /// scene may read; `None` where no GPU engine starts.
+    fn drawn(
+        gpu: bool,
+        releases: bool,
+        reads: bool,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        RELEASES_RECORDERS.set(releases);
+        let mut canvas = Canvas::new(SIDE.0, SIDE.1);
+        canvas.set_gpu(gpu);
+        let started = !gpu || canvas.engine_kind() == EngineKind::Gpu;
+        if started {
+            let between: &dyn Fn(&mut Context2D) = match reads {
+                true => &read,
+                false => &|_| {},
+            };
+            scene(canvas.context(), between);
+        }
+        let mut bytes = |format| {
+            canvas
+                .to_buffer(format, &EncodeOptions::default())
+                .expect("encodes")
+        };
+        let kept =
+            started.then(|| (bytes(ImageFormat::Raw), bytes(ImageFormat::Pdf)));
+        RELEASES_RECORDERS.set(true);
+        kept
+    }
+
+    #[test]
+    fn a_page_drawn_and_read_by_turns_draws_as_one_that_kept_its_recorders() {
+        for gpu in [false, true] {
+            let Some(released) = drawn(gpu, true, true) else {
+                continue;
+            };
+            let kept = drawn(gpu, false, true).expect("the same engine");
+            let unread = drawn(gpu, true, false).expect("the same engine");
+            assert!(
+                released.0.iter().any(|&byte| byte != 0),
+                "gpu {gpu}: nothing was drawn"
+            );
+            assert!(
+                released == kept,
+                "gpu {gpu}: released recorders drew or wrote otherwise"
+            );
+            assert!(
+                released.0 == unread.0,
+                "gpu {gpu}: a read between draws changed the pixels"
+            );
         }
     }
 }

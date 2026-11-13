@@ -24,7 +24,10 @@ use std::{
     f32::consts::SQRT_2,
     fmt,
     marker::PhantomData,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use parking_lot::Mutex;
@@ -154,6 +157,188 @@ impl Layer {
             Layer::ColourText(text) => Some(text.reach()),
         }
     }
+
+    /// What the pictures this entry keeps hold, as Skia estimates each --
+    /// `SkPicture::approximateBytesUsed`, which a picture works out once,
+    /// when it is finished, so this costs a call for each picture and walks
+    /// no draws.
+    ///
+    /// A picture recorded only when a target first plays it -- a deferred
+    /// run, a colour run's recording -- counts once it has been recorded.
+    /// Left out: a blur's geometry and the filter it makes at playback,
+    /// which hold no pixels, and a pattern's source, which is another
+    /// canvas's page, reported by that canvas.
+    pub(crate) fn recorded_bytes(&self) -> usize {
+        #[cfg(test)]
+        ENTRIES_WALKED.set(ENTRIES_WALKED.get() + 1);
+        let recorded = LazyPicture::bytes;
+        match self {
+            Layer::Picture(picture) => picture.approximate_bytes_used(),
+            Layer::Blur(_) => 0,
+            Layer::Group(group) => group
+                .contents
+                .layers
+                .iter()
+                .map(Layer::recorded_bytes)
+                .sum(),
+            Layer::Targeted(pictures) => {
+                pictures.0.approximate_bytes_used()
+                    + pictures.1.approximate_bytes_used()
+            }
+            Layer::Cut(op) => op
+                .draws
+                .iter()
+                .chain(op.documents.iter().flatten())
+                .map(Picture::approximate_bytes_used)
+                .sum(),
+            Layer::Clipped(piece) => piece.entry.recorded_bytes(),
+            Layer::Pattern(tile) => tile.plain.approximate_bytes_used(),
+            Layer::Deferred(deferred) => {
+                recorded(&deferred.pixels.picture)
+                    + deferred
+                        .document
+                        .as_ref()
+                        .map_or(0, |document| recorded(&document.picture))
+            }
+            Layer::ColourText(text) => {
+                recorded(&text.recording)
+                    + text
+                        .document
+                        .as_ref()
+                        .map_or(0, |document| recorded(&document.picture))
+            }
+        }
+    }
+
+    /// Has every picture this entry records only when a target first plays
+    /// it add its bytes to `count` when it is recorded -- see
+    /// [`LazyPicture`] -- so that what a page holds is counted as it changes
+    /// rather than by walking every entry at each read.
+    pub(crate) fn count_into(&self, count: &RecordedCount) {
+        match self {
+            Layer::Group(group) => group
+                .contents
+                .layers
+                .iter()
+                .for_each(|layer| layer.count_into(count)),
+            Layer::Clipped(piece) => piece.entry.count_into(count),
+            Layer::Deferred(deferred) => {
+                deferred.pixels.picture.count_into(count);
+                if let Some(document) = &deferred.document {
+                    document.picture.count_into(count);
+                }
+            }
+            Layer::ColourText(text) => {
+                text.recording.count_into(count);
+                if let Some(document) = &text.document {
+                    document.picture.count_into(count);
+                }
+            }
+            Layer::Picture(_)
+            | Layer::Blur(_)
+            | Layer::Targeted(_)
+            | Layer::Cut(_)
+            | Layer::Pattern(_) => {}
+        }
+    }
+}
+
+/// The bytes the pictures of one generation of a page's recording hold --
+/// see [`PageRecorder::recorded_bytes`](super::page::PageRecorder::recorded_bytes)
+/// -- added to as each entry is filed and as each picture recorded when first
+/// played is recorded. Shared with those pictures, which an export can
+/// record on another thread.
+///
+/// `Relaxed` throughout: the count is a figure told to the JavaScript
+/// engine, and nothing is published through it -- no thread reads a picture
+/// because it read the count. Every addition to one atomic falls in a single
+/// order, so none is lost; a report made while another thread records may
+/// miss that one picture, which the next report counts.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RecordedCount(Arc<AtomicUsize>);
+
+impl RecordedCount {
+    pub(crate) fn add(&self, bytes: usize) {
+        self.0.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// A picture recorded the first time a target asks for it, which then adds
+/// its bytes to the count of the page that filed it -- see
+/// [`Layer::count_into`]. The thread that records it adds them after the
+/// picture is in place, so a count never runs ahead of the pictures a walk
+/// of the page finds.
+#[derive(Debug, Default)]
+pub struct LazyPicture {
+    picture: OnceLock<Option<Picture>>,
+    counted_by: OnceLock<RecordedCount>,
+}
+
+impl Clone for LazyPicture {
+    /// The picture as it stands, counted by the page that files the clone
+    /// rather than by the one that filed this.
+    fn clone(&self) -> Self {
+        Self {
+            picture: self.picture.clone(),
+            counted_by: OnceLock::new(),
+        }
+    }
+}
+
+impl From<Option<Picture>> for LazyPicture {
+    /// `picture`, recorded already.
+    fn from(picture: Option<Picture>) -> Self {
+        Self {
+            picture: OnceLock::from(picture),
+            counted_by: OnceLock::new(),
+        }
+    }
+}
+
+impl LazyPicture {
+    /// The picture, `Some` once it has been recorded -- `Some(None)` where
+    /// Skia recorded nothing.
+    pub(crate) fn get(&self) -> Option<&Option<Picture>> {
+        self.picture.get()
+    }
+
+    /// The picture, recorded by `record` now if nothing has asked for it
+    /// yet, its bytes then added to the count it was filed into.
+    pub(crate) fn get_or_record(
+        &self,
+        record: impl FnOnce() -> Option<Picture>,
+    ) -> Option<&Picture> {
+        let mut made = 0;
+        let picture = self.picture.get_or_init(|| {
+            let picture = record();
+            made = picture.as_ref().map_or(0, Picture::approximate_bytes_used);
+            picture
+        });
+        if made > 0
+            && let Some(count) = self.counted_by.get()
+        {
+            count.add(made);
+        }
+        picture.as_ref()
+    }
+
+    /// The bytes the picture holds, 0 until it is recorded.
+    pub(crate) fn bytes(&self) -> usize {
+        self.picture
+            .get()
+            .and_then(Option::as_ref)
+            .map_or(0, Picture::approximate_bytes_used)
+    }
+
+    /// Adds the picture's bytes to `count` when it is recorded. Kept for the
+    /// first page that files it, the only one that holds it.
+    fn count_into(&self, count: &RecordedCount) {
+        let _ = self.counted_by.set(count.clone());
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +355,9 @@ thread_local! {
         const { Cell::new(false) };
     /// How many runs this thread has filed to be recorded when first played.
     pub(crate) static DEFERRED_FILED: Cell<usize> = const { Cell::new(0) };
+    /// How many entries [`Layer::recorded_bytes`] has been asked of on this
+    /// thread, a group's own and each it holds counted apart.
+    pub(crate) static ENTRIES_WALKED: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many of a [`DeferredPicture`]'s recordings were made: those played as
@@ -210,14 +398,14 @@ pub struct DeferredPicture {
 /// a target has played it.
 struct Deferral {
     text: DrawnText,
-    picture: OnceLock<Option<Picture>>,
+    picture: LazyPicture,
 }
 
 impl Deferral {
     fn new(text: DrawnText) -> Self {
         Self {
             text,
-            picture: OnceLock::new(),
+            picture: LazyPicture::default(),
         }
     }
 }
@@ -278,28 +466,23 @@ impl DeferredPicture {
     }
 
     fn recorded<'a>(&self, deferral: &'a Deferral) -> Option<&'a Picture> {
-        deferral
-            .picture
-            .get_or_init(|| {
-                #[cfg(test)]
-                if let Some(watch) = &self.watch.0 {
-                    let kind =
-                        usize::from(!std::ptr::eq(deferral, &self.pixels));
-                    watch[kind]
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                let mut recorder = PictureRecorder::new();
-                let canvas = recorder.begin_recording(self.bounds, true);
-                canvas.set_matrix(&self.matrix.into());
-                #[cfg(test)]
-                if self.watch.1 {
-                    return recorder.finish_recording_as_picture(None);
-                }
-                deferral.text.draw(canvas);
-                reach_the_clip(canvas);
-                recorder.finish_recording_as_picture(None)
-            })
-            .as_ref()
+        deferral.picture.get_or_record(|| {
+            #[cfg(test)]
+            if let Some(watch) = &self.watch.0 {
+                let kind = usize::from(!std::ptr::eq(deferral, &self.pixels));
+                watch[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.matrix.into());
+            #[cfg(test)]
+            if self.watch.1 {
+                return recorder.finish_recording_as_picture(None);
+            }
+            deferral.text.draw(canvas);
+            reach_the_clip(canvas);
+            recorder.finish_recording_as_picture(None)
+        })
     }
 }
 
@@ -1583,7 +1766,7 @@ pub struct ColourText {
     /// The run as recorded for pixels, under [`Self::matrix`], once
     /// something has asked for it -- see [`Self::recorded`]; its bounds are
     /// what the run reaches.
-    pub recording: OnceLock<Option<Picture>>,
+    pub recording: LazyPicture,
     /// The bounds of the page the run is recorded over.
     pub bounds: Rect,
     /// The run as recorded for a document, on a page that keeps a recording
@@ -1618,7 +1801,7 @@ pub struct ColourRecording {
     /// The shadow recorded beneath the run.
     pub shadow: Option<ColourShadow>,
     /// The picture, once recorded.
-    pub picture: OnceLock<Option<Picture>>,
+    pub picture: LazyPicture,
 }
 
 impl ColourRecording {
@@ -1627,7 +1810,7 @@ impl ColourRecording {
         Self {
             paint: Paint::default(),
             shadow: None,
-            picture: OnceLock::from(Some(picture)),
+            picture: LazyPicture::from(Some(picture)),
         }
     }
 
@@ -1637,7 +1820,7 @@ impl ColourRecording {
         Self {
             paint,
             shadow,
-            picture: OnceLock::new(),
+            picture: LazyPicture::default(),
         }
     }
 }
@@ -1724,8 +1907,7 @@ impl ColourText {
     /// picture the blend composites where the blend covers beyond the draw.
     pub(crate) fn recorded(&self) -> Option<&Picture> {
         self.recording
-            .get_or_init(|| self.record(&self.paint, self.shadow.as_ref()))
-            .as_ref()
+            .get_or_record(|| self.record(&self.paint, self.shadow.as_ref()))
     }
 
     /// The run as recorded for a document, recorded now if nothing has
@@ -1735,12 +1917,9 @@ impl ColourText {
         let Some(document) = &self.document else {
             return self.recorded();
         };
-        document
-            .picture
-            .get_or_init(|| {
-                self.record(&document.paint, document.shadow.as_ref())
-            })
-            .as_ref()
+        document.picture.get_or_record(|| {
+            self.record(&document.paint, document.shadow.as_ref())
+        })
     }
 
     /// The run recorded in `paint`, `shadow` beneath it, for
@@ -3851,14 +4030,23 @@ impl CutOp {
     /// Adds the draw `drawn` holds to the run, under the op's clip, into each
     /// recording the op keeps. A draw that holds other than the recordings
     /// the op keeps is dropped, so that the two hold the same draws.
-    pub fn extend(&mut self, drawn: Layer) {
+    ///
+    /// Returns the bytes the pictures it took hold -- see
+    /// [`Layer::recorded_bytes`].
+    pub fn extend(&mut self, drawn: Layer) -> usize {
         match (drawn, &mut self.documents) {
-            (Layer::Picture(picture), None) => self.draws.push(picture),
+            (Layer::Picture(picture), None) => {
+                let bytes = picture.approximate_bytes_used();
+                self.draws.push(picture);
+                bytes
+            }
             (Layer::Targeted(pair), Some(documents)) => {
                 self.draws.push(pair.0.clone());
                 documents.push(pair.1.clone());
+                pair.0.approximate_bytes_used()
+                    + pair.1.approximate_bytes_used()
             }
-            _ => {}
+            _ => 0,
         }
     }
 

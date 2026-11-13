@@ -1047,6 +1047,13 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     #[cfg(debug_assertions)]
     cx.export_function("__reportedMemory", node::external::reported_memory)?;
     #[cfg(debug_assertions)]
+    cx.export_function("__contextBytes", ctx::context_bytes)?;
+    #[cfg(all(
+        debug_assertions,
+        any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
+    ))]
+    cx.export_function("__mallocInUse", node::external::malloc_in_use)?;
+    #[cfg(debug_assertions)]
     cx.export_function("__droppedPages", context::resident::dropped_pages)?;
     #[cfg(debug_assertions)]
     cx.export_function("__setPageBudget", context::resident::set_page_budget)?;
