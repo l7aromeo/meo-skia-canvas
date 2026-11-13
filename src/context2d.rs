@@ -5331,12 +5331,14 @@ mod overlapping_glyph_tests {
 
     use crate::{
         canvas::{BackendInfo, EngineKind},
+        filter::BlurStyle,
         font::FontLibrary,
         node::typography::{
             GLYPH_DRAWS, GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws,
             forget_laid_out,
         },
         paint::BlendMode::*,
+        pixels::PixelDepth,
     };
 
     const W: f32 = 320.0;
@@ -5623,6 +5625,156 @@ mod overlapping_glyph_tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// The ways a run reaches the page past the plain one, each a route
+    /// `Context2D::render_to_canvas` files it by: under a filter the crate
+    /// runs as a chain, casting a shadow blurred or sharp, through a mask
+    /// filter of its own, clipped, turned, dyed by a pattern, and on a page
+    /// that keeps one recording for both targets.
+    const ROUTES: [&str; 10] = [
+        "plain",
+        "drop-shadow filter",
+        "blur filter",
+        "shadow",
+        "sharp shadow",
+        "mask filter",
+        "clipped",
+        "turned",
+        "pattern",
+        "F16 page",
+    ];
+
+    /// Oswald's run drawn twice, its glyphs a quarter em into one another,
+    /// under `blend` on the route named, on the GPU where `gpu`.
+    fn drawn_on_route(gpu: bool, route: &str, blend: BlendMode) -> Vec<u8> {
+        register();
+        forget_laid_out();
+        let options = CanvasOptions {
+            color_type: match route {
+                "F16 page" => PixelDepth::F16,
+                _ => PixelDepth::Uint8,
+            },
+            ..CanvasOptions::default()
+        };
+        let mut canvas = Canvas::with_options(W, H, options).expect("a canvas");
+        canvas.set_gpu(gpu);
+        let mut tile = Canvas::new(8.0, 8.0);
+        tile.set_gpu(false);
+        {
+            let ctx = tile.context();
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+            ctx.set_fill_style_css("rgb(160,40,90)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let ctx = canvas.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(&mut tile, PatternRepeat::Repeat);
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+        ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+        ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+        ctx.set_global_composite_operation(blend);
+        assert!(ctx.set_font_css(OSWALD.0));
+        ctx.set_letter_spacing(-12.0);
+        ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+            .expect("a colour");
+        match route {
+            "drop-shadow filter" => ctx
+                .set_filter_css("drop-shadow(3px 2px 1px rgba(0,0,0,0.5))")
+                .expect("a filter"),
+            "blur filter" => ctx.set_filter_css("blur(1px)").expect("a filter"),
+            "shadow" | "sharp shadow" => {
+                ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(3.0, 2.0);
+                if route == "shadow" {
+                    ctx.set_shadow_blur(2.0);
+                }
+            }
+            "clipped" => {
+                ctx.begin_path();
+                ctx.rect(20.5, 20.0, 200.0, 110.0);
+                ctx.clip(FillRule::NonZero);
+            }
+            "mask filter" => ctx.set_mask_filter(Some(
+                &crate::filter::MaskFilter::blur(BlurStyle::Normal, 1.5, true)
+                    .expect("a mask filter"),
+            )),
+            "turned" => ctx.rotate(0.05),
+            "pattern" => ctx.set_fill_pattern(&pattern),
+            _ => {}
+        }
+        for y in [70.0, 140.0] {
+            ctx.fill_text(OSWALD.1, 10.0, y, None);
+        }
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        let engine = canvas.engine_kind();
+        assert_eq!(
+            engine == EngineKind::Gpu,
+            gpu,
+            "{route}: drawn on {engine:?}"
+        );
+        bytes
+    }
+
+    /// How much further than under `source-over` a route may stand from the
+    /// CPU under a blend read in the shader: 1 level, the blend's own
+    /// rounding of bytes that already stand apart. Under `blur(1px)` the
+    /// GPU's chain stood 36 levels from the CPU's under `source-over` and
+    /// 37 under `multiply`, drawn whole, apart, or as the canvas chose.
+    const BLEND_ROUNDING: u8 = 1;
+
+    /// Every route draws a run whole on the CPU, and blends its glyphs on
+    /// the GPU as on the CPU: no further from it under a blend read in the
+    /// shader than the same route stands under `source-over` -- and
+    /// [`BLEND_ROUNDING`] -- nor past the levels a fill stands -- see
+    /// [`METAL_FILL_LEVELS`].
+    #[test]
+    fn every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu() {
+        let gpu = RenderingEngine::GPU.selectable();
+        let bound = match on_llvmpipe() {
+            true => UNMEASURED_LEVELS,
+            false => METAL_FILL_LEVELS,
+        };
+        let mut wrong = vec![];
+        for route in ROUTES {
+            // A float page is not drawn by Ganesh, and with no other GPU
+            // engine in the build it falls back to the CPU.
+            let source_over = (gpu && route != "F16 page").then(|| {
+                most_apart(
+                    &drawn_on_route(false, route, SourceOver),
+                    &drawn_on_route(true, route, SourceOver),
+                )
+            });
+            for blend in [Multiply, Difference, Luminosity] {
+                GLYPHS_DRAWN_ALONE.set(0);
+                let cpu = drawn_on_route(false, route, blend);
+                if GLYPHS_DRAWN_ALONE.get() != 0 {
+                    wrong.push(format!(
+                        "CPU {route} {blend:?}: {} glyphs drawn apart",
+                        GLYPHS_DRAWN_ALONE.get()
+                    ));
+                }
+                let Some(source_over) = source_over else {
+                    continue;
+                };
+                let most =
+                    most_apart(&cpu, &drawn_on_route(true, route, blend));
+                if most > (source_over + BLEND_ROUNDING).max(bound) {
+                    wrong.push(format!(
+                        "GPU {route} {blend:?}: {most} levels, past \
+                         {source_over} under source-over and {bound}"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A run kept to be drawn again where the page is played writes a PDF
     /// and an SVG with its glyphs whole, the bytes a run drawn as one blob
     /// writes -- see `typography::WholeRuns`. Drawn apart, the PDF differs
@@ -5637,7 +5789,6 @@ mod overlapping_glyph_tests {
         use crate::{
             context::REPLAYS_BLENDED_TEXT,
             export::{EncodeOptions, ImageFormat},
-            pixels::PixelDepth,
         };
         let written = |replays: bool,
                        draws: Option<GlyphDraws>,

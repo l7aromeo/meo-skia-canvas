@@ -2211,8 +2211,19 @@ pub(crate) enum GlyphDraws {
 /// a glyph at a time, which is right at any scale; for a document, whole --
 /// see [`WholeRuns`]. A run drawn from its outlines -- see [`draw_outlines`]
 /// -- is one path on either engine, and is left so.
+///
+/// A run under an image filter -- a shadow -- is whole everywhere: Skia
+/// draws the whole blob into one layer, filters it once and composites it
+/// in one draw, on either engine, where drawn a glyph at a time each
+/// glyph's own layer blends over the last. Oswald's run casting a shadow
+/// under `multiply` stood 93 levels from the same run drawn whole on the
+/// CPU with the shadow blurred, and 102 with it sharp. A mask filter is not
+/// such a case: the CPU blurs each glyph's mask and composites it in turn,
+/// as a group drawn apart does.
 pub(crate) fn glyph_draws(paint: &Paint, canvas: &Canvas) -> GlyphDraws {
-    if blends_by_coefficients(paint.blend_mode_or(SkBlendMode::SrcOver)) {
+    if blends_by_coefficients(paint.blend_mode_or(SkBlendMode::SrcOver))
+        || paint.image_filter().is_some()
+    {
         return GlyphDraws::Whole;
     }
     #[cfg(test)]
@@ -6646,10 +6657,16 @@ mod glyph_group_tests {
         sheared_blob,
     };
     use skia_safe::{
-        AlphaType, Color, ColorType, Data, Font, FontHinting, FontMgr, IRect,
-        ImageInfo, Matrix, Paint, PaintStyle, Point, Rect, surfaces,
+        AlphaType, BlurStyle, Color, ColorType, Data, Font, FontHinting,
+        FontMgr, IRect, ImageInfo, MaskFilter, Matrix, Paint, PaintStyle,
+        Point, Rect, surfaces,
     };
     use std::ops::Range;
+
+    /// The sigma of the mask filter one case draws through, in the glyph's
+    /// own units: a blur whose tail reaches pixels past the glyph's outline,
+    /// which its pixels have to hold too.
+    const MASK_SIGMA: f32 = 2.0;
 
     const OSWALD: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -6734,7 +6751,11 @@ mod glyph_group_tests {
         let mut outside = Vec::new();
         for hinting in [FontHinting::None, FontHinting::Normal] {
             for subpixel in [false, true] {
-                for style in [PaintStyle::Fill, PaintStyle::Stroke] {
+                for (style, blur) in [
+                    (PaintStyle::Fill, None),
+                    (PaintStyle::Stroke, None),
+                    (PaintStyle::Fill, Some(MASK_SIGMA)),
+                ] {
                     let mut font = Font::from_typeface(typeface.clone(), 48.0);
                     font.set_hinting(hinting).set_subpixel(subpixel);
                     let mut paint = Paint::default();
@@ -6742,7 +6763,10 @@ mod glyph_group_tests {
                         .set_anti_alias(true)
                         .set_style(style)
                         .set_stroke_width(3.0)
-                        .set_color(Color::BLACK);
+                        .set_color(Color::BLACK)
+                        .set_mask_filter(blur.and_then(|sigma| {
+                            MaskFilter::blur(BlurStyle::Normal, sigma, None)
+                        }));
                     let glyphs = font.str_to_glyphs_vec("Hello Wq");
                     let mut advances = vec![0.0; glyphs.len()];
                     font.get_widths(&glyphs, &mut advances);

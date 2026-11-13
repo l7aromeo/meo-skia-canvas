@@ -60,7 +60,7 @@ use crate::{
         pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
         texture::{BoxedCanvasTexture, CanvasTexture},
-        typography::with_style_axes,
+        typography::{WholeRuns, with_style_axes},
     },
     pixels::PixelColorSpace,
     started,
@@ -1523,15 +1523,18 @@ impl Context2D {
             recorder.finish_recording_as_picture(None)
         };
         // The draw as a document writes it, less what a group composites
-        // through where one does: its filter, and its blend.
+        // through where one does: its filter, and its blend. Its glyphs are
+        // whole, as a document takes a run -- see `WholeRuns`.
         let mut plain = paint.clone();
         plain.set_image_filter(None);
         if !alone {
             plain.set_blend_mode(BlendMode::SrcOver);
         }
+        let whole = WholeRuns::hold();
         let Some(recorded) = record(&plain) else {
             return false;
         };
+        drop(whole);
         let mut through = plain;
         through.set_shader(None);
         let unit_of = |paint: Paint, replay: Replay| {
