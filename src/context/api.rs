@@ -1057,9 +1057,15 @@ pub fn set_lineDashMarker(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let marker = opt_skpath_arg(&mut cx, 1);
 
+    // `null` and `undefined` both clear the marker, as WebIDL converts
+    // `undefined` to `null` for a nullable attribute of an interface type;
+    // anything else but a Path2D is the wrong kind of value, a `TypeError`
+    // (rule 5).
     if marker.is_none() {
         let val = cx.argument::<JsValue>(1)?;
-        if !(val.is_a::<JsNull, _>(&mut cx) || val.is_a::<JsNull, _>(&mut cx)) {
+        if !(val.is_a::<JsNull, _>(&mut cx)
+            || val.is_a::<JsUndefined, _>(&mut cx))
+        {
             return cx.throw_type_error("Expected a Path2D object (or null)");
         }
     }

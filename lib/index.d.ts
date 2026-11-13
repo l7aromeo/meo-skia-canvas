@@ -2363,10 +2363,10 @@ export interface CanvasGradient {
    * `"unpremultiplied"`, which is what a browser does.
    *
    * It shows only through a stop that is not opaque, and there it shows
-   * plainly. Fading red to `transparent`, `"unpremultiplied"` carries the
-   * colour down with the alpha and reads `[222, 0, 0, 221]` a fifth of the
-   * way along; `"premultiplied"` holds the hue at full strength and reads
-   * `[255, 0, 0, 221]` at the same place.
+   * plainly. On a 100-pixel ramp from red to `transparent`, the pixel at
+   * x = 20 reads `[202, 0, 0, 203]` with `"unpremultiplied"`, the colour
+   * falling with the alpha, and `[255, 0, 0, 203]` with `"premultiplied"`,
+   * which holds the hue at full strength.
    *
    * CSS Color 4 section 12.3 specifies premultiplied interpolation for CSS
    * gradients. Canvas gradients are not CSS gradients and that rule does not
