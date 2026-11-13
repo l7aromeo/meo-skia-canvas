@@ -9,7 +9,10 @@ use skia_safe::{
     },
     shaders,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use crate::{export::VectorFeatures, utils::*};
 
@@ -128,12 +131,30 @@ impl Gradient {
 pub type BoxedCanvasGradient = JsBox<RefCell<CanvasGradient>>;
 impl Finalize for CanvasGradient {}
 
-#[derive(Clone)]
-pub struct CanvasGradient {
-    gradient: Rc<RefCell<Gradient>>,
+/// How a gradient's stops mix: the space, the hue arc and the alpha
+/// interpolation the three setters beside `addColorStop` choose.
+///
+/// The default is each enum's own: the canvas's space, the shorter arc and
+/// unpremultiplied alpha, which is what a gradient mixes in until one is set.
+#[derive(Clone, Copy, Default)]
+struct Mixing {
     color_space: GradientColorSpace,
     hue_method: HueMethod,
     alpha: AlphaInterpolation,
+}
+
+/// A Canvas gradient, shared by every style it has been set as.
+///
+/// Cloned when it becomes a context's `fillStyle` or `strokeStyle`, and both
+/// halves are shared rather than copied, so a change made to the gradient
+/// afterwards dyes the fills made after it -- as `addColorStop` does in a
+/// browser. The stops and the way they mix are kept alike for that reason:
+/// were the mixing copied, `colorInterpolationSpace` set after `fillStyle`
+/// would read back as set and paint as it was.
+#[derive(Clone)]
+pub struct CanvasGradient {
+    gradient: Rc<RefCell<Gradient>>,
+    mixing: Rc<Cell<Mixing>>,
 }
 
 impl CanvasGradient {
@@ -148,7 +169,7 @@ impl CanvasGradient {
         match &*self.gradient.borrow() {
             Gradient::Conic { .. } => VectorFeatures::EXOTIC_SHADER,
             Gradient::Linear { .. } | Gradient::Radial { .. } => {
-                self.color_space.vector_features()
+                self.mixing.get().color_space.vector_features()
             }
         }
     }
@@ -165,14 +186,15 @@ impl CanvasGradient {
     }
 
     pub fn shader(&self) -> Option<Shader> {
+        let mixing = self.mixing.get();
         let interp = Interpolation {
             // Was hard-coded to `No` here, which is what made the crate's
             // `AlphaInterpolation` unreachable from JavaScript: the option
             // existed, threaded through `Shader`'s factories, and this line
             // discarded it on the one path a JavaScript caller can take.
-            in_premul: self.alpha.to_skia(),
-            color_space: self.color_space.to_skia(),
-            hue_method: self.hue_method.to_skia(),
+            in_premul: mixing.alpha.to_skia(),
+            color_space: mixing.color_space.to_skia(),
+            hue_method: mixing.hue_method.to_skia(),
         };
 
         let shader = match &*self.gradient.borrow() {
@@ -254,7 +276,7 @@ impl CanvasGradient {
             }
         }?;
         // `None` for a space Skia cannot build, as for a shader it declines.
-        self.color_space.in_working_space(shader).ok()
+        mixing.color_space.in_working_space(shader).ok()
     }
 
     pub fn add_color_stop(&mut self, offset: f32, color: Color4f) {
@@ -293,9 +315,7 @@ pub fn linear(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(ramp)),
-        color_space: GradientColorSpace::Destination,
-        hue_method: HueMethod::Shorter,
-        alpha: AlphaInterpolation::Unpremultiplied,
+        mixing: Rc::default(),
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -320,9 +340,7 @@ pub fn radial(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(bloom)),
-        color_space: GradientColorSpace::Destination,
-        hue_method: HueMethod::Shorter,
-        alpha: AlphaInterpolation::Unpremultiplied,
+        mixing: Rc::default(),
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -355,9 +373,7 @@ pub fn conic(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(sweep)),
-        color_space: GradientColorSpace::Destination,
-        hue_method: HueMethod::Shorter,
-        alpha: AlphaInterpolation::Unpremultiplied,
+        mixing: Rc::default(),
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -524,16 +540,19 @@ fn str_to_alpha(s: &str) -> Option<AlphaInterpolation> {
 pub fn get_interpolation(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedCanvasGradient>(0)?;
     let this = this.borrow();
-    Ok(cx.string(color_space_to_str(this.color_space)))
+    Ok(cx.string(color_space_to_str(this.mixing.get().color_space)))
 }
 
 pub fn set_interpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedCanvasGradient>(0)?;
-    let mut this = this.borrow_mut();
+    let this = this.borrow();
     let value = string_arg(&mut cx, 1, "interpolation")?;
 
-    if let Some(cs) = str_to_color_space(&value) {
-        this.color_space = cs;
+    if let Some(color_space) = str_to_color_space(&value) {
+        this.mixing.set(Mixing {
+            color_space,
+            ..this.mixing.get()
+        });
     }
 
     Ok(cx.undefined())
@@ -542,16 +561,19 @@ pub fn set_interpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 pub fn get_hueInterpolation(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedCanvasGradient>(0)?;
     let this = this.borrow();
-    Ok(cx.string(hue_method_to_str(this.hue_method)))
+    Ok(cx.string(hue_method_to_str(this.mixing.get().hue_method)))
 }
 
 pub fn set_hueInterpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedCanvasGradient>(0)?;
-    let mut this = this.borrow_mut();
+    let this = this.borrow();
     let value = string_arg(&mut cx, 1, "hueInterpolation")?;
 
-    if let Some(hm) = str_to_hue_method(&value) {
-        this.hue_method = hm;
+    if let Some(hue_method) = str_to_hue_method(&value) {
+        this.mixing.set(Mixing {
+            hue_method,
+            ..this.mixing.get()
+        });
     }
 
     Ok(cx.undefined())
@@ -562,14 +584,14 @@ pub fn get_alphaInterpolationMethod(
 ) -> JsResult<JsString> {
     let this = cx.argument::<BoxedCanvasGradient>(0)?;
     let this = this.borrow();
-    Ok(cx.string(alpha_to_str(this.alpha)))
+    Ok(cx.string(alpha_to_str(this.mixing.get().alpha)))
 }
 
 pub fn set_alphaInterpolationMethod(
     mut cx: FunctionContext,
 ) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedCanvasGradient>(0)?;
-    let mut this = this.borrow_mut();
+    let this = this.borrow();
     let value = string_arg(&mut cx, 1, "alphaInterpolationMethod")?;
 
     // Silent here and refused in `lib/classes/canvas.js`, as both siblings
@@ -579,7 +601,10 @@ pub fn set_alphaInterpolationMethod(
     // list keeps one validation site, which is the same reason the
     // deprecated spellings delegate rather than repeat.
     if let Some(alpha) = str_to_alpha(&value) {
-        this.alpha = alpha;
+        this.mixing.set(Mixing {
+            alpha,
+            ..this.mixing.get()
+        });
     }
 
     Ok(cx.undefined())
@@ -706,9 +731,7 @@ mod tests {
     fn wrap(gradient: Gradient) -> CanvasGradient {
         CanvasGradient {
             gradient: Rc::new(RefCell::new(gradient)),
-            color_space: GradientColorSpace::default(),
-            hue_method: HueMethod::default(),
-            alpha: AlphaInterpolation::default(),
+            mixing: Rc::default(),
         }
     }
 }
