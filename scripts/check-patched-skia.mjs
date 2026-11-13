@@ -14,7 +14,7 @@
 // not stall the compiler, land a path where the pixel moves, draw a curve at
 // two scales or look at which buffer a read kept. Three things have to hold,
 // and each is read from what skia-bindings' build script printed -- its
-// `output` and its `stderr`, see `buildLog`:
+// stdout and its stderr, see `buildLog`:
 //
 // 1. It built from a source tree and did not try a download: offline from
 //    `SKIA_SOURCE_DIR` -- "STARTING OFFLINE BUILD" -- or, from a rust-skia
@@ -43,7 +43,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -56,6 +55,7 @@ import {
   entriesFor,
   seedLog,
 } from "./skia-binaries.mjs";
+import { buildScriptLogs, buildScriptRuns } from "./cargo-build-dir.mjs";
 import { cacheRoot, treeName } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -387,19 +387,6 @@ export function markerRefusal(patchText, file, marker) {
 }
 
 /**
- * Where a build script's run left its stdout and stderr in `dir`, the
- * directory above its `out`: `output` and `stderr` in stable cargo's build
- * directory, `run/stdout` and `run/stderr` in the one nightly cargo lays
- * out, `<package>/<hash>/` -- which builds the static musl archives.
- */
-export function buildScriptLogs(dir) {
-  const run = join(dir, "run");
-  return existsSync(join(run, "stdout")) && !existsSync(join(dir, "output"))
-    ? { output: join(run, "stdout"), stderr: join(run, "stderr") }
-    : { output: join(dir, "output"), stderr: join(dir, "stderr") };
-}
-
-/**
  * What skia-bindings' build script printed in `dir`, both streams, from the
  * files `buildScriptLogs` names. Both ninjas print what they compiled on
  * stdout, but samurai prints the directory it ran in on stderr.
@@ -418,10 +405,9 @@ function check(buildDir) {
     console.error(`check-patched-skia: no patches for ${process.platform}`);
     process.exit(1);
   }
-  const outputs = readdirSync(buildDir)
-    .filter((name) => name.startsWith("skia-bindings-"))
-    .map((name) => join(buildDir, name, "output"))
-    .filter(existsSync);
+  const outputs = buildScriptRuns(buildDir, "skia-bindings").filter((dir) =>
+    existsSync(buildScriptLogs(dir).output),
+  );
   if (!outputs.length) {
     console.error(
       `check-patched-skia: no skia-bindings output under ${buildDir}`,
@@ -431,9 +417,9 @@ function check(buildDir) {
   const where = { cache: cacheRoot(), tree: treeName() };
   const problems = outputs
     .map((path) => {
-      const log = buildLog(dirname(path));
+      const log = buildLog(path);
       const why = log.includes(LINKED)
-        ? bindRefusal(dirname(path), patched, where)
+        ? bindRefusal(path, patched, where)
         : refusal(log, patched);
       return [path, why];
     })

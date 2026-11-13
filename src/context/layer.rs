@@ -3701,23 +3701,32 @@ pub(crate) fn drawn_by(picture: &Picture) -> Option<Rect> {
 
 /// Whether a run's pieces are bounded -- see [`Clipped::play_run`]: always,
 /// but off on a thread a test has turned it off on.
+#[cfg(not(test))]
 fn bounds_pieces() -> bool {
-    #[cfg(test)]
-    if !BOUNDS_PIECES.get() {
-        return false;
-    }
     true
+}
+
+/// Whether a run's pieces are bounded -- see [`Clipped::play_run`]: unless
+/// this thread's test turned [`BOUNDS_PIECES`] off.
+#[cfg(test)]
+fn bounds_pieces() -> bool {
+    BOUNDS_PIECES.get()
 }
 
 /// Whether a piece played onto a raster on the CPU is bounded -- see
 /// [`Clipped::playback`]: always, but off on a thread a test has turned it
 /// off on.
+#[cfg(not(test))]
 fn bounds_page() -> bool {
-    #[cfg(test)]
-    if !BOUNDS_PAGE.get() {
-        return false;
-    }
     true
+}
+
+/// Whether a piece played onto a raster on the CPU is bounded -- see
+/// [`Clipped::playback`]: unless this thread's test turned [`BOUNDS_PAGE`]
+/// off.
+#[cfg(test)]
+fn bounds_page() -> bool {
+    BOUNDS_PAGE.get()
 }
 
 /// Whether `entries`, or a group among them, hold a [`CutOp`].
