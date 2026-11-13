@@ -259,7 +259,12 @@ features, compiles Skia as before.
 
 **What the entry compiled.** An entry also keeps `notices.json`: the Skia
 tree and the projects its build compiled, from ninja's dependency record,
-which the third-party notices of a build that links it are written from. An
+which the third-party notices of a build that links it are written from. A
+build whose ninja has no `deps` tool -- the musl image's `/usr/bin/ninja` is
+samurai -- has its build directory described by `gn desc` instead, and every
+build whose ninja keeps a record is described that way too and refused where
+the two differ, so that the route the musl builds take is checked on every
+other build. An
 entry stored before entries kept one has it derived when a lookup finds it,
 by `gn desc` over the arguments its seed log printed, and is linked as
 before -- the same set as ninja's, measured on three entries whose seed

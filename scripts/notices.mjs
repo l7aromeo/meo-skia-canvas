@@ -34,7 +34,7 @@
 // only library -- the Vulkan Memory Allocator, compiled into libskia -- is
 // there because its header was read, and a project the build never touched is
 // not. The table below only names where each project's licence lives.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -252,25 +252,40 @@ export function recordFromLog(tree, log) {
       join(out, "args.gn"),
       args.map(([k, v]) => `${k} = ${v}`).join("\n") + "\n",
     );
-    const gn = join(
-      tree,
-      "bin",
-      process.platform === "win32" ? "gn.exe" : "gn",
-    );
-    execFileSync(gn, ["gen", out], { cwd: tree, stdio: "ignore" });
-    const labels = GN_TARGETS.map((t) =>
-      execFileSync(gn, ["desc", out, t, "deps", "--all"], {
-        cwd: tree,
-        encoding: "utf8",
-      }),
-    ).join("\n");
-    const vulkan = args.some(
-      ([k, v]) => k === "skia_use_vulkan" && v === "true",
-    );
-    return { tree, projects: projectsFromGn(labels, vulkan) };
+    execFileSync(gnOf(tree), ["gen", out], { cwd: tree, stdio: "ignore" });
+    return { tree, projects: gnProjects(tree, out) };
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
+}
+
+/**
+ * The gn a Skia build in `tree` runs: `SKIA_GN_COMMAND` where skia-bindings
+ * is told to use one -- the musl image's system gn, since the tree's own is
+ * built against glibc -- and the tree's own otherwise.
+ */
+function gnOf(tree) {
+  return (
+    process.env.SKIA_GN_COMMAND ||
+    join(tree, "bin", process.platform === "win32" ? "gn.exe" : "gn")
+  );
+}
+
+/**
+ * The projects gn puts under the libraries skia-bindings builds, for the gn
+ * build directory `outDir` generated from the Skia tree `tree`: what each
+ * of `GN_TARGETS` depends on, read with `gn desc`, and the Vulkan headers
+ * where its arguments turn Vulkan on.
+ */
+export function gnProjects(tree, outDir) {
+  const labels = GN_TARGETS.map((t) =>
+    execFileSync(gnOf(tree), ["desc", outDir, t, "deps", "--all"], {
+      cwd: tree,
+      encoding: "utf8",
+    }),
+  ).join("\n");
+  const args = readFileSync(join(outDir, "args.gn"), "utf8");
+  return projectsFromGn(labels, /^\s*skia_use_vulkan\s*=\s*true\b/m.test(args));
 }
 
 /**
@@ -285,17 +300,50 @@ export function skiaTreeOf(outDir) {
   return resolve(realpathSync(outDir), root[1]);
 }
 
-/** The projects a Skia build in `outDir` compiled, from ninja's own record. */
-export function compiledProjects(outDir) {
-  const deps = execFileSync("ninja", ["-C", outDir, "-t", "deps"], {
+/**
+ * The projects a Skia build in `outDir` compiled, from the record of the
+ * ninja that built it -- `SKIA_NINJA_COMMAND` where skia-bindings is told to
+ * use one, and `ninja` otherwise. Samurai, which the musl image's
+ * `/usr/bin/ninja` is, keeps no record it can print: it has no `deps` tool
+ * and answers `unknown tool 'deps'`. For a build it ran, gn describes the
+ * build directory instead -- `describe`, by default `gnProjects`.
+ *
+ * Where ninja does print its record, gn describes the directory too, and a
+ * difference between the two stops the notices: every build whose ninja
+ * keeps a record -- the glibc, macOS and Windows legs -- checks that the
+ * description samurai's builds rely on is the record, for the arguments it
+ * was built with.
+ */
+export function compiledProjects(
+  outDir,
+  ninja = ninjaOf(),
+  describe = (dir) => gnProjects(skiaTreeOf(dir), dir),
+) {
+  const run = spawnSync(ninja, ["-C", outDir, "-t", "deps"], {
     encoding: "utf8",
     maxBuffer: 1 << 30,
   });
-  if (!deps.trim())
+  if (run.error) throw run.error;
+  if (run.status !== 0) {
+    if (/unknown tool 'deps'/.test(run.stderr)) return describe(outDir);
+    throw new Error(`notices: ${ninja} -t deps failed: ${run.stderr.trim()}`);
+  }
+  if (!run.stdout.trim())
     throw new Error(
       `notices: ninja holds no dependency record in ${outDir}; a build that ran there leaves one`,
     );
-  return projectsFromDeps(deps);
+  const recorded = projectsFromDeps(run.stdout);
+  const described = describe(outDir);
+  if (recorded.join() !== described.join())
+    throw new Error(
+      `notices: ninja's record of ${outDir} names ${recorded.join(", ")}, and gn's description of it ${described.join(", ")}; a build whose ninja keeps no record is written from gn's`,
+    );
+  return recorded;
+}
+
+/** The ninja a Skia build runs -- see `compiledProjects`. */
+function ninjaOf() {
+  return process.env.SKIA_NINJA_COMMAND || "ninja";
 }
 
 /**
@@ -794,6 +842,62 @@ function selfTest() {
   refuse("a gn third_party label with no project", () =>
     projectsFromGn("//third_party/dawn:dawn\n", false),
   );
+  // A build directory whose ninja is samurai, which has no `deps` tool: its
+  // record comes from gn instead. Stand-ins for both, as scripts, since the
+  // check runs where neither tool is installed.
+  if (process.platform !== "win32") {
+    const scratch = realpathSync(mkdtempSync(join(tmpdir(), "notices-samu-")));
+    const tree = join(scratch, "skia");
+    const out = join(tree, "out");
+    mkdirSync(out, { recursive: true });
+    writeFileSync(
+      join(out, "build.ninja"),
+      "rule gn\n  command = gn --root=..\n",
+    );
+    writeFileSync(join(out, "args.gn"), "skia_use_vulkan = true\n");
+    const script = (name, body) => {
+      const path = join(scratch, name);
+      writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      return path;
+    };
+    const samurai = script(
+      "samu",
+      `echo "ninja: unknown tool 'deps'" >&2; exit 1`,
+    );
+    const broken = script(
+      "broken",
+      `echo "ninja: loading 'build.ninja': nope" >&2; exit 1`,
+    );
+    const ninja = script(
+      "ninja",
+      "printf 'obj/a.o: #deps 1\\n    ../../third_party/externals/libpng/png.c\\n'",
+    );
+    const gn = script("gn", 'printf "//third_party/zlib:zlib\\n"');
+    const before = process.env.SKIA_GN_COMMAND;
+    process.env.SKIA_GN_COMMAND = gn;
+    try {
+      eq("samurai's build, described by gn", compiledProjects(out, samurai), [
+        "skia",
+        "zlib",
+        "vulkan-headers",
+      ]);
+      eq(
+        "ninja's own record, which gn's description agrees with",
+        compiledProjects(out, ninja, () => ["skia", "libpng"]),
+        ["skia", "libpng"],
+      );
+      refuse("ninja's record and gn's description apart", () =>
+        compiledProjects(out, ninja, () => ["skia", "zlib"]),
+      );
+      refuse("a ninja failing for another reason", () =>
+        compiledProjects(out, broken),
+      );
+    } finally {
+      if (before === undefined) delete process.env.SKIA_GN_COMMAND;
+      else process.env.SKIA_GN_COMMAND = before;
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
   const text = "a ``` b\n````\n";
   const out = render("Opening.", [
     { id: "x:y", title: "Y", files: [{ name: "LICENSE", text }] },
@@ -1047,26 +1151,8 @@ async function main() {
   }
   if (command === "gn") {
     const [tree, outDir] = args;
-    const args_gn = readFileSync(join(outDir, "args.gn"), "utf8");
-    const labels = GN_TARGETS.map((t) =>
-      execFileSync(
-        join(tree, "bin", "gn"),
-        ["desc", outDir, t, "deps", "--all"],
-        { cwd: tree, encoding: "utf8" },
-      ),
-    ).join("\n");
     console.log(
-      JSON.stringify(
-        {
-          tree,
-          projects: projectsFromGn(
-            labels,
-            /skia_use_vulkan\s*=\s*true/.test(args_gn),
-          ),
-        },
-        null,
-        2,
-      ),
+      JSON.stringify({ tree, projects: gnProjects(tree, outDir) }, null, 2),
     );
     return;
   }

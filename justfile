@@ -742,17 +742,18 @@ build: ensure-deps
 
 # Build the native module, release profile. What CI ships.
 build-release: ensure-deps
-    rm -f {{ lib }}
+    rm -f "{{ lib }}"
     bun run build
 
 # The third-party notices `build-release`'s binary owes, beside it, where
 # `bun run upload` refuses to go without them. Read from the build itself
 # -- the Skia it compiled or the cache entry it linked, and the crates this
 # host's target links -- by scripts/notices.mjs, so it runs after
-# `build-release` with nothing changed between them.
+# `build-release` with nothing changed between them. The path is quoted: on
+# Windows it holds backslashes, which bash takes as escapes in a bare word.
 [doc("Write the third-party notices the release binary owes, beside it.")]
 notices-release: ensure-deps
-    node scripts/notices.mjs release {{ lib }}.notices.md
+    node scripts/notices.mjs release "{{ lib }}.notices.md"
 
 # Every crate a shipped target links has its licence text, from its package
 # or from `licences/crates`, and that directory holds nothing else. Cargo
@@ -1075,7 +1076,7 @@ check-bench-parity: ensure-deps
 
 # Remove the compiled binary.
 clean:
-    rm -f {{ lib }}
+    rm -f "{{ lib }}"
 
 # Remove the binary, node_modules, and all cargo build output.
 clean-all: clean

@@ -35,7 +35,9 @@ from a Skia it compiled, and the notices that program owes when it ships a binar
 build rather than from a list kept by hand:
 
 - **Skia and the projects its build compiled** come from Skia's own dependency record: ninja's for a
-  build that compiled Skia, or `gn desc` over the gn arguments a cached build was made with. Each
+  build that compiled Skia, or `gn desc` over the gn arguments a cached build was made with, or over
+  the build directory where the build's ninja keeps no record it can print -- the musl image builds
+  with samurai, which has no `deps` tool. Each
   text is read from the Skia tree that build compiled. Linux builds compile FreeType and zlib from
   this repository's `vendor/freetype` and `vendor/zlib` submodules in place of Skia's copies, so
   those have sections of their own naming the commit.
