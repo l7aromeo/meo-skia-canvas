@@ -312,6 +312,8 @@ fn parted(a: &[[u8; 4]], b: &[[u8; 4]], levels: u8) -> (usize, u8) {
     })
 }
 
+/// A square casting a blurred shadow. An SVG writes the square as a path
+/// and embeds the shadow, which it cannot write, as pixels.
 fn shadowed_square(ctx: &mut Context2D, x: f32) {
     ctx.set_shadow_color(RgbaLinear::from_srgb8(255, 0, 0, 1.0));
     ctx.set_shadow_offset(3.0, 2.0);
@@ -338,8 +340,8 @@ fn exported_svg(draw: impl FnOnce(&mut Context2D)) -> (Document, usize) {
 }
 
 /// A layer that composites what it holds as it stands is taken entry by
-/// entry: its plain draw stays a vector, and only the shadowed draw an SVG
-/// cannot write is embedded as pixels.
+/// entry: its plain draw and the shadowed square stay vectors, and only the
+/// shadow an SVG cannot write is embedded as pixels.
 #[test]
 fn an_unpainted_layer_keeps_what_it_can_write_vector() {
     let (svg, parted) = exported_svg(|ctx| {
@@ -348,8 +350,8 @@ fn an_unpainted_layer_keeps_what_it_can_write_vector() {
         shadowed_square(ctx, 40.0);
         ctx.restore();
     });
-    assert_eq!(count(&svg, "path"), 1, "the plain draw");
-    assert_eq!(count(&svg, "image"), 1, "the shadowed draw");
+    assert_eq!(count(&svg, "path"), 2, "the plain draw and the square");
+    assert_eq!(count(&svg, "image"), 1, "the shadow");
     assert_eq!(parted, 0);
 }
 
@@ -435,8 +437,8 @@ fn an_unpainted_layer_keeps_to_its_clip_once() {
     };
     let (with, without) = (svg(true), svg(false));
     let document = parse(&with);
-    assert_eq!(count(&document, "path"), 1, "the plain draw");
-    assert_eq!(count(&document, "image"), 1, "the shadowed draw");
+    assert_eq!(count(&document, "path"), 2, "the plain draw and the square");
+    assert_eq!(count(&document, "image"), 1, "the shadow");
     assert_eq!(parted(&rendered(&with), &rendered(&without), RENDERED).0, 0);
 }
 
@@ -450,8 +452,8 @@ fn an_unpainted_layer_after_an_embedded_draw_stays_vector() {
         ctx.fill_rect(5.0, 20.0, 20.0, 12.0);
         ctx.restore();
     });
-    assert_eq!(count(&svg, "path"), 1, "the layer's draw");
-    assert_eq!(count(&svg, "image"), 1, "the shadowed draw");
+    assert_eq!(count(&svg, "path"), 2, "the square and the layer's draw");
+    assert_eq!(count(&svg, "image"), 1, "the shadow");
     assert_eq!(parted, 0);
 }
 
@@ -686,13 +688,24 @@ fn a_canvas_drawn_in_under_alpha_embeds_in_place() {
         ctx.fill_rect(2.0, 2.0, 10.0, 10.0);
         shadowed_square(ctx, 20.0);
     }
+    // At half a pixel down and half again its size, the shadowed square's
+    // edges land on whole pixels. `Svg::rasterize`, which renders the
+    // export here, composites on a linear-light surface, so a square's
+    // partly covered edge over its own shadow blends there as the canvas
+    // does not, 30 levels apart under this alpha; whole edges leave only
+    // the placement to measure. Once `Svg::rasterize` blends as the canvas
+    // does (#728), the draw goes back to (6, 4).
     let (svg, parted) = exported_svg(|ctx| {
         ctx.set_global_alpha(0.5);
-        ctx.draw_canvas_sized(&mut source, 6.0, 4.0, 60.0, 30.0);
+        ctx.draw_canvas_sized(&mut source, 6.0, 4.5, 60.0, 30.0);
     });
     assert_eq!(opacities(&svg), ["0.5"]);
-    assert_eq!(count(&svg, "image"), 1, "the shadowed square");
-    assert_eq!(count(&svg, "path"), 1, "the plain one");
+    assert_eq!(count(&svg, "image"), 1, "the shadow");
+    assert_eq!(
+        count(&svg, "path"),
+        2,
+        "the plain square and the shadowed one"
+    );
     // A square and a blurred one, which a renderer draws as the canvas
     // does: the canvas's own pixels are the reference.
     assert_eq!(parted, 0);
@@ -701,7 +714,8 @@ fn a_canvas_drawn_in_under_alpha_embeds_in_place() {
 /// A canvas holding a draw its clip cuts, drawn into another, is written
 /// as what it holds: the cut triangle as a path under its clip, through no
 /// layer, and, where the source also holds a shadowed square and is drawn
-/// through a layer for it, that alone as pixels.
+/// through a layer for it, the square as a path and its shadow alone as
+/// pixels.
 #[test]
 fn a_canvas_holding_a_cut_draw_is_drawn_in_as_its_entries() {
     for shadowed in [false, true] {
@@ -726,7 +740,11 @@ fn a_canvas_holding_a_cut_draw_is_drawn_in_as_its_entries() {
         }
         let (svg, _) =
             exported_svg(|ctx| ctx.draw_canvas(&mut source, 0.0, 0.0));
-        assert_eq!(count(&svg, "path"), 1, "shadowed {shadowed}: the triangle");
+        assert_eq!(
+            count(&svg, "path"),
+            1 + usize::from(shadowed),
+            "shadowed {shadowed}: the triangle, and the square"
+        );
         assert_eq!(count(&svg, "image"), usize::from(shadowed));
         assert!(count(&svg, "clipPath") > 0, "the triangle under its clip");
     }
@@ -748,8 +766,8 @@ fn a_plain_draw_after_an_embedded_one_in_a_layer_stays_vector() {
         ctx.restore();
         ctx.restore();
     });
-    assert_eq!(count(&svg, "path"), 1, "the plain draw");
-    assert_eq!(count(&svg, "image"), 1, "the shadowed one");
+    assert_eq!(count(&svg, "path"), 2, "the plain draw and the square");
+    assert_eq!(count(&svg, "image"), 1, "the shadow");
     assert_eq!(parted, 0);
 }
 

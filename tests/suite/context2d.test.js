@@ -769,7 +769,11 @@ describe("Context2D", () => {
       ctx.filter =
         "blur(5px) invert(56%) sepia(63%) saturate(4837%) hue-rotate(163deg) brightness(96%) contrast(101%)";
       ctx.fillRect(0, 0, 20, 20);
-      assert.deepEqual(pixel(10, 10), [0, 162, 213, 245]);
+      // The tint the colour functions make in one pass, over the exact blur's
+      // alpha: Chrome 156 stores (0, 162, 212, 245), the alpha of its
+      // approximate blur -- see "A blurred rectangle is its exact Gaussian
+      // blur" in docs/browser-differences.md.
+      assert.deepEqual(pixel(10, 10), [0, 162, 213, 232]);
       canvas.gpu = gpu;
     });
 

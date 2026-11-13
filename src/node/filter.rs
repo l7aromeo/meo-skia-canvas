@@ -306,11 +306,18 @@ impl Filter {
     /// filter, which is the same at any scale, and a `drop-shadow()` as the
     /// draw over its alpha blurred by the exact Gaussian. `None` for no
     /// filter, and for one holding a function the crate does not run.
+    ///
+    /// Colour functions in a row are one step, their filters composed: Skia
+    /// works a composed filter in floats in one pass, each function still
+    /// clamping what it leaves. A step a function stores its pixels between
+    /// functions, and a `saturate(4837%)` multiplied that rounding to 4
+    /// levels of blue on what the function before left.
     pub(crate) fn steps(&self) -> Option<Vec<Step>> {
         if self.specs.is_empty() {
             return None;
         }
-        self.specs
+        let steps = self
+            .specs
             .iter()
             .map(|spec| match spec {
                 FilterSpec::Plain { name, value } if name == "blur" => {
@@ -330,10 +337,22 @@ impl Filter {
                         sigma: *blur,
                         colour,
                         space,
+                        shadow_only: false,
                     })
                 }
             })
-            .collect()
+            .collect::<Option<Vec<Step>>>()?;
+        steps
+            .into_iter()
+            .try_fold(Vec::new(), |mut steps: Vec<Step>, step| {
+                match (steps.last_mut(), step) {
+                    (Some(Step::Colour(inner)), Step::Colour(outer)) => {
+                        *inner = outer.composed(inner.clone())?;
+                    }
+                    (_, step) => steps.push(step),
+                }
+                Some(steps)
+            })
     }
 
     /// The standard deviation, in canvas pixels, of a filter that is one
