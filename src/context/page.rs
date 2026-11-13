@@ -25,6 +25,7 @@ use std::{
     io::{BufWriter, Cursor, Write},
     ops::Range,
     path::Path as FilePath,
+    rc::Rc,
     sync::{
         Arc, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -49,6 +50,7 @@ use crate::{
             Target, TileScope, holds_a_cut, in_document_space, play_entries,
             tiles_exactly,
         },
+        resident::{Place, SharedSurface},
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -73,6 +75,7 @@ use crate::{
     },
     node::{
         canvas::BoxedCanvas,
+        external::Reported,
         utils::{skia_paint_color, skia_paint_color_onto},
     },
     pixels::PixelColorSpace,
@@ -361,7 +364,11 @@ pub struct PageRecorder {
     bounds: Rect,
     matrix: Matrix,
     clip: Option<Path>,
-    surface: RecordingSurface,
+    /// What the page's reads composited, shared with the budget the pages on
+    /// this thread keep to -- see [`resident`](super::resident).
+    surface: SharedSurface,
+    /// The page's place in that budget.
+    place: Place,
     changed: bool,
     /// Set while `current` is recording an isolated layer rather than an
     /// ordinary one, to the features that layer was opened for. Consecutive
@@ -955,7 +962,14 @@ impl PageRecorder {
     /// The bytes this page holds in pixels. See
     /// [`RecordingSurface::resident_bytes`].
     pub fn resident_bytes(&self) -> usize {
-        self.surface.resident_bytes()
+        self.surface.borrow().resident_bytes()
+    }
+
+    /// Shares what the page's canvas reports to the JavaScript engine with
+    /// the budget the pages on this thread keep to, so that the engine is told
+    /// when the budget drops the page -- see [`Place::reports_through`].
+    pub(crate) fn reports_through(&self, reported: Reported) {
+        self.place.reports_through(reported);
     }
 
     /// Mints a page identity and registers it with the cache.
@@ -1001,7 +1015,8 @@ impl PageRecorder {
             clip: None,
             bounds,
             id,
-            surface: RecordingSurface::default(),
+            surface: SharedSurface::default(),
+            place: Place::new(),
             replay_cost: 0,
             open: Vec::new(),
         }
@@ -1152,7 +1167,9 @@ impl PageRecorder {
         self.state_dirty = false;
         self.matrix = Matrix::default();
         self.clip = None;
-        self.surface = RecordingSurface::default();
+        // Replaced in place, so that the budget's reference to it holds.
+        *self.surface.borrow_mut() = RecordingSurface::default();
+        self.place.emptied();
         // The layers open on the erased content go with it, and so do the
         // recordings they were opened inside.
         self.open.clear();
@@ -1466,7 +1483,9 @@ impl PageRecorder {
         let Some(layer) = self.open.pop() else {
             return;
         };
-        self.surface.forget_layers_past(self.open.len());
+        self.surface
+            .borrow_mut()
+            .forget_layers_past(self.open.len());
         if !layer.entries.is_empty() || layer.rec.marks_when_empty() {
             let rec_features = layer.rec.vector_features();
             let group = Group {
@@ -1753,27 +1772,44 @@ impl PageRecorder {
             return Ok(());
         }
 
+        let read = self.read_into(crop, &opts, &engine, &dst_info, dst_buffer);
+        // Whether or not it was served, a read can leave the page keeping
+        // a surface or tiles it did not keep before, and the budget counts
+        // what a page keeps.
+        self.place.served(&self.surface);
+        read
+    }
+
+    /// [`Self::pixels_into`] once the rectangle is known to touch the page.
+    fn read_into(
+        &mut self,
+        crop: IRect,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+        dst_info: &ImageInfo,
+        dst_buffer: &mut [u8],
+    ) -> Result<(), String> {
         if !self.open.is_empty() {
             return self
-                .pixels_in_layer(crop, &opts, &engine, &dst_info, dst_buffer);
+                .pixels_in_layer(crop, opts, engine, dst_info, dst_buffer);
         }
 
         let page = self.page();
+        let mut surface = self.surface.borrow_mut();
 
         // Small reads are served by the squares they touch, which is the
         // whole point: a hit test asked for sixty-four pixels and used to
         // composite and keep a megapixel. Anything wider than the grid is
         // worth is served by the page, as before.
-        if self
-            .surface
-            .read_tiled(&page, &opts, &engine, &dst_info, crop, dst_buffer)?
+        if surface
+            .read_tiled(&page, opts, engine, dst_info, crop, dst_buffer)?
         {
             return Ok(());
         }
 
-        match self.surface.confirmed_read(
-            &page, &opts, &engine, &dst_info, crop, dst_buffer,
-        )? {
+        match surface
+            .confirmed_read(&page, opts, engine, dst_info, crop, dst_buffer)?
+        {
             true => Ok(()),
             false => Err(format!(
                 "Could not get image data (format: {:?})",
@@ -1801,11 +1837,15 @@ impl PageRecorder {
         self.split_run();
         self.file_current();
         self.reframe();
-        self.surface.confirmed_update(&filed, opts, engine)?;
+        // A handle of its own, so that the surface stays borrowed across the
+        // calls below that need the rest of the recorder.
+        let shared = Rc::clone(&self.surface);
+        let mut surface = shared.borrow_mut();
+        surface.confirmed_update(&filed, opts, engine)?;
         let origin = (crop.x(), crop.y());
         let rastered =
             self.open.iter().all(|layer| layer.rasters(opts.density))
-                && self.surface.read_rastered(
+                && surface.read_rastered(
                     &self.open,
                     opts.density,
                     (dst_info, origin),
@@ -1821,7 +1861,7 @@ impl PageRecorder {
             origin,
             whole,
         };
-        self.surface.read_overlaid(
+        surface.read_overlaid(
             drawn.as_ref(),
             opts.density,
             filed.id,
@@ -2400,12 +2440,13 @@ impl PageRecorder {
         // export). The surface only ever holds the filed page, which is what a
         // page taken inside a layer starts from.
         let filed = self.filed_page();
+        let mut surface = self.surface.borrow_mut();
         if opts.is_raster()
-            && let Some(image) =
-                self.surface.snapshot_if_valid(&filed, opts, engine)
+            && let Some(image) = surface.snapshot_if_valid(&filed, opts, engine)
         {
-            PageCache::set(&filed.owner, image, opts, self.surface.depth);
+            PageCache::set(&filed.owner, image, opts, surface.depth);
         }
+        drop(surface);
         self.page()
     }
 
@@ -2529,6 +2570,9 @@ struct Tile {
     /// whenever a layer is played into it, so only a read of a tile nothing
     /// has been drawn into since its last confirmation goes without one.
     confirmed: bool,
+    /// The samples a pixel of `surface` has -- see
+    /// [`RecordingSurface::budgeted_bytes`].
+    samples: usize,
 }
 
 impl Tile {
@@ -3342,6 +3386,8 @@ pub struct RecordingSurface {
     depth: usize,
     matte: Option<Matte>,
     msaa: Option<usize>,
+    /// The samples a pixel of `surface` has -- see [`Self::budgeted_bytes`].
+    samples: usize,
     /// The engine the surface and tiles were made for: a page moving between
     /// any two of them, the CPU and Graphite among them, makes them again.
     engine: Option<RenderingEngine>,
@@ -3395,6 +3441,7 @@ impl Default for RecordingSurface {
             depth: 0,
             matte: None,
             msaa: None,
+            samples: 0,
             engine: None,
             color_space: ColorSpace::new_srgb(),
             density: 0.0,
@@ -3421,6 +3468,32 @@ impl RecordingSurface {
             .iter()
             .map(|image| image.image_info().compute_min_byte_size());
         surfaces.chain(raster).sum()
+    }
+
+    /// What this holds in pixels as the budget the pages on a thread keep to
+    /// counts it -- see [`resident`](super::resident): what
+    /// [`Self::resident_bytes`] counts, and the multisample buffer Ganesh
+    /// keeps beside each surface it made multisampled.
+    ///
+    /// That buffer holds every sample of every pixel, so a surface of `n`
+    /// samples keeps `n` times its own pixels beside them. It is an estimate
+    /// from the count Ganesh was asked for rather than a figure Skia reports,
+    /// and it is the larger share: a thousand 600 by 1100 pages at the
+    /// default 4x held 14 GB on Metal, where their own pixels are 2.6 GB.
+    pub fn budgeted_bytes(&self) -> usize {
+        let multisampled = |surface: &Surface, samples: usize| match samples {
+            0 | 1 => 0,
+            samples => surface.image_info().compute_min_byte_size() * samples,
+        };
+        let page = self
+            .surface
+            .iter()
+            .map(|surface| multisampled(surface, self.samples));
+        let tiles = self
+            .tiles
+            .values()
+            .map(|tile| multisampled(&tile.surface, tile.samples));
+        self.resident_bytes() + page.chain(tiles).sum::<usize>()
     }
 
     /// The tile origins a page-space rectangle covers.
@@ -3501,6 +3574,7 @@ impl RecordingSurface {
                 .ok() else {
                     return false;
                 };
+                let samples = engine.sample_count(&surface.image_info(), opts);
                 self.tiles.insert(
                     *origin,
                     Tile {
@@ -3510,6 +3584,7 @@ impl RecordingSurface {
                         raster: None,
                         served_at: None,
                         confirmed: false,
+                        samples,
                     },
                 );
             }
@@ -3772,6 +3847,23 @@ impl RecordingSurface {
         self.layers.clear();
     }
 
+    /// Drops what the page keeps from its reads, for the budget the pages on
+    /// a thread keep to -- see [`resident`](super::resident). The next read
+    /// replays every layer, as the first did.
+    ///
+    /// `served_at` is kept. The replay brings `depth` back to where it was
+    /// for a page drawn on no further, so a read of the state already read
+    /// is still taken for the repeat it is and keeps the copy -- see
+    /// [`Self::update`], which keeps it for a surface rebuilt to that depth,
+    /// and [`Self::checked_pixels`]. Cleared with the rest, a page dropped and
+    /// read twice more would pay the copy's sync on both.
+    pub fn drop_kept(&mut self) {
+        let served_at = self.served_at;
+        self.tiles.clear();
+        self.restart();
+        self.served_at = served_at;
+    }
+
     /// [`Self::update`] for `page`, then `src` of it read into `pixels` as
     /// `dst_info` lays it out, with the draws confirmed by the read's own
     /// wait -- see [`read_checked`] -- rather than by one in front of it:
@@ -3864,6 +3956,11 @@ impl RecordingSurface {
     ) {
         // check for anything that would invalidate the previous contents
         let reconfigure = self.is_config_stale(opts);
+        // Made again only because there is none: what the budget dropped --
+        // see `drop_kept` -- or a page not yet read.
+        let rebuilt = self.surface.is_none()
+            && !reconfigure
+            && self.engine == Some(*engine);
         let recreate = self.is_surface_stale(page, opts, engine);
         let was = (self.depth, reconfigure || recreate);
 
@@ -3894,6 +3991,9 @@ impl RecordingSurface {
                     &opts.surface_color_space,
                 )
                 .ok();
+                self.samples = self.surface.as_ref().map_or(0, |surface| {
+                    engine.sample_count(&surface.image_info(), opts)
+                });
             }
         }
 
@@ -3942,9 +4042,14 @@ impl RecordingSurface {
         // picture that is no longer on it. Keyed on the layer count rather
         // than on a dirty flag because that is what `update` itself uses to
         // decide what to replay -- one notion of "changed", not two.
+        //
+        // A surface rebuilt to the depth a read was served at holds that
+        // read's state again, so the next read there is still a repeat.
         if was.1 || was.0 != self.depth {
             self.raster = None;
-            self.served_at = None;
+            if !(rebuilt && self.served_at == Some(self.depth)) {
+                self.served_at = None;
+            }
         }
     }
 
@@ -7447,6 +7552,7 @@ mod tests {
         context::{
             faint::Faint,
             layer::{reach_of, reach_the_clip},
+            resident,
         },
         context2d::Context2D,
         filter::ImageFilter,
@@ -9887,7 +9993,8 @@ mod tests {
         let square = Path::rect(Rect::from_xywh(1.0, 0.0, 6.0, 7.0), None);
         for clip in [None, Some(square)] {
             let recorder = read_in_layers(8.0, 3, clip.clone());
-            let rasters = &recorder.surface.layers;
+            let surface = recorder.surface.borrow();
+            let rasters = &surface.layers;
             assert_eq!(rasters.len(), 3, "{clip:?}: one raster a layer");
             for (raster, layer) in rasters.iter().zip(&recorder.open) {
                 assert_eq!(raster.id, layer.id, "{clip:?}: the layer's own");
@@ -9908,11 +10015,17 @@ mod tests {
     fn reads_inside_layers_replay_what_a_raster_cannot_hold() {
         let round = Path::circle((4.0, 4.0), 3.5, None);
         let recorder = read_in_layers(8.0, 2, Some(round));
-        assert!(recorder.surface.layers.is_empty(), "under a round clip");
+        assert!(
+            recorder.surface.borrow().layers.is_empty(),
+            "under a round clip"
+        );
         let side = 2048.0;
         let over = LAYER_RASTER_BUDGET / (side * side * 4.0) as usize + 1;
         let mut recorder = read_in_layers(side, over, None);
-        assert!(recorder.surface.layers.is_empty(), "past the budget");
+        assert!(
+            recorder.surface.borrow().layers.is_empty(),
+            "past the budget"
+        );
         let crop = IRect::from_xywh(0, 0, 24, 4);
         let read = |recorder: &mut PageRecorder| {
             recorder
@@ -9933,7 +10046,11 @@ mod tests {
     fn a_layer_opened_where_one_closed_reads_its_own() {
         let mut recorder = read_in_layers(8.0, 2, None);
         recorder.close_layer();
-        assert_eq!(recorder.surface.layers.len(), 1, "the closed one goes");
+        assert_eq!(
+            recorder.surface.borrow().layers.len(),
+            1,
+            "the closed one goes"
+        );
         let mut half = Paint::default();
         half.set_alpha_f(0.5);
         recorder.open_layer(LayerRec {
@@ -9953,10 +10070,14 @@ mod tests {
                 .expect("a read of the page")
         };
         let inside = read(&mut recorder);
-        assert_eq!(recorder.surface.layers.len(), 2, "a raster of its own");
+        assert_eq!(
+            recorder.surface.borrow().layers.len(),
+            2,
+            "a raster of its own"
+        );
         recorder.close_layer();
         recorder.close_layer();
-        assert!(recorder.surface.layers.is_empty(), "both go");
+        assert!(recorder.surface.borrow().layers.is_empty(), "both go");
         assert_eq!(inside, read(&mut recorder), "inside and after");
     }
 
@@ -9994,6 +10115,239 @@ mod tests {
         assert_eq!(once, [1, 0], "the outer layer's fill is kept once");
     }
 
+    /// The side of the pages the budget tests read: wider than a tile, so
+    /// that a whole read is served by the page -- see
+    /// `RecordingSurface::read_tiled`.
+    const BUDGET_SIDE: (i32, i32) = (600, 300);
+
+    /// What one of those pages keeps once read: its surface's pixels.
+    const BUDGET_PAGE: usize = (BUDGET_SIDE.0 * BUDGET_SIDE.1 * 4) as usize;
+
+    /// A page for the budget tests, with a square of `colour` drawn.
+    fn budget_page(colour: Color) -> PageRecorder {
+        let mut recorder = PageRecorder::new(Rect::from_wh(
+            BUDGET_SIDE.0 as f32,
+            BUDGET_SIDE.1 as f32,
+        ));
+        draw_square(&mut recorder, colour, 10.0);
+        recorder
+    }
+
+    /// Draws a 40-pixel square of `colour` at (`x`, 10).
+    fn draw_square(recorder: &mut PageRecorder, colour: Color, x: f32) {
+        let mut paint = Paint::default();
+        paint.set_color(colour);
+        recorder.append(move |canvas: &SkCanvas, _: Recording| {
+            canvas.draw_rect(Rect::from_xywh(x, 10.0, 40.0, 40.0), &paint);
+        });
+    }
+
+    /// The whole of `recorder`'s page, read on `engine`.
+    fn read_whole(
+        recorder: &mut PageRecorder,
+        engine: RenderingEngine,
+    ) -> Vec<u8> {
+        recorder
+            .pixels(
+                IRect::from_wh(BUDGET_SIDE.0, BUDGET_SIDE.1),
+                ExportOptions::default(),
+                engine,
+            )
+            .expect("a read of the page")
+    }
+
+    /// Sets this thread's budget to `pages` of the budget tests' pages.
+    fn budget_of(pages: f64) {
+        let bytes = (BUDGET_PAGE as f64 * pages) as usize;
+        resident::BUDGET_OVERRIDE.set(Some(bytes));
+    }
+
+    #[test]
+    fn pages_inside_the_budget_keep_what_their_reads_composited() {
+        let _shared = SHARED_CACHE.lock();
+        // Exactly at the budget is inside it.
+        budget_of(2.0);
+        let mut pages = [budget_page(Color::RED), budget_page(Color::BLUE)];
+        for page in &mut pages {
+            read_whole(page, RenderingEngine::CPU);
+        }
+        let kept = pages.each_ref().map(PageRecorder::resident_bytes);
+        assert_eq!(kept, [BUDGET_PAGE; 2], "both kept");
+        assert_eq!(resident::kept_on_this_thread(), 2 * BUDGET_PAGE);
+    }
+
+    #[test]
+    fn a_read_past_the_budget_drops_the_oldest_page_read_once() {
+        let _shared = SHARED_CACHE.lock();
+        budget_of(2.0);
+        let mut pages =
+            [Color::RED, Color::GREEN, Color::BLUE].map(budget_page);
+        for page in &mut pages {
+            read_whole(page, RenderingEngine::CPU);
+        }
+        let kept = pages.each_ref().map(PageRecorder::resident_bytes);
+        assert_eq!(kept, [0, BUDGET_PAGE, BUDGET_PAGE], "the first goes");
+        assert_eq!(resident::kept_on_this_thread(), 2 * BUDGET_PAGE);
+
+        // Read again, the first is kept and the oldest of the rest goes.
+        read_whole(&mut pages[0], RenderingEngine::CPU);
+        let kept = pages.each_ref().map(PageRecorder::resident_bytes);
+        assert_eq!(kept, [BUDGET_PAGE, 0, BUDGET_PAGE], "then the second");
+    }
+
+    #[test]
+    fn a_page_read_again_outlasts_older_pages_read_once() {
+        let _shared = SHARED_CACHE.lock();
+        budget_of(2.0);
+        let mut again = budget_page(Color::RED);
+        let mut once = budget_page(Color::GREEN);
+        let mut third = budget_page(Color::BLUE);
+        read_whole(&mut again, RenderingEngine::CPU);
+        read_whole(&mut again, RenderingEngine::CPU);
+        read_whole(&mut once, RenderingEngine::CPU);
+        read_whole(&mut third, RenderingEngine::CPU);
+        // The page read again was last read before the page read once.
+        assert_eq!(again.resident_bytes(), BUDGET_PAGE, "read again, kept");
+        assert_eq!(once.resident_bytes(), 0, "read once, dropped");
+    }
+
+    #[test]
+    fn a_page_read_again_is_never_dropped_past_the_budget() {
+        let _shared = SHARED_CACHE.lock();
+        budget_of(1.0);
+        let mut again = [Color::RED, Color::GREEN].map(budget_page);
+        for page in &mut again {
+            read_whole(page, RenderingEngine::CPU);
+            read_whole(page, RenderingEngine::CPU);
+        }
+        let mut once = [Color::BLUE, Color::YELLOW].map(budget_page);
+        for page in &mut once {
+            read_whole(page, RenderingEngine::CPU);
+        }
+        // Two pages past the budget before the first read once: those read
+        // again are kept, and the first read once goes to the second.
+        let kept = [&again[0], &again[1], &once[0], &once[1]]
+            .map(PageRecorder::resident_bytes);
+        assert_eq!(kept, [BUDGET_PAGE, BUDGET_PAGE, 0, BUDGET_PAGE]);
+        assert_eq!(resident::kept_on_this_thread(), 3 * BUDGET_PAGE);
+    }
+
+    #[test]
+    fn the_page_being_read_keeps_what_it_composited_past_the_budget() {
+        let _shared = SHARED_CACHE.lock();
+        // A budget smaller than one page: the read has nothing else to drop.
+        budget_of(0.5);
+        let mut first = budget_page(Color::RED);
+        read_whole(&mut first, RenderingEngine::CPU);
+        assert_eq!(first.resident_bytes(), BUDGET_PAGE, "the only page");
+        let mut second = budget_page(Color::BLUE);
+        read_whole(&mut second, RenderingEngine::CPU);
+        let kept = [first.resident_bytes(), second.resident_bytes()];
+        assert_eq!(kept, [0, BUDGET_PAGE], "the read one is kept");
+    }
+
+    #[test]
+    fn a_page_leaves_the_budget_when_cleared_or_dropped() {
+        let _shared = SHARED_CACHE.lock();
+        let mut cleared = budget_page(Color::RED);
+        let mut dropped = budget_page(Color::BLUE);
+        read_whole(&mut cleared, RenderingEngine::CPU);
+        read_whole(&mut dropped, RenderingEngine::CPU);
+        assert_eq!(resident::kept_on_this_thread(), 2 * BUDGET_PAGE);
+        cleared.set_bounds(Rect::from_wh(10.0, 10.0));
+        assert_eq!(resident::kept_on_this_thread(), BUDGET_PAGE, "cleared");
+        drop(dropped);
+        assert_eq!(resident::kept_on_this_thread(), 0, "dropped");
+    }
+
+    #[test]
+    fn a_page_the_budget_dropped_reads_every_draw() {
+        let _shared = SHARED_CACHE.lock();
+        // What the page reads with both squares, never dropped.
+        let mut reference = budget_page(Color::RED);
+        draw_square(&mut reference, Color::BLUE, 300.0);
+        let want = read_whole(&mut reference, RenderingEngine::CPU);
+        drop(reference);
+
+        budget_of(1.0);
+        let mut page = budget_page(Color::RED);
+        read_whole(&mut page, RenderingEngine::CPU);
+        draw_square(&mut page, Color::BLUE, 300.0);
+        read_whole(&mut budget_page(Color::GREEN), RenderingEngine::CPU);
+        assert_eq!(page.resident_bytes(), 0, "dropped by the other read");
+
+        // A small read first, served by a tile, then the whole page.
+        let small = page
+            .pixels(
+                IRect::from_xywh(296, 6, 8, 8),
+                ExportOptions::default(),
+                RenderingEngine::CPU,
+            )
+            .expect("a small read");
+        let rows: Vec<u8> = (6..14)
+            .flat_map(|y| {
+                let at = ((y * BUDGET_SIDE.0 + 296) * 4) as usize;
+                want[at..at + 8 * 4].to_vec()
+            })
+            .collect();
+        assert_eq!(small, rows, "a small read after the drop");
+        let whole = read_whole(&mut page, RenderingEngine::CPU);
+        assert!(whole == want, "a whole read after the drop");
+    }
+
+    /// A GPU page counts against the budget with the multisample buffer
+    /// Ganesh keeps beside it: a sample of every pixel per sample counted.
+    #[test]
+    fn a_multisampled_page_counts_its_samples_against_the_budget() {
+        if !RenderingEngine::GPU.selectable() {
+            return;
+        }
+        let _shared = SHARED_CACHE.lock();
+        let mut page = budget_page(Color::RED);
+        read_whole(&mut page, RenderingEngine::GPU);
+        let surface = page.surface.borrow();
+        assert!(surface.samples > 1, "the default multisamples");
+        assert_eq!(surface.resident_bytes(), BUDGET_PAGE, "its own pixels");
+        assert_eq!(
+            surface.budgeted_bytes(),
+            BUDGET_PAGE * (1 + surface.samples),
+            "with every sample"
+        );
+        drop(surface);
+        assert_eq!(
+            resident::kept_on_this_thread(),
+            page.surface.borrow().budgeted_bytes(),
+            "what the budget counts"
+        );
+    }
+
+    /// A page the budget drops keeps the depth it was served at, so a read
+    /// of the same state after the drop is the repeat it is and makes the
+    /// copy -- see `RecordingSurface::drop_kept`. Only the GPU keeps a copy.
+    #[test]
+    fn a_dropped_page_read_again_at_the_same_state_keeps_a_copy() {
+        if !RenderingEngine::GPU.selectable() {
+            return;
+        }
+        let _shared = SHARED_CACHE.lock();
+        let copied =
+            |page: &PageRecorder| page.surface.borrow().raster.is_some();
+        let mut same = budget_page(Color::RED);
+        read_whole(&mut same, RenderingEngine::GPU);
+        assert!(!copied(&same), "no copy for a first read");
+        same.surface.borrow_mut().drop_kept();
+        read_whole(&mut same, RenderingEngine::GPU);
+        assert!(copied(&same), "a copy for the same state read again");
+
+        // The control: drawn on between, the read is a first read.
+        let mut drawn = budget_page(Color::RED);
+        read_whole(&mut drawn, RenderingEngine::GPU);
+        drawn.surface.borrow_mut().drop_kept();
+        draw_square(&mut drawn, Color::BLUE, 300.0);
+        read_whole(&mut drawn, RenderingEngine::GPU);
+        assert!(!copied(&drawn), "no copy for a state read once");
+    }
+
     #[test]
     fn a_read_inside_a_layer_commits_nothing() {
         let _shared = SHARED_CACHE.lock();
@@ -10022,8 +10376,9 @@ mod tests {
                 .get(&recorder.id.0)
                 .map(|entry| entry.depth)
         };
+        let depth = |recorder: &PageRecorder| recorder.surface.borrow().depth;
         read(&mut recorder);
-        let committed = (recorder.surface.depth, cached(&mut recorder));
+        let committed = (depth(&recorder), cached(&mut recorder));
         assert_eq!(committed, (1, Some(1)), "the filed page is committed");
 
         let mut half = Paint::default();
@@ -10036,7 +10391,7 @@ mod tests {
             recorder.append(square);
             read(&mut recorder);
             assert_eq!(
-                (recorder.surface.depth, cached(&mut recorder)),
+                (depth(&recorder), cached(&mut recorder)),
                 committed,
                 "a read and an export inside the layer"
             );
@@ -10045,7 +10400,7 @@ mod tests {
         recorder.close_layer();
         read(&mut recorder);
         assert!(
-            recorder.surface.depth > committed.0,
+            depth(&recorder) > committed.0,
             "the closed layer is filed and read"
         );
     }
@@ -11163,6 +11518,7 @@ mod tests {
             assert!(
                 recorder
                     .surface
+                    .borrow()
                     .tiles
                     .values()
                     .any(|tile| tile.raster.is_some()),
@@ -11177,7 +11533,7 @@ mod tests {
                 );
             }
             assert!(
-                recorder.surface.raster.is_some(),
+                recorder.surface.borrow().raster.is_some(),
                 "the page keeps a copy for a repeated read"
             );
         }

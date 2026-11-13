@@ -92,6 +92,11 @@ describe("Native memory reported to V8", () => {
       const before = await settled();
       const canvas = new Canvas(SIDE[0], SIDE[1]);
       canvas.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
+      assert.equal(
+        (await settled()) - before,
+        SIDE[0] * SIDE[1] * PIXEL_BYTES,
+        "the page kept before the resize",
+      );
       canvas.width = SIDE[0];
       assert.equal(
         (await settled()) - before,
@@ -99,6 +104,41 @@ describe("Native memory reported to V8", () => {
         "what a canvas whose page a resize dropped counts",
       );
       assert.equal(canvas.width, SIDE[0]);
+    },
+  );
+
+  // The budget the pages on a thread keep to drops one canvas's page during
+  // another's read: the engine is told then, and the dropped canvas's
+  // finalizer releases only what it still reports.
+  test(
+    "stops counting a page the budget drops, and releases it once",
+    { skip: why ?? false },
+    async () => {
+      const page = SIDE[0] * SIDE[1] * PIXEL_BYTES;
+      const before = await settled();
+      // A budget of one page: the second canvas's read drops the first's.
+      skiaNode.__setPageBudget(page);
+      try {
+        const live = [new Canvas(SIDE[0], SIDE[1])];
+        live[0].getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
+        assert.equal((await settled()) - before, page, "the first page");
+        const second = new Canvas(SIDE[0], SIDE[1]);
+        second.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
+        assert.equal(
+          (await settled()) - before,
+          page,
+          "the first page dropped and the second kept",
+        );
+        live.pop();
+        assert.equal(
+          (await settled()) - before,
+          page,
+          "what the dropped canvas's finalizer releases",
+        );
+        assert.equal(second.width, SIDE[0]);
+      } finally {
+        skiaNode.__setPageBudget(null);
+      }
     },
   );
 

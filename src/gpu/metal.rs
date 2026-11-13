@@ -189,6 +189,15 @@ impl MetalEngine {
     ) -> Result<Surface, String> {
         Self::with_context(|ctx| ctx.surface(image_info, opts))
     }
+
+    /// The samples a pixel [`Self::make_surface`] asks Ganesh for, for a page
+    /// of `image_info` under `opts`.
+    pub fn sample_count(
+        image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> Result<usize, String> {
+        Self::with_context(|ctx| ctx.sample_count(image_info, opts))
+    }
 }
 
 /// `device` as `canvas.engine` names it: where it sits, then the name Metal
@@ -308,11 +317,12 @@ impl MetalContext {
         opts: &ExportOptions,
     ) -> Result<Surface, String> {
         self.last_use = self.last_use.max(Instant::now());
+        let samples = self.sample_count(image_info, opts)?;
         surfaces::render_target(
             &mut self.context,
             Budgeted::Yes,
             image_info,
-            Some(opts.msaa_from(&self.msaa)?),
+            Some(samples),
             SurfaceOrigin::BottomLeft,
             Some(&opts.surface_props()),
             false,
@@ -324,6 +334,17 @@ impl MetalContext {
             image_info.height(),
             image_info.color_type()
         ))
+    }
+
+    /// The samples a pixel [`Self::surface`] asks for: what `opts` names, or
+    /// the default [`ExportOptions::msaa_from`] picks, among the counts the
+    /// device supports.
+    fn sample_count(
+        &self,
+        _image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> Result<usize, String> {
+        opts.msaa_from(&self.msaa)
     }
 
     fn cleanup(&mut self) {

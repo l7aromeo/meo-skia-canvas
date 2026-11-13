@@ -143,6 +143,17 @@ the `RGBAF16` whole-page figure gave 10.86 to 10.87 MB. It needs repeating befor
 believed, either way: a single pass reads whatever the allocator happened to do, and has come back
 at 2.91 MB for the eight-bit case and at a negative number for `RGBAF32`.
 
+What pages keep from their reads is held to a budget per thread: 256 MB between the pages on it,
+Skia's own default for what a GPU context keeps, counting a GPU page's multisample buffer as well as
+its pixels. Inside it every page keeps what its reads composited, so a canvas read again pays only
+for what was drawn since. A read that takes the thread past it drops what pages read only once keep,
+the oldest first, and a dropped page replays every layer at its next read. That is what bounds
+canvases made and read back once in one synchronous loop: Node frees a canvas only on the turn of
+the event loop after a collection finds it, so each would otherwise keep its page until the loop
+ends. A page read more than once counts against the budget but is never dropped, so canvases read
+every frame never replay each other's pages however many there are, and a loop that reads each
+canvas twice and then leaves it keeps every page until the loop ends, as it did before the budget.
+
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. A rectangle narrower than a pixel should darken it in proportion to how much of it the
 rectangle covers, which is arithmetic rather than taste, so each renderer can be scored against it.

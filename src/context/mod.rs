@@ -35,6 +35,7 @@ pub(crate) mod fold;
 pub(crate) mod kept;
 pub mod layer;
 pub mod page;
+pub(crate) mod resident;
 pub(crate) mod run_mask;
 pub mod typesetting;
 
@@ -636,6 +637,9 @@ impl Context2D {
         let bounds = Rect::from_size(dims);
         let dual = records_pixels_apart(&canvas_color_space, canvas_color_type);
         let canvas_pixels = PixelColorSpace::matching(&canvas_color_space);
+        let external = External::default();
+        let recorder = PageRecorder::recording(bounds, dual);
+        recorder.reports_through(external.reported());
 
         Context2D {
             bounds,
@@ -644,13 +648,13 @@ impl Context2D {
             canvas_text,
             canvas_pixels,
             faint: Faint::of(canvas_color_type),
-            recorder: RefCell::new(PageRecorder::recording(bounds, dual)),
+            recorder: RefCell::new(recorder),
             exact_shader: RefCell::default(),
             path: PathBuilder::new(),
             stack: vec![],
             layers: vec![],
             state: State::default(),
-            external: External::default(),
+            external,
         }
     }
 
@@ -662,7 +666,11 @@ impl Context2D {
     /// its tiles, and after a resize, which drops them, and released in the
     /// finalizer. A drawing that clears the whole page drops them too and is
     /// counted at the next of those, so the engine is told too much in
-    /// between and never too little.
+    /// between and never too little. The budget the pages on a thread keep to
+    /// drops them, for a page read only once, when another page's read takes
+    /// the thread past it -- see [`resident`] -- and the engine is told of that
+    /// by the next report any canvas or image on the thread makes, through
+    /// the count this shares with the page -- see `External::reported`.
     pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
         let bytes = self.recorder.borrow().resident_bytes();
         self.external.hold(cx, bytes);
