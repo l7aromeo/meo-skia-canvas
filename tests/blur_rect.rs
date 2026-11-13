@@ -17,12 +17,6 @@ use meo_skia_canvas::prelude::*;
 /// before it. Measured at 0.500 in every case here.
 const ROUNDED: f64 = 0.51;
 
-/// The same on the GPU engine, where the blur is worked per fragment and
-/// leaves it as a half-precision float: half a unit in the last place of
-/// one just below 1 is 2^-12, a sixteenth of a level, on top of the
-/// rounding. Measured at up to 0.560.
-const GPU_ROUNDED: f64 = 0.5 + 255.0 / 4096.0 + 0.001;
-
 /// The alpha of the translucent colour a case of
 /// [`a_rectangle_drawn_after_another_is_its_own_blur`] draws in,
 /// `rgba(0, 0, 0, 0.5)`.
@@ -33,20 +27,13 @@ fn alpha_byte(alpha: f64) -> f64 {
     (alpha * f64::from(u8::MAX) + 0.5).floor()
 }
 
-/// How far an 8-bit alpha may lie from the exact blur on an engine.
-fn rounded(gpu: bool) -> f64 {
-    match gpu {
-        true => GPU_ROUNDED,
-        false => ROUNDED,
-    }
+/// How far an 8-bit alpha may lie from the exact blur on an engine: the
+/// same on both, since the GPU draws the CPU's profiles rounded as the CPU
+/// rounds them -- see `blur_mask::RECT_BLUR_SKSL`. Working the profile
+/// itself in the GPU's arithmetic, it lay up to 0.859 off.
+fn rounded(_gpu: bool) -> f64 {
+    ROUNDED
 }
-
-/// How far an 8-bit colour channel may lie from the exact blur on the GPU
-/// engine: half a level for rounding to a level, and Ganesh may carry the
-/// colour at half precision and its product with the coverage once more,
-/// each moving a value just under 1 by 2^-12 of it, a sixteenth of a level.
-/// The alpha is carried once, which [`GPU_ROUNDED`] holds.
-const GPU_COLOUR_ROUNDED: f64 = 0.5 + 2.0 * 255.0 / 4096.0;
 
 /// How far an F16 alpha may lie from the exact blur, as a fraction of one:
 /// half a unit in the last place of a half-precision float just below 1,
@@ -845,12 +832,8 @@ fn a_blurred_rectangle_is_a_fills_bytes_times_its_blur_inside_and_out() {
                     }
                 }
             }
-            let tolerance = match gpu {
-                true => GPU_COLOUR_ROUNDED,
-                false => ROUNDED,
-            };
             assert!(
-                worst_off <= tolerance,
+                worst_off <= ROUNDED,
                 "gpu {gpu}, {name}: {worst_off:.3} levels from a fill's bytes \
                  times the exact blur, at {at}"
             );
@@ -925,4 +908,179 @@ fn a_blurred_rectangle_on_float_pixels_keeps_its_alpha_as_given() {
             );
         }
     }
+}
+
+/// The sigmas [`the_gpu_draws_a_blurred_rectangle_to_the_cpus_bytes`]
+/// sweeps: under a pixel, where the GPU's own profile lay 0.859 off, about
+/// the one-time quadrature switch at 4, and well past it.
+const EVERY_SIGMA: [f32; 11] =
+    [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 8.0, 12.0, 40.0];
+
+/// How near a half-level an exact value has to lie for two engines to round
+/// it apart: the GPU's product and the CPU's are the same `f32` operations,
+/// and differ only where a fused multiply-add or the profile's 24-bit
+/// texel moves a value lying on a tie.
+const TIE: f64 = 0.01;
+
+/// Where a transform puts a rectangle `[x, y, w, h]` on the device.
+type OnDevice = fn([f32; 4]) -> [f64; 4];
+
+/// A rectangle's axes are kept by where its edges lie in their window, not
+/// by where the window lies, so a rectangle the size of one drawn before,
+/// lying alike within a pixel, draws from the kept axes -- and lands where
+/// it is drawn: the GPU stores the CPU's bytes, ties aside.
+#[test]
+fn a_rectangle_drawn_again_elsewhere_lands_where_it_is_drawn() {
+    let size = (220.0f32, 160.0f32);
+    let draw = |gpu: bool| -> Option<Vec<u8>> {
+        let mut canvas = page(size, PixelColorSpace::Srgb, gpu)?;
+        let ctx = canvas.context();
+        ctx.set_filter_css("blur(3px)").expect("a filter");
+        for (x, y) in [(20.25, 15.5), (120.25, 95.5)] {
+            ctx.fill_rect(x, y, 41.3, 27.6);
+        }
+        Some(stored(&mut canvas, PixelColorSpace::Srgb))
+    };
+    let (Some(cpu), Some(gpu)) = (draw(false), draw(true)) else {
+        return;
+    };
+    let apart = cpu
+        .iter()
+        .zip(&gpu)
+        .filter(|(c, g)| c.abs_diff(**g) > 1)
+        .count();
+    assert_eq!(apart, 0, "bytes apart by more than a tie");
+}
+
+#[test]
+fn the_gpu_draws_a_blurred_rectangle_to_the_cpus_bytes() {
+    // Both engines draw the CPU's profiles, so the GPU lands the CPU's
+    // bytes, each within rounding of the exact blur: at every sigma, in an
+    // opaque colour, a translucent one and under a `globalAlpha`, for a
+    // rectangle on and off the pixel grid, at a scale and turned a quarter.
+    // A turn that leaves the rectangle unaligned is a path's blur, the
+    // chain's -- see `tests/blur_result.rs`.
+    let size = (220.0f32, 160.0f32);
+    let n = (size.0 as usize, size.1 as usize);
+    let transforms: [(&str, [f32; 6], OnDevice); 3] = [
+        ("identity", [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], |r| {
+            r.map(f64::from)
+        }),
+        ("scale 2", [2.0, 0.0, 0.0, 2.0, 0.0, 0.0], |[x, y, w, h]| {
+            [x, y, w, h].map(|v| f64::from(v) * 2.0)
+        }),
+        // A quarter turn about the origin, moved back onto the page: x' =
+        // 200 - y, y' = x.
+        (
+            "quarter turn",
+            [0.0, 1.0, -1.0, 0.0, 200.0, 0.0],
+            |[x, y, w, h]| {
+                let [x, y, w, h] = [x, y, w, h].map(f64::from);
+                [200.0 - y - h, x, h, w]
+            },
+        ),
+    ];
+    let rects: [[f32; 4]; 2] =
+        [[30.25, 20.5, 45.0, 30.0], [41.3, 33.7, 37.45, 21.85]];
+    let paints = [
+        ("black", 1.0f32),
+        ("rgba(200, 80, 20, 0.6)", 1.0),
+        ("rgb(30 160 90)", 0.45),
+        ("color(srgb 0.137 0.981 0.786 / 0.786)", 1.0),
+    ];
+    let draw = |gpu: bool,
+                transform: [f32; 6],
+                rect: [f32; 4],
+                paint: &str,
+                global_alpha: f32,
+                filter: &str|
+     -> Option<Vec<u8>> {
+        let mut canvas = page(size, PixelColorSpace::Srgb, gpu)?;
+        let ctx = canvas.context();
+        ctx.set_global_alpha(global_alpha);
+        ctx.set_fill_style_css(paint).expect("a colour");
+        ctx.set_filter_css(filter).expect("a filter");
+        let [a, b, c, d, tx, ty] = transform;
+        ctx.set_transform(Affine { a, b, c, d, tx, ty });
+        let [x, y, w, h] = rect;
+        ctx.fill_rect(x, y, w, h);
+        Some(stored(&mut canvas, PixelColorSpace::Srgb))
+    };
+    let mut wrong = vec![];
+    for (name, transform, device) in transforms {
+        for rect in rects {
+            for (paint, global_alpha) in paints {
+                // The bytes a fill of the paint stores: what the blur scales.
+                let Some(fill) = draw(
+                    false,
+                    [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, size.0, size.1],
+                    paint,
+                    global_alpha,
+                    "none",
+                ) else {
+                    continue;
+                };
+                let fill = [fill[0], fill[1], fill[2], fill[3]].map(f64::from);
+                for sigma in EVERY_SIGMA {
+                    let filter = format!("blur({sigma}px)");
+                    let (Some(cpu), Some(gpu)) = (
+                        draw(
+                            false,
+                            transform,
+                            rect,
+                            paint,
+                            global_alpha,
+                            &filter,
+                        ),
+                        draw(
+                            true,
+                            transform,
+                            rect,
+                            paint,
+                            global_alpha,
+                            &filter,
+                        ),
+                    ) else {
+                        continue;
+                    };
+                    let want = expected(n, device(rect), f64::from(sigma));
+                    let (mut apart, mut off, mut worst) = (0, 0, 0.0f64);
+                    let mut by_engine = [0.0f64; 2];
+                    let mut at = (0usize, 0.0f64, 0u8, 0u8);
+                    for (i, (c, g)) in cpu.iter().zip(&gpu).enumerate() {
+                        let exact = fill[i % 4] * want[i / 4];
+                        for (e, got) in [c, g].into_iter().enumerate() {
+                            let d = (f64::from(*got) - exact).abs();
+                            worst = worst.max(d);
+                            if d > by_engine[e] {
+                                by_engine[e] = d;
+                                if e == 1 {
+                                    at = (i, want[i / 4], *c, *g);
+                                }
+                            }
+                            if d > ROUNDED {
+                                off += 1;
+                            }
+                        }
+                        let tie = (exact.fract() - 0.5).abs() < TIE;
+                        if c != g && !tie {
+                            apart += 1;
+                        }
+                    }
+                    if apart > 0 || off > 0 {
+                        wrong.push(format!(
+                            "{name} {rect:?} {paint} at {global_alpha} sigma \
+                             {sigma}: {apart} bytes apart off a tie, {off} \
+                             off the exact blur, worst {worst:.3}, cpu \
+                             {:.3} gpu {:.3} at byte {} coverage {:.4} cpu \
+                             {} gpu {}",
+                            by_engine[0], by_engine[1], at.0, at.1, at.2, at.3
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

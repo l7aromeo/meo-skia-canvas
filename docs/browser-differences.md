@@ -1097,7 +1097,11 @@ the hundredth. An image, or a canvas drawn into another, through a `blur()`
 or a chain of blurs and colour functions is blurred the same way, and
 composited at its `globalAlpha` rounded once: a 40px red square blurred by
 8px reads alpha 72 and 30 five and ten pixels outside it and 228 ten pixels
-inside it here, where Chrome's `drawImage` of it reads 72, 28 and 233. `tests/blur_result.rs`
+inside it here, where Chrome's `drawImage` of it reads 72, 28 and 233. So is
+a fill or stroke in a pattern or a gradient, whose blur is of its pixels:
+through Skia's image blur, a triangle in a canvas's pattern of translucent
+stripes blurred by 4px was 5.78 levels off the exact blur on the CPU engine
+and 1.19 on the GPU. `tests/blur_result.rs`
 holds the pixels, at a density and inside a `saveLayer` too. A draw that its clip cuts is the exception, and
 the same one any clipped draw is: Skia anti-aliases a path its clip does not
 contain by another route, whose edges move by up to 15 levels, and the blur
@@ -1142,9 +1146,11 @@ standard deviation is the length given. Blurring a rectangle by it gives the
 product of the blurred interval across and the blurred interval down, which
 has a closed form, and a flat-colour rectangle that stays one on the device is
 drawn here as exactly that, averaged over each pixel: within half a level on
-8-bit pixels on the CPU engine, within 0.56 of one on the GPU engine, whose
-fragments hand the value on as a half float, and to the surface's precision on
-F16 and F32. On an 8-bit canvas the blur scales the bytes a fill of the colour
+8-bit pixels on either engine, the GPU landing the CPU's bytes, and to the
+surface's precision on F16 and F32. Both engines draw the same profiles,
+worked on the CPU: the GPU's own `exp` and division, working them per
+fragment, put a rectangle up to 0.86 of a level off at a sigma of 0.25 and
+over half a level at every sigma. On an 8-bit canvas the blur scales the bytes a fill of the colour
 stores, as a blurred path's does, so that its interior stores what the fill
 does: 128 of `rgba(0, 0, 0, 0.5)`, where the alpha as given stored 127. Chrome 152 approximates it, and its two canvases approximate it
 differently. A black 60 by 40 rectangle at a fractional position, worst levels
@@ -1324,9 +1330,8 @@ what casts it here, and 12.5 and 4.5 in Chrome, which puts it at 4.32 when
 it is blurred by 2px. `tests/blur_result.rs` holds the shadow to the exact
 one and `tests/filter_transform.rs` the offsets.
 
-A draw that casts a `shadowColor` shadow as well, or is drawn under a
-`globalCompositeOperation` that composites the whole canvas, is drawn
-through Skia's filter layer instead. There the offset and the blur's length
+A draw under a `globalCompositeOperation` that composites the whole canvas
+is drawn through Skia's filter layer instead. There the offset and the blur's length
 are Chrome's, but the blur is Skia's approximation, and under a turn or a
 skew Skia draws the filtered draw at the transform's scale and turns it onto
 the page, which resamples the draw itself: a 30-pixel square read up to 16
@@ -1337,6 +1342,47 @@ turn and stretch with the transform as CanvasKit's do, so it is made at the
 transform's scale and the filtered draw is turned onto the page. On an F16
 or F32 page that is a layer of the page's own floats, where Skia's would be
 eight bits a channel; beside a CSS filter it is Skia's layer on any page.
+
+**A `shadowColor` shadow is the exact Gaussian blur of what casts it, and
+Chrome's is not.** The HTML Standard casts the shadow from the draw's alpha
+in `shadowColor`, blurred by a Gaussian whose standard deviation is half the
+`shadowBlur`, in canvas pixels whatever the transform. Here it is that, made
+from the draw's own pixels and rounded once, as a `drop-shadow()` is: within
+half a level on 8-bit pixels on either engine. Chrome for Testing
+158.0.8127.18 headless approximates the blur, on its raster canvas by up to
+12.5 levels. A black triangle on a 560 by 300 canvas, worst levels from the
+exact shadow of Chrome's own unshadowed triangle:
+
+        shadowBlur          2       4       8      12      24
+        here             0.50    0.50    0.50    0.50    0.50
+        Chrome raster   12.49   11.33    8.38    8.97    3.97
+        Chrome GPU       0.84    0.86    0.99    1.87    2.17
+
+A filled rectangle in a flat colour, untransformed and unfiltered, casts the
+closed form of its blurred rectangle, as `blur()` draws one -- see the entry
+on a blurred rectangle -- and not the Gaussian of the rectangle as Skia
+rasterises it, whose edges step in quarters of a pixel.
+
+The shadow of a filtered draw is cast from what the filter makes, and the
+shadow is not filtered, as the HTML Standard orders the two and as Chrome
+does on both its canvases: a black draw through `invert(1)` casts its red
+`shadowColor` red, not cyan, and one through `drop-shadow(30px 0 0 blue)`
+casts a black shadow of the draw and of its copy, with no blue. Through `blur(2px)`
+the shadow here is within 0.6 of a level of the exact shadow of the exact
+filtered draw at a `shadowBlur` of 4, 8 and 16, the filtered draw being
+held as pixels between the two; Chrome's raster canvas is 9.33, 7.84 and
+5.47 off, its GPU canvas 1.05, 1.12 and 1.24.
+
+Casting a shadow leaves the draw's own pixels as they are casting none: the
+shadow is a group of its own, cast before the draw, and the draw takes the
+route it takes casting none. `tests/shadow_result.rs` holds the shadow to
+the exact one -- translucent, clipped and filtered -- and the draw to its
+bytes casting none, under a filter and under a clip.
+
+Four shadows are still Skia's: one under a `globalCompositeOperation` that
+composites the whole canvas, one under a CanvasKit filter, one cast by a run
+holding colour glyphs, and every shadow in a PDF or SVG document. Each is
+cast from what the draw's filter makes, and each blur is Skia's.
 
 **On an eight-bit sRGB canvas a shadow stores the exact product of its colour
 and its alpha, on either engine, and Chrome's do not all.** `shadowColor`, a
