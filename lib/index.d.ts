@@ -2225,6 +2225,11 @@ export type AlphaInterpolation = "unpremultiplied" | "premultiplied";
 /**
  * An opaque object describing a gradient. It is returned by the methods CanvasRenderingContext2D.createLinearGradient() or CanvasRenderingContext2D.createRadialGradient().
  *
+ * A change to it -- a stop added, or any of the interpolation settings --
+ * reaches the fills made after the change, including through a context
+ * whose `fillStyle` or `strokeStyle` is already this gradient, and leaves
+ * the fills made before it as they were drawn, as a browser does.
+ *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient)
  *
  * @category Drawing Styles
