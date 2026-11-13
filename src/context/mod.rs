@@ -687,10 +687,10 @@ impl Context2D {
     /// was dropped still holds its recording until it is finalized, and the
     /// engine is told so until then.
     ///
-    /// Not told: what a canvas holds beside its pages and its pictures --
-    /// the recordings it is in the middle of and the objects around them.
-    /// A dropped CPU canvas of 1000 by 800 read once held about 24 KB
-    /// resident where its pictures came to about 1.2 KB.
+    /// Not told: what a context holds beside its page and its pictures --
+    /// its state, its path, its paragraph style. 400 CPU canvases of 1000
+    /// by 800, each filled once, read and held, held 8.1 KB of native
+    /// memory apiece beside their kept pages, about 2 KB of it pictures.
     pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
         let recorder = self.recorder.borrow();
         let (pixels, recorded) =
