@@ -1,5 +1,5 @@
 {
-  "about": "Text decorations and the whitespace a canvas run ends in. `decorations`: each case is drawn on a canvas twice, plain and with `textDecoration` set to each of `lines`, in `font` with `letterSpacing` of `spacing` px, aligned `align` at `anchor[align]` in direction `dir` for each of `layouts`; the columns where the two draws differ are the decoration, and they are exactly floor(start) to ceil(start + width), width being measureText`s and start where the alignment puts the advance -- the anchor, less all of the width for `right` and half of it for `center`, in either direction. `inkBoxes`: measureText`s actualBoundingBoxLeft and actualBoundingBoxRight for right-to-left runs of text ending in whitespace, which stands at the visual start of the run. `paragraphs`: the same for the Paragraph API, which says what it holds. Read by tests/native_context2d.rs and tests/suite/text.test.js.",
+  "about": "Text decorations and the whitespace a canvas run ends in. `decorations`: each case is drawn on a canvas twice, plain and with `textDecoration` set to each of `lines`, in `font` with `letterSpacing` of `spacing` px, aligned `align` at `anchor[align]` in direction `dir` for each of `layouts`; the columns where the two draws differ are the decoration, and they are exactly floor(start) to ceil(start + width), width being measureText`s and start where the alignment puts the advance -- the anchor, less all of the width for `right` and half of it for `center`, in either direction. `inkBoxes`: measureText`s actualBoundingBoxLeft and actualBoundingBoxRight for right-to-left runs of text ending in whitespace, which stands at the visual start of the run. `paragraphs`: the same for the Paragraph API, which says what it holds. `emptyInkBoxes`: the same for runs of nothing but spaces, which ink nothing and whose empty box Chrome puts at the left edge of their advance, in either direction. Read by tests/native_context2d.rs and tests/suite/text.test.js.",
   "source": "Chrome Headless Shell 158.0.8127.18 on macOS, 2026-11-13. The decorations from CSS text, Chrome`s canvas having no textDecoration -- a div with `white-space: pre`, which keeps every space as a canvas does, read plain against decorated -- in Oswald 16px and, for U+3000, in the system`s Hiragino Sans GB: the rule held in 234 of 234 cases, every line and layout here. The ink boxes from Chrome`s canvas measureText, in Oswald 16px.",
   "font": "16px Oswald",
   "lines": [
@@ -449,5 +449,103 @@
         ]
       }
     ]
-  }
+  },
+  "emptyInkBoxes": [
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "ltr",
+      "spacing": 0,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "ltr",
+      "spacing": 4,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "ltr",
+      "spacing": 0,
+      "left": 3.66,
+      "right": -3.66
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "ltr",
+      "spacing": 4,
+      "left": 7.66,
+      "right": -7.66
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "ltr",
+      "spacing": 0,
+      "left": 1.83,
+      "right": -1.83
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "ltr",
+      "spacing": 4,
+      "left": 3.83,
+      "right": -3.83
+    },
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "rtl",
+      "spacing": 0,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "left",
+      "dir": "rtl",
+      "spacing": 4,
+      "left": 0,
+      "right": 0
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "rtl",
+      "spacing": 0,
+      "left": 1.83,
+      "right": -1.83
+    },
+    {
+      "text": " ",
+      "align": "center",
+      "dir": "rtl",
+      "spacing": 4,
+      "left": 3.83,
+      "right": -3.83
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "rtl",
+      "spacing": 0,
+      "left": 3.66,
+      "right": -3.66
+    },
+    {
+      "text": " ",
+      "align": "right",
+      "dir": "rtl",
+      "spacing": 4,
+      "left": 7.66,
+      "right": -7.66
+    }
+  ]
 }

@@ -3920,6 +3920,35 @@ describe("Text that ends in whitespace", () => {
     assert.deepEqual(wrong, []);
   });
 
+  // A run of nothing but spaces inks nothing, and its empty box stands at
+  // the left edge of its advance, wherever the alignment puts it.
+  test("a run of only spaces has its empty ink box at its start", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    for (const {
+      text,
+      align,
+      dir,
+      spacing,
+      left,
+      right,
+    } of cases.emptyInkBoxes) {
+      Object.assign(ctx, {
+        font: cases.font,
+        letterSpacing: `${spacing}px`,
+        textAlign: align,
+        direction: dir,
+      });
+      const m = ctx.measureText(text);
+      assert.ok(
+        Math.abs(m.actualBoundingBoxLeft - left) < 0.02 &&
+          Math.abs(m.actualBoundingBoxRight - right) < 0.02,
+        `${JSON.stringify(text)} at ${spacing}px ${align} ${dir}: ` +
+          `${m.actualBoundingBoxLeft}, ${m.actualBoundingBoxRight} for ` +
+          `Chrome's ${left}, ${right}`,
+      );
+    }
+  });
+
   // The spaces a right-to-left run ends in stand at its visual start, so
   // the glyphs stand a whole run of them in from where a left-aligned run
   // starts and half of it in from where a centred one does.

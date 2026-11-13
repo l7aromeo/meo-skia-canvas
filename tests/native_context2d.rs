@@ -14328,3 +14328,33 @@ fn a_run_of_only_spaces_is_decorated_on_its_baseline() {
     assert!(!letter.is_empty(), "the letter is underlined");
     assert_eq!(rows(" "), letter, "the space's underline");
 }
+
+/// A run of nothing but spaces inks nothing, and measure_text's empty box
+/// stands at the left edge of its advance, wherever the alignment puts it,
+/// as Chrome's does: every row of the case file's `emptyInkBoxes`.
+#[test]
+fn a_run_of_only_spaces_has_its_empty_ink_box_at_its_start() {
+    let cases = trailing_whitespace_cases();
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for row in cases["emptyInkBoxes"].as_array().expect("empty ink boxes") {
+        let text = row["text"].as_str().expect("a text");
+        let align = row["align"].as_str().expect("an alignment");
+        let dir = row["dir"].as_str().expect("a direction");
+        let spacing = row["spacing"].as_f64().expect("a spacing");
+        set_case(ctx, spacing, align, dir);
+        let m = ctx.measure_text(text, None);
+        let (left, right) = (
+            row["left"].as_f64().expect("a left") as f32,
+            row["right"].as_f64().expect("a right") as f32,
+        );
+        assert!(
+            (m.actual_bounding_box_left - left).abs() < 0.02
+                && (m.actual_bounding_box_right - right).abs() < 0.02,
+            "{text:?} at {spacing}px {align} {dir}: {}, {} for Chrome's \
+             {left}, {right}",
+            m.actual_bounding_box_left,
+            m.actual_bounding_box_right
+        );
+    }
+}

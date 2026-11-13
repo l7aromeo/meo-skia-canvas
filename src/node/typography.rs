@@ -3171,9 +3171,21 @@ impl<'a> Typesetter<'a> {
         // lines, since
         // the advance is what it would take unwrapped and would contradict
         // both the ink bounds beside it and the pixels drawn.
+        let advance = self.signed_advance(&paragraph);
         let width = match self.text_wrap {
-            false => self.signed_advance(&paragraph) * condensation,
+            false => advance * condensation,
             true => width,
+        };
+        let empty_at = match self.text_wrap {
+            false => {
+                let share = match self.gravity() {
+                    TextAlign::Center => 0.5,
+                    TextAlign::Right => 1.0,
+                    _ => 0.0,
+                };
+                -share * advance
+            }
+            true => origin.x,
         };
 
         let extents = TextExtents {
@@ -3199,6 +3211,7 @@ impl<'a> Typesetter<'a> {
             ideo,
             char_ranges,
             oblique: self.oblique,
+            empty_at,
         };
         (extents, measured)
     }
@@ -3997,6 +4010,12 @@ pub struct Measured {
     /// The angle an `oblique` font is drawn at, which shears the ink of the
     /// runs it shears -- see [`run_shear`].
     oblique: Option<f32>,
+    /// Where a run that inks nothing has its empty ink box, relative to the
+    /// anchor before the run is squeezed: the left edge of its advance, where
+    /// Chrome 158 puts it -- a right-aligned `" "` in 16px Oswald reports an
+    /// `actualBoundingBoxLeft` of 3.66 and a right of -3.66, in either
+    /// direction. A wrapped run's is where its paragraph is painted.
+    empty_at: f32,
 }
 
 impl Measured {
@@ -4013,6 +4032,7 @@ impl Measured {
             ideo,
             char_ranges,
             oblique,
+            empty_at,
         } = self;
         let (origin, condensation) = (*origin, *condensation);
         let (hang, norm, ideo) = (*hang, *norm, *ideo);
@@ -4169,7 +4189,11 @@ impl Measured {
                 None => text_bounds,
             });
         }
-        let ink_bounds = ink_bounds.unwrap_or(Rect::new_empty());
+        // A run of spaces has glyph runs, each inking nothing, so its union
+        // is empty rather than missing.
+        let ink_bounds = ink_bounds
+            .filter(|bounds| !bounds.is_empty())
+            .unwrap_or_else(|| Rect::from_xywh(*empty_at, 0.0, 0.0, 0.0));
 
         // The ink box takes the condensation as the width does: a
         // horizontal scale about the anchor.
