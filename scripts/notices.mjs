@@ -71,6 +71,7 @@ export const SKIA_PROJECTS = {
   },
   "libjpeg-turbo": {
     title: "libjpeg-turbo",
+    home: "third_party/externals/libjpeg-turbo",
     files: [
       "third_party/externals/libjpeg-turbo/LICENSE.md",
       "third_party/externals/libjpeg-turbo/README.ijg",
@@ -96,6 +97,7 @@ export const SKIA_PROJECTS = {
   brotli: { title: "Brotli", files: ["third_party/externals/brotli/LICENSE"] },
   freetype: {
     title: "FreeType",
+    home: "third_party/externals/freetype",
     files: [
       "third_party/externals/freetype/LICENSE.TXT",
       "third_party/externals/freetype/docs/FTL.TXT",
@@ -109,6 +111,51 @@ export const SKIA_PROJECTS = {
     title: "Vulkan headers (Khronos Group)",
     files: ["include/third_party/vulkan/LICENSE"],
   },
+};
+
+/// The sentence the IJG licence requires of the documentation of a binary
+/// that holds libjpeg-turbo without its source: clause 2 of the IJG licence,
+/// as libjpeg-turbo's LICENSE.md restates it under "If you are distributing
+/// only libjpeg-turbo binaries". The licence text carries it mid-clause,
+/// which is not the statement the clause asks for.
+const IJG_STATEMENT =
+  "This software is based in part on the work of the Independent JPEG Group.";
+
+/// FreeType's binary clause, in FTL.TXT's "Legal Terms": the documentation
+/// of a binary must state that it is based in part on the work of the
+/// FreeType Team. FreeType is dual-licensed, so which licence it is used
+/// under is said too: the FTL, whose credit clause the GPLv2 cannot carry.
+const FREETYPE_STATEMENT =
+  "This software is based in part on the work of the FreeType Team. FreeType is used here under the FreeType License (FTL), not the GNU General Public License version 2.";
+
+/// FTL.TXT's preferred form of the credit its "credits" clause requires,
+/// with `<year>` the FreeType release's own: its last copyright year in
+/// `include/freetype/freetype.h`, the header every FreeType release dates.
+const freetypeCredit = (year) =>
+  `Portions of this software are copyright © ${year} The FreeType Project (https://freetype.org). All rights reserved.`;
+
+/// The last year of the `Copyright (C) 1996-2025 by` line opening
+/// FreeType's `freetype.h`.
+const FREETYPE_YEAR = /Copyright \(C\) (?:\d{4}-)?(\d{4}) by/;
+
+/**
+ * The statements a project's licence requires a binary's documentation to
+ * make beyond carrying the licence's text, by project, from the project's
+ * own directory. libpng's and zlib's acknowledgements are "appreciated" and
+ * not required, and every other licence here asks only that its text
+ * travel with the binary.
+ */
+export const STATEMENTS = {
+  freetype: (dir) => {
+    const header = join(dir, "include", "freetype", "freetype.h");
+    const year = FREETYPE_YEAR.exec(readFileSync(header, "utf8"))?.[1];
+    if (!year)
+      throw new Error(
+        `notices: ${header} has no "Copyright (C) <years> by" line to date FreeType's credit by`,
+      );
+    return [FREETYPE_STATEMENT, freetypeCredit(year)];
+  },
+  "libjpeg-turbo": () => [IJG_STATEMENT],
 };
 
 /// The project a path under `third_party/externals/<dir>/` belongs to. A
@@ -362,13 +409,15 @@ export function skiaSections(projects, tree, root = ROOT) {
     ? realpathSync(join(root, "vendor"))
     : null;
   return projects.map((id) => {
-    const { title, files } = SKIA_PROJECTS[id];
+    const { title, files, home } = SKIA_PROJECTS[id];
     const read = files.map((file) => ({
       name: file,
       text: readFileSync(join(tree, file), "utf8"),
     }));
     const real = realpathSync(join(tree, files[0]));
-    if (inside(realTree, real)) return { id: `skia:${id}`, title, files: read };
+    const statements = STATEMENTS[id]?.(join(tree, home)) ?? [];
+    if (inside(realTree, real))
+      return { id: `skia:${id}`, title, statements, files: read };
     if (!vendor || !inside(vendor, real))
       throw new Error(
         `notices: ${files[0]} in ${tree} resolves to ${real}, outside the Skia tree and this repository's vendor/`,
@@ -385,6 +434,7 @@ export function skiaSections(projects, tree, root = ROOT) {
       id: `vendor:${name}`,
       title: `${title} (vendor/${name})`,
       note: `This build compiled ${title} from the \`vendor/${name}\` submodule of https://github.com/l7aromeo/meo-skia-canvas, at ${commit}, in place of the copy in Skia's tree.`,
+      statements,
       files: read,
     };
   });
@@ -567,9 +617,10 @@ function fence(text) {
  */
 export function render(opening, sections) {
   const parts = [`# Third-party notices\n\n${opening.trim()}\n`];
-  for (const { id, title, note, files } of sections) {
+  for (const { id, title, note, statements = [], files } of sections) {
     parts.push(`<!-- notice: ${id} -->\n## ${title}\n`);
     if (note) parts.push(`${note}\n`);
+    for (const statement of statements) parts.push(`${statement}\n`);
     for (const { name, text } of files) {
       const f = fence(text);
       parts.push(
@@ -577,7 +628,63 @@ export function render(opening, sections) {
       );
     }
   }
-  return parts.join("\n");
+  return attributed(parts.join("\n"));
+}
+
+/// A licence's text that obliges the binary's documentation to make a
+/// statement of its own, and that statement, as a line outside the
+/// licence's fenced text: a statement quoted inside a licence is the
+/// licence's, not the documentation's. FreeType's FTL is told apart from
+/// the mentions of FreeType in other licences, fontconfig's among them,
+/// which oblige nothing.
+const OBLIGATIONS = [
+  {
+    licence: /The FreeType Project LICENSE/,
+    statements: [
+      new RegExp(`^${escape(FREETYPE_STATEMENT)}$`, "m"),
+      new RegExp(
+        `^${escape(freetypeCredit("YEAR")).replace("YEAR", "\\d{4}")}$`,
+        "m",
+      ),
+    ],
+  },
+  {
+    licence: /Independent JPEG Group/,
+    statements: [new RegExp(`^${escape(IJG_STATEMENT)}$`, "m")],
+  },
+];
+
+function escape(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/// A section's text with its fenced licence texts taken out.
+const unfenced = (body) => body.replace(/^(`{3,})text\n[\s\S]*?^\1$/gm, "");
+
+/**
+ * The sections of `rendered` whose licence obliges a statement the section
+ * does not make, with the statements missing, by id.
+ */
+export function unattributedSections(rendered) {
+  const missing = [];
+  for (const [id, body] of sectionsOf(rendered)) {
+    const own = unfenced(body);
+    for (const { licence, statements } of OBLIGATIONS)
+      if (licence.test(body))
+        for (const statement of statements)
+          if (!statement.test(own)) missing.push(`${id}: ${statement.source}`);
+  }
+  return missing;
+}
+
+/** `rendered`, refused where a section lacks a statement its licence requires. */
+function attributed(rendered) {
+  const missing = unattributedSections(rendered);
+  if (missing.length)
+    throw new Error(
+      `notices: a licence requires a statement its section does not make: ${missing.join("; ")}`,
+    );
+  return rendered;
 }
 
 /** The sections of a rendered file, by id, with their raw text. */
@@ -605,7 +712,9 @@ export function union(opening, files) {
   const order = [...all.keys()].sort(
     (a, b) => rank(a) - rank(b) || a.localeCompare(b),
   );
-  return `# Third-party notices\n\n${opening.trim()}\n\n${order.map((id) => all.get(id)).join("\n")}`;
+  return attributed(
+    `# Third-party notices\n\n${opening.trim()}\n\n${order.map((id) => all.get(id)).join("\n")}`,
+  );
 }
 
 const rank = (id) =>
@@ -1056,13 +1165,126 @@ function selfTest() {
   } finally {
     rmSync(recipeRoot, { recursive: true, force: true });
   }
+  // A licence that obliges the binary's documentation to make a statement
+  // of its own -- FreeType's FTL, libjpeg-turbo's IJG clause -- has it made
+  // outside the licence's text, dated from FreeType's own header; a section
+  // without it is refused when rendered, joined or checked.
+  const ftTree = realpathSync(mkdtempSync(join(tmpdir(), "notices-ftl-")));
+  try {
+    const home = (id) => join(ftTree, SKIA_PROJECTS[id].home);
+    for (const id of ["freetype", "libjpeg-turbo"])
+      for (const file of SKIA_PROJECTS[id].files) {
+        mkdirSync(dirname(join(ftTree, file)), { recursive: true });
+        writeFileSync(
+          join(ftTree, file),
+          id === "freetype"
+            ? "The FreeType Project LICENSE\n"
+            : "The Independent JPEG Group's JPEG software\n",
+        );
+      }
+    mkdirSync(join(home("freetype"), "include", "freetype"), {
+      recursive: true,
+    });
+    const header = (line) =>
+      writeFileSync(
+        join(home("freetype"), "include", "freetype", "freetype.h"),
+        `/*\n * freetype.h\n *\n * ${line}\n */\n`,
+      );
+    header("Copyright (C) 1996-2025 by");
+    const sections = skiaSections(["freetype", "libjpeg-turbo"], ftTree);
+    eq("FreeType's statements", sections[0].statements, [
+      FREETYPE_STATEMENT,
+      "Portions of this software are copyright © 2025 The FreeType Project (https://freetype.org). All rights reserved.",
+    ]);
+    eq("the IJG statement", sections[1].statements, [IJG_STATEMENT]);
+    const made = render("opening", sections);
+    eq("a file making every statement", unattributedSections(made), []);
+    eq("one joined from it", unattributedSections(union("o", [made])), []);
+    header("Copyright (C) 2003 by");
+    eq(
+      "a single year",
+      STATEMENTS.freetype(home("freetype"))[1].includes("© 2003 The"),
+      true,
+    );
+    header("no copyright line here");
+    refuse("a freetype.h with no copyright year", () =>
+      STATEMENTS.freetype(home("freetype")),
+    );
+    const without = (drop) =>
+      sections.map((section) => ({
+        ...section,
+        statements: section.statements.filter((line) => !drop(line)),
+      }));
+    for (const [what, drop] of [
+      ["FreeType's credit line", (line) => line.startsWith("Portions")],
+      ["FreeType's FTL statement", (line) => line === FREETYPE_STATEMENT],
+      ["the IJG statement", (line) => line === IJG_STATEMENT],
+    ]) {
+      refuse(`a file without ${what}`, () => render("o", without(drop)));
+      const bare = render("o", sections).replace(
+        `\n${sections.flatMap((x) => x.statements).find(drop)}\n`,
+        "\n",
+      );
+      eq(`${what} found missing`, unattributedSections(bare).length, 1);
+      refuse(`a join without ${what}`, () => union("o", [bare]));
+    }
+    // A statement quoted inside the licence's own fenced text is the
+    // licence's, and does not stand for the documentation's.
+    const quoted = render(
+      "o",
+      without(() => false),
+    ).replace(`\n${IJG_STATEMENT}\n\n`, "\n");
+    const inside = quoted.replace(
+      "The Independent JPEG Group's JPEG software\n",
+      `The Independent JPEG Group's JPEG software\n${IJG_STATEMENT}\n`,
+    );
+    eq("a statement only inside the licence", unattributedSections(inside), [
+      `skia:libjpeg-turbo: ${OBLIGATIONS[1].statements[0].source}`,
+    ]);
+    // FreeType named in a licence that is not the FTL -- fontconfig's --
+    // obliges nothing.
+    eq(
+      "FreeType named outside the FTL",
+      unattributedSections(
+        render("o", [
+          {
+            id: "image:fontconfig",
+            title: "Fontconfig",
+            files: [{ name: "COPYING", text: "uses FreeType\n" }],
+          },
+        ]),
+      ),
+      [],
+    );
+  } finally {
+    rmSync(ftTree, { recursive: true, force: true });
+  }
   console.log("notices: self-test, every case answered and every refusal held");
+}
+
+/**
+ * `check` given files: each notices file already written makes every
+ * statement its licences require -- see `unattributedSections`.
+ */
+function checkFiles(files) {
+  const failures = files.flatMap((file) =>
+    unattributedSections(readFileSync(file, "utf8")).map(
+      (missing) => `${file}: ${missing}`,
+    ),
+  );
+  if (failures.length) {
+    console.error(failures.map((f) => `::error::${f}`).join("\n"));
+    process.exit(1);
+  }
+  console.log(
+    `notices: each of the ${files.length} files makes every statement its licences require`,
+  );
 }
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "--self-test") return selfTest();
-  if (command === "check") return check();
+  if (command === "check") return args.length ? checkFiles(args) : check();
   if (command === "record") {
     const [outDir, file] = args;
     writeFileSync(file, JSON.stringify(record(outDir), null, 2) + "\n");
@@ -1157,7 +1379,7 @@ async function main() {
     return;
   }
   console.error(
-    "usage: node scripts/notices.mjs archive|record|binary|union|gn|check|--self-test",
+    "usage: node scripts/notices.mjs archive|record|binary|union|gn|check [file...]|--self-test",
   );
   process.exit(2);
 }
