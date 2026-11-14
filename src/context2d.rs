@@ -1553,12 +1553,22 @@ impl Context2D {
         gpu: bool,
         options: &CanvasOptions,
     ) -> Self {
-        Self {
+        let context = Self {
             inner,
             gpu,
             canvas_depth: options.color_type,
             canvas_space: options.color_space,
-        }
+        };
+        context.tell_engine();
+        context
+    }
+
+    /// Tells the page whether the canvas plays it on the GPU, as
+    /// [`Self::engine`] now chooses -- see
+    /// `context::page::PageRecorder::set_plays_on_gpu`.
+    pub(crate) fn tell_engine(&self) {
+        self.inner
+            .set_plays_on_gpu(self.engine() == RenderingEngine::GPU);
     }
 
     /// Sets the color subsequent fills use.
@@ -6582,6 +6592,96 @@ mod overlapping_glyph_tests {
                 if reads != 1 {
                     wrong.push(format!(
                         "{blend:?} {clip}: {reads} read backs, not 1"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page recorded where the CPU plays it, and played on the GPU after
+    /// its canvas is switched there, draws the bytes the CPU page draws.
+    /// Its clips' runs were not bounded as they recorded -- see
+    /// `page::PageRecorder::plays_on_gpu` -- so each reaches the page and
+    /// ends the batch of runs drawn on the CPU before it: the switched page
+    /// reads back once for each run, where a page recorded for the GPU
+    /// reads back once. That is the cost of a switch, accepted so that a
+    /// CPU canvas pays nothing for a bound only the GPU reads.
+    #[test]
+    fn a_cpu_page_played_on_the_gpu_draws_the_cpu_pages_bytes() {
+        use crate::context::layer::BACKDROPS_READ;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 4;
+        /// How the page reaches the GPU.
+        const ROUTES: [&str; 2] = ["GPU", "switched"];
+        let draw = |ctx: &mut Context2D, blend: BlendMode| {
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                ctx.set_global_composite_operation(blend);
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+                // A clip's run between each run and the next, clear of
+                // them.
+                ctx.set_global_composite_operation(SourceOver);
+                ctx.save();
+                ctx.begin_path();
+                ctx.rect(200.5, 0.0, 100.0, H);
+                ctx.clip(FillRule::NonZero);
+                ctx.set_fill_style_css("rgba(160,40,90,0.5)")
+                    .expect("a colour");
+                ctx.fill_rect(240.0, y - 8.0, 30.0, 6.0);
+                ctx.restore();
+            }
+        };
+        // The page drawn on `route`, or on the CPU throughout for `None`:
+        // its bytes and the read backs reading them took.
+        let page = |route: Option<&str>, blend: BlendMode| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(route == Some("GPU"));
+            draw(canvas.context(), blend);
+            canvas.set_gpu(route.is_some());
+            let before = BACKDROPS_READ.get();
+            let bytes = canvas
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            let gpu = route.is_some();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "read on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            let (cpu, _) = page(None, blend);
+            for route in ROUTES {
+                let (gpu, reads) = page(Some(route), blend);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} {route}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                let expected = match route {
+                    "GPU" => 1,
+                    _ => LINES,
+                };
+                if reads != expected {
+                    wrong.push(format!(
+                        "{blend:?} {route}: {reads} read backs, not {expected}"
                     ));
                 }
             }

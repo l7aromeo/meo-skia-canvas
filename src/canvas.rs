@@ -573,6 +573,7 @@ impl Canvas {
         self.gpu = enabled;
         for context in &mut self.contexts {
             context.gpu = enabled;
+            context.tell_engine();
         }
     }
 

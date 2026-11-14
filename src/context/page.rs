@@ -419,9 +419,24 @@ pub struct PageRecorder {
     /// draws such runs on the CPU over one read back, and a batch of them
     /// extends past an entry between them only where that entry's reach
     /// meets none of them -- see `layer::replayed_on_their_backdrop` -- so
-    /// only here does [`Self::close_run`] pay to file a clip's run with
-    /// the reach of what it draws.
+    /// only here, and only where [`Self::plays_on_gpu`], does a clip's run
+    /// record with a bounding hierarchy -- see [`Run::bbh`] -- which trims
+    /// its picture to what it draws, and the one operation
+    /// [`Self::close_run`] files it as reaches no further. Played into the
+    /// page instead, each operation bounded on its own, the run's
+    /// operations are copied, then bounded again as the page is finished.
+    /// A run opened before the page held one is not bounded, which ends a
+    /// batch sooner and draws the same pixels.
     holds_reading_runs: bool,
+    /// Whether the canvas the page belongs to plays it on the GPU, as its
+    /// engine stands while it records -- see [`Self::set_plays_on_gpu`].
+    /// Only a GPU playback reads what a clip's run reaches, to tell how far
+    /// a batch of runs drawn on the CPU extends, so a run is bounded only
+    /// here. A page recorded otherwise and played on the GPU later -- its
+    /// canvas switched to the GPU, or drawn into a GPU canvas -- ends its
+    /// batches at its clipped draws, reading back more often for the same
+    /// pixels.
+    plays_on_gpu: bool,
     /// The frame the last layer, a [`CutOp`], was opened in while it can
     /// still be joined, as `blur_run` is for a [`BlurOp`].
     cut_run: Option<u64>,
@@ -885,14 +900,16 @@ struct Run {
     /// The clip as coverage, made once, where the run holds a cut draw.
     coverage: Option<Arc<Coverage>>,
     /// Whether the run's pixels record with a bounding hierarchy, which they
-    /// do inside an open `saveLayer`. Without one its picture is bounded by
-    /// the page, and so by the clip's bounds where it is played under the
-    /// clip, rather than by what it draws, and finishing it skips
-    /// computing the bounds of every operation. Inside a layer those
-    /// bounds are what the layer is confined to -- see
-    /// [`LayerRec::footprint`] -- and a layer the size of the clip around
-    /// one small draw cost a page of translucent layers under a large clip
-    /// some fifteen times what it did.
+    /// do inside an open `saveLayer` and on a page holding runs read in
+    /// the shader that plays on the GPU -- see
+    /// [`PageRecorder::holds_reading_runs`]. Without one its picture is
+    /// bounded by the page, and so by the clip's bounds where it is played
+    /// under the clip, rather than by what it draws, and finishing it skips
+    /// computing the bounds of every operation. Inside a layer those bounds
+    /// are what the layer is confined to -- see [`LayerRec::footprint`] --
+    /// and a layer the size of the clip around one small draw cost a page
+    /// of translucent layers under a large clip some fifteen times what it
+    /// did.
     bbh: bool,
 }
 
@@ -1165,6 +1182,7 @@ impl PageRecorder {
             frame: 0,
             blur_run: None,
             holds_reading_runs: false,
+            plays_on_gpu: false,
             cut_run: None,
             gradient_run: None,
             gradient_filtered: 0,
@@ -1436,7 +1454,10 @@ impl PageRecorder {
         if let Some(clip) = self.clip.as_ref().filter(|_| self.framed_bare)
             && self.run.is_none()
         {
-            let bbh = !self.open.is_empty();
+            // Bounded op by op where a GPU playback reads what the run
+            // reaches -- see `Self::holds_reading_runs`.
+            let bbh = !self.open.is_empty()
+                || (self.holds_reading_runs && self.plays_on_gpu);
             let dual = self.dual;
             let bounds = self.bounds;
             let spare = self
@@ -1568,7 +1589,6 @@ impl PageRecorder {
             self.fork_current();
         }
         let clip = &run.clip;
-        let reading = self.holds_reading_runs;
         self.current().each(|canvas, recording| {
             let picture = match (&entry, recording) {
                 (Layer::Picture(picture), _) => picture,
@@ -1582,19 +1602,7 @@ impl PageRecorder {
                 ClipOp::Intersect,
                 true, /* antialias */
             );
-            // Played rather than drawn where the page holds runs read in the
-            // shader: drawn, a picture of more than one operation is
-            // recorded as one operation reaching its own cull rectangle,
-            // which for a run, recorded without a bounding hierarchy, is the
-            // page. Played, each operation is bounded on its own. Not
-            // everywhere: copying the operations cost a page of 500 clipped
-            // frames a third of its time.
-            match reading {
-                true => picture.playback(canvas),
-                false => {
-                    canvas.draw_picture(picture, None, None);
-                }
-            }
+            canvas.draw_picture(picture, None, None);
             canvas.restore();
         });
         self.changed = true;
@@ -2394,6 +2402,13 @@ impl PageRecorder {
             clip,
             features,
         );
+    }
+
+    /// Says whether the canvas plays the page on the GPU, as its engine now
+    /// stands -- see [`Self::plays_on_gpu`]. Runs already recorded keep the
+    /// bounds they were recorded with.
+    pub fn set_plays_on_gpu(&mut self, gpu: bool) {
+        self.plays_on_gpu = gpu;
     }
 
     /// Files `text`, a run of text holding colour glyphs -- see

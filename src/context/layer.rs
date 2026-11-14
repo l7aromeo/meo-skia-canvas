@@ -6721,6 +6721,10 @@ mod tests {
             for clipped in [false, true] {
                 let mut canvas = Canvas::new(400.0, 200.0);
                 let ctx = canvas.context();
+                // Only a page played on the GPU bounds a clip's run, and
+                // only the reach is under test here, not the engine the
+                // machine running it has.
+                ctx.inner.set_plays_on_gpu(true);
                 assert!(ctx.set_font_css("16px ReachOswald"));
                 ctx.set_global_composite_operation(BlendMode::Multiply);
                 ctx.fill_text("Sphinx of black quartz", 10.0, 20.0, None);
@@ -6777,6 +6781,201 @@ mod tests {
             "the rectangle {drawn:?} reaches\n{}",
             wrong.join("\n")
         );
+    }
+
+    /// A clip's run between kept runs reaches every pixel its draws ink,
+    /// past the geometry they are given: a stroke's half width, a miter
+    /// join's point and a square cap -- each recorded into the run's
+    /// picture and bounded with its paint, as Skia bounds a draw -- see
+    /// `page::PageRecorder::holds_reading_runs`. A shadow, sharp or
+    /// blurred, and a blur filter are filed as a [`BlurOp`], whose reach is
+    /// not known, which ends a batch of runs drawn on the CPU there instead
+    /// -- see [`super::replayed_on_their_backdrop`]. A reach
+    /// short of the ink would let the batch read back before the draw inks
+    /// under its runs.
+    ///
+    /// The ink is what the same draw alone inks on a CPU canvas, and every
+    /// draw is held to ink past its geometry, so that no case passes on the
+    /// geometry alone; and each is held to the way it is bounded, so that
+    /// none passes vacuously on an unknown reach.
+    #[test]
+    fn a_clips_run_reaches_what_its_draws_ink_past_their_geometry() {
+        use super::Layer;
+        use crate::{
+            canvas::Canvas,
+            context2d::Context2D,
+            font::FontLibrary,
+            paint::{BlendMode, StrokeCap, StrokeJoin},
+            path::FillRule,
+        };
+        use skia_safe::Contains;
+        FontLibrary::new()
+            .register_font_from_path(
+                "ReachOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled face registers");
+        const SIZE: (f32, f32) = (400.0, 200.0);
+        /// Each draw, and whether its reach is known: recorded into the
+        /// clip's run, or filed as a blur, its shadow's or its own.
+        const DRAWS: [(&str, bool); 7] = [
+            ("stroke", true),
+            ("miter join", true),
+            ("square cap", true),
+            ("sharp shadow", false),
+            ("stroke's sharp shadow", false),
+            ("blurred shadow", false),
+            ("blur filter", false),
+        ];
+        // The geometry each draw is given, clear of the runs at its left.
+        let geometry = Rect::from_xywh(260.0, 60.0, 40.0, 30.0);
+        let draw = |ctx: &mut Context2D, kind: &str| {
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.set_stroke_style_css("rgb(160,40,90)")
+                .expect("a colour");
+            let (left, top) = (geometry.left, geometry.top);
+            let (right, bottom) = (geometry.right, geometry.bottom);
+            if kind.contains("shadow") {
+                ctx.set_shadow_color_css("rgba(0,0,0,0.8)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(18.0, 14.0);
+                ctx.set_shadow_blur(if kind == "blurred shadow" {
+                    6.0
+                } else {
+                    0.0
+                });
+            }
+            match kind {
+                "stroke" | "stroke's sharp shadow" => {
+                    // Round joins, which Skia bounds by the half width
+                    // alone: a miter join is bounded by the miter limit
+                    // too, which would hold a reach short of the stroke's
+                    // own width to the ink all the same.
+                    ctx.set_line_width(14.0);
+                    ctx.set_line_join(StrokeJoin::Round);
+                    ctx.stroke_rect(
+                        left,
+                        top,
+                        geometry.width(),
+                        geometry.height(),
+                    );
+                }
+                "miter join" => {
+                    // A narrow angle, whose miter reaches far past the
+                    // points it joins.
+                    ctx.set_line_width(8.0);
+                    ctx.set_line_join(StrokeJoin::Miter);
+                    ctx.set_miter_limit(20.0);
+                    ctx.begin_path();
+                    ctx.move_to(left, top);
+                    ctx.line_to(right, top + 6.0);
+                    ctx.line_to(left, top + 12.0);
+                    ctx.stroke();
+                }
+                "square cap" => {
+                    ctx.set_line_width(16.0);
+                    ctx.set_line_cap(StrokeCap::Square);
+                    ctx.begin_path();
+                    ctx.move_to(left, bottom);
+                    ctx.line_to(right, bottom);
+                    ctx.stroke();
+                }
+                "blur filter" => {
+                    ctx.set_filter_css("blur(5px)").expect("a filter");
+                    ctx.fill_rect(
+                        left,
+                        top,
+                        geometry.width(),
+                        geometry.height(),
+                    );
+                }
+                _ => ctx.fill_rect(
+                    left,
+                    top,
+                    geometry.width(),
+                    geometry.height(),
+                ),
+            }
+        };
+        // What the draw inks alone, on the CPU: the box of every pixel it
+        // leaves with any alpha.
+        let inked = |kind: &str| {
+            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            draw(ctx, kind);
+            let data = ctx
+                .get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+                .expect("the canvas reads back");
+            let width = SIZE.0 as usize;
+            let mut ink = Rect::new_empty();
+            for (at, pixel) in
+                data.pixels().as_chunks::<4>().0.iter().enumerate()
+            {
+                if pixel[3] > 0 {
+                    let (x, y) = ((at % width) as f32, (at / width) as f32);
+                    ink.join(Rect::new(x, y, x + 1.0, y + 1.0));
+                }
+            }
+            ink
+        };
+        let mut wrong = vec![];
+        for (kind, known) in DRAWS {
+            let ink = inked(kind);
+            if geometry.contains(ink) {
+                wrong
+                    .push(format!("{kind}: inks {ink:?}, within its geometry"));
+                continue;
+            }
+            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+            let ctx = canvas.context();
+            // Only a page played on the GPU bounds a clip's run.
+            ctx.inner.set_plays_on_gpu(true);
+            assert!(ctx.set_font_css("16px ReachOswald"));
+            ctx.set_global_composite_operation(BlendMode::Multiply);
+            ctx.fill_text("Sphinx of black quartz", 10.0, 20.0, None);
+            ctx.set_global_composite_operation(BlendMode::SourceOver);
+            ctx.save();
+            // Clear of the runs and wide of the draw's ink, so that only
+            // what the run records bounds its reach.
+            ctx.begin_path();
+            ctx.rect(200.5, 0.0, 199.0, SIZE.1);
+            ctx.clip(FillRule::NonZero);
+            draw(ctx, kind);
+            ctx.restore();
+            ctx.set_global_composite_operation(BlendMode::Multiply);
+            ctx.fill_text("Sphinx of black quartz", 10.0, 40.0, None);
+            let entries = ctx.inner.entries();
+            let kept = |entry: &&Layer| matches!(entry, Layer::ReplayedText(_));
+            let reach = entries
+                .layers
+                .iter()
+                .skip_while(|entry| !kept(entry))
+                .skip(1)
+                .take_while(|entry| !kept(entry))
+                .try_fold(Rect::new_empty(), |mut all, entry| {
+                    all.join(entry.reach()?);
+                    Some(all)
+                });
+            match (reach, known) {
+                (None, false) => {}
+                (None, true) => wrong.push(format!("{kind}: no reach")),
+                (Some(reach), false) => wrong.push(format!(
+                    "{kind}: reaches {reach:?}, where a blur's is not known"
+                )),
+                (Some(reach), true) if !reach.contains(ink) => wrong
+                    .push(format!("{kind}: reaches {reach:?}, inks {ink:?}")),
+                // Bounded, not the page: a reach of the whole page holds
+                // any ink and says nothing.
+                (Some(reach), true)
+                    if reach.contains(Rect::from_wh(SIZE.0, SIZE.1)) =>
+                {
+                    wrong.push(format!("{kind}: reaches the page"))
+                }
+                (Some(_), true) => {}
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// A group through no layer composites what it holds as it is, so a

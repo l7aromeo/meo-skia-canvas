@@ -654,6 +654,12 @@ thread_local! {
 }
 
 impl Context2D {
+    /// Says whether the canvas plays the page on the GPU -- see
+    /// [`PageRecorder::set_plays_on_gpu`].
+    pub(crate) fn set_plays_on_gpu(&self, gpu: bool) {
+        self.recorder.borrow_mut().set_plays_on_gpu(gpu);
+    }
+
     /// A context sized to the canvas that owns it.
     ///
     /// The size is taken here rather than applied afterwards because a

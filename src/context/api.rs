@@ -17,6 +17,7 @@ use crate::{
     context2d::{FontKerning, TextRendering, decoration_from_css},
     css::parse_filter_named,
     export::VectorFeatures,
+    gpu::RenderingEngine,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
@@ -618,13 +619,14 @@ verbs! {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let parent = cx.argument::<BoxedCanvas>(1)?;
-    let parent = parent.borrow();
+    let mut parent = parent.borrow_mut();
     let mut this = Context2D::new(
         parent.color_space.clone(),
         parent.color_type,
         (parent.text_contrast as f32, parent.text_gamma as f32),
         (parent.width, parent.height),
     );
+    this.set_plays_on_gpu(parent.engine() == RenderingEngine::GPU);
     // What the context holds before anything is drawn.
     this.report_resident(&mut cx);
 
@@ -637,6 +639,17 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
 #[cfg(debug_assertions)]
 pub fn context_bytes(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(CONTEXT_BYTES as f64))
+}
+
+/// Tells the page whether its canvas plays it on the GPU, as the canvas's
+/// engine now stands -- see `PageRecorder::set_plays_on_gpu`. Called by the
+/// canvas each time its engine is set.
+pub fn tellEngine(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let this = cx.argument::<BoxedContext2D>(0)?;
+    let parent = cx.argument::<BoxedCanvas>(1)?;
+    let gpu = parent.borrow_mut().engine() == RenderingEngine::GPU;
+    this.borrow().set_plays_on_gpu(gpu);
+    Ok(cx.undefined())
 }
 
 pub fn resetSize(mut cx: FunctionContext) -> JsResult<JsUndefined> {
