@@ -1357,10 +1357,14 @@ impl Context2D {
         let beyond =
             covers_beyond_the_draw(self.state.global_composite_operation);
         // The draw into one recording, under the canvas's transform, in
-        // `drawn` and casting its shadow from `cast`: for blend modes that
-        // affect regions of the canvas outside of the bounds of the object
-        // being drawn, through an intermediate picture, one for each
-        // recording, each with that recording's paint.
+        // `drawn` and casting its shadow from `cast`. Under a blend that
+        // changes the page beyond what the draw covers, the shadow and then
+        // the draw are each recorded `source-over` into a picture of their
+        // own, which the blend composites over the whole page: the HTML
+        // Standard composites the shadow and then what casts it. Drawn into
+        // one picture composited once, as they were, a shadowed rectangle
+        // under `source-in` stood 200 to 255 levels from Chrome and Firefox
+        // on every pixel of its shadow, where the two composites fit both.
         let draw_in = |canvas: &SkCanvas,
                        recording: Recording,
                        drawn: &Paint,
@@ -1368,32 +1372,42 @@ impl Context2D {
             true => {
                 let mut layer_paint = drawn.clone();
                 layer_paint.set_blend_mode(BlendMode::SrcOver);
-                let mut layer_recorder = PictureRecorder::new();
-                layer_recorder.begin_recording(self.bounds, true);
-                if let Some(layer) = layer_recorder.recording_canvas() {
-                    // draw the dropshadow (if applicable)
-                    render_shadow(layer, &layer_paint, recording);
-                    // draw normally
-                    if !self.shadow_alone {
-                        layer.set_matrix(&self.state.matrix.into());
-                        f(layer, &layer_paint, Pass::Draw);
-                    }
-                }
-
-                // transfer the picture contents to the canvas in a single
-                // operation, applying the blend mode to the whole canvas
-                // (regardless of the bounds of the text/path being drawn)
-                if let Some(pict) =
-                    layer_recorder.finish_recording_as_picture(None)
-                {
+                // `paint` recorded on its own and composited through the
+                // blend. A shadow that records nothing is not composited,
+                // which the blend would do as transparent black over the
+                // whole page; the draw always is, as a draw is.
+                let composite = |paint: &dyn Fn(&SkCanvas), shadow: bool| {
+                    let mut recorder = PictureRecorder::new();
+                    paint(recorder.begin_recording(self.bounds, true));
+                    let Some(picture) = recorder
+                        .finish_recording_as_picture(None)
+                        .filter(|picture| {
+                            !shadow || picture.approximate_op_count() > 0
+                        })
+                    else {
+                        return;
+                    };
                     canvas.save();
                     canvas.set_matrix(&Matrix::new_identity().into());
                     let mut blend_paint = Paint::default();
                     blend_paint.set_anti_alias(true);
                     blend_paint
                         .set_blend_mode(self.state.global_composite_operation);
-                    canvas.draw_picture(&pict, None, Some(&blend_paint));
+                    canvas.draw_picture(&picture, None, Some(&blend_paint));
                     canvas.restore();
+                };
+                composite(
+                    &|layer| render_shadow(layer, &layer_paint, recording),
+                    true,
+                );
+                if !self.shadow_alone {
+                    composite(
+                        &|layer| {
+                            layer.set_matrix(&self.state.matrix.into());
+                            f(layer, &layer_paint, Pass::Draw);
+                        },
+                        false,
+                    );
                 }
             }
             false => {
@@ -1527,11 +1541,9 @@ impl Context2D {
 
     /// Whether a draw made now casts its shadow through a chain -- see
     /// [`Self::files_shadow_through_chain`]: one casting a shadow, under no
-    /// CanvasKit filter, through a blend that covers no more than it.
+    /// CanvasKit filter.
     fn casts_shadow_through_chain(&self) -> bool {
-        self.casts_shadow()
-            && self.state.skia_image_filter.is_none()
-            && !covers_beyond_the_draw(self.state.global_composite_operation)
+        self.casts_shadow() && self.state.skia_image_filter.is_none()
     }
 
     /// Whether a run of text drawn now is played through a chain, its own
@@ -1562,10 +1574,9 @@ impl Context2D {
     /// taking the CSS filter as its input. Through Skia's layer, the filter's
     /// blur and the shadow's were each Skia's approximation.
     ///
-    /// `false`, filing nothing, for a draw casting no shadow; for one under
-    /// a CanvasKit filter, which Skia's layer runs in the draw's own units;
-    /// and for one under a blend that covers beyond it, which
-    /// `render_to_canvas` composites with its shadow through one layer.
+    /// `false`, filing nothing, for a draw casting no shadow, and for one
+    /// under a CanvasKit filter, which Skia's layer runs in the draw's own
+    /// units.
     /// `cpu_bytes` says a GPU canvas draws the draw in the CPU's bytes -- a
     /// gradient, whose alpha the shadow casts, or a canvas holding such
     /// draws, see [`CpuBytes`] -- and so makes it on the CPU for the chain --
@@ -1657,11 +1668,21 @@ impl Context2D {
         let entry = self.chain_input(cpu_bytes, entry);
         // The group composites through the blend, and a document through
         // Skia's shadow filter in the colour it names, of what the draw's
-        // own filter makes.
+        // own filter makes. Under a blend that changes the page beyond what
+        // the shadow covers, the group composites `source-over` into a layer
+        // of its own, which the blend composites over the whole clip: a
+        // chain composites only over what it draws, so the page beyond the
+        // shadow kept its backdrop under `source-in`, where the HTML
+        // Standard's composite of the shadow clears it.
+        let blend = self.state.global_composite_operation;
+        let beyond = covers_beyond_the_draw(blend);
         let mut through = Paint::default();
         through
             .set_anti_alias(true)
-            .set_blend_mode(self.state.global_composite_operation)
+            .set_blend_mode(match beyond {
+                true => BlendMode::SrcOver,
+                false => blend,
+            })
             .set_image_filter(image_filters::drop_shadow_only(
                 (0.0, 0.0),
                 (document_cast.sigma.x, document_cast.sigma.y),
@@ -1679,6 +1700,14 @@ impl Context2D {
                 .with(VectorFeatures::MASKED_BLEND),
         );
         self.with_recorder(|mut recorder| {
+            if beyond {
+                let mut over = Paint::default();
+                over.set_anti_alias(true).set_blend_mode(blend);
+                recorder.open_layer(LayerRec {
+                    paint: Some(over),
+                    ..LayerRec::default()
+                });
+            }
             recorder.append_group(
                 Composite::Chain {
                     steps,
@@ -1695,6 +1724,9 @@ impl Context2D {
                 features,
                 offset,
             );
+            if beyond {
+                recorder.close_layer();
+            }
         });
         true
     }

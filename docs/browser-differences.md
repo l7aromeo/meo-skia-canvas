@@ -1391,10 +1391,9 @@ route it takes casting none. `tests/shadow_result.rs` holds the shadow to
 the exact one -- translucent, clipped and filtered -- and the draw to its
 bytes casting none, under a filter and under a clip.
 
-Four shadows are still Skia's: one under a `globalCompositeOperation` that
-composites the whole canvas, one under a CanvasKit filter, one cast by a run
-holding colour glyphs, and every shadow in a PDF or SVG document. Each is
-cast from what the draw's filter makes, and each blur is Skia's.
+Three shadows are still Skia's: one under a CanvasKit filter, one cast by
+a run holding colour glyphs, and every shadow in a PDF or SVG document.
+Each is cast from what the draw's filter makes, and each blur is Skia's.
 
 **Under an operator other than `source-over`, a run of text casting a shadow
 composites its shadow and then the run as one image; Chrome composites the
