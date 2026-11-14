@@ -74,7 +74,7 @@ use crate::{
             Checked, DRAW_ATTEMPTS, Rows, discarded, draws_ran,
             read_after_draws, read_checked, read_off_gpu,
         },
-        engine_of, graphite, owner, pacing,
+        engine_of, graphite, multisample_bytes, owner, pacing,
     },
     node::{
         canvas::BoxedCanvas,
@@ -3882,9 +3882,8 @@ impl RecordingSurface {
     /// and it is the larger share: a thousand 600 by 1100 pages at the
     /// default 4x held 14 GB on Metal, where their own pixels are 2.6 GB.
     pub fn budgeted_bytes(&self) -> usize {
-        let multisampled = |surface: &Surface, samples: usize| match samples {
-            0 | 1 => 0,
-            samples => surface.image_info().compute_min_byte_size() * samples,
+        let multisampled = |surface: &Surface, samples: usize| {
+            multisample_bytes(&surface.image_info(), samples)
         };
         let page = self
             .surface
@@ -4402,7 +4401,7 @@ impl RecordingSurface {
             let canvas = surface.canvas();
             // The surface was made with `opts`, so its chains' layers are
             // kept for the next run -- see `chain::pool`.
-            let _layers = LayerScope::open(canvas, opts.msaa);
+            let _layers = LayerScope::open(canvas, self.samples);
             let (cache_image, cache_depth) =
                 PageCache::get(page.id, opts, page.depth());
 
@@ -5702,9 +5701,10 @@ impl Page {
             img_dims,
             &options.surface_color_space,
         )?;
+        let samples = engine.sample_count(&surface.image_info(), options);
         let canvas = surface.canvas();
         // Made with `options`: see `chain::pool`.
-        let _layers = LayerScope::open(canvas, options.msaa);
+        let _layers = LayerScope::open(canvas, samples);
 
         // The cached bitmap stands in for the layers already drawn -- but only
         // where compositing it is the same operation as drawing them.
@@ -6072,9 +6072,10 @@ impl Page {
                 img_dims,
                 &options.surface_color_space,
             )?;
+            let samples = engine.sample_count(&surface.image_info(), options);
             let canvas = surface.canvas();
             // Made with `options`: see `chain::pool`.
-            let _layers = LayerScope::open(canvas, options.msaa);
+            let _layers = LayerScope::open(canvas, samples);
             if let Some(matte) = &options.matte {
                 matte.paint(canvas);
             }

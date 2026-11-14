@@ -171,16 +171,17 @@ pub(crate) enum Depth {
 /// confines what the result paints, not what the chain reads: a blur
 /// spreads what lies outside the clip into it. `draw` is handed the layer
 /// with a transform mapping canvas pixels to the layer's, and draws what is
-/// to be filtered under it. `content` bounds what `draw` paints, in canvas
-/// pixels, where it is known; the layer is sized from it and the clip, so a
-/// small draw does not cost a page-sized layer.
+/// to be filtered under it -- more than once where a CPU layer starts before
+/// the device's origin, see [`draw_from_the_origin`]. `content` bounds what
+/// `draw` paints, in canvas pixels, where it is known; the layer is sized from
+/// it and the clip, so a small draw does not cost a page-sized layer.
 pub(crate) fn apply(
     canvas: &SkCanvas,
     steps: &[Step],
     content: Option<Rect>,
     depth: Depth,
     paint: &Paint,
-    draw: impl FnOnce(&SkCanvas),
+    draw: impl Fn(&SkCanvas),
 ) {
     if let Some(outcome) = run(canvas, steps, content, depth, paint, draw) {
         outcome.composite(canvas, paint);
@@ -458,15 +459,11 @@ pub(crate) fn run(
     content: Option<Rect>,
     depth: Depth,
     paint: &Paint,
-    draw: impl FnOnce(&SkCanvas),
+    draw: impl Fn(&SkCanvas),
 ) -> Option<Outcome> {
     let plan = plan(canvas, steps, content, depth)?;
-    let mut draw = Some(draw);
-    let mut drawn = Drawn::new(canvas, &[&plan], |_, offscreen| {
-        if let Some(draw) = draw.take() {
-            draw(offscreen);
-        }
-    })?;
+    let mut drawn =
+        Drawn::new(canvas, &[&plan], |_, offscreen| draw(offscreen))?;
     drawn.finish(&plan, steps, paint)
 }
 
@@ -593,8 +590,10 @@ impl Drawn {
     /// One layer at `plans`' layer, which they share, of their depth,
     /// holding what `draw` draws for each of them: called with each plan's
     /// index in turn, onto a canvas under that plan's transform, in a save
-    /// of its own, after every plan's region has been cleared. `None` where
-    /// no layer could be made.
+    /// of its own, after every plan's region has been cleared -- and, for a
+    /// layer in main memory that starts before the device's origin, once
+    /// more for each onto a layer that starts at it, see
+    /// [`draw_from_the_origin`]. `None` where no layer could be made.
     ///
     /// A single plan's layer falls back to its region alone where Skia
     /// refuses the one [`placed`] asks for, as `placed` says. Plans sharing a
@@ -644,6 +643,9 @@ impl Drawn {
             offscreen.set_matrix(&Matrix::concat(&origin, &plan.layer).into());
             draw(i, offscreen);
             offscreen.restore();
+        }
+        if zeroed {
+            draw_from_the_origin(canvas, plans, at, offscreen, &mut draw);
         }
         Some(Self {
             snapshot: surface.image_snapshot(),
@@ -1119,10 +1121,13 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
 ///   rest, along either axis; lines and rectangles came out alike at every one.
 ///   So the layer starts at the device's origin, as the page does, or at the
 ///   region's where that lies before it, and the chain runs on the region
-///   alone. Only the region is written, and memory nothing writes is never
-///   mapped, so the layer costs the pages its rows touch: a page or more a row,
-///   which for a narrow region far into a wide page is most of its cost -- 8.5
-///   MB for 518 rows of 16 KB pages, where the region alone is 0.3 MB.
+///   alone. One that starts before the origin draws what lies from the origin
+///   on again in a layer that starts at it, which the chain takes that part
+///   from -- see [`draw_from_the_origin`]. Only the region is written, and
+///   memory nothing writes is never mapped, so the layer costs the pages its
+///   rows touch: a page or more a row, which for a narrow region far into a
+///   wide page is most of its cost -- 8.5 MB for 518 rows of 16 KB pages, where
+///   the region alone is 0.3 MB.
 /// - Where Skia refuses a layer that large -- one past the `i32::MAX` bytes it
 ///   allows a raster surface, which an F32 layer for a picture being recorded
 ///   can pass when the picture's own pixels would not -- the layer is the
@@ -1207,6 +1212,75 @@ fn placed(
 pub(crate) fn clear_unless_zeroed(surface: &mut Surface) {
     if surface.peek_pixels().is_none() {
         surface.canvas().clear(Color::TRANSPARENT);
+    }
+}
+
+/// Draws again, in a layer in main memory starting at the device's origin,
+/// what `plans`' chains draw onto `offscreen`, one at `at` that starts
+/// before it, and copies the rows of each chain's region from the origin on
+/// from it over `offscreen`'s: so that a chain whose region crosses the page's
+/// top or left edge draws its input there as a chain inside the page does.
+/// Skia's anti-aliasing covers a curve by where on the raster it lies, whole
+/// pixels included -- see [`placed`] -- and Times New Roman's 96px "Ag",
+/// stroked 40 wide, drew 25 levels apart in a layer starting 54 pixels before
+/// the origin. The layer's size does not decide it on the CPU: one from the
+/// origin to the region's far corner draws as the page does. What lies before
+/// the origin has no page to match, and keeps `offscreen`'s pixels. Nothing
+/// is done for a layer starting at the origin or past it, or one the rest of
+/// the transform maps onto the device, which is not in the device's pixels.
+fn draw_from_the_origin(
+    canvas: &SkCanvas,
+    plans: &[&Plan],
+    at: IRect,
+    offscreen: &SkCanvas,
+    draw: &mut impl FnMut(usize, &SkCanvas),
+) {
+    let Some(first) = plans.first() else {
+        return;
+    };
+    if (at.left >= 0 && at.top >= 0)
+        || !plans.iter().all(|plan| plan.rest.is_identity())
+    {
+        return;
+    }
+    let from_origin = IRect::from_ltrb(0, 0, at.right, at.bottom);
+    let inside: Vec<IRect> = plans
+        .iter()
+        .filter_map(|plan| IRect::intersect(&plan.region, &from_origin))
+        .collect();
+    if inside.is_empty() {
+        return;
+    }
+    let Some((mut layer, _)) = layer_surface(canvas, first.depth, from_origin)
+    else {
+        return;
+    };
+    // Made just before in main memory, so zeros already -- see
+    // [`clear_unless_zeroed`].
+    for (i, plan) in plans.iter().enumerate() {
+        layer.canvas().save();
+        layer.canvas().set_matrix(&plan.layer.into());
+        draw(i, layer.canvas());
+        layer.canvas().restore();
+    }
+    // The rows are copied as they lie: the two layers share a colour type
+    // and space, so a write is a copy of bytes. A draw in `Src` does the same
+    // through Skia's raster pipeline, and took most of this function's time.
+    let Some(drawn) = layer.peek_pixels() else {
+        return;
+    };
+    for area in &inside {
+        let written = drawn.extract_subset(area).is_some_and(|rows| {
+            rows.bytes().is_some_and(|bytes| {
+                offscreen.write_pixels(
+                    rows.info(),
+                    bytes,
+                    rows.row_bytes(),
+                    (area.left - at.left, area.top - at.top),
+                )
+            })
+        });
+        debug_assert!(written, "a layer in main memory takes its own rows");
     }
 }
 
@@ -4342,6 +4416,161 @@ mod tests {
             wrong.len(),
             wrong.first()
         );
+    }
+}
+
+/// A chain on the CPU whose region crosses the page's top or left edge,
+/// held to drawing its input within the page as a chain inside it does.
+#[cfg(test)]
+mod origin_tests {
+    use skia_safe::{
+        AlphaType, Canvas as SkCanvas, Color, ColorType, IRect, Image,
+        ImageInfo, Paint, PaintStyle, RRect, Rect, image::CachingHint,
+    };
+
+    use super::{Depth, Drawn, Step, layer_info, plan};
+    use crate::started;
+
+    /// The page every scene is drawn on.
+    const PAGE: (i32, i32) = (600, 400);
+
+    /// The sigma whose reach takes a shape's region past the page's edge
+    /// where the shape only nears it.
+    const BLUR: f32 = 6.0;
+
+    /// The `k`th shape of a sweep that crosses the page's left edge, its
+    /// top, or both, by 5 to 59 pixels and a fraction, at a place along the
+    /// edge that varies.
+    fn crossing(k: usize) -> Rect {
+        let fraction = (k as f32 * 0.137) % 1.0;
+        let (w, h) =
+            (120.0 + (k % 3) as f32 * 17.3, 70.0 + (k % 4) as f32 * 9.1);
+        let along = ((k * 7919) % 1000) as f32 / 1000.0;
+        let over = 5.0 + (k % 7) as f32 * 9.0 + fraction;
+        let (pw, ph) = (PAGE.0 as f32, PAGE.1 as f32);
+        match k % 3 {
+            0 => Rect::from_xywh(-over, along * (ph - h), w, h),
+            1 => Rect::from_xywh(along * (pw - w), -over, w, h),
+            _ => Rect::from_xywh(-over, -over * 0.7, w, h),
+        }
+    }
+
+    /// The `k`th shape's draw: a filled rounded rectangle, a filled oval, or
+    /// a stroked oval, anti-aliased.
+    fn draw(canvas: &SkCanvas, rect: Rect, k: usize) {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(255, 20, 60, 200));
+        match k % 4 {
+            0 => {
+                canvas.draw_rrect(RRect::new_rect_xy(rect, 10.0, 10.0), &paint);
+            }
+            1 => {
+                canvas.draw_oval(rect, &paint);
+            }
+            _ => {
+                paint.set_style(PaintStyle::Stroke).set_stroke_width(9.3);
+                canvas.draw_oval(rect, &paint);
+            }
+        }
+    }
+
+    /// The pixels of `image` within `area`, as premultiplied 32-bit floats.
+    fn pixels(image: &Image, area: IRect) -> Vec<u8> {
+        let info = ImageInfo::new(
+            area.size(),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            image.color_space(),
+        );
+        let mut pixels = vec![0u8; info.compute_min_byte_size()];
+        assert!(image.read_pixels(
+            &info,
+            &mut pixels,
+            info.min_row_bytes(),
+            (area.left, area.top),
+            CachingHint::Disallow,
+        ));
+        pixels
+    }
+
+    /// A chain on the CPU whose region crosses the page's top or left edge
+    /// draws its input, within the page, in the bytes a layer starting at
+    /// the device's origin holds -- the layer a chain inside the page draws
+    /// into: Skia's anti-aliasing covers a curve by where on the raster it
+    /// lies, so a layer starting before the origin draws it otherwise. In
+    /// bytes and in half floats, over curves, corners and a stroke.
+    #[test]
+    fn a_chain_past_the_top_left_draws_its_input_as_the_page_does() {
+        let mut page =
+            started::raster(&ImageInfo::new_n32_premul(PAGE, None), None, None)
+                .expect("a page");
+        let canvas = page.canvas();
+        let (mut crossed, mut apart) = (0, Vec::new());
+        for depth in [Depth::Bytes, Depth::Halves] {
+            for k in 0..84 {
+                let rect = crossing(k);
+                let steps = [Step::Blur(BLUR)];
+                let Some(plan) = plan(canvas, &steps, Some(rect), depth) else {
+                    continue;
+                };
+                if plan.drawn.left >= 0 && plan.drawn.top >= 0 {
+                    continue;
+                }
+                crossed += 1;
+                let drawn = Drawn::new(canvas, &[&plan], |_, layer| {
+                    draw(layer, rect, k)
+                })
+                .expect("a layer");
+                let from_origin =
+                    IRect::from_ltrb(0, 0, plan.drawn.right, plan.drawn.bottom);
+                let Some(inside) = IRect::intersect(&plan.region, &from_origin)
+                else {
+                    continue;
+                };
+                let got = pixels(
+                    &drawn.snapshot,
+                    inside.with_offset((-drawn.at.left, -drawn.at.top)),
+                );
+                let mut origin = started::raster(
+                    &layer_info(canvas, depth, from_origin),
+                    None,
+                    None,
+                )
+                .expect("a layer at the origin");
+                origin.canvas().set_matrix(&plan.layer.into());
+                draw(origin.canvas(), rect, k);
+                let want = pixels(&origin.image_snapshot(), inside);
+                // The reference's size does not decide it: a layer the
+                // page's size, from the same origin, holds the same bytes.
+                let mut whole = started::raster(
+                    &layer_info(canvas, depth, IRect::from_wh(PAGE.0, PAGE.1)),
+                    None,
+                    None,
+                )
+                .expect("a page-sized layer");
+                whole.canvas().set_matrix(&plan.layer.into());
+                draw(whole.canvas(), rect, k);
+                let within =
+                    IRect::intersect(&inside, &IRect::from_wh(PAGE.0, PAGE.1))
+                        .expect("within the page");
+                assert_eq!(
+                    pixels(&whole.image_snapshot(), within),
+                    pixels(&origin.image_snapshot(), within),
+                    "{depth:?} #{k}: the reference moved with its size"
+                );
+                let differ =
+                    got.iter().zip(&want).filter(|(a, b)| a != b).count();
+                if differ > 0 {
+                    apart.push(format!(
+                        "{depth:?} #{k} at {:?}: {differ} bytes",
+                        plan.drawn
+                    ));
+                }
+            }
+        }
+        assert!(crossed > 100, "only {crossed} plans crossed an edge");
+        assert!(apart.is_empty(), "apart from the page: {apart:#?}");
     }
 }
 
