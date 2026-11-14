@@ -8,11 +8,16 @@
 //! The chain draws the shape into an RGBA layer in its colour, so each
 //! channel of an edge pixel is rounded to a byte before the blur and again
 //! after it. Here a channel is rounded once, from the blurred coverage: the
-//! exact product the blur's definition asks for. The alpha is the chain's
-//! bit for bit -- the layer's alpha is the same coverage, blurred by the
-//! same sums and rounded by the same rule -- and so is an interior, where
-//! the coverage is whole and the product lands on the bytes a fill stores.
-//! It costs a quarter of the chain's sums and none of its conversions.
+//! exact product the blur's definition asks for, at any sigma -- through the
+//! FFT, which blurs four of the plane's rows as one line's channels, as tap
+//! by tap. A blurred path's alpha is the chain's -- its layer's alpha is the
+//! same coverage, rounded by the same rule -- bit for bit tap by tap and but
+//! for exact ties through the FFT, and so is an interior, where the coverage
+//! is whole and the product lands on the bytes a fill stores. A run of text
+//! is drawn into the chain's layer in its colour, alpha and all, so a
+//! translucent run's alpha there is rounded before the blur, and the route's
+//! lands up to a level from it. It costs a quarter of the chain's sums and
+//! none of its conversions.
 
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, ClipOp, ColorType, IRect, ISize, ImageInfo,
@@ -804,13 +809,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_blurred_coverage_rounds_the_exact_product_once() {
-        // Each pixel the route composites onto a transparent page, against
-        // the exact Gaussian of the same coverage in f64 times the placed
-        // colour and the gain, rounded once: the alpha and every channel,
-        // in each eight-bit page space, at gains of 1 and on alphas'
-        // bytes, every sigma summed tap by tap, a curve and a polygon.
+    /// Each pixel the route composites onto a transparent page, against the
+    /// exact Gaussian of the same coverage in f64 times the placed colour
+    /// and the gain, rounded once: the alpha and every channel, in each
+    /// eight-bit page space, at gains of 1 and on alphas' bytes, at each of
+    /// `sigmas`, a curve and a polygon. Asserts every value that is no tie,
+    /// and returns how many were checked and how many were ties.
+    fn exact_product_at(sigmas: &[f32]) -> (usize, usize) {
         let shapes: [Path; 2] =
             [Path::oval(Rect::new(20.3, 15.6, 63.1, 49.8), None), {
                 let mut b = PathBuilder::new();
@@ -836,7 +841,7 @@ mod tests {
             for (shape, plane_kind) in shapes.iter().flat_map(|s| {
                 [(s, super::Plane::Drawn), (s, super::Plane::Alpha)]
             }) {
-                for sigma in [0.5f32, 1.5, 3.0, 4.9] {
+                for &sigma in sigmas {
                     for (rgb, stored) in [
                         ([200.0 / 255.0, 120.0 / 255.0, 40.0 / 255.0], 255u8),
                         ([21.0 / 179.0, 42.0 / 179.0, 140.0 / 179.0], 179),
@@ -927,8 +932,27 @@ mod tests {
                 }
             }
         }
+        (checked, ties)
+    }
+
+    #[test]
+    fn a_blurred_coverage_rounds_the_exact_product_once() {
+        // Every sigma summed tap by tap.
+        let (checked, ties) = exact_product_at(&[0.5, 1.5, 3.0, 4.9]);
         assert!(checked > 100_000, "{checked} values checked");
         assert!(ties * 1000 < checked, "{ties} ties of {checked}");
+    }
+
+    /// The same through the FFT, from [`exact_blur::FFT_FROM_SIGMA`] to well
+    /// past it. Ties are what a value's place in the [`TIE`] band either side
+    /// of a half-level makes them, `2 * TIE` of the values that are not whole
+    /// levels; a wide blur leaves few whole, so up to a quarter of a percent.
+    #[test]
+    fn a_coverage_blurred_through_the_fft_rounds_the_exact_product_once() {
+        let (checked, ties) =
+            exact_product_at(&[exact_blur::FFT_FROM_SIGMA, 8.0, 14.0, 25.0]);
+        assert!(checked > 100_000, "{checked} values checked");
+        assert!(ties * 400 < checked, "{ties} ties of {checked}");
     }
 
     #[test]
@@ -937,8 +961,8 @@ mod tests {
         // pixels read in the page's own space: the alpha everywhere and the
         // colour inside a shape bit for bit, an edge's colour by at most a
         // level, and some edge moved -- the route is not the chain. Taken on
-        // every draw whose device sigma is summed tap by tap: 3 and 4.9 at
-        // density 2 go through the FFT and keep the chain.
+        // every draw, at device sigmas summed tap by tap and through the FFT:
+        // 3 and 4.9 at density 2, and 8 at either.
         let colours = [
             "rgb(200 120 40)",
             "rgb(30 60 200 / 0.7)",
@@ -955,7 +979,7 @@ mod tests {
                 (0usize, 0usize, 0u8, 0usize, 0usize);
             for shape in 0..4 {
                 for colour in colours {
-                    for sigma in [0.5f32, 1.5, 3.0, 4.9] {
+                    for sigma in [0.5f32, 1.5, 3.0, 4.9, 8.0] {
                         for density in [1, 2] {
                             let before = COVERAGE_RUNS.with(|r| r.get());
                             let ours = drawn(
@@ -986,7 +1010,7 @@ mod tests {
             assert_eq!(alpha, 0, "{space:?}: alphas moved");
             assert!(worst <= 1, "{space:?}: a colour byte moved by {worst}");
             assert!(moved > 0, "{space:?}: nothing moved of {px} pixels");
-            assert_eq!(runs, 4 * 5 * 4 * 2 - 4 * 5 * 2, "{space:?}");
+            assert_eq!(runs, 4 * 5 * 5 * 2, "{space:?}");
             // Deep inside the triangle, past a reach of the blur at density 1.
             for colour in colours {
                 for sigma in [0.5f32, 1.5] {
@@ -1271,9 +1295,10 @@ mod tests {
 
     #[test]
     fn a_draw_the_route_cannot_take_keeps_the_chain() {
-        // A float page, and a sigma through the FFT, take the chain's layer;
-        // the same draw on an eight-bit page at a tapped sigma takes the
-        // route. Counted, since the bytes alone cannot tell the two apart.
+        // A float page takes the chain's layer; the same draw on an
+        // eight-bit page takes the route, at a sigma summed tap by tap and
+        // at one through the FFT. Counted, since the bytes alone cannot tell
+        // the two apart.
         let runs = |depth: crate::pixels::PixelDepth, sigma: f32| {
             let mut canvas = Canvas::with_options(
                 60.0,
@@ -1305,7 +1330,7 @@ mod tests {
         assert_eq!(runs(PixelDepth::Uint8, 3.0), 1, "an eight-bit page");
         assert_eq!(runs(PixelDepth::F16, 3.0), 0, "a half-float page");
         assert_eq!(runs(PixelDepth::F32, 3.0), 0, "a float page");
-        assert_eq!(runs(PixelDepth::Uint8, 6.0), 0, "a sigma through the FFT");
+        assert_eq!(runs(PixelDepth::Uint8, 6.0), 1, "a sigma through the FFT");
     }
 
     /// Props no canvas has by default, told apart by their pixel geometry.

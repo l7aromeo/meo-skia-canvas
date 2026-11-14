@@ -46,7 +46,7 @@ use crate::{
     context::{
         blur_mask,
         chain::{self, Depth, Step},
-        chain_cache, coverage_of, exact_blur,
+        chain_cache, coverage_of,
         exact_gradient::GradientSpec,
         faint::{Faint, composited},
         kept::CoverageInput,
@@ -3777,12 +3777,7 @@ impl Group {
                     && let [Step::Blur(sigma)] = &steps[..]
                     // Undithered: `coverage_files` records no copy of a
                     // dithered run.
-                    && coverage_plays(
-                        canvas,
-                        &run.exact,
-                        false,
-                        sigma * replay_scale(canvas),
-                    )
+                    && coverage_plays(canvas, &run.exact, false)
                     && let Some(at) =
                         chain::coverage::Placement::of(canvas, *sigma, content)
                 {
@@ -5378,24 +5373,23 @@ fn replay_scale(canvas: &SkCanvas) -> f32 {
 
 /// Whether a blur in `exact`, a colour placed on the bytes an eight-bit page
 /// stores, is made on `canvas` from its coverage alone -- see
-/// [`chain::coverage`] -- at `device_sigma`, in `canvas`'s device pixels:
-/// the half of the route's conditions a draw asks as it is played. A
-/// blurred path asks it in [`BlurOp::coverage_colour`] and a run of text in
-/// [`Composite::Chain`]'s playback; a run asks [`coverage_files`] as it is
-/// recorded, which keeps it from recording a copy this would never play.
+/// [`chain::coverage`]: the half of the route's conditions a draw asks as it
+/// is played. A blurred path asks it in [`BlurOp::coverage_colour`] and a run
+/// of text in [`Composite::Chain`]'s playback; a run asks [`coverage_files`]
+/// as it is recorded, which keeps it from recording a copy this would never
+/// play.
 ///
 /// `false` on a page that is not eight bits a channel in RGBA or BGRA; on a
 /// canvas that is not a raster on the CPU -- the GPU, a recording, a
 /// document; on a page in another space than the colour was held in, as a
-/// canvas drawn into one in another space is; for a dithered paint, whose
-/// colour varies from pixel to pixel; and for a sigma through the FFT, which
-/// blurs a plane's rows in pairs and so rounds an alpha unlike the chain's
-/// sums.
+/// canvas drawn into one in another space is; and for a dithered paint,
+/// whose colour varies from pixel to pixel. Any sigma: through the FFT, as
+/// tap by tap, the route rounds each value once from the exact product, but
+/// for exact ties.
 fn coverage_plays(
     canvas: &SkCanvas,
     exact: &ExactColour,
     dither: bool,
-    device_sigma: f32,
 ) -> bool {
     #[cfg(test)]
     if !COVERAGE_ROUTE.with(Cell::get) {
@@ -5407,11 +5401,7 @@ fn coverage_plays(
     );
     let same_space =
         canvas.image_info().color_space().as_ref() == Some(&exact.space);
-    eight
-        && same_space
-        && !dither
-        && device_sigma < exact_blur::FFT_FROM_SIGMA
-        && blur_mask::draws_on_cpu(canvas)
+    eight && same_space && !dither && blur_mask::draws_on_cpu(canvas)
 }
 
 /// Whether a run of text filed under `steps`, in `exact` through a paint
@@ -5495,9 +5485,7 @@ impl BlurOp {
                 // On an eight-bit page on the CPU a placed colour's blur is
                 // made from the draw's coverage alone -- see
                 // `chain::coverage` -- and the chain's layer is not drawn.
-                if let Some(rgb) =
-                    self.coverage_colour(canvas, self.paint.sigma * replay)
-                {
+                if let Some(rgb) = self.coverage_colour(canvas) {
                     let gain = chain.gain.alpha_f();
                     let info = canvas.image_info();
                     // The plane holds coverage alone, so a fill draws it
@@ -5628,16 +5616,11 @@ impl BlurOp {
     /// in -- see [`chain::coverage`] -- or `None` for the chain's layer: for
     /// a colour not placed on the bytes an eight-bit page stores, and
     /// wherever [`coverage_plays`] says no.
-    fn coverage_colour(
-        &self,
-        canvas: &SkCanvas,
-        device_sigma: f32,
-    ) -> Option<[f32; 3]> {
+    fn coverage_colour(&self, canvas: &SkCanvas) -> Option<[f32; 3]> {
         let exact = self.paint.exact.as_ref()?;
         let placed = matches!(self.paint.faint, Faint::Dropped) && exact.bytes;
-        (placed
-            && coverage_plays(canvas, exact, self.paint.dither, device_sigma))
-        .then(|| exact.at(self.paint.color.a).0.rgb)
+        (placed && coverage_plays(canvas, exact, self.paint.dither))
+            .then(|| exact.at(self.paint.color.a).0.rgb)
     }
 
     /// The paths the op draws: its one, or each of a run's.
@@ -7336,7 +7319,7 @@ mod coverage_run_tests {
             ),
             (
                 "a sigma through the FFT",
-                0,
+                1,
                 Run {
                     filter: "blur(6px)",
                     ..OPAQUE
