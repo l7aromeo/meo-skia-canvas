@@ -3654,15 +3654,21 @@ mod tests {
     /// it draws on a canvas, with every style copied where `copied`.
     fn built_from(changes: Change, copied: bool) -> (bool, Vec<u8>) {
         use crate::{canvas::Canvas, font::FontLibrary, text::TextEngine};
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
+        // Once on each thread: a registration is seen only on the thread
+        // that made it -- see `FontLibrary::register_font_from_data` --
+        // and tests run on threads of their own.
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
             FontLibrary::new()
                 .register_font_from_path(
                     "GivenOswald",
                     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
                 )
                 .expect("Oswald registers");
-        });
+        }
         let mut base = SpanStyle {
             font_families: vec!["GivenOswald".into()],
             font_size: 28.0,
@@ -4234,15 +4240,21 @@ mod tests {
     /// style changed by `change`, laid out at `width`.
     fn lazily_drawn(change: Change, width: f32) -> crate::text::Paragraph {
         use crate::{font::FontLibrary, text::TextEngine};
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
+        // Once on each thread: a registration is seen only on the thread
+        // that made it -- see `FontLibrary::register_font_from_data` --
+        // and tests run on threads of their own.
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
             FontLibrary::new()
                 .register_font_from_path(
                     "LazyOswald",
                     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
                 )
                 .expect("Oswald registers");
-        });
+        }
         let base = SpanStyle {
             font_families: vec!["LazyOswald".into()],
             font_size: 24.0,
