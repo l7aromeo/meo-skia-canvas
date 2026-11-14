@@ -738,8 +738,8 @@ impl Drawn {
         // result it left, once the input is that one to the byte -- see
         // `kept`. The input is judged by the region where it lies in the
         // layer, before it is copied out and padded, which a result found
-        // never needs; a shadow cast from another layer, by that layer's
-        // region as well.
+        // never needs; a shadow cast from another layer, by the alphas of
+        // that layer's region as well, which are all the shadow reads of it.
         let input = match context.is_none() {
             true => ChainInput::of_region(
                 &self.snapshot,

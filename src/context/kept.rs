@@ -23,7 +23,9 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use skia_safe::{Flattenable, IRect, ISize, Image, ImageInfo, Vector};
+use skia_safe::{
+    ColorType, Flattenable, IRect, ISize, Image, ImageInfo, Vector,
+};
 
 use crate::{
     cache_map::{CacheHasher, KeptSets},
@@ -229,6 +231,31 @@ fn rows_copied(pixels: &Pixels) -> Option<Arc<[u8]>> {
     with_rows(pixels, |rows| rows.flatten().copied().collect())
 }
 
+/// Which byte of an eight-bit pixel holds its alpha: the last, in RGBA and
+/// in BGRA alike.
+const ALPHA_BYTE: usize = 3;
+
+/// The alpha of each of `pixels`, row by row with nothing between rows;
+/// `None` for pixels not of eight bits a channel, or not in main memory.
+fn alphas_copied(pixels: &Pixels) -> Option<Arc<[u8]>> {
+    let eight_bits = matches!(
+        pixels.image.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    if !eight_bits {
+        return None;
+    }
+    let pixel = pixels.image.image_info().bytes_per_pixel();
+    let count = pixels.rect.width() as usize * pixels.rect.height() as usize;
+    with_rows(pixels, |rows| {
+        let mut alphas = Vec::with_capacity(count);
+        rows.for_each(|row| {
+            alphas.extend(row.chunks_exact(pixel).map(|p| p[ALPHA_BYTE]));
+        });
+        alphas.into()
+    })
+}
+
 /// How many keys the record of keys seen once holds: 256 sets of
 /// [`SEEN_WAYS`].
 const SEEN_SETS: usize = 256;
@@ -280,9 +307,9 @@ pub(crate) struct ChainKey {
     steps: Arc<[StepKey]>,
     scale: [u32; 2],
     gain: u32,
-    /// The digest of what the chain's shadow is cast from, where that is
-    /// not its input, and the alpha the shadow takes it at -- see
-    /// [`ChainInput::cast_from`].
+    /// The digest of the alpha of what the chain's shadow is cast from,
+    /// where that is not its input, and the alpha the shadow takes it at --
+    /// see [`ChainInput::cast_from`].
     cast: Option<(u64, u32)>,
 }
 
@@ -297,7 +324,8 @@ impl StoreKey for ChainKey {
 #[derive(Clone)]
 pub(crate) struct KeptChain {
     input: Arc<[u8]>,
-    /// What its shadow was cast from, where that was not its input.
+    /// The alpha of what its shadow was cast from, where that was not its
+    /// input.
     cast: Option<Arc<[u8]>>,
     output: Image,
 }
@@ -324,8 +352,9 @@ static SEEN_CHAINS: LazyLock<Mutex<Seen<ChainKey>>> =
 pub(crate) struct ChainInput {
     key: ChainKey,
     input: Pixels,
-    /// What the chain's shadow is cast from, where that is not `input`.
-    cast: Option<Pixels>,
+    /// The alpha of what the chain's shadow is cast from, where that is not
+    /// `input`, copied out once to be digested, compared and kept.
+    cast: Option<Arc<[u8]>>,
 }
 
 impl ChainInput {
@@ -383,20 +412,23 @@ impl ChainInput {
     /// This input, its chain's shadow cast from `read` of `image`, a raster
     /// image, at `alpha` rather than from the input itself -- see
     /// `chain::Cast`. `read` is the same size as the input's own rectangle
-    /// and holds the same chain's draw, so it is judged as the input is:
-    /// two such inputs alike in both rectangles are alike to the byte.
-    /// `None` where `image`'s pixels are not in main memory.
+    /// and holds the same chain's draw. The shadow reads nothing of it but
+    /// its alpha, so its alpha alone is judged, and kept: two such inputs
+    /// alike in the input's pixels and the cast's alphas make the same
+    /// result to the byte, at a quarter of the cast's bytes. `None` where
+    /// `image`'s pixels are not of eight bits a channel or not in main
+    /// memory.
     pub(crate) fn cast_from(
         mut self,
         image: &Image,
         read: IRect,
         alpha: f32,
     ) -> Option<Self> {
-        let cast = Pixels {
+        let cast = alphas_copied(&Pixels {
             image: image.clone(),
             rect: read,
-        };
-        self.key.cast = Some((digest_rows(&cast)?, alpha.to_bits()));
+        })?;
+        self.key.cast = Some((digest(&cast), alpha.to_bits()));
         self.cast = Some(cast);
         Some(self)
     }
@@ -410,12 +442,7 @@ impl ChainInput {
         }
         let kept = CHAINS.lock().get(&self.key);
         let same = kept.as_ref().map(|kept| {
-            rows_are(&self.input, &kept.input)
-                && match (&self.cast, &kept.cast) {
-                    (Some(cast), Some(bytes)) => rows_are(cast, bytes),
-                    (None, None) => true,
-                    _ => false,
-                }
+            rows_are(&self.input, &kept.input) && self.cast == kept.cast
         });
         let found = kept
             .zip(same)
@@ -435,18 +462,11 @@ impl ChainInput {
         let Some(input) = rows_copied(&self.input) else {
             return;
         };
-        let cast = match &self.cast {
-            Some(cast) => match rows_copied(cast) {
-                Some(bytes) => Some(bytes),
-                None => return,
-            },
-            None => None,
-        };
         CHAINS.lock().put(
             self.key,
             KeptChain {
                 input,
-                cast,
+                cast: self.cast,
                 output,
             },
         );
@@ -1050,6 +1070,57 @@ mod tests {
         assert_eq!(kept.key, other.key, "the control");
         kept.keep_seen(image(7));
         assert!(other.kept().is_none(), "another cast, one digest");
+    }
+
+    #[test]
+    fn a_shadow_cast_from_another_layer_is_judged_and_kept_by_its_alpha() {
+        // The shadow reads nothing of what it is cast from but its alpha, so
+        // a cast whose colour alone differs makes the same result and takes
+        // the one kept, and only the alphas are kept: a byte a pixel.
+        let shadow = Step::Shadow {
+            offset: Vector::new(1.0, 2.0),
+            sigma: 2.0,
+            colour: Color4f::new(0.0, 0.0, 0.0, 1.0),
+            space: ColorSpace::new_srgb(),
+            shadow_only: false,
+        };
+        let steps = [shadow];
+        let scale = Vector::new(1.0, 1.0);
+        let size = (24, 20);
+        let whole = IRect::from_size(size);
+        // A cast of `alpha` whose colour channels hold `colour`.
+        let cast = |alpha: u8, colour: u8| {
+            let info = ImageInfo::new(
+                size,
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                ColorSpace::new_srgb(),
+            );
+            let bytes: Vec<u8> = (0..size.0 * size.1)
+                .flat_map(|_| [colour, colour, colour, alpha])
+                .collect();
+            started::raster_from_data(
+                &info,
+                Data::new_copy(&bytes),
+                info.min_row_bytes(),
+            )
+            .expect("an image")
+        };
+        let input = |alpha, colour| {
+            ChainInput::of(&image(70), &steps, scale, 1.0)
+                .expect("a key")
+                .cast_from(&cast(alpha, colour), whole, 0.6)
+                .expect("a key")
+        };
+        let kept = input(200, 90);
+        assert_eq!(
+            kept.cast.as_ref().map(|cast| cast.len()),
+            Some((size.0 * size.1) as usize),
+            "kept more than its alphas"
+        );
+        kept.keep_seen(image(8));
+        assert!(input(200, 30).kept().is_some(), "another colour missed");
+        assert!(input(201, 90).kept().is_none(), "another alpha taken");
     }
 
     #[test]
