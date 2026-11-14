@@ -1878,12 +1878,15 @@ impl ReplayedText {
 
     /// What the run inks on a canvas whose transform is `device`, within
     /// `clip`, in that canvas's pixels: its replay and its shadow recorded
-    /// under `device` -- see [`inked_by`] -- and bounded as Skia bounds them,
-    /// which its own culling depends on. Recorded at the scale it is played
-    /// at, since hinting puts a run's ink elsewhere at another -- see
-    /// [`reach_the_clip`]. `None` where the run has no replay, a paragraph
-    /// drawn from its raster, or composites through a layer of its own, which
-    /// covers the clip.
+    /// under `device` -- see [`inked_by`] -- bounded as Skia bounds them,
+    /// which its own culling depends on, and widened by [`HINTED_INK_DRIFT`]
+    /// device pixels, since Skia takes a glyph's bounds at the font's own
+    /// size while FreeType hints it at the size it is drawn: the drift that
+    /// constant was measured for, at most 1.73 pixels over its CoreText and
+    /// FreeType sweeps. Too wide only ends a batch of runs sooner; too
+    /// narrow leaves ink unwritten. `None` where the
+    /// run has no replay, a paragraph drawn from its raster, or composites
+    /// through a layer of its own, which covers the clip.
     pub(crate) fn ink_under(
         &self,
         device: &Matrix,
@@ -1902,6 +1905,10 @@ impl ReplayedText {
             }
             replay.draw(canvas, &self.matrix, &self.paint);
         });
+        // Skia bounds a run by its glyphs at the font's own size, unhinted,
+        // and FreeType hints them at the size they are drawn: at a density
+        // of 2 a run inked a row below what its recording reported.
+        let inked = inked.with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
         Some(IRect::intersect(&inked.round_out(), &clip).unwrap_or_default())
     }
 
