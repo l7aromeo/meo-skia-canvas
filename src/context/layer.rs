@@ -6007,6 +6007,97 @@ mod tests {
         assert!(moved.is_some(), "the oval covered alike at every shift");
     }
 
+    /// A draw between two kept runs is filed as an entry whose
+    /// [`Layer::reach`] is what it draws, not the page, in a blend by
+    /// coefficients or one read in the shader, under a clip or not: the
+    /// page's recording keeps a bounding hierarchy, and neither an isolated
+    /// layer -- see `page::PageRecorder::flush` -- nor a clip's run -- see
+    /// `page::PageRecorder::close_run` -- reaches it as one operation
+    /// bounded by the page. The read back that draws kept runs on the CPU
+    /// -- see [`super::replayed_on_their_backdrop`] -- can then tell a draw
+    /// beside the runs from one over them.
+    #[test]
+    fn a_draw_between_kept_runs_reaches_only_what_it_draws() {
+        use super::Layer;
+        use crate::{
+            canvas::Canvas, font::FontLibrary, paint::BlendMode, path::FillRule,
+        };
+        use skia_safe::Contains;
+        FontLibrary::new()
+            .register_font_from_path(
+                "ReachOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled face registers");
+        /// Fills of the rectangle between the runs: more ops than a
+        /// recording is filed bare with.
+        const FILLS: usize = 24;
+        let drawn = Rect::from_xywh(300.0, 10.0, 40.0, 8.0);
+        // Anti-aliasing may widen the bounds Skia keeps by a pixel.
+        let outset = drawn.with_outset((1.0, 1.0));
+        let mut wrong = vec![];
+        for blend in [BlendMode::SourceOver, BlendMode::Multiply] {
+            for clipped in [false, true] {
+                let mut canvas = Canvas::new(400.0, 200.0);
+                let ctx = canvas.context();
+                assert!(ctx.set_font_css("16px ReachOswald"));
+                ctx.set_global_composite_operation(BlendMode::Multiply);
+                ctx.fill_text("Sphinx of black quartz", 10.0, 20.0, None);
+                ctx.set_global_composite_operation(blend);
+                ctx.save();
+                if clipped {
+                    ctx.begin_path();
+                    ctx.rect(250.0, 0.0, 120.0, 100.0);
+                    ctx.clip(FillRule::NonZero);
+                }
+                // More fills than a recording is filed bare with, so that
+                // the wrapped one is held too -- see `page::UNWRAPPED_OPS`.
+                for _ in 0..FILLS {
+                    ctx.fill_rect(
+                        drawn.left,
+                        drawn.top,
+                        drawn.width(),
+                        drawn.height(),
+                    );
+                }
+                ctx.restore();
+                ctx.set_global_composite_operation(BlendMode::Multiply);
+                ctx.fill_text("Sphinx of black quartz", 10.0, 40.0, None);
+                let entries = ctx.inner.entries();
+                let kept =
+                    |entry: &&Layer| matches!(entry, Layer::ReplayedText(_));
+                let reaches: Vec<_> = entries
+                    .layers
+                    .iter()
+                    .skip_while(|entry| !kept(entry))
+                    .skip(1)
+                    .take_while(|entry| !kept(entry))
+                    .map(Layer::reach)
+                    .collect();
+                // Every entry between the runs within the rectangle, and the
+                // rectangle among them.
+                let within = reaches.iter().all(|reach| {
+                    reach.is_some_and(|reach| {
+                        reach.is_empty() || outset.contains(reach)
+                    })
+                });
+                let found = reaches.iter().any(|reach| {
+                    reach.is_some_and(|reach| reach.contains(drawn))
+                });
+                if !(within && found) {
+                    wrong.push(format!(
+                        "{blend:?} clipped {clipped}: {reaches:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the rectangle {drawn:?} reaches\n{}",
+            wrong.join("\n")
+        );
+    }
+
     /// A group through no layer composites what it holds as it is, so a
     /// document opens it at an opacity of 1. `Context2D` makes one only for
     /// a source asking nothing of a backend, which a document plays without

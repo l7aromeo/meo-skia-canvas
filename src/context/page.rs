@@ -414,6 +414,14 @@ pub struct PageRecorder {
     /// can still be joined; `None` once anything could have seen it -- a
     /// flush, which every export goes through, records it for good.
     blur_run: Option<u64>,
+    /// Whether the page has filed a kept run read in the shader since it was
+    /// last cleared -- see [`ReplayedText::reads_the_page`]. A GPU playback
+    /// draws such runs on the CPU over one read back, and a batch of them
+    /// extends past an entry between them only where that entry's reach
+    /// meets none of them -- see `layer::replayed_on_their_backdrop` -- so
+    /// only here does [`Self::close_run`] pay to file a clip's run with
+    /// the reach of what it draws.
+    holds_reading_runs: bool,
     /// The frame the last layer, a [`CutOp`], was opened in while it can
     /// still be joined, as `blur_run` is for a [`BlurOp`].
     cut_run: Option<u64>,
@@ -1152,6 +1160,7 @@ impl PageRecorder {
             framed: false,
             frame: 0,
             blur_run: None,
+            holds_reading_runs: false,
             cut_run: None,
             gradient_run: None,
             gradient_filtered: 0,
@@ -1318,6 +1327,7 @@ impl PageRecorder {
         // what it was given.
         self.layers = Arc::default();
         self.features = Arc::default();
+        self.holds_reading_runs = false;
         // A count of its own, which what the old content records when an
         // export first plays it adds to rather than to this one's.
         self.recorded = RecordedCount::default();
@@ -1554,6 +1564,7 @@ impl PageRecorder {
             self.fork_current();
         }
         let clip = &run.clip;
+        let reading = self.holds_reading_runs;
         self.current().each(|canvas, recording| {
             let picture = match (&entry, recording) {
                 (Layer::Picture(picture), _) => picture,
@@ -1567,7 +1578,19 @@ impl PageRecorder {
                 ClipOp::Intersect,
                 true, /* antialias */
             );
-            canvas.draw_picture(picture, None, None);
+            // Played rather than drawn where the page holds runs read in the
+            // shader: drawn, a picture of more than one operation is
+            // recorded as one operation reaching its own cull rectangle,
+            // which for a run, recorded without a bounding hierarchy, is the
+            // page. Played, each operation is bounded on its own. Not
+            // everywhere: copying the operations cost a page of 500 clipped
+            // frames a third of its time.
+            match reading {
+                true => picture.playback(canvas),
+                false => {
+                    canvas.draw_picture(picture, None, None);
+                }
+            }
             canvas.restore();
         });
         self.changed = true;
@@ -2378,6 +2401,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.holds_reading_runs |= text.reads_the_page();
         self.append_under_clip(
             |clip| match clip {
                 None => Layer::ReplayedText(text),
