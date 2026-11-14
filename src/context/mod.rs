@@ -1254,9 +1254,9 @@ impl Context2D {
     /// route its dye and filter take. `replay`, where the draw's kind can be
     /// kept whole, is what a canvas's pattern is drawn through at playback
     /// -- see [`Replay`]. `text` where the draw is a run of text -- see
-    /// [`TextRun`]. `gradient` where the dye is a gradient, its description,
-    /// from which a GPU canvas draws it in the CPU's bytes -- see
-    /// [`GradientDye`]. `f` is told which [`Pass`] it draws.
+    /// [`TextRun`]. `cpu_bytes` where a GPU canvas draws the draw in the
+    /// bytes the CPU draws it in -- see [`CpuBytes`]. `f` is told which
+    /// [`Pass`] it draws.
     #[allow(clippy::too_many_arguments)]
     pub fn render_to_canvas<F>(
         &self,
@@ -1265,7 +1265,7 @@ impl Context2D {
         features: VectorFeatures,
         replay: Option<Replay>,
         text: Option<TextRun>,
-        gradient: Option<GradientDye<'_>>,
+        cpu_bytes: Option<CpuBytes<'_>>,
         f: F,
     ) where
         F: Fn(&SkCanvas, &Paint, Pass),
@@ -1277,7 +1277,7 @@ impl Context2D {
                 exact,
                 features,
                 text.as_ref(),
-                gradient.is_some(),
+                cpu_bytes.is_some(),
                 &f,
                 None,
             )
@@ -1297,7 +1297,7 @@ impl Context2D {
                 paint,
                 features,
                 text.as_ref(),
-                gradient.is_some(),
+                cpu_bytes.is_some(),
                 &f,
             );
         // A draw under a filter of its own whose shadow is filed apart is
@@ -1309,7 +1309,7 @@ impl Context2D {
                 exact,
                 features,
                 text.as_ref(),
-                gradient.is_some(),
+                cpu_bytes.is_some(),
                 &f,
                 self.exact_steps(),
             )
@@ -1403,15 +1403,16 @@ impl Context2D {
             true => features.without(VectorFeatures::IMAGE_FILTER),
             false => features,
         };
-        // A draw dyed by a gradient on an eight-bit page is filed as a
-        // `GradientDraw`, which a GPU canvas draws in the CPU's bytes -- see
+        // A draw dyed by a gradient, or a canvas drawn as an image that holds
+        // such draws, on an eight-bit page is filed as a `GradientDraw`,
+        // which a GPU canvas draws in the CPU's bytes -- see
         // `layer::GradientDraw`. A float page is drawn on the CPU whichever
         // engine is asked for -- see `RenderingEngine::for_canvas` -- and
         // has nothing to choose; nor has a page in a process no GPU can play
         // it in -- see `RenderingEngine::never_gpu`.
         #[cfg(test)]
-        let gradient = gradient.filter(|_| FILES_GRADIENTS.get());
-        if let Some(dye) = gradient.filter(|_| self.files_gradients()) {
+        let cpu_bytes = cpu_bytes.filter(|_| FILES_GRADIENTS.get());
+        if let Some(route) = cpu_bytes.filter(|_| self.files_gradients()) {
             let dual = self.records_pixels_apart();
             let pixels = match dual {
                 true => Recording::Pixels,
@@ -1433,12 +1434,13 @@ impl Context2D {
                     .flatten()
             };
             // A path the effect reproduces is kept rather than recorded.
-            let piece = match self.gradient_path(
-                &dye,
-                paint,
-                paint_for(pixels),
-                beyond,
-            ) {
+            let path = match &route {
+                CpuBytes::Gradient(dye) => {
+                    self.gradient_path(dye, paint, paint_for(pixels), beyond)
+                }
+                CpuBytes::Source => None,
+            };
+            let piece = match path {
                 Some(path) => layer::GradientPiece {
                     pixels: layer::GradientPixels::Path(path.clone()),
                     document: document(),
@@ -1450,16 +1452,33 @@ impl Context2D {
                     else {
                         return;
                     };
-                    let gpu = self.gradient_on_gpu(
-                        &dye,
-                        paint,
-                        paint_for(pixels),
-                        beyond,
-                        native.cull_rect(),
-                        &|canvas, paint| draw_in(canvas, pixels, paint, paint),
-                        &|canvas, paint| render_shadow(canvas, paint, pixels),
-                        &|canvas, paint| f(canvas, paint, Pass::Draw),
-                    );
+                    let shadow = |canvas: &SkCanvas, paint: &Paint| {
+                        render_shadow(canvas, paint, pixels)
+                    };
+                    let shape = |canvas: &SkCanvas, paint: &Paint| {
+                        f(canvas, paint, Pass::Draw)
+                    };
+                    let gpu = match &route {
+                        CpuBytes::Gradient(dye) => self.gradient_on_gpu(
+                            dye,
+                            paint,
+                            paint_for(pixels),
+                            beyond,
+                            native.cull_rect(),
+                            &|canvas, paint| {
+                                draw_in(canvas, pixels, paint, paint)
+                            },
+                            &shadow,
+                            &shape,
+                        ),
+                        CpuBytes::Source => self.raster_on_gpu(
+                            paint,
+                            paint_for(pixels),
+                            beyond,
+                            &shadow,
+                            &shape,
+                        ),
+                    };
                     let Some(gpu) = gpu else {
                         return;
                     };
@@ -1523,15 +1542,16 @@ impl Context2D {
     /// a CanvasKit filter, which Skia's layer runs in the draw's own units;
     /// and for one under a blend that covers beyond it, which
     /// `render_to_canvas` composites with its shadow through one layer.
-    /// `gradient` says the draw is dyed by a gradient, whose alpha the shadow
-    /// casts, which a GPU canvas then makes on the CPU for the chain -- see
-    /// [`Self::chain_input`].
+    /// `cpu_bytes` says a GPU canvas draws the draw in the CPU's bytes -- a
+    /// gradient, whose alpha the shadow casts, or a canvas holding such
+    /// draws, see [`CpuBytes`] -- and so makes it on the CPU for the chain --
+    /// see [`Self::chain_input`].
     fn files_shadow_through_chain<F>(
         &self,
         paint: &Paint,
         features: VectorFeatures,
         text: Option<&TextRun>,
-        gradient: bool,
+        cpu_bytes: bool,
         f: &F,
     ) -> bool
     where
@@ -1610,7 +1630,7 @@ impl Context2D {
         let Some((entry, reach)) = entry else {
             return false;
         };
-        let entry = self.chain_input(gradient, entry);
+        let entry = self.chain_input(cpu_bytes, entry);
         // The group composites through the blend, and a document through
         // Skia's shadow filter in the colour it names, of what the draw's
         // own filter makes.
@@ -1664,18 +1684,19 @@ impl Context2D {
 
     /// `entry`, a draw recorded for a chain to run -- see
     /// [`Self::files_through_chain`] -- as a run a GPU canvas draws in the
-    /// CPU's bytes, where the draw is dyed by a gradient: made on the CPU
-    /// onto the chain's layer -- see `layer::OnGpu::Alone` -- rather than
-    /// by Ganesh's own gradient, which the chain would otherwise blur, tint
+    /// CPU's bytes, where `cpu_bytes` says the draw is one -- dyed by a
+    /// gradient, or a canvas holding such draws, see [`CpuBytes`]: made on
+    /// the CPU onto the chain's layer -- see `layer::OnGpu::Alone` -- rather
+    /// than by Ganesh's own draws, which the chain would otherwise blur, tint
     /// or cast a shadow from up to four levels off what a CPU canvas runs it
     /// on. Not the effect, whose image covers only the page, where a chain
     /// reads past it: a blur draws in what lies beyond the page's edge.
     /// Any other entry, and any on a page that files no gradient draws, as
     /// it is.
-    fn chain_input(&self, gradient: bool, entry: Layer) -> Layer {
+    fn chain_input(&self, cpu_bytes: bool, entry: Layer) -> Layer {
         #[cfg(test)]
-        let gradient = gradient && FILES_GRADIENTS.get();
-        if !gradient || !self.files_gradients() {
+        let cpu_bytes = cpu_bytes && FILES_GRADIENTS.get();
+        if !cpu_bytes || !self.files_gradients() {
             return entry;
         }
         let (pixels, document) = match entry {
@@ -1751,6 +1772,27 @@ impl Context2D {
                 },
             );
         }
+        self.raster_on_gpu(paint, pixels, beyond, shadow, shape)
+    }
+
+    /// How a GPU canvas draws, on the CPU, a draw made with `paint` --
+    /// `pixels` where the page's pixels recording draws with another: each
+    /// layer of it recorded with `SrcOver` and composited through the blend
+    /// by itself -- the draw's shadow, then the draw; and under a blend that
+    /// changes what lies `beyond` the draw, the two in one layer, as a draw
+    /// through such a blend is composited -- see `layer::OnGpu::Raster`.
+    /// `shadow` and `shape` draw the draw's shadow and itself.
+    fn raster_on_gpu(
+        &self,
+        paint: &Paint,
+        pixels: &Paint,
+        beyond: bool,
+        shadow: &dyn Fn(&SkCanvas, &Paint),
+        shape: &dyn Fn(&SkCanvas, &Paint),
+    ) -> Option<layer::OnGpu> {
+        let mut over = pixels.clone();
+        over.set_blend_mode(BlendMode::SrcOver);
+        let blend = self.state.global_composite_operation;
         let mut cast = paint.clone();
         cast.set_blend_mode(BlendMode::SrcOver);
         let layers: Vec<Picture> = match beyond {
@@ -2334,8 +2376,9 @@ impl Context2D {
     /// `steps`, where given, is the chain run instead of the one
     /// [`Self::draw_chain`] picks: the whole of the draw's filter, for a
     /// draw whose shadow is filed as a group of its own -- see
-    /// `render_to_canvas` -- which is then filed casting none. `gradient`
-    /// says the draw is dyed by a gradient, which a GPU canvas then makes on
+    /// `render_to_canvas` -- which is then filed casting none. `cpu_bytes`
+    /// says a GPU canvas draws the draw in the CPU's bytes -- a gradient, or
+    /// a canvas holding such draws, see [`CpuBytes`] -- and so makes it on
     /// the CPU for the chain -- see [`Self::chain_input`].
     #[allow(clippy::too_many_arguments)]
     fn files_through_chain<F>(
@@ -2344,7 +2387,7 @@ impl Context2D {
         exact: Option<&Paint>,
         features: VectorFeatures,
         text: Option<&TextRun>,
-        gradient: bool,
+        cpu_bytes: bool,
         f: &F,
         steps: Option<Arc<[Step]>>,
     ) -> bool
@@ -2354,7 +2397,7 @@ impl Context2D {
         let reached = text.map(|text| text.reached);
         let lines = text.is_some_and(|text| text.lines);
         // A draw whose paint blurs what it draws, through an image filter --
-        // a pattern, a gradient, a run of text -- has no `BlurOp`; one whose
+        // a pattern, a cpu_bytes, a run of text -- has no `BlurOp`; one whose
         // paint blurs its coverage, through a mask filter, keeps it, which
         // the chain's recording would blur a second time.
         let unblurrable = reached.is_some()
@@ -2485,7 +2528,7 @@ impl Context2D {
             }
             (entry, _) => entry,
         }
-        .map(|entry| self.chain_input(gradient, entry));
+        .map(|entry| self.chain_input(cpu_bytes, entry));
         // A run of text in one flat colour that the coverage route could
         // play is drawn once more, in its colour opaque, through the paint
         // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
@@ -3356,19 +3399,21 @@ impl Context2D {
             features,
             replay,
             None,
-            self.state.dye(style).gradient().map(|spec| GradientDye {
-                spec,
-                path: Some((
-                    &path,
-                    drawn_bounds(
+            self.state.dye(style).gradient().map(|spec| {
+                CpuBytes::Gradient(GradientDye {
+                    spec,
+                    path: Some((
                         &path,
-                        &paint,
-                        style,
-                        &self.state.matrix,
-                        false,
-                    ),
-                )),
-                whole_pixels,
+                        drawn_bounds(
+                            &path,
+                            &paint,
+                            style,
+                            &self.state.matrix,
+                            false,
+                        ),
+                    )),
+                    whole_pixels,
+                })
             }),
             |canvas, paint, _| {
                 self.fill_or_stroke(canvas, &path, paint, style, mark.as_ref());
@@ -3914,21 +3959,31 @@ impl Context2D {
     /// For a source that carries a nested picture and would otherwise be
     /// rasterized whole. The subset is expanded to whatever a filter reads,
     /// and both rectangles move with it, so the pixels that land on the page
-    /// are the ones that would have landed there anyway.
+    /// are the ones that would have landed there anyway. `apart` as for
+    /// [`Self::draw_source_image`].
     pub fn draw_nested_image(
         &mut self,
         image: &Image,
         picture: Option<&Picture>,
         src_rect: &Rect,
         dst_rect: &Rect,
+        apart: bool,
     ) {
+        let whole = |this: &mut Self| {
+            this.draw_source_image(
+                &flatten_image(image),
+                src_rect,
+                dst_rect,
+                apart,
+            );
+        };
         let Some(subset) = self.visible_source_rect(src_rect, dst_rect) else {
-            return self.draw_image(&flatten_image(image), src_rect, dst_rect);
+            return whole(self);
         };
 
         // The destination the subset covers, so the drawing does not move.
         let Some(to_dst) = Matrix::rect_2_rect(src_rect, dst_rect, None) else {
-            return self.draw_image(&flatten_image(image), src_rect, dst_rect);
+            return whole(self);
         };
         let sub = Rect::from(subset);
         let dst = to_dst.map_rect(sub).0;
@@ -3936,11 +3991,11 @@ impl Context2D {
         match rasterize_region(image, picture, subset) {
             Some(part) => {
                 let src = Rect::from_wh(sub.width(), sub.height());
-                self.draw_image(&part, &src, &dst)
+                self.draw_source_image(&part, &src, &dst, apart)
             }
             // Whole rather than deferred: a picture that keeps travelling is
             // the defect this exists to stop.
-            None => self.draw_image(&flatten_image(image), src_rect, dst_rect),
+            None => whole(self),
         }
     }
 
@@ -4014,6 +4069,29 @@ impl Context2D {
         src_rect: &Rect,
         dst_rect: &Rect,
     ) {
+        self.draw_source_image(image, src_rect, dst_rect, false);
+    }
+
+    /// [`Self::draw_image`] for a canvas drawn as an image, `apart` where its
+    /// page holds what a GPU canvas replaying a recording of it draws in
+    /// other bytes than a CPU canvas -- see `PageRecorder::plays_apart_on_gpu`.
+    ///
+    /// The image of a canvas is backed by its page's picture, and a GPU
+    /// canvas replays that picture as Skia's own draws: two colour glyphs
+    /// there land up to 81 levels from the CPU's bytes and a conic's hard
+    /// stop 255, where drawn on the canvas itself, or drawn into this one
+    /// with `drawCanvas`, they choose at playback how a GPU canvas draws them
+    /// in those bytes. So where `apart`, the draw is filed as a draw a GPU
+    /// canvas makes on the CPU, at its own device pixels, and composites --
+    /// see `layer::OnGpu::Raster` -- and a CPU canvas and a document play it
+    /// as recorded, so that what either stores or writes for it is unchanged.
+    pub fn draw_source_image(
+        &mut self,
+        image: &Image,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        apart: bool,
+    ) {
         let scaling = ScalingOperation::for_matrix(&Matrix::concat(
             &self.state.matrix,
             &Matrix::rect_2_rect(src_rect, dst_rect, None)
@@ -4039,13 +4117,13 @@ impl Context2D {
                 );
             };
             self.files_shadow_through_chain(
-                &paint, features, None, false, &draw,
+                &paint, features, None, apart, &draw,
             )
         };
         if cast_apart {
             let (color, space) = self.state.shadow_color.clone();
             self.state.shadow_color.0.a = 0.0;
-            self.draw_image(image, src_rect, dst_rect);
+            self.draw_source_image(image, src_rect, dst_rect, apart);
             self.state.shadow_color = (color, space);
             return;
         }
@@ -4079,11 +4157,34 @@ impl Context2D {
             // colour filter built for them -- see `Self::pixels_paint`. The
             // image drawn inside asks for nothing: its filter and its blend
             // are the group's.
-            let entry = match self.pixels_paint(&paint) {
-                None => record(&paint).map(Layer::Picture),
-                Some(pixels) => record(&pixels)
+            let entry = match (self.pixels_paint(&paint), apart) {
+                (None, false) => record(&paint).map(Layer::Picture),
+                (Some(pixels), false) => record(&pixels)
                     .zip(record(&paint))
                     .map(|pictures| Layer::Targeted(Arc::new(pictures))),
+                // Played inside the group's layer, whose pixels cannot be
+                // read, so a GPU canvas makes it on the CPU over transparent
+                // -- see `layer::played_on_gpu`.
+                (pixels, true) => {
+                    let drawn = record(pixels.as_ref().unwrap_or(&paint));
+                    let document = pixels.as_ref().and_then(|_| record(&paint));
+                    drawn.map(|drawn| {
+                        Layer::Gradient(Arc::new(layer::GradientDraw {
+                            draws: vec![layer::GradientPiece {
+                                pixels: layer::GradientPixels::Recorded(
+                                    drawn.clone(),
+                                ),
+                                document,
+                                gpu: layer::OnGpu::Raster {
+                                    layers: vec![drawn],
+                                    blend: BlendMode::SrcOver,
+                                    beyond: false,
+                                },
+                            }],
+                            clip: None,
+                        }))
+                    })
+                }
             };
             let contents = entry
                 .map(|entry| (entry, VectorFeatures::PLAIN))
@@ -4127,7 +4228,7 @@ impl Context2D {
             features,
             None,
             None,
-            None,
+            apart.then_some(CpuBytes::Source),
             |canvas, paint, _| {
                 canvas.draw_image_rect_with_sampling_options(
                     image,
@@ -4171,6 +4272,13 @@ impl Context2D {
     /// Charges this page for replaying a source that costs `cost`.
     pub fn charge_replay(&mut self, cost: usize) {
         self.recorder.borrow_mut().charge_replay(cost);
+    }
+
+    /// Whether this canvas's page holds what a GPU canvas replaying a
+    /// recording of it draws in other bytes than a CPU canvas; see
+    /// `PageRecorder::plays_apart_on_gpu`.
+    pub fn plays_apart_on_gpu(&self) -> bool {
+        self.recorder.borrow().plays_apart_on_gpu()
     }
 
     /// What replaying this canvas as a nested picture would cost; see
@@ -4604,10 +4712,12 @@ impl Context2D {
                     colour,
                     own_colours: &own_colours,
                 }),
-                self.state.dye(style).gradient().map(|spec| GradientDye {
-                    spec,
-                    path: None,
-                    whole_pixels: false,
+                self.state.dye(style).gradient().map(|spec| {
+                    CpuBytes::Gradient(GradientDye {
+                        spec,
+                        path: None,
+                        whole_pixels: false,
+                    })
                 }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
@@ -5302,6 +5412,18 @@ pub enum Pass {
     /// A shadow whose colour took the `globalAlpha`, which a named line
     /// colour is drawn without.
     AlphaInShadow,
+}
+
+/// What a draw hands the page so that a GPU canvas draws it in the bytes
+/// the CPU draws it in -- see `layer::GradientDraw`.
+pub enum CpuBytes<'a> {
+    /// A draw dyed by a gradient.
+    Gradient(GradientDye<'a>),
+    /// A canvas drawn as an image whose page holds draws a GPU canvas
+    /// replaying it would draw in other bytes -- see
+    /// `layer::Layer::plays_apart_on_gpu` -- which a GPU canvas draws on
+    /// the CPU instead.
+    Source,
 }
 
 /// A draw's gradient as the draw hands it to the page: what it is made

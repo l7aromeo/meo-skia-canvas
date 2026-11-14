@@ -1261,7 +1261,13 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
         // `Context2D::draw_nested_image`.
         Content::Bitmap(image) if source.nested => {
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_nested_image(image, source.picture.as_ref(), &src, &dst);
+            ctx.draw_nested_image(
+                image,
+                source.picture.as_ref(),
+                &src,
+                &dst,
+                source.plays_apart_on_gpu,
+            );
         }
         Content::Bitmap(image) => {
             // A crop reaching outside the image is clipped to it, and the
@@ -1273,7 +1279,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
             // kind of source, not one bitmap case moves. The picture below is
             // the one that needs it.
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_image(image, &src, &dst);
+            ctx.draw_source_image(image, &src, &dst, source.plays_apart_on_gpu);
         }
         Content::Vector(picture, size) => {
             // An SVG with no intrinsic size is scaled to the canvas instead,
@@ -1342,6 +1348,7 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             replay_cost: 0,
             nested: false,
             picture: None,
+            plays_apart_on_gpu: false,
         },
     };
 
@@ -1403,7 +1410,9 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             Ok(cx.undefined())
         }
         Content::Bitmap(image) => {
-            this.borrow_mut().draw_image(image, &src, &dst);
+            let apart = context.borrow().plays_apart_on_gpu();
+            this.borrow_mut()
+                .draw_source_image(image, &src, &dst, apart);
             Ok(cx.undefined())
         }
         _ => cx.throw_error(

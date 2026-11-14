@@ -1525,7 +1525,11 @@ a conic gradient's hard stops apart from the CPU's (#667), and the test glyphs
 stood up to 255 levels from the CPU canvas. The image is made where the page
 is played back, at the scale and in the pixel format it is played onto, so
 that an export at a density, a canvas drawn into another and a canvas pattern
-draw the glyph as drawing it there would. A shadow's filter is applied to
+draw the glyph as drawing it there would. A canvas holding colour glyphs,
+drawn with `drawImage` into a GPU canvas, is drawn on the CPU over the GPU's
+pixels and lands on the CPU canvas's bytes (#703). Ganesh replaying the
+picture behind the image draws the glyphs' gradients itself: 284 pixels of two
+test glyphs up to 81 levels off. A shadow's filter is applied to
 the glyph image on the CPU, as the CPU canvas applied it to the glyph's layer
 (`layer::ColourText`). On the GPU canvas the four test glyphs, standing
 apart, are the CPU canvas's bytes under a shadow, a blur filter,
@@ -1571,18 +1575,24 @@ centre's coordinates exactly: drawn directly through a path, or as a rectangle
 whose edges fall inside pixels, it put 0.5% and 16% of its pixels a level off.
 Over 600 generated gradients drawn as a rectangle, a rectangle off whole
 pixels, a triangle and a polygon, the GPU canvas parted from the CPU on 582
-pixels, every one within float noise of a half level or a stop. What stays
-apart: those ties; a shape's anti-aliased edge, which is Ganesh's coverage as
-for a flat colour; a gradient the CPU draws in floats -- a translucent
+pixels, every one within float noise of a half level or a stop. A canvas
+holding such a draw, drawn with `drawImage` into a GPU canvas, is drawn on the
+CPU over the GPU's pixels as well (#703), and lands on the CPU canvas's
+bytes under a scale, a rotation, a `globalAlpha`, `multiply`, `copy` and a
+shadow, the shadow cast from the CPU's draw and standing within a level of
+the CPU canvas's: Metal composites any shadow at half precision, a level off
+near a tie, and an x86 CPU canvas composites one up to a level off the
+exact composite the GPU makes on Vulkan.
+The image of a canvas is backed by its page's picture, and Ganesh replaying
+that picture draws the hard stops as its own gradient. What stays apart:
+those ties; a shape's anti-aliased edge, which is Ganesh's coverage as for a
+flat colour; a gradient the CPU draws in floats -- a translucent
 two-point conical one, one interpolated in a space other than the page's, one
 under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
 for -- inside a layer a group opens, where the pixels cannot be read back and
 the CPU's raster is composited instead, a level apart wherever its two
 roundings differ from the CPU's one (9,792 of 16,384 pixels on a translucent
-radial over a fill, measured by compositing at the page); a canvas drawn with
-`drawImage` into a GPU canvas, whose picture Ganesh rasterizes itself (2,064
-pixels, up to 203 levels, on the conic above), where `drawCanvas` keeps the
-choice (#703); a GPU canvas drawn with `drawCanvas` into another under a
+radial over a fill, measured by compositing at the page); a GPU canvas drawn with `drawCanvas` into another under a
 transform other than a whole pixel's translation, where the image would be
 resampled and the draw is made on the CPU at the destination's pixels instead,
 inside the layer the source is drawn through and composited through the draw's
