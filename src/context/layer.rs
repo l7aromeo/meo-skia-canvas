@@ -5793,38 +5793,68 @@ mod shared_shadow_tests {
     /// in order, and finishes the rest alone, and one whose atlas would hold
     /// fewer than two finishes them all alone: the bytes are the same either
     /// way, and the targets opened lie between the shared passes' and each
-    /// shadow's own.
+    /// shadow's own. Both where chains share layers and, through
+    /// [`UNSHARED_LAYERS`], where each takes its own, as on Vulkan: there a
+    /// run is [`MAX_RUN_LAYERS`](super::MAX_RUN_LAYERS) chains rather than
+    /// all of [`PLAIN`]'s.
+    ///
+    /// [`PART_SIDE`] holds part of a run in either: [`PLAIN`]'s 24 shadows
+    /// make one run in four shared layers and three runs of 8 in layers of
+    /// their own, and a side of 512 holds all of a run of 8, so that with
+    /// layers of their own part of the atlas opened what all of it did.
     #[test]
     fn shadows_past_one_atlas_finish_alone() {
-        let sides = [None, Some(512), Some(100)];
-        let read = sides.map(|side| {
-            ATLAS_SIDE.with(|cap| cap.set(side));
-            let read = page(PLAIN, false, false);
-            ATLAS_SIDE.with(|cap| cap.set(None));
-            read
-        });
-        let ([Some(whole), Some(part), Some(none)], Some(alone)) =
-            (read, page(PLAIN, true, false))
-        else {
-            return;
-        };
-        for (what, read) in [("part", &part), ("none", &none)] {
-            let differ = read
-                .bytes
-                .iter()
-                .zip(&alone.bytes)
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(differ, 0, "{what} of the shadows in the atlas, apart");
+        /// An atlas side that holds two lanes of [`PLAIN`]'s or more, and
+        /// fewer than a run of 8 of them.
+        const PART_SIDE: usize = 400;
+        /// An atlas side that holds no two lanes of [`PLAIN`]'s.
+        const NONE_SIDE: usize = 100;
+        for (shape, unshared) in [("shared", false), ("their own", true)] {
+            let sides = [None, Some(PART_SIDE), Some(NONE_SIDE)];
+            let read = sides.map(|side| {
+                UNSHARED_LAYERS.with(|flag| flag.set(unshared));
+                ATLAS_SIDE.with(|cap| cap.set(side));
+                let read = page(PLAIN, false, false);
+                ATLAS_SIDE.with(|cap| cap.set(None));
+                UNSHARED_LAYERS.with(|flag| flag.set(false));
+                read
+            });
+            let ([Some(whole), Some(part), Some(none)], Some(alone)) =
+                (read, page(PLAIN, true, false))
+            else {
+                return;
+            };
+            if unshared {
+                assert_eq!(
+                    whole.layers, PLAIN.n,
+                    "layers {shape}: not one each"
+                );
+            }
+            for (what, read) in [("part", &part), ("none", &none)] {
+                let differ = read
+                    .bytes
+                    .iter()
+                    .zip(&alone.bytes)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    differ, 0,
+                    "layers {shape}: {what} of the shadows in the atlas, apart"
+                );
+            }
+            assert!(
+                whole.opened < part.opened && part.opened < none.opened,
+                "layers {shape}: opened {} with the atlas whole, {} with part \
+                 of it, {} with none",
+                whole.opened,
+                part.opened,
+                none.opened
+            );
+            assert!(
+                none.opened <= alone.opened,
+                "layers {shape}: none, more than alone"
+            );
         }
-        assert!(
-            whole.opened < part.opened && part.opened < none.opened,
-            "opened {} with the atlas whole, {} with part of it, {} with none",
-            whole.opened,
-            part.opened,
-            none.opened
-        );
-        assert!(none.opened <= alone.opened, "none, more than alone");
     }
 
     /// Where Skia refuses the layer the chains would share, each is drawn
