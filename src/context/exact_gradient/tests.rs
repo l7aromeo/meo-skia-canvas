@@ -1377,9 +1377,65 @@ fn has_powerless(spec: &GradientSpec, page: &ColorSpace) -> bool {
 #[test]
 fn the_effect_compiles_at_every_size() {
     for size in SIZES {
-        if let Err(error) = RuntimeEffect::make_for_shader(sksl(size), None) {
-            panic!("size {size}: {error}");
+        for converts in [false, true] {
+            if let Err(error) =
+                RuntimeEffect::make_for_shader(sksl(size, converts), None)
+            {
+                panic!("size {size}, converts {converts}: {error}");
+            }
         }
+    }
+}
+
+/// A gradient interpolated in the page's own space takes the effect
+/// without the conversions, and one in any other space the effect with
+/// them, which a gradient on a Display P3 page interpolated in sRGB needs
+/// to reach the page.
+#[test]
+fn only_a_gradient_that_converts_takes_the_conversions() {
+    let (mut spec, _, _) = case(1);
+    spec.color_space = ColorSpace::new_srgb();
+    let srgb = ColorSpace::new_srgb();
+    let p3 = PixelColorSpace::DisplayP3
+        .to_skia_color_space()
+        .expect("Display P3");
+    let cases = [
+        (
+            InterpolationSpace::Destination,
+            GradientColorSpace::Destination,
+            &srgb,
+            false,
+        ),
+        (
+            InterpolationSpace::SRGB,
+            GradientColorSpace::Srgb,
+            &srgb,
+            false,
+        ),
+        (
+            InterpolationSpace::SRGB,
+            GradientColorSpace::Srgb,
+            &p3,
+            true,
+        ),
+        (
+            InterpolationSpace::OKLab,
+            GradientColorSpace::Oklab,
+            &srgb,
+            true,
+        ),
+        (
+            InterpolationSpace::HSL,
+            GradientColorSpace::Hsl,
+            &srgb,
+            true,
+        ),
+    ];
+    for (named, ours, page, converts) in cases {
+        spec.interpolation.color_space = named;
+        spec.space = ours;
+        let exact = spec.exact(page, 1.0).expect("an effect");
+        assert_eq!(exact.converts, converts, "{named:?} on {page:?}");
     }
 }
 
