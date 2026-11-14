@@ -3870,14 +3870,49 @@ impl Group {
                     Target::Pixels => Step::for_pixels(steps),
                     Target::Document => None,
                 };
-                let outcome = chain::run(
-                    canvas,
-                    pixels.as_deref().unwrap_or(steps),
-                    content,
-                    Depth::Floats,
-                    &paint,
-                    |layer| self.draw_chained(layer, target, &back),
-                );
+                let steps = pixels.as_deref().unwrap_or(steps);
+                // A run in one flat colour the route does not take -- in
+                // another space than its colour was held in -- is drawn
+                // opaque on an eight-bit page on the CPU, its alpha the
+                // chain's gain, so that the blur rounds
+                // its alpha once, as `BlurOp::result_chain` does a path's:
+                // drawn in its translucent colour, the layer rounded its
+                // alpha to a byte before the blur and again after.
+                let opaque = coverage
+                    .as_deref()
+                    .filter(|_| eight_bits_on_cpu(canvas))
+                    .and_then(|run| Some((run.alpha, run.picture.picture()?)));
+                let outcome = match opaque {
+                    Some((alpha, picture)) => {
+                        let mut gained = paint.clone();
+                        gained.set_alpha_f(paint.alpha_f() * byte_alpha(alpha));
+                        chain::run(
+                            canvas,
+                            steps,
+                            content,
+                            Depth::Floats,
+                            &gained,
+                            |layer| {
+                                self.draw_chained_as(
+                                    layer,
+                                    target,
+                                    &back,
+                                    |layer| {
+                                        layer.draw_picture(picture, None, None);
+                                    },
+                                )
+                            },
+                        )
+                    }
+                    None => chain::run(
+                        canvas,
+                        steps,
+                        content,
+                        Depth::Floats,
+                        &paint,
+                        |layer| self.draw_chained(layer, target, &back),
+                    ),
+                };
                 if let Some(outcome) = outcome {
                     outcome.composite(canvas, &paint);
                     if let Some(key) = key {
@@ -5395,13 +5430,19 @@ fn coverage_plays(
     if !COVERAGE_ROUTE.with(Cell::get) {
         return false;
     }
-    let eight = matches!(
-        canvas.image_info().color_type(),
-        ColorType::RGBA8888 | ColorType::BGRA8888
-    );
     let same_space =
         canvas.image_info().color_space().as_ref() == Some(&exact.space);
-    eight && same_space && !dither && blur_mask::draws_on_cpu(canvas)
+    eight_bits_on_cpu(canvas) && same_space && !dither
+}
+
+/// Whether `canvas` is a raster on the CPU of eight bits a channel in RGBA
+/// or BGRA: where a blur's alpha, stored on a byte, could be rounded to one
+/// before the blur as well as after it.
+fn eight_bits_on_cpu(canvas: &SkCanvas) -> bool {
+    matches!(
+        canvas.image_info().color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    ) && blur_mask::draws_on_cpu(canvas)
 }
 
 /// Whether a run of text filed under `steps`, in `exact` through a paint
@@ -7195,6 +7236,8 @@ mod coverage_run_tests {
     struct Run {
         filter: &'static str,
         fill: &'static str,
+        /// The font's size, in pixels.
+        size: u32,
         gradient: bool,
         decoration: &'static str,
         depth: PixelDepth,
@@ -7204,6 +7247,7 @@ mod coverage_run_tests {
     const OPAQUE: Run = Run {
         filter: "blur(3px)",
         fill: "rgb(200, 80, 30)",
+        size: 32,
         gradient: false,
         decoration: "none",
         depth: PixelDepth::Uint8,
@@ -7232,7 +7276,7 @@ mod coverage_run_tests {
         )
         .expect("a canvas");
         let ctx = canvas.context();
-        assert!(ctx.set_font_css(&format!("32px {OSWALD}")));
+        assert!(ctx.set_font_css(&format!("{}px {OSWALD}", run.size)));
         match run.gradient {
             true => {
                 let stop = |position, css| GradientStop {
@@ -7289,6 +7333,78 @@ mod coverage_run_tests {
             .to_vec();
         COVERAGE_ROUTE.with(|route| route.set(true));
         (pixels, COVERAGE_RUNS.with(|runs| runs.get()) - before)
+    }
+
+    #[test]
+    fn translucent_text_in_the_chain_keeps_the_routes_alpha() {
+        // Where the route does not play, a run in one flat colour through
+        // the chain's layer is drawn opaque, its alpha the chain's gain, so
+        // that its alpha is rounded once, as the route's is: byte for byte
+        // the route's, at sigmas tap by tap and through the FFT, at sizes
+        // from a hinted 13px to 60px, at alphas on and off a tie.
+        let alpha = |pixels: &[u8]| -> Vec<u8> {
+            pixels.chunks(4).map(|p| p[3]).collect()
+        };
+        let mut apart = Vec::new();
+        for fill in [
+            "rgba(200, 80, 30, 0.6)",
+            "rgba(20, 60, 200, 0.3)",
+            "rgba(128, 128, 128, 0.55)",
+        ] {
+            for filter in ["blur(3px)", "blur(8px)"] {
+                for size in [13, 32, 60] {
+                    let run = Run {
+                        fill,
+                        filter,
+                        size,
+                        ..OPAQUE
+                    };
+                    let (route, runs) = played(&run, true);
+                    let (chain, chained) = played(&run, false);
+                    assert_eq!(
+                        (runs, chained),
+                        (1, 0),
+                        "{fill} {filter} {size}px"
+                    );
+                    let differ = alpha(&route)
+                        .iter()
+                        .zip(alpha(&chain))
+                        .filter(|(a, b)| **a != *b)
+                        .count();
+                    if differ > 0 {
+                        apart.push(format!(
+                            "{fill} {filter} {size}px: {differ} alphas"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(apart.is_empty(), "the chain's alpha moved: {apart:#?}");
+    }
+
+    #[test]
+    fn translucent_text_drawn_onto_another_space_keeps_the_routes_alpha() {
+        // A page drawn onto one in another space is where the route does
+        // not play and the chain does: its alpha is the route's, byte for
+        // byte, as it would be on a page of its own space.
+        let alpha = |pixels: &[u8]| -> Vec<u8> {
+            pixels.chunks(4).map(|p| p[3]).collect()
+        };
+        for filter in ["blur(3px)", "blur(8px)"] {
+            let run = Run {
+                fill: "rgba(20, 60, 200, 0.3)",
+                filter,
+                ..OPAQUE
+            };
+            let (own, runs) = played(&run, true);
+            let onto = Run {
+                onto: Some((PixelDepth::Uint8, PixelColorSpace::DisplayP3)),
+                ..run
+            };
+            let (other, chained) = played(&onto, true);
+            assert_eq!((runs, chained), (1, 0), "{filter}");
+            assert_eq!(alpha(&own), alpha(&other), "{filter}: the alpha moved");
+        }
     }
 
     #[test]

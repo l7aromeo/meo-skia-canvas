@@ -13,11 +13,11 @@
 //! by tap. A blurred path's alpha is the chain's -- its layer's alpha is the
 //! same coverage, rounded by the same rule -- bit for bit tap by tap and but
 //! for exact ties through the FFT, and so is an interior, where the coverage
-//! is whole and the product lands on the bytes a fill stores. A run of text
-//! is drawn into the chain's layer in its colour, alpha and all, so a
-//! translucent run's alpha there is rounded before the blur, and the route's
-//! lands up to a level from it. It costs a quarter of the chain's sums and
-//! none of its conversions.
+//! is whole and the product lands on the bytes a fill stores, and so is a run
+//! of text's, which the chain draws opaque with its alpha the gain where the
+//! route does not play on an eight-bit page on the CPU, as in another
+//! space. It costs a quarter of the chain's sums and none of its
+//! conversions.
 
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, ClipOp, ColorType, IRect, ISize, ImageInfo,

@@ -1134,10 +1134,12 @@ its alpha. Blurred from pixels already rounded to bytes, a channel could land
 a level off it: 16px blurred by 2 in `rgb(200, 80, 30)` moved by a level on
 491 of 2,322 inked pixels, and in `rgba(200, 80, 30, 0.6)` on 646 of 2,259,
 alpha among them; an opaque run's alpha is the same either way. That holds at
-every blur, whether summed tap by tap or through the FFT. A run in a gradient
-or a pattern, one whose decoration names a colour of its own, and every run
-on the GPU engine or a float page are blurred from their pixels in the chain's
-layer.
+every blur, whether summed tap by tap or through the FFT. A run on a page
+drawn onto one in another space is blurred in the chain's layer drawn opaque,
+its alpha rounded once as the route's is and its colour from the layer's
+bytes. A run in a gradient or a pattern, one whose decoration names a colour
+of its own, and every run on the GPU engine or a float page are blurred from
+their pixels in the chain's layer.
 
 **A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
 Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
