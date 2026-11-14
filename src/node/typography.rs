@@ -1229,9 +1229,18 @@ fn keeps_font_box() -> bool {
     !cfg!(target_os = "macos")
 }
 
-/// How many paints a kept run keeps blobs for: a shadowed run is drawn in
-/// two, the shadow's and the text's, every time.
-const BLOB_PAINTS: usize = 2;
+/// How many paints a kept run keeps blobs for: as many as one draw takes it
+/// through, so that a page drawn again finds each of them kept.
+///
+/// A run is drawn in its colour as given and in that colour placed on the
+/// bytes an eight-bit page stores, two paints for a colour off them. A
+/// translucent run under a sole `blur()` or `drop-shadow()` is drawn in its
+/// opaque copy as well -- see `context::layer::coverage_files` -- and a run
+/// casting a canvas shadow in its colour made opaque, for the shadow: four
+/// where a run takes both. Kept for fewer, each draw lets go of a paint the
+/// same draw takes next, building its blobs again and reading every
+/// glyph's outline for what they ink.
+const BLOB_PAINTS: usize = 4;
 
 /// What a kept run holds beyond its glyphs: the laid-out paragraph's own
 /// structure, the entry and the blobs it keeps.
@@ -6264,7 +6273,7 @@ mod hinting {
 mod laid_out {
     use super::{
         COLLIDING, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, LaidOutCache,
-        LaidOutKey, SEEN_ONCE, forget_laid_out, laid_out_held,
+        LaidOutKey, SEEN_ONCE, forget_laid_out, laid_out_bytes, laid_out_held,
     };
     use crate::{
         Canvas, Context2D, FontLibrary as Library, GradientInterpolation,
@@ -6702,27 +6711,37 @@ mod laid_out {
     }
 
     /// Draws one run every time and a new one each time, past the count.
+    /// The new ones are a number each, short enough that the count is
+    /// reached before the bytes are.
     fn least_recently_drawn_go_past_the_count(family: &str) {
+        const THROUGHOUT: &str = "kept throughout";
+        let longest = (LAID_OUT_COUNT + 63).to_string();
+        assert!(
+            (LAID_OUT_COUNT - 1) * laid_out_bytes(longest.len())
+                + laid_out_bytes(THROUGHOUT.len())
+                <= LAID_OUT_BYTES,
+            "the runs fit the bytes, so that the count is what lets them go"
+        );
         register(family, OSWALD);
         forget_laid_out();
         let mut canvas = Canvas::new(400.0, 120.0);
         let ctx = canvas.context();
         assert!(ctx.set_font_css(&format!("12px {family}")));
         for at in 0..LAID_OUT_COUNT + 64 {
-            ctx.fill_text("kept throughout", 0.0, 20.0, None);
+            ctx.fill_text(THROUGHOUT, 0.0, 20.0, None);
             // Twice, for it to be kept.
             for _ in 0..2 {
-                ctx.fill_text(&format!("run {at}"), 0.0, 40.0, None);
+                ctx.fill_text(&at.to_string(), 0.0, 40.0, None);
             }
         }
         assert_eq!(laid_out_held().0, LAID_OUT_COUNT);
-        assert!(kept("kept throughout"), "drawn every time, it stays");
+        assert!(kept(THROUGHOUT), "drawn every time, it stays");
         LAID_OUT.with(|cache| {
             let cache = cache.borrow();
             let copies = cache
                 .runs
                 .values()
-                .filter(|entry| &*entry.key.text == "kept throughout")
+                .filter(|entry| &*entry.key.text == THROUGHOUT)
                 .count();
             assert_eq!(copies, 1, "found each time rather than laid out again");
             assert!(
@@ -6730,8 +6749,8 @@ mod laid_out {
                 "no hash is left filed for a run that has gone"
             );
         });
-        assert!(!kept("run 0"), "the first of the others has gone");
-        assert!(kept(&format!("run {}", LAID_OUT_COUNT + 63)));
+        assert!(!kept("0"), "the first of the others has gone");
+        assert!(kept(&longest));
     }
 
     #[test]

@@ -8241,6 +8241,89 @@ mod tests {
         }
     }
 
+    /// A kept run drawn on page after page alike builds no blobs once kept,
+    /// under every filter and shadow a page puts it through: each paint one
+    /// draw takes it through is kept together -- see
+    /// `typography::BLOB_PAINTS`. A colour off the bytes an eight-bit page
+    /// stores is drawn both as given and placed on them; a translucent
+    /// run's sole filter adds its opaque copy, and a canvas shadow its
+    /// opaque colour, four in all.
+    #[test]
+    fn a_kept_run_keeps_every_paint_a_page_draws_it_in() {
+        use crate::node::typography::BLOB_BUILDS;
+        let filters = [
+            "none",
+            "blur(4px)",
+            "drop-shadow(3px 2px 4px rgba(0,0,0,0.6))",
+        ];
+        let mut thrashed = Vec::new();
+        // A text of its own for each case: a run is kept for the thread,
+        // and the case before would otherwise have built this one's blobs.
+        let mut case = 0;
+        for filter in filters {
+            for shadow in [false, true] {
+                for alpha in [0.6, 1.0] {
+                    let mut canvas = Canvas::with_options(
+                        120.0,
+                        40.0,
+                        CanvasOptions {
+                            gpu: false,
+                            ..CanvasOptions::default()
+                        },
+                    )
+                    .expect("a canvas");
+                    let ctx = canvas.context();
+                    let text = format!("Kept {case}");
+                    case += 1;
+                    let mut page = || {
+                        ctx.set_fill_style_css("white").expect("a colour");
+                        ctx.fill_rect(0.0, 0.0, 120.0, 40.0);
+                        ctx.save();
+                        ctx.set_filter_css(filter).expect("a filter");
+                        if shadow {
+                            ctx.set_shadow_color_css("rgba(0, 0, 0, 0.5)")
+                                .expect("a colour");
+                            ctx.set_shadow_blur(3.0);
+                            ctx.set_shadow_offset(2.0, 2.0);
+                        }
+                        ctx.set_font_css("24px sans-serif");
+                        ctx.set_fill_style_css(&format!(
+                            "hsl(0 60% 45% / {alpha})"
+                        ))
+                        .expect("a colour");
+                        ctx.fill_text(&text, 8.0, 28.0, None);
+                        ctx.restore();
+                        ctx.get_image_data(0.0, 0.0, 120.0, 40.0)
+                            .expect("read")
+                            .pixels()
+                            .to_vec()
+                    };
+                    let before = BLOB_BUILDS.get();
+                    // Seen once, kept from the second page, drawn from the
+                    // third.
+                    let warm: Vec<_> = (0..3).map(|_| page()).collect();
+                    assert!(
+                        BLOB_BUILDS.get() > before,
+                        "{filter}, shadow {shadow}, alpha {alpha}: the \
+                         pages build blobs at all, or this asserts nothing"
+                    );
+                    let built = BLOB_BUILDS.get();
+                    for _ in 0..3 {
+                        assert!(page() == warm[2], "the same pixels");
+                    }
+                    if BLOB_BUILDS.get() != built {
+                        thrashed.push(format!(
+                            "{filter}, shadow {shadow}, alpha {alpha}: {} \
+                             builds",
+                            BLOB_BUILDS.get() - built
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(thrashed.is_empty(), "blobs built again: {thrashed:#?}");
+    }
+
     /// A page of 200 fills in a colour each, drawn twice on fresh Display
     /// P3 canvases on one thread, converts each colour once: the second
     /// page finds every one kept, as a canvas made for each render does.
