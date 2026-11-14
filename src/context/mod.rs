@@ -2978,10 +2978,21 @@ impl Context2D {
         }))
     }
 
-    /// Records a paragraph that casts text shadows: what lies beneath them,
-    /// each shadow, and the text over them, as one group composited through
-    /// the context's alpha and blend, as [`Self::with_composited_canvas`]
-    /// composites any paragraph. `draw` draws the part it is handed.
+    /// Whether a draw made now composites through more than `source-over`
+    /// at full alpha: under a `globalAlpha` below 1 or another operator.
+    pub(crate) fn composites_drawing(&self) -> bool {
+        self.state.global_alpha != 1.0
+            || self.state.global_composite_operation != BlendMode::SrcOver
+    }
+
+    /// Records a paragraph in its parts: what lies beneath its shadows --
+    /// its backgrounds -- each shadow in the order it is cast, and the text
+    /// over them, each composited apart through the context's alpha and
+    /// blend, as a canvas composites a `fillRect`, the shadow of a
+    /// `fillText` and then its run -- see [`Self::draw_text`]. `draw` draws
+    /// the part it is handed. A part that draws nothing beneath the text is
+    /// not composited, which a blend reaching beyond it would do as
+    /// transparent black over the whole page; the text always is.
     ///
     /// A blurred shadow is its own group, whose chain blurs the shadow drawn
     /// sharp on pixels by the exact Gaussian -- see `context::chain` -- so
@@ -2992,11 +3003,11 @@ impl Context2D {
     /// mask filter to write, embeds as pixels. An unblurred shadow is drawn
     /// sharp on both.
     ///
-    /// Under an alpha of 1 and `source-over` a group around them all would
-    /// change nothing, since every part is drawn `source-over` too, so there
-    /// is none: each part is filed on the page as it stands, which a vector
-    /// backend then takes part by part -- an SVG keeps the text and the
-    /// sharp shadows as vectors, where it writes nothing of a layer.
+    /// Under an alpha of 1 and `source-over` a group around each part would
+    /// change nothing, so there is none: each part is filed on the page as
+    /// it stands, which a vector backend then takes part by part -- an SVG
+    /// keeps the text and the sharp shadows as vectors, where it writes
+    /// nothing of a layer.
     ///
     /// `features` is what the paragraph's glyphs ask of a vector backend --
     /// see [`Self::with_composited_canvas`] -- which the parts that draw them
@@ -3009,9 +3020,7 @@ impl Context2D {
     ) where
         F: Fn(&SkCanvas, ShadowPart, Recording),
     {
-        if self.state.global_alpha == 1.0
-            && self.state.global_composite_operation == BlendMode::SrcOver
-        {
+        if !self.composites_drawing() {
             self.append_draw(features, false, |canvas, recording| {
                 draw(canvas, ShadowPart::Beneath, recording);
             });
@@ -3040,12 +3049,30 @@ impl Context2D {
         paint.set_alpha_f(self.state.global_alpha as f32);
         paint.set_blend_mode(self.state.global_composite_operation);
         let paint = self.faint().drawable(&paint).into_owned();
+        // A part's picture holds the transform it is recorded under as an
+        // operation of its own, so a part drawing nothing holds as many
+        // operations as a picture of that transform alone.
+        let placed = |canvas: &SkCanvas| {
+            canvas.set_matrix(&self.state.matrix.into());
+        };
+        let unmoved = {
+            let mut recorder = PictureRecorder::new();
+            placed(recorder.begin_recording(self.bounds, true));
+            recorder
+                .finish_recording_as_picture(None)
+                .map_or(0, |picture| picture.approximate_op_count())
+        };
         let record = |part: ShadowPart, recording: Recording| {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(self.bounds, true);
-            canvas.set_matrix(&self.state.matrix.into());
+            placed(canvas);
             draw(canvas, part, recording);
-            recorder.finish_recording_as_picture(None)
+            recorder
+                .finish_recording_as_picture(None)
+                .filter(|picture| {
+                    part == ShadowPart::Over
+                        || picture.approximate_op_count() > unmoved
+                })
         };
         let dual = self.recorder.borrow().dual();
         // The recording a pair's pixels and its document are each drawn for:
@@ -3061,39 +3088,47 @@ impl Context2D {
                 .zip(record(part, document))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        // The parts drawn sharp ask for what the glyphs do, and a blurred
-        // shadow for its filter, as each does filed on the page.
-        let plain = |part| entry(part).map(|e| (e, features));
-        let mut contents: Vec<(Layer, VectorFeatures)> =
-            Vec::with_capacity(casts.len() + 2);
-        contents.extend(plain(ShadowPart::Beneath));
+        // Each part a group of its own, composited through the alpha and
+        // the blend. The parts drawn sharp ask for what the glyphs do, and a
+        // blurred shadow for its filter, as each does filed on the page.
+        let composite = |entry: Layer, asks: VectorFeatures| {
+            self.with_recorder(|mut recorder| {
+                recorder.append_group(
+                    Composite::Layer(LayerRec {
+                        paint: Some(paint.clone()),
+                        ..LayerRec::default()
+                    }),
+                    None,
+                    Matrix::new_identity(),
+                    [(entry, asks)].into_iter().collect(),
+                    self.composited_features(),
+                    Point::default(),
+                );
+            });
+        };
+        if let Some(beneath) = entry(ShadowPart::Beneath) {
+            composite(beneath, features);
+        }
         for (index, cast) in casts.iter().enumerate() {
             match cast.blurs() {
-                false => contents.extend(plain(ShadowPart::Sharp(index))),
-                true => contents.extend(
-                    self.shadow_group(cast, index, &draw).map(|group| {
-                        (
+                false => {
+                    if let Some(sharp) = entry(ShadowPart::Sharp(index)) {
+                        composite(sharp, features);
+                    }
+                }
+                true => {
+                    if let Some(group) = self.shadow_group(cast, index, &draw) {
+                        composite(
                             Layer::Group(Arc::new(group)),
                             VectorFeatures::IMAGE_FILTER,
-                        )
-                    }),
-                ),
+                        );
+                    }
+                }
             }
         }
-        contents.extend(plain(ShadowPart::Over));
-        self.with_recorder(|mut recorder| {
-            recorder.append_group(
-                Composite::Layer(LayerRec {
-                    paint: Some(paint),
-                    ..LayerRec::default()
-                }),
-                None,
-                Matrix::new_identity(),
-                contents.into_iter().collect(),
-                self.composited_features(),
-                Point::default(),
-            );
-        });
+        if let Some(over) = entry(ShadowPart::Over) {
+            composite(over, features);
+        }
     }
 
     /// What a group composited through the context's alpha and blend asks

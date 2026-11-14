@@ -3269,7 +3269,10 @@ impl Context2D {
     /// not from the context: font, color and decoration were fixed when the
     /// paragraph was built. What the context still contributes is the
     /// compositing -- transform, clip, global alpha and composite operation
-    /// all apply.
+    /// all apply. The alpha and the operator composite the paragraph part
+    /// by part, as a canvas composites a `fill_rect` and then a `fill_text`:
+    /// its text backgrounds as one image, then each text shadow in the
+    /// order it is painted, then its glyphs and decorations as one image.
     ///
     /// Reuse a layout across frames rather than rebuilding it; laying out is
     /// the expensive half.
