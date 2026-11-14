@@ -38,15 +38,17 @@
 //! `SkColorSpaceXformSteps` takes it: its transfer function undone, the
 //! gamut matrix, the page's transfer function applied, each curve through
 //! Skia's own `approx_powf` rebuilt in arithmetic -- see `Toward`. One in
-//! Oklab or Lab is first converted back to the space its stops were
-//! converted from, as the CPU's own stages do -- see `Css`. That runs on
-//! the float pipeline, so it is taken only where that pipeline rounds
-//! nothing before the store.
+//! Oklab, Lab, LCH, OkLCH, HSL or HWB is first converted back to the space
+//! its stops were converted from, as the CPU's own stages do -- see `Css`;
+//! the polar four with their stops split and their hues walked on the host
+//! as `SkColor4fXformer` does both -- see `split_powerless` and
+//! `walk_hues`. That runs on the float pipeline, so it is taken only where
+//! that pipeline rounds nothing before the store.
 //!
 //! [`GradientSpec::exact`] answers `None` where the effect cannot reproduce
-//! the CPU: an interpolation space it does not convert from (LCH, OKLCH,
-//! HSL, HWB, ProPhoto RGB, a working space wrapped around the shader, a PQ
-//! or HLG curve); a gradient on the float pipeline -- a
+//! the CPU: an interpolation space it does not convert from (ProPhoto RGB,
+//! a working space wrapped around the shader, a PQ or HLG curve); a
+//! gradient on the float pipeline -- a
 //! two-point conical, or one converted to the page -- whose stops are
 //! translucent or that is drawn at an alpha (that pipeline rounds once,
 //! after blending); more stops than the largest effect holds; and Skia's
@@ -62,7 +64,9 @@ use skia_safe::{
     Pixmap, Point, Rect, RuntimeEffect, SamplingOptions, Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
-        interpolation::{ColorSpace as InterpolationSpace, InPremul},
+        interpolation::{
+            ColorSpace as InterpolationSpace, HueMethod, InPremul,
+        },
         shaders as gradient_shaders,
     },
     images,
@@ -739,18 +743,48 @@ impl Ramp {
     const TWO: i32 = 2;
 
     fn of(spec: &GradientSpec, page: &ColorSpace) -> Option<Ramp> {
-        let (colors, positions, opaque) = stops(spec)?;
+        let Stops {
+            colors,
+            positions,
+            opaque,
+            first_implicit,
+            last_implicit,
+        } = stops(spec)?;
         let intermediate = intermediate_space(spec, page)?;
         let toward = Toward::of(&intermediate, page)?;
         let css = Css::of(spec.interpolation.color_space);
-        let mut colors = convert(&colors, &spec.color_space, &intermediate)?;
-        for c in &mut colors {
-            *c = css.converted(*c);
+        let converted: Vec<([f32; 4], bool)> =
+            convert(&colors, &spec.color_space, &intermediate)?
+                .into_iter()
+                .map(|c| css.converted(c))
+                .collect();
+        let (mut colors, positions) =
+            match converted.iter().any(|&(_, powerless)| powerless) {
+                true => {
+                    let split =
+                        split_powerless(&converted, positions.as_deref());
+                    (split.0, Some(split.1))
+                }
+                false => {
+                    (converted.into_iter().map(|(c, _)| c).collect(), positions)
+                }
+            };
+        if css.is_polar() {
+            walk_hues(
+                &mut colors,
+                spec.interpolation.hue_method,
+                first_implicit,
+                last_implicit,
+            );
         }
         let premul = spec.interpolation.in_premul == InPremul::Yes;
         if premul {
+            // `premul_polar` leaves the hue alone; `premul_rgb` scales all
+            // three.
+            let from = usize::from(css.is_polar());
             for c in &mut colors {
-                *c = [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
+                let a = c[3];
+                c[from..3].iter_mut().for_each(|v| *v *= a);
             }
         }
         let premul_after = !premul && !opaque;
@@ -853,13 +887,26 @@ fn general(
     ramp
 }
 
+/// The stops as `SkGradientBaseShader`'s constructor leaves them -- see
+/// [`stops`].
+struct Stops {
+    colors: Vec<Color4f>,
+    /// `None` where the constructor finds the positions evenly spaced.
+    positions: Option<Vec<f32>>,
+    /// Whether every colour is opaque.
+    opaque: bool,
+    /// Whether the first stop is the copy added at 0, and the last the copy
+    /// added at 1: the longer hue method walks neither pair of hues the
+    /// long way -- see [`walk_hues`].
+    first_implicit: bool,
+    last_implicit: bool,
+}
+
 /// The stops as `SkGradientBaseShader`'s constructor leaves them: bracketed
 /// by stops at 0 and 1, pinned to rise, `None` for positions it finds
 /// evenly spaced, and runs of three or more stops at one offset cut to the
-/// first and last. With whether every colour is opaque.
-fn stops(
-    spec: &GradientSpec,
-) -> Option<(Vec<Color4f>, Option<Vec<f32>>, bool)> {
+/// first and last.
+fn stops(spec: &GradientSpec) -> Option<Stops> {
     let (given, pos) = (&spec.colors, &spec.positions);
     if given.len() < 2 || pos.len() != given.len() {
         return None;
@@ -896,7 +943,13 @@ fn stops(
         positions.push(curr);
     }
     if uniform {
-        return Some((colors, None, opaque));
+        return Some(Stops {
+            colors,
+            positions: None,
+            opaque,
+            first_implicit,
+            last_implicit,
+        });
     }
     // Of three or more stops at one offset, under clamp, the leftmost and
     // the rightmost.
@@ -914,8 +967,102 @@ fn stops(
             i = j;
         }
     }
-    Some((kept_colors, Some(kept_positions), opaque))
+    Some(Stops {
+        colors: kept_colors,
+        positions: Some(kept_positions),
+        opaque,
+        first_implicit,
+        last_implicit,
+    })
 }
+
+/// The stops with each whose hue is powerless split in two at its
+/// position, as `SkColor4fXformer` splits them: one taking the hue of the
+/// stop before it, one the hue of the stop after, the first stop keeping
+/// only the second and the last only the first. The positions are always
+/// returned, as Skia then hands the gradient stage positions even where
+/// the stops were evenly spaced.
+///
+/// A neighbour's hue may itself be powerless; Skia copies it all the same,
+/// and so does this.
+fn split_powerless(
+    stops: &[([f32; 4], bool)],
+    positions: Option<&[f32]>,
+) -> (Vec<[f32; 4]>, Vec<f32>) {
+    let n = stops.len();
+    // `getPos`: evenly spaced stops are at `i / (n - 1)`, in f32.
+    let at = |i: usize| match positions {
+        Some(positions) => positions[i],
+        None => i as f32 / (n - 1) as f32,
+    };
+    let with_hue_of = |c: [f32; 4], from: [f32; 4]| [from[0], c[1], c[2], c[3]];
+    let mut colors = Vec::with_capacity(2 * n);
+    let mut kept = Vec::with_capacity(2 * n);
+    for (i, &(c, powerless)) in stops.iter().enumerate() {
+        if !powerless {
+            colors.push(c);
+            kept.push(at(i));
+            continue;
+        }
+        if i != 0 {
+            colors.push(with_hue_of(c, stops[i - 1].0));
+            kept.push(at(i));
+        }
+        if i != n - 1 {
+            colors.push(with_hue_of(c, stops[i + 1].0));
+            kept.push(at(i));
+        }
+    }
+    (colors, kept)
+}
+
+/// The hues of `colors` adjusted for `method`, as `SkColor4fXformer` does:
+/// a pair's second hue moved by a whole turn where the method takes the
+/// other way round, and each later hue by the turns before it, so that the
+/// interpolation needs no adjustment per pixel. The longer method leaves the
+/// pair an implicit first or last stop makes as it is (skbug.com/40044215).
+///
+/// `first_implicit` and `last_implicit` are tested against the first and
+/// last pair of `colors` after [`split_powerless`], which is where Skia
+/// tests them.
+fn walk_hues(
+    colors: &mut [[f32; 4]],
+    method: HueMethod,
+    first_implicit: bool,
+    last_implicit: bool,
+) {
+    let n = colors.len();
+    let mut delta = 0.0_f32;
+    for i in 0..n - 1 {
+        let h1 = colors[i][0];
+        let mut h2 = colors[i + 1][0] + delta;
+        let d = h2 - h1;
+        let turn = match method {
+            HueMethod::Shorter if d > HALF_TURN => -TURN,
+            HueMethod::Shorter if d < -HALF_TURN => TURN,
+            HueMethod::Longer
+                if (i == 0 && first_implicit)
+                    || (i == n - 2 && last_implicit) =>
+            {
+                0.0
+            }
+            HueMethod::Longer if 0.0 < d && d < HALF_TURN => -TURN,
+            HueMethod::Longer if -HALF_TURN < d && d <= 0.0 => TURN,
+            HueMethod::Increasing if h2 < h1 => TURN,
+            HueMethod::Decreasing if h1 < h2 => -TURN,
+            _ => 0.0,
+        };
+        h2 += turn;
+        delta += turn;
+        colors[i + 1][0] = h2;
+    }
+}
+
+/// A whole turn of hue, in the degrees the polar spaces keep it in.
+const TURN: f32 = 360.0;
+
+/// Half a turn: two hues further apart than this are nearer the other way.
+const HALF_TURN: f32 = 180.0;
 
 /// The space the CPU interpolates in, as `intermediate_color_space` in
 /// `SkGradientBaseShader.cpp` picks it for the interpolation space `spec`
@@ -923,11 +1070,11 @@ fn stops(
 /// built as Skia builds it -- see [`skia_space`]. The CPU converts an
 /// interpolated colour from it to the page -- see [`Toward`].
 ///
-/// Lab's is XYZ D50 made linear, and Oklab's linear sRGB, the spaces the
-/// stops are converted into and out of -- see [`Css`]. `None` where a
-/// working space is wrapped around the shader, for the polar spaces -- LCH,
-/// OkLCH, HSL and HWB -- and for ProPhoto RGB, whose gamut Skia derives from
-/// its primaries at run time.
+/// Lab's and LCH's is XYZ D50 made linear, Oklab's and OkLCH's linear sRGB,
+/// and HSL's and HWB's sRGB, the spaces the stops are converted into and
+/// out of -- see [`Css`]. `None` where a working space is wrapped around
+/// the shader, and for ProPhoto RGB, whose gamut Skia derives from its
+/// primaries at run time.
 fn intermediate_space(
     spec: &GradientSpec,
     page: &ColorSpace,
@@ -943,8 +1090,15 @@ fn intermediate_space(
             PixelColorSpace::DisplayP3.to_skia_color_space().ok()
         }
         InterpolationSpace::A98RGB => skia_space(&A98_TF, &ADOBE_RGB_GAMUT),
-        InterpolationSpace::Lab => skia_space(&LINEAR_TF, &XYZ_GAMUT),
-        InterpolationSpace::OKLab => Some(ColorSpace::new_srgb_linear()),
+        InterpolationSpace::Lab | InterpolationSpace::LCH => {
+            skia_space(&LINEAR_TF, &XYZ_GAMUT)
+        }
+        InterpolationSpace::OKLab | InterpolationSpace::OKLCH => {
+            Some(ColorSpace::new_srgb_linear())
+        }
+        InterpolationSpace::HSL | InterpolationSpace::HWB => {
+            Some(ColorSpace::new_srgb())
+        }
         _ => None,
     }
 }
@@ -1055,17 +1209,28 @@ const XYZ_GAMUT: [[i32; 3]; 3] =
 
 /// A space the CPU interpolates in through code of its own: the stops are
 /// converted into it from the intermediate space once, on the host --
-/// `xyzd50_to_lab` and `lin_srgb_to_oklab` in `SkGradientBaseShader.cpp` --
-/// and each interpolated colour back -- `css_lab_to_xyz` and
-/// `css_oklab_to_linear_srgb` in `SkRasterPipeline_opts.h`. Skia builds
-/// both with `-ffp-contract=off` outside Windows, so each operation here is
-/// the one it makes, rounded where it rounds.
+/// `xyzd50_to_lab`, `xyzd50_to_hcl`, `lin_srgb_to_oklab`,
+/// `lin_srgb_to_okhcl`, `srgb_to_hsl` and `srgb_to_hwb` in
+/// `SkGradientBaseShader.cpp` -- and each interpolated colour back --
+/// `css_lab_to_xyz`, `css_oklab_to_linear_srgb`, `css_hcl_to_lab` before
+/// either, `css_hsl_to_srgb` and `css_hwb_to_srgb` in
+/// `SkRasterPipeline_opts.h`. Skia builds both with `-ffp-contract=off`
+/// outside Windows, so each operation here is the one it makes, rounded
+/// where it rounds; the host's `atan2f` and `cbrtf` are the platform's, as
+/// Rust's are.
+///
+/// The polar spaces keep their hue first, as Skia does: LCH and OkLCH are
+/// held as hue, chroma, lightness.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Css {
     #[default]
     None,
     Lab,
     OkLab,
+    Lch,
+    OkLch,
+    Hsl,
+    Hwb,
 }
 
 impl Css {
@@ -1073,8 +1238,18 @@ impl Css {
         match space {
             InterpolationSpace::Lab => Css::Lab,
             InterpolationSpace::OKLab => Css::OkLab,
+            InterpolationSpace::LCH => Css::Lch,
+            InterpolationSpace::OKLCH => Css::OkLch,
+            InterpolationSpace::HSL => Css::Hsl,
+            InterpolationSpace::HWB => Css::Hwb,
             _ => Css::None,
         }
+    }
+
+    /// Whether this keeps a hue, which `color_space_is_polar` in
+    /// `SkGradientBaseShader.cpp` asks.
+    fn is_polar(self) -> bool {
+        matches!(self, Css::Lch | Css::OkLch | Css::Hsl | Css::Hwb)
     }
 
     /// The uniform the effect selects its conversion back by.
@@ -1082,50 +1257,126 @@ impl Css {
         self as i32
     }
 
-    /// `c`, unpremultiplied in the intermediate space, in this space.
-    /// Ottosson's constants are written as `lin_srgb_to_oklab` writes them,
-    /// so that each rounds to the f32 Skia's does and can be checked
-    /// against it.
-    #[allow(clippy::excessive_precision)]
-    fn converted(self, c: [f32; 4]) -> [f32; 4] {
+    /// `c`, unpremultiplied in the intermediate space, in this space, with
+    /// whether its hue is powerless. Ottosson's constants are written as
+    /// `lin_srgb_to_oklab` writes them, so that each rounds to the f32
+    /// Skia's does and can be checked against it.
+    fn converted(self, c: [f32; 4]) -> ([f32; 4], bool) {
         match self {
-            Css::None => c,
-            Css::Lab => {
-                let f: [f32; 3] = std::array::from_fn(|i| {
-                    let v = c[i] / LAB_D50[i];
-                    match v > LAB_E {
-                        true => v.cbrt(),
-                        false => (LAB_K * v + 16.0) / 116.0,
-                    }
-                });
-                [
-                    (116.0 * f[1]) - 16.0,
-                    500.0 * (f[0] - f[1]),
-                    200.0 * (f[1] - f[2]),
-                    c[3],
-                ]
-            }
-            Css::OkLab => {
-                let [r, g, b] = [c[0], c[1], c[2]];
-                let l =
-                    (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
-                        .cbrt();
-                let m =
-                    (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
-                        .cbrt();
-                let s =
-                    (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
-                        .cbrt();
-                [
-                    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
-                    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
-                    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
-                    c[3],
-                ]
+            Css::None => (c, false),
+            Css::Lab => (lab(c), false),
+            Css::OkLab => (oklab(c), false),
+            Css::Lch => hcl(lab(c), LCH_POWERLESS),
+            Css::OkLch => hcl(oklab(c), OKLCH_POWERLESS),
+            Css::Hsl => hsl(c),
+            Css::Hwb => {
+                let (hsl, powerless) = hsl(c);
+                let white = c[0].min(c[1]).min(c[2]);
+                let black = 1.0 - c[0].max(c[1]).max(c[2]);
+                ([hsl[0], white * 100.0, black * 100.0, c[3]], powerless)
             }
         }
     }
 }
+
+/// `xyzd50_to_lab`.
+fn lab(c: [f32; 4]) -> [f32; 4] {
+    let f: [f32; 3] = std::array::from_fn(|i| {
+        let v = c[i] / LAB_D50[i];
+        match v > LAB_E {
+            true => v.cbrt(),
+            false => (LAB_K * v + 16.0) / 116.0,
+        }
+    });
+    [
+        (116.0 * f[1]) - 16.0,
+        500.0 * (f[0] - f[1]),
+        200.0 * (f[1] - f[2]),
+        c[3],
+    ]
+}
+
+/// `lin_srgb_to_oklab`.
+#[allow(clippy::excessive_precision)]
+fn oklab(c: [f32; 4]) -> [f32; 4] {
+    let [r, g, b] = [c[0], c[1], c[2]];
+    let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+    let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+    let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+    [
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+        c[3],
+    ]
+}
+
+/// `xyzd50_to_hcl` and `lin_srgb_to_okhcl` after the conversion to Lab or
+/// Oklab: the hue in degrees, from 0 to under 360, the chroma and the
+/// lightness, the hue powerless at a chroma of `powerless` or less.
+fn hcl(lab: [f32; 4], powerless: f32) -> ([f32; 4], bool) {
+    let hue = lab[2].atan2(lab[1]) * DEGREES_PER_RADIAN;
+    let chroma = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+    let hue = match hue >= 0.0 {
+        true => hue,
+        false => hue + TURN,
+    };
+    ([hue, chroma, lab[0], lab[3]], chroma <= powerless)
+}
+
+/// `srgb_to_hsl`: the hue in degrees, the saturation and the lightness in
+/// percent, the hue powerless where the saturation is 0.
+fn hsl(c: [f32; 4]) -> ([f32; 4], bool) {
+    let [r, g, b] = [c[0], c[1], c[2]];
+    let mx = r.max(g).max(b);
+    let mn = r.min(g).min(b);
+    let light = (mn + mx) / 2.0;
+    let d = mx - mn;
+    let (mut hue, mut sat) = (0.0_f32, 0.0_f32);
+    if d != 0.0 {
+        sat = match light == 0.0 || light == 1.0 {
+            true => 0.0,
+            false => (mx - light) / light.min(1.0 - light),
+        };
+        hue = if mx == r {
+            (g - b) / d + if g < b { 6.0 } else { 0.0 }
+        } else if mx == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+        hue *= 60.0;
+    }
+    ([hue, sat * 100.0, light * 100.0, c[3]], sat == 0.0)
+}
+
+/// `sk_float_radians_to_degrees`'s factor, `180 / SK_FloatPI` in f32.
+const DEGREES_PER_RADIAN: f32 = 180.0 / std::f32::consts::PI;
+
+/// `sk_float_degrees_to_radians`'s factor, `SK_FloatPI / 180` in f32, which
+/// `css_hcl_to_lab` turns a hue into radians by.
+const RADIANS_PER_DEGREE: f32 = std::f32::consts::PI / 180.0;
+
+/// `1 / (2 * SK_FloatPI)`, in f32, which `sin_` and `cos_` take an angle to
+/// turns by.
+const TURNS_PER_RADIAN: f32 = 1.0 / (2.0 * std::f32::consts::PI);
+
+/// `sin5q_`'s coefficients, `A`, `B` and `C`: its polynomial for
+/// `sin(x * 2 * pi)` on a quarter turn, from SwiftShader's
+/// Sin-Cos-Optimization note, exact at 0, 1/12, 1/6 and 1/4.
+#[allow(clippy::excessive_precision)]
+const SIN5Q: [f32; 3] = [6.28230858, -41.1693687, 74.4388885];
+
+/// `0.01f`, which `css_hsl_to_srgb_` and `css_hwb_to_srgb` take a percent
+/// to a fraction by.
+const HSL_PERCENT: f32 = 0.01;
+
+/// The chroma at or below which `xyzd50_to_hcl` calls a hue powerless:
+/// LCH's arithmetic leaves an achromatic colour a small chroma.
+const LCH_POWERLESS: f32 = 1e-2;
+
+/// The same for `lin_srgb_to_okhcl`, whose arithmetic leaves less.
+const OKLCH_POWERLESS: f32 = 1e-6;
 
 /// The D50 white `xyzd50_to_lab` and `css_lab_to_xyz` divide and multiply
 /// by: CSS Color 4's `0.3457 / 0.3585`, 1, `(1 - 0.3457 - 0.3585) /
@@ -1251,6 +1502,9 @@ struct Offsets {
     lab_b: usize,
     ok_in: [usize; 3],
     ok_out: [usize; 3],
+    polar: usize,
+    sinq: usize,
+    hsl_k: usize,
     ts: usize,
     factors: usize,
     biases: usize,
@@ -1298,6 +1552,9 @@ impl Offsets {
             lab_b: at("labB")?,
             ok_in: [at("okIn0")?, at("okIn1")?, at("okIn2")?],
             ok_out: [at("okOut0")?, at("okOut1")?, at("okOut2")?],
+            polar: at("polar")?,
+            sinq: at("sinq")?,
+            hsl_k: at("hslK")?,
             ts: at("ts")?,
             factors: at("factors")?,
             biases: at("biases")?,
@@ -1343,6 +1600,9 @@ uniform float3 okIn2;
 uniform float3 okOut0;
 uniform float3 okOut1;
 uniform float3 okOut2;
+uniform float2 polar;
+uniform float3 sinq;
+uniform float4 hslK;
 uniform float ts[{size}];
 uniform float4 factors[{size}];
 uniform float4 biases[{size}];
@@ -1440,6 +1700,50 @@ float3 oklab_to_linear_srgb(float3 c) {{
     return float3(row(okOut0, lms), row(okOut1, lms), row(okOut2, lms));
 }}
 
+// `sin5q_`, Skia's polynomial for `sin(x * 2 * pi)` on a quarter turn.
+float sin5q(float x) {{
+    float x2 = x * x;
+    return x * ((x2 * sinq.z + sinq.y) * x2 + sinq.x);
+}}
+
+// `css_hcl_to_lab`, through Skia's `cos_` and `sin_`: hue, chroma and
+// lightness to Lab or Oklab.
+float3 hcl_to_lab(float3 c) {{
+    float h = c.r * polar.x;
+    float k = h * polar.y;
+    k = 0.25 - abs(k - floor(k + 0.5));
+    float s = h * -polar.y + 0.25;
+    s = 0.25 - abs(s - floor(s + 0.5));
+    return float3(c.b, c.g * sin5q(k), c.g * sin5q(s));
+}}
+
+// `mod_`: `x - y * floor(x * (1 / y))`, the reciprocal handed in.
+float modOf(float x, float y, float inverse) {{
+    return x - y * floor(x * inverse);
+}}
+
+// `css_hsl_to_srgb_`.
+float3 hsl_to_srgb(float h, float s, float l) {{
+    h = modOf(h, 360.0, hslK.z);
+    s *= hslK.x;
+    l *= hslK.x;
+    float3 k = float3(modOf(0.0 + h * hslK.y, 12.0, hslK.w),
+                      modOf(8.0 + h * hslK.y, 12.0, hslK.w),
+                      modOf(4.0 + h * hslK.y, 12.0, hslK.w));
+    float a = s * min(l, 1.0 - l);
+    return l - a * max(float3(-1.0), min(min(k - 3.0, 9.0 - k), float3(1.0)));
+}}
+
+// `css_hwb_to_srgb`.
+float3 hwb_to_srgb(float3 c) {{
+    float w = c.g * hslK.x;
+    float b = c.b * hslK.x;
+    float gray = w / (w + b);
+    float3 rgb = hsl_to_srgb(c.r, 100.0, 50.0);
+    rgb = rgb * (1.0 - w - b) + w;
+    return (w + b) >= 1.0 ? float3(gray) : rgb;
+}}
+
 half4 main(float2 p) {{
     float x = p.x;
     float y = p.y;
@@ -1514,6 +1818,14 @@ half4 main(float2 p) {{
         c.rgb = lab_to_xyz(c.rgb);
     }} else if (css == 2) {{
         c.rgb = oklab_to_linear_srgb(c.rgb);
+    }} else if (css == 3) {{
+        c.rgb = lab_to_xyz(hcl_to_lab(c.rgb));
+    }} else if (css == 4) {{
+        c.rgb = oklab_to_linear_srgb(hcl_to_lab(c.rgb));
+    }} else if (css == 5) {{
+        c.rgb = hsl_to_srgb(c.r, c.g, c.b);
+    }} else if (css == 6) {{
+        c.rgb = hwb_to_srgb(c.rgb);
     }}
     // `SkColorSpaceXformSteps`, from the space interpolated in to the page.
     if (linearize != 0) {{
@@ -1627,6 +1939,15 @@ fn uniforms(
             floats(*at, row);
         }
     }
+    floats(offsets.polar, &[RADIANS_PER_DEGREE, TURNS_PER_RADIAN]);
+    floats(offsets.sinq, &SIN5Q);
+    // `css_hsl_to_srgb_`'s `1 / 30.0f`, a hue in hours of a twelve-hour
+    // wheel, and `mod_`'s `1 / y` for its 360 and its 12, each divided in
+    // f32 as the CPU divides it.
+    floats(
+        offsets.hsl_k,
+        &[HSL_PERCENT, 1.0 / 30.0, 1.0 / TURN, 1.0 / 12.0],
+    );
     // `matrix_3x3`'s `m` is column by column; the effect takes a row of
     // the matrix each.
     let m = toward.gamut.unwrap_or([0.0; 9]);

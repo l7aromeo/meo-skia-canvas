@@ -433,108 +433,234 @@ const CONVERSION_ULPS: f64 = 512.0;
 /// 3, inside the linear segment `css_lab_to_xyz` takes below L 8.
 const DARK: f32 = 0.03;
 
-/// How many units in the last place of the sizes it sums the conversion
-/// back from Lab or Oklab may lose on the GPU against the CPU: two sums and
-/// three products a step, which a GPU may fuse where the CPU does not.
+/// How many units in the last place of the sizes it sums a conversion back
+/// from one of the spaces [`Css`] names may lose on the GPU against the
+/// CPU: two sums and three products a step, which a GPU may fuse where the
+/// CPU does not, and HWB's one quotient, which Metal's fast math lands a
+/// unit or two off.
 const CSS_ULPS: f64 = 8.0;
 
-/// `css_lab_to_xyz` and `css_oklab_to_linear_srgb`, in f32 as the CPU
-/// computes them.
+/// `css_lab_to_xyz`, `css_oklab_to_linear_srgb`, `css_hcl_to_lab`,
+/// `css_hsl_to_srgb` and `css_hwb_to_srgb`, in f32 as the CPU computes
+/// them.
 fn css_back(css: Css, c: [f32; 3]) -> [f32; 3] {
     match css {
         Css::None => c,
-        Css::Lab => {
-            let f1 = (c[0] + 16.0) * (1.0 / 116.0);
-            let f0 = (c[1] * (1.0 / 500.0)) + f1;
-            let f2 = f1 - (c[2] * (1.0 / 200.0));
-            let cube = |v: f32| v * v * v;
-            let x = match cube(f0) > LAB_E {
-                true => cube(f0),
-                false => (116.0 * f0 - 16.0) * (1.0 / LAB_K),
-            };
-            let y = match c[0] > LAB_K * LAB_E {
-                true => cube(f1),
-                false => c[0] * (1.0 / LAB_K),
-            };
-            let z = match cube(f2) > LAB_E {
-                true => cube(f2),
-                false => (116.0 * f2 - 16.0) * (1.0 / LAB_K),
-            };
-            [x * LAB_D50[0], y * LAB_D50[1], z * LAB_D50[2]]
-        }
-        Css::OkLab => {
-            let row = |m: [f32; 3], v: [f32; 3]| {
-                (m[0] * v[0] + m[1] * v[1]) + m[2] * v[2]
-            };
-            let lms = OKLAB_IN.map(|m| {
-                let v = row(m, c);
-                v * v * v
-            });
-            OKLAB_OUT.map(|m| row(m, lms))
+        Css::Lab => lab_back(c),
+        Css::OkLab => oklab_back(c),
+        Css::Lch => lab_back(hcl_back(c)),
+        Css::OkLch => oklab_back(hcl_back(c)),
+        Css::Hsl => hsl_back(c[0], c[1], c[2]),
+        Css::Hwb => {
+            let (w, b) = (c[1] * HSL_PERCENT, c[2] * HSL_PERCENT);
+            if w + b >= 1.0 {
+                return [w / (w + b); 3];
+            }
+            hsl_back(c[0], 100.0, 50.0).map(|v| v * (1.0 - w - b) + w)
         }
     }
 }
 
+fn lab_back(c: [f32; 3]) -> [f32; 3] {
+    let f1 = (c[0] + 16.0) * (1.0 / 116.0);
+    let f0 = (c[1] * (1.0 / 500.0)) + f1;
+    let f2 = f1 - (c[2] * (1.0 / 200.0));
+    let cube = |v: f32| v * v * v;
+    let x = match cube(f0) > LAB_E {
+        true => cube(f0),
+        false => (116.0 * f0 - 16.0) * (1.0 / LAB_K),
+    };
+    let y = match c[0] > LAB_K * LAB_E {
+        true => cube(f1),
+        false => c[0] * (1.0 / LAB_K),
+    };
+    let z = match cube(f2) > LAB_E {
+        true => cube(f2),
+        false => (116.0 * f2 - 16.0) * (1.0 / LAB_K),
+    };
+    [x * LAB_D50[0], y * LAB_D50[1], z * LAB_D50[2]]
+}
+
+fn oklab_back(c: [f32; 3]) -> [f32; 3] {
+    let row =
+        |m: [f32; 3], v: [f32; 3]| (m[0] * v[0] + m[1] * v[1]) + m[2] * v[2];
+    let lms = OKLAB_IN.map(|m| {
+        let v = row(m, c);
+        v * v * v
+    });
+    OKLAB_OUT.map(|m| row(m, lms))
+}
+
+/// `sin5q_`, in f32.
+fn sin5q(x: f32) -> f32 {
+    let x2 = x * x;
+    x * ((x2 * SIN5Q[2] + SIN5Q[1]) * x2 + SIN5Q[0])
+}
+
+/// `css_hcl_to_lab`, through `cos_` and `sin_`, in f32.
+fn hcl_back(c: [f32; 3]) -> [f32; 3] {
+    let h = c[0] * RADIANS_PER_DEGREE;
+    let quarter = |x: f32| 0.25 - (x - (x + 0.5).floor()).abs();
+    let cos = sin5q(quarter(h * TURNS_PER_RADIAN));
+    let sin = sin5q(quarter(h * -TURNS_PER_RADIAN + 0.25));
+    [c[2], c[1] * cos, c[1] * sin]
+}
+
+/// `css_hsl_to_srgb_`, in f32.
+fn hsl_back(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let modulo = |x: f32, y: f32| x - y * (x * (1.0 / y)).floor();
+    let h = modulo(h, TURN);
+    let (s, l) = (s * HSL_PERCENT, l * HSL_PERCENT);
+    let a = s * l.min(1.0 - l);
+    [0.0, 8.0, 4.0].map(|n: f32| {
+        let k = modulo(n + h * (1.0 / 30.0), 12.0);
+        l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    })
+}
+
 /// [`css_back`] in f64, with, for each channel, the size of what it sums
-/// along the way: the bound on what rounding there can move it by.
-fn css_back_f64(css: Css, c: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+/// along the way: the bound on what rounding there can move it by. `sizes`
+/// are the inputs' own: the sizes of the terms `t * factor + bias` sums.
+fn css_back_f64(
+    css: Css,
+    c: [f64; 3],
+    sizes: [f64; 3],
+) -> ([f64; 3], [f64; 3]) {
     match css {
+        // Nothing converted, nothing summed: the interpolation's own
+        // noise is `t`'s, which the judge counts apart.
         Css::None => (c, [0.0; 3]),
-        Css::Lab => {
-            let d50 = LAB_D50.map(f64::from);
-            let (e, k) = (f64::from(LAB_E), f64::from(LAB_K));
-            let f1 = (c[0] + 16.0) / 116.0;
-            let f = [c[1] / 500.0 + f1, f1, f1 - c[2] / 200.0];
-            // A cube's error is three times its root's, relative: the root
-            // sums `c / 500` or `c / 200` with `f1`.
-            let root_sizes = [
-                (c[1] / 500.0).abs() + f1.abs(),
-                f1.abs(),
-                f1.abs() + (c[2] / 200.0).abs(),
-            ];
-            let mut out = [0.0; 3];
-            let mut sizes = [0.0; 3];
-            for i in 0..3 {
-                let cubed = f[i] * f[i] * f[i];
-                let curved = match i {
-                    1 => c[0] > k * e,
-                    _ => cubed > e,
-                };
-                let (v, size) = match curved {
-                    true => {
-                        (cubed, 3.0 * f[i] * f[i] * root_sizes[i] + cubed.abs())
-                    }
-                    false => {
-                        let v = match i {
-                            1 => c[0] / k,
-                            _ => (116.0 * f[i] - 16.0) / k,
-                        };
-                        (v, (116.0 * root_sizes[i] + 16.0) / k)
-                    }
-                };
-                out[i] = v * d50[i];
-                sizes[i] = size * d50[i];
-            }
-            (out, sizes)
+        Css::Lab => lab_back_f64(c, sizes),
+        Css::OkLab => oklab_back_f64(c, sizes),
+        Css::Lch => {
+            let (lab, lab_sizes) = hcl_back_f64(c, sizes);
+            lab_back_f64(lab, lab_sizes)
         }
-        Css::OkLab => {
-            let row = |m: [f32; 3], v: [f64; 3]| {
-                (0..3).map(|j| f64::from(m[j]) * v[j]).sum::<f64>()
-            };
-            let size = |m: [f32; 3], v: [f64; 3]| {
-                (0..3).map(|j| (f64::from(m[j]) * v[j]).abs()).sum::<f64>()
-            };
-            let root = OKLAB_IN.map(|m| row(m, c));
-            let root_sizes = OKLAB_IN.map(|m| size(m, c));
-            let lms = root.map(|v| v * v * v);
-            let lms_sizes: [f64; 3] = std::array::from_fn(|j| {
-                3.0 * root[j] * root[j] * root_sizes[j] + lms[j].abs()
+        Css::OkLch => {
+            let (lab, lab_sizes) = hcl_back_f64(c, sizes);
+            oklab_back_f64(lab, lab_sizes)
+        }
+        Css::Hsl => hsl_back_f64(c, sizes),
+        Css::Hwb => {
+            let (w, b) = (c[1] / 100.0, c[2] / 100.0);
+            let (sw, sb) = (sizes[1] / 100.0, sizes[2] / 100.0);
+            if w + b >= 1.0 {
+                // A quotient, and its divisor's sum.
+                let gray = w / (w + b);
+                return (
+                    [gray; 3],
+                    [4.0 * gray.abs() + (sw + sb) / (w + b); 3],
+                );
+            }
+            let (rgb, rgb_sizes) =
+                hsl_back_f64([c[0], 100.0, 50.0], [sizes[0], 100.0, 50.0]);
+            let scale = 1.0 - w - b;
+            let out = rgb.map(|v| v * scale + w);
+            let out_sizes: [f64; 3] = std::array::from_fn(|k| {
+                rgb_sizes[k] * scale.abs()
+                    + rgb[k].abs() * (1.0 + sw + sb)
+                    + sw
+                    + 1.0
             });
-            let out = OKLAB_OUT.map(|m| row(m, lms));
-            let sizes = OKLAB_OUT.map(|m| size(m, lms) + size(m, lms_sizes));
-            (out, sizes)
+            (out, out_sizes)
         }
     }
+}
+
+fn lab_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let d50 = LAB_D50.map(f64::from);
+    let (e, k) = (f64::from(LAB_E), f64::from(LAB_K));
+    let f1 = (c[0] + 16.0) / 116.0;
+    let f = [c[1] / 500.0 + f1, f1, f1 - c[2] / 200.0];
+    // A cube's error is three times its root's, relative: the root sums
+    // `c / 500` or `c / 200` with `f1`.
+    let f1_size = (sizes[0] + 16.0) / 116.0;
+    let root_sizes = [
+        sizes[1] / 500.0 + f1_size,
+        f1_size,
+        f1_size + sizes[2] / 200.0,
+    ];
+    let mut out = [0.0; 3];
+    let mut out_sizes = [0.0; 3];
+    for i in 0..3 {
+        let cubed = f[i] * f[i] * f[i];
+        let curved = match i {
+            1 => c[0] > k * e,
+            _ => cubed > e,
+        };
+        let (v, size) = match curved {
+            true => (cubed, 3.0 * f[i] * f[i] * root_sizes[i] + cubed.abs()),
+            false => {
+                let v = match i {
+                    1 => c[0] / k,
+                    _ => (116.0 * f[i] - 16.0) / k,
+                };
+                (v, (116.0 * root_sizes[i] + 16.0) / k)
+            }
+        };
+        out[i] = v * d50[i];
+        out_sizes[i] = size * d50[i];
+    }
+    (out, out_sizes)
+}
+
+fn oklab_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let row = |m: [f32; 3], v: [f64; 3]| {
+        (0..3).map(|j| f64::from(m[j]) * v[j]).sum::<f64>()
+    };
+    let size = |m: [f32; 3], v: [f64; 3]| {
+        (0..3).map(|j| (f64::from(m[j]) * v[j]).abs()).sum::<f64>()
+    };
+    let root = OKLAB_IN.map(|m| row(m, c));
+    let root_sizes = OKLAB_IN.map(|m| size(m, sizes));
+    let lms = root.map(|v| v * v * v);
+    let lms_sizes: [f64; 3] = std::array::from_fn(|j| {
+        3.0 * root[j] * root[j] * root_sizes[j] + lms[j].abs()
+    });
+    let out = OKLAB_OUT.map(|m| row(m, lms));
+    let out_sizes = OKLAB_OUT.map(|m| size(m, lms) + size(m, lms_sizes));
+    (out, out_sizes)
+}
+
+/// [`hcl_back`] in f64, through the same polynomial. The angle, in turns,
+/// carries the noise of the hue it is made from and of the two products
+/// that make it; each of Lab's two axes that, times the chroma, through a
+/// slope of at most a whole turn's.
+fn hcl_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let sin5q = |x: f64| {
+        let [a, b, cc] = SIN5Q.map(f64::from);
+        let x2 = x * x;
+        x * ((x2 * cc + b) * x2 + a)
+    };
+    let turns = c[0] / f64::from(TURN);
+    let quarter = |x: f64| 0.25 - (x - (x + 0.5).floor()).abs();
+    let cos = sin5q(quarter(turns));
+    let sin = sin5q(quarter(0.25 - turns));
+    let angle_size = 4.0 * sizes[0] / f64::from(TURN) + 1.0;
+    let axis_size =
+        sizes[1] + c[1].abs() * (4.0 + std::f64::consts::TAU * angle_size);
+    (
+        [c[2], c[1] * cos, c[1] * sin],
+        [sizes[2], axis_size, axis_size],
+    )
+}
+
+/// [`hsl_back`] in f64. Each channel is `l` less `a` times a clamped
+/// distance along the wheel, the wheel's position a hue scaled down to a
+/// twelfth of a turn's thirtieth and reduced twice.
+fn hsl_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let h = c[0].rem_euclid(360.0);
+    let (s, l) = (c[1] / 100.0, c[2] / 100.0);
+    let (ss, sl) = (sizes[1] / 100.0, sizes[2] / 100.0);
+    let a = s * l.min(1.0 - l);
+    let a_size = ss * l.min(1.0 - l).abs() + s.abs() * (sl + 1.0);
+    let k_size = sizes[0] / 30.0 + 2.0 * 12.0;
+    let out = [0.0, 8.0, 4.0].map(|n| {
+        let k = (n + h / 30.0).rem_euclid(12.0);
+        l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    });
+    let size = sl + a_size + a.abs() * (k_size + 12.0);
+    (out, [size; 3])
 }
 
 /// The CPU's `approx_log2`, in f32 as it computes it. The constants are
@@ -767,10 +893,14 @@ fn margins_at(
     let rgb: [f32; 3] = std::array::from_fn(|k| t32 * f[k] + b[k]);
     let value = toward_page(&ramp.toward, css_back(ramp.css, rgb))[channel];
     let level = f64::from(value.clamp(0.0, 1.0)) * 255.0;
+    let sizes: [f64; 3] = std::array::from_fn(|k| {
+        (t * f64::from(f[k])).abs() + f64::from(b[k]).abs()
+    });
     let at = |t: f64| {
         let rgb =
             std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
-        toward_page_f64(&ramp.toward, css_back_f64(ramp.css, rgb).0)[channel]
+        toward_page_f64(&ramp.toward, css_back_f64(ramp.css, rgb, sizes).0)
+            [channel]
             .clamp(0.0, 1.0)
             * 255.0
     };
@@ -787,7 +917,7 @@ fn margins_at(
     // encoding curve's own, relative to the value.
     let rgb: [f64; 3] =
         std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
-    let (rgb, css_sizes) = css_back_f64(ramp.css, rgb);
+    let (rgb, css_sizes) = css_back_f64(ramp.css, rgb, sizes);
     let linear = match &ramp.toward.linearize {
         Some(tf) => rgb.map(|c| curve_f64(c, tf)),
         None => rgb,
@@ -939,11 +1069,14 @@ fn the_effect_stores_the_cpus_bytes_but_on_ties() {
 }
 
 /// The spaces Skia interpolates in apart from the page and converts from
-/// afterwards on the float pipeline -- linear sRGB, Display P3, sRGB and A98
-/// RGB -- on an sRGB and a Display P3 page: over the corpus's gradients,
-/// made opaque and drawn at full alpha, the effect stores the CPU's bytes
-/// but on ties, the conversion's noise counted in -- see
-/// [`CONVERSION_ULPS`]. Skia's own GPU gradient is judged beside it.
+/// afterwards on the float pipeline -- linear sRGB, Display P3, sRGB, A98
+/// RGB, Oklab, Lab, LCH, OkLCH, HSL and HWB -- on an sRGB and a Display P3
+/// page: over the corpus's gradients, made opaque and drawn at full alpha,
+/// the effect stores the CPU's bytes but on ties, the conversion's noise
+/// counted in -- see [`CONVERSION_ULPS`] and [`CSS_ULPS`]. Every fourth
+/// case is drawn near black, every third greys a stop in three, whose hue
+/// is then powerless, and the hue methods take turns. Skia's own GPU
+/// gradient is judged beside it.
 #[test]
 fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
     let spaces = [
@@ -956,7 +1089,20 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
         (InterpolationSpace::A98RGB, GradientColorSpace::A98Rgb),
         (InterpolationSpace::OKLab, GradientColorSpace::Oklab),
         (InterpolationSpace::Lab, GradientColorSpace::Lab),
+        (InterpolationSpace::LCH, GradientColorSpace::Lch),
+        (InterpolationSpace::OKLCH, GradientColorSpace::Oklch),
+        (InterpolationSpace::HSL, GradientColorSpace::Hsl),
+        (InterpolationSpace::HWB, GradientColorSpace::Hwb),
     ];
+    let methods = [
+        HueMethod::Shorter,
+        HueMethod::Longer,
+        HueMethod::Increasing,
+        HueMethod::Decreasing,
+    ];
+    // How many drawn cases of each polar space had a stop whose hue is
+    // powerless, which splits it.
+    let mut powerless = [0; 4];
     let (mut drawn_cases, mut parted, mut ganesh, mut ganesh_off) =
         (0, 0, 0, 0);
     let mut largest: f64 = 0.0;
@@ -976,7 +1122,17 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
                         color.b *= DARK;
                     }
                 }
+                // Every third case greys every third stop, whose hue is
+                // then powerless in a polar space.
+                if seed % 3 == 0 {
+                    for color in spec.colors.iter_mut().step_by(3) {
+                        color.g = color.r;
+                        color.b = color.r;
+                    }
+                }
                 spec.interpolation.color_space = named;
+                spec.interpolation.hue_method =
+                    methods[(seed / 4) as usize % 4];
                 spec.space = ours;
                 let Some(native) = spec.native() else {
                     continue;
@@ -991,6 +1147,10 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
                 );
                 if effect.is_none() {
                     continue;
+                }
+                let css = Css::of(named);
+                if css.is_polar() && has_powerless(&spec, &space) {
+                    powerless[css as usize - Css::Lch as usize] += 1;
                 }
                 let Some(gpu) = drawn_as(
                     true,
@@ -1038,19 +1198,27 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
                         .fold(0.0, f64::max);
                     largest = largest.max(nearest);
                     if !judge(a, b, index) {
+                        // A case is judged up to its first byte off a tie:
+                        // a broken conversion parts most of the page, and
+                        // judging each pixel costs a ramp's worth of work.
                         worst.push(format!(
                             "seed {seed} {named:?} on {page:?} pixel {index}: cpu {a:?} gpu {b:?}"
                         ));
+                        break;
                     }
                 }
             }
         }
     }
     eprintln!(
-        "{drawn_cases} cases drawn; {parted} pixels parted, all ties but {}, the furthest {largest:.2} of its noise from its tie; Skia's GPU gradient parted {ganesh}, {ganesh_off} off their ties",
+        "{drawn_cases} cases drawn; {parted} pixels parted, all ties but in {} cases, the furthest {largest:.2} of its noise from its tie; Skia's GPU gradient parted {ganesh}, {ganesh_off} off their ties; cases with a powerless hue in LCH, OkLCH, HSL, HWB: {powerless:?}",
         worst.len()
     );
     assert!(drawn_cases > 0, "no case was drawn through the effect");
+    assert!(
+        powerless.iter().all(|&n| n > 0),
+        "a polar space drew no stop whose hue is powerless: {powerless:?}"
+    );
     assert!(
         ganesh_off > 0,
         "the judge found no fault in Skia's gradient"
@@ -1065,6 +1233,28 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// `SK_FloatPI`, `3.14159265f` in `SkFloatingPoint.h`, is the f32 Rust's
+/// `PI` is, which `RADIANS_PER_DEGREE`, `DEGREES_PER_RADIAN` and
+/// `TURNS_PER_RADIAN` are worked out from as Skia works its out.
+#[test]
+// The literal as Skia writes it, more figures than an f32 holds.
+#[allow(clippy::approx_constant, clippy::excessive_precision)]
+fn skias_pi_is_rusts() {
+    assert_eq!(3.141_592_65_f32.to_bits(), std::f32::consts::PI.to_bits());
+}
+
+/// Whether a stop of `spec` has a powerless hue in the space it is
+/// interpolated in, drawn on `page`.
+fn has_powerless(spec: &GradientSpec, page: &ColorSpace) -> bool {
+    let css = Css::of(spec.interpolation.color_space);
+    stops(spec)
+        .zip(intermediate_space(spec, page))
+        .and_then(|(stops, space)| {
+            convert(&stops.colors, &spec.color_space, &space)
+        })
+        .is_some_and(|colors| colors.into_iter().any(|c| css.converted(c).1))
 }
 
 /// Every size of the effect compiles; a refusal here would leave every
