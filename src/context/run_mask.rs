@@ -1433,12 +1433,12 @@ mod tests {
         // The scene `text-blur-sans-*` times: fifty "Ag" in sans-serif on a
         // page of 400 by 300, at whole pixels, cleared and drawn again. By
         // the third page every run is kept where it is drawn, and each is
-        // composited from what was kept without drawing it -- but under a
-        // blur of 10, past the sigma the coverage route takes, none is.
+        // composited from what was kept without drawing it, a blur of 10
+        // through the FFT as a blur of 3 tap by tap.
         for (px, blur, trusted) in [
             (40, 1, 50),
             (40, 3, 50),
-            (40, 10, 0),
+            (40, 10, 50),
             (20, 3, 50),
             (80, 3, 50),
         ] {

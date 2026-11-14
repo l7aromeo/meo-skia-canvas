@@ -259,6 +259,18 @@ pub(crate) fn engine_of(canvas: &Canvas) -> RenderingEngine {
     RenderingEngine::CPU
 }
 
+/// The bytes Ganesh keeps beside a surface of `info` made with `samples`
+/// samples a pixel: a multisample buffer holding every sample of every pixel,
+/// `samples` times the surface's own pixels, and nothing at one sample or
+/// none, which draw into the surface itself. An estimate from the count Ganesh
+/// was asked for rather than a figure Skia reports.
+pub(crate) fn multisample_bytes(info: &ImageInfo, samples: usize) -> usize {
+    match samples {
+        0 | 1 => 0,
+        samples => info.compute_min_byte_size() * samples,
+    }
+}
+
 #[allow(dead_code)]
 impl RenderingEngine {
     /// The engine a canvas of `color_type` rasterizes on, where `gpu` says

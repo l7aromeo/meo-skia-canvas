@@ -9127,19 +9127,31 @@ mod text_reach_tests {
     /// Skia 156 has for a path -- see `skia_covers_a_curve_by_where_it_lies`.
     const AAA_COVERAGE_ERROR: u8 = 40;
 
-    /// How far two placements of the same scene may draw any pixel apart:
-    /// each covers an edge within [`AAA_COVERAGE_ERROR`] of its true
-    /// coverage, so the two lie within twice that of each other. It follows
-    /// from that error rather than from the spreads seen, which were 25
-    /// levels under a drop shadow and 32 without the filter.
+    /// How far two placements of the same scene on the GPU may draw any
+    /// pixel apart. A clip-bounded chain's layer there is the page and the
+    /// region together, another size of target than the page, which draws an
+    /// edge otherwise (#747): a skewed hairline came 63 levels apart. Each
+    /// lies within [`AAA_COVERAGE_ERROR`] of the true coverage, so the two
+    /// within twice that of each other, until #747 is fixed.
     const AAA_PLACEMENT_SPREAD: u8 = 2 * AAA_COVERAGE_ERROR;
+
+    /// How far two placements of the same scene on the CPU may draw any
+    /// pixel apart: a level, a tie either way. Both layers start at the
+    /// device's origin -- see `chain::draw_from_the_origin` -- so a curve is
+    /// covered alike; their widths differ, and a blur through the FFT rounds
+    /// a value within float noise of a half either way by the length it is
+    /// transformed at. Helvetica's 40px "Ag" under its drop shadow at
+    /// density 3 drew (186, 314) with an alpha of 86 from a region 254
+    /// pixels wide and 85 from one 1010 wide.
+    const CPU_PLACEMENT_SPREAD: u8 = 1;
 
     /// The largest difference, in premultiplied levels, between the scene
     /// drawn in a chain layer bounded by its reach and one bounded by the
     /// clip, at each scale.
     ///
-    /// An end-to-end check that confining the layer changes nothing past
-    /// Skia's own placement noise -- see [`AAA_PLACEMENT_SPREAD`] -- not the
+    /// An end-to-end check that confining the layer changes nothing past a
+    /// tie on the CPU and #747's target sizes on the GPU -- see
+    /// [`CPU_PLACEMENT_SPREAD`] and [`AAA_PLACEMENT_SPREAD`] -- not the
     /// guard on the reach: a reach that cuts a pixel off an anti-aliased
     /// fringe can lose a few tens of levels, which the spread allows, and
     /// [`inked_past`] is what refuses that. Drawn in by TEXT_REACH_INSET, in
@@ -9558,8 +9570,8 @@ mod text_reach_tests {
     /// its font's declared box (Zapfino's swashes), colour emoji, a wide
     /// stroke, a turn, a skew and a scale. And the chain bounded by it
     /// draws what one bounded by the clip draws, a drop shadow cast further
-    /// than the run is long included, within [`AAA_PLACEMENT_SPREAD`]: Skia
-    /// covers a curved edge by where on the device its layer puts it.
+    /// than the run is long included, within [`CPU_PLACEMENT_SPREAD`] on the
+    /// CPU and [`AAA_PLACEMENT_SPREAD`] on the GPU.
     #[test]
     fn text_in_a_chain_is_bounded_by_all_it_inks() {
         let full = std::env::var("TEXT_REACH_SWEEP").is_ok_and(|v| v == "full");
@@ -9659,7 +9671,13 @@ mod text_reach_tests {
                 }
                 let parted = if full { Vec::new() } else { parted_from_the_clip(&scene) }
                     .into_iter()
-                    .filter(|(_, levels)| *levels > AAA_PLACEMENT_SPREAD)
+                    .filter(|(at, levels)| {
+                        let spread = match at.starts_with("gpu") {
+                            true => AAA_PLACEMENT_SPREAD,
+                            false => CPU_PLACEMENT_SPREAD,
+                        };
+                        *levels > spread
+                    })
                     .map(|(at, levels)| {
                         format!("{label} {at}: {levels} levels from the clip-bounded chain")
                     })
