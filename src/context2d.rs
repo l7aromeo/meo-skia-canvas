@@ -4878,6 +4878,91 @@ mod recorded_count_tests {
         shader::{GradientColorSpace, GradientInterpolation, GradientStop},
     };
 
+    /// A draw the clip cuts and a pattern's tile, filed under a clip
+    /// straight after a gradient fill the page isolates, are pieces of the
+    /// frame's run, one clip around both, whether or not the page files its
+    /// gradient draws -- see `RenderingEngine::never_gpu`. The fill follows
+    /// another such fill with nothing recorded between them, where the
+    /// page's flush has nothing to file and resumes nothing; filed, the op
+    /// left the frame unbuilt, and each entry after it took a clip of its
+    /// own, which a PDF writes once for each.
+    #[test]
+    fn entries_under_a_clip_after_an_isolated_gradient_join_its_run() {
+        use crate::{
+            context::layer::Layer, paint::BlendMode, path::FillRule,
+            pattern::PatternRepeat,
+        };
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 30.0, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.5, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.2, 1.0),
+                },
+            ],
+            GradientInterpolation::new(GradientColorSpace::Destination),
+        )
+        .expect("a gradient");
+        let mut wrong = vec![];
+        for never_gpu in [false, true] {
+            NEVER_GPU.set(Some(never_gpu));
+            let mut source = Canvas::new(8.0, 8.0);
+            source
+                .context()
+                .set_fill_style_css("rgb(200 40 90)")
+                .expect("a colour");
+            source.context().fill_rect(0.0, 0.0, 4.0, 4.0);
+            let mut canvas = Canvas::new(96.0, 96.0);
+            let pattern = canvas
+                .context()
+                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(20 40 200)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 96.0, 96.0);
+            // A blend a document cannot write, so the page isolates each
+            // fill, the second in a frame of its own.
+            ctx.set_global_composite_operation(BlendMode::ColorDodge);
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(5.0, 5.0, 30.0, 20.0);
+            ctx.save();
+            ctx.begin_path();
+            ctx.arc(48.0, 48.0, 22.0, 0.0, std::f32::consts::TAU, false)
+                .expect("a positive radius");
+            ctx.clip(FillRule::NonZero);
+            ctx.fill_rect(30.0, 30.0, 30.0, 20.0);
+            ctx.set_global_composite_operation(BlendMode::SourceOver);
+            // A stroke the arc's edge cuts, then a tile.
+            ctx.set_stroke_style_css("rgb(10 200 30)")
+                .expect("a colour");
+            ctx.set_line_width(4.0);
+            ctx.stroke_rect(38.0, 48.0, 30.0, 20.0);
+            ctx.set_fill_pattern(&pattern);
+            ctx.fill_rect(30.0, 30.0, 40.0, 40.0);
+            ctx.restore();
+            let entries = ctx.inner.entries();
+            let runs: Vec<Option<u64>> = entries
+                .layers
+                .iter()
+                .rev()
+                .take(2)
+                .map(|entry| match entry {
+                    Layer::Clipped(piece) => Some(piece.run),
+                    _ => None,
+                })
+                .collect();
+            NEVER_GPU.set(None);
+            if !matches!(runs[..], [Some(a), Some(b)] if a == b) {
+                wrong.push(format!("never_gpu {never_gpu}: runs {runs:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// Gradient fills one after another count what the page records for
     /// them, on a CPU canvas and a GPU one alike. Where the page files them
     /// -- in a process that may play it on a GPU -- they are one run, each
