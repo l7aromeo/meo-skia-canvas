@@ -4299,7 +4299,12 @@ fn drawn_on_their_backdrop(
     // the area, the transform inverted with another translation moved a
     // value on a half level to the next, 2 bytes in 40 Oklab radials.
     let whole = format.image_info(ISize::new(area.right, area.bottom));
-    let Some(mut surface) = started::raster(&whole, None, None) else {
+    // Under the canvas's own surface properties, so that text on the raster
+    // takes the page's contrast and gamma rather than Skia's defaults, which
+    // differ from the page's on Linux.
+    let props = canvas.props();
+    let Some(mut surface) = started::raster(&whole, None, props.as_ref())
+    else {
         return false;
     };
     let raster = surface.canvas();

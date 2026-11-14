@@ -6288,6 +6288,66 @@ mod overlapping_glyph_tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// A run drawn on the CPU over a GPU page's pixels read back is
+    /// rasterized under the page's own text contrast and gamma, as the CPU
+    /// page draws it -- see `layer::drawn_on_their_backdrop`: a canvas made
+    /// with others than Skia's defaults reads the same bytes on either
+    /// engine. Drawn under the defaults, the run's glyph masks took other
+    /// coverage, Linux's default gamma of 1.2 13 levels from the CPU page
+    /// under `multiply`.
+    #[test]
+    fn a_run_drawn_on_its_backdrop_takes_the_pages_text_gamma() {
+        use crate::canvas::CanvasOptions;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let page = |gpu: bool, contrast: f32, gamma: f32| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::with_options(
+                W,
+                H,
+                CanvasOptions {
+                    gpu,
+                    text_contrast: contrast,
+                    text_gamma: gamma,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, 16.0, None);
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            bytes
+        };
+        let mut apart = vec![];
+        for (contrast, gamma) in [(0.0, 2.2), (1.0, 1.2), (0.5, 0.0)] {
+            let most = most_apart(
+                &page(false, contrast, gamma),
+                &page(true, contrast, gamma),
+            );
+            if most != 0 {
+                apart.push(format!(
+                    "contrast {contrast} gamma {gamma}: {most} levels"
+                ));
+            }
+        }
+        assert!(apart.is_empty(), "{}", apart.join("\n"));
+    }
+
     /// A page of runs under a blend read in the shader, every line its own
     /// run, drawn on the GPU reads the bytes it reads drawn on the CPU: the
     /// runs one after another are played on the CPU over one read back of
