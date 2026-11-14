@@ -3350,7 +3350,9 @@ pub enum Composite {
 /// colour opaque -- recorded a second time, or the picture of its pixels
 /// where that is the paint they are drawn in -- so that on a page the
 /// coverage route plays on its blur is made from its coverage alone -- see
-/// [`chain::coverage`]. A translucent run under a sole `drop-shadow()` is
+/// [`chain::coverage`] -- and on any other eight-bit page, on either
+/// engine, the chain blurs the copy at the run's alpha rather than the run
+/// rounded to a byte. A translucent run under a sole `drop-shadow()` is
 /// recorded so too, for its shadow to be cast from its coverage on an
 /// eight-bit page, on either engine -- see [`chain::Cast`].
 ///
@@ -3713,19 +3715,26 @@ impl Group {
             return None;
         }
         let steps = Step::for_pixels(steps).unwrap_or_else(|| steps.clone());
-        // A translucent run's shadow is cast from its opaque copy, as alone
-        // -- see `Composite::Chain`'s playback.
-        let cast = coverage
-            .as_deref()
-            .filter(|_| eight_bits(canvas) && casts_from_copy(&steps[..]))
-            .and_then(|run| {
-                Some((run.picture.picture()?.clone(), byte_alpha(run.alpha)))
-            });
+        // A run that records its opaque copy is blurred from it, or casts
+        // its shadow from it, as alone -- see `Composite::Chain`'s playback.
+        let copy = coverage.as_deref().filter(|_| eight_bits(canvas)).and_then(
+            |run| Some((run.picture.picture()?.clone(), byte_alpha(run.alpha))),
+        );
+        let mut paint = chain_paint(rec);
+        let (copy, blurs) = match (copy, &steps[..]) {
+            (Some((copy, alpha)), [Step::Blur(_)]) => {
+                // Blurred from the copy, the run's alpha the chain's gain.
+                paint.set_alpha_f(paint.alpha_f() * alpha);
+                (Some((copy, alpha)), true)
+            }
+            (copy, steps) => (copy.filter(|_| casts_from_copy(steps)), false),
+        };
         Some(SharedChain {
             steps,
-            paint: chain_paint(rec),
+            paint,
             reach: *reach,
-            cast,
+            copy,
+            blurs,
         })
     }
 
@@ -4008,24 +4017,19 @@ impl Group {
                     Target::Document => None,
                 };
                 let steps = pixels.as_deref().unwrap_or(steps);
-                // A run in one flat colour the route does not take -- in
-                // another space than its colour was held in -- is drawn
-                // opaque on an eight-bit page on the CPU, its alpha the
-                // chain's gain, so that the blur rounds
-                // its alpha once, as `BlurOp::result_chain` does a path's:
-                // drawn in its translucent colour, the layer rounded its
-                // alpha to a byte before the blur and again after. A
-                // translucent run's `drop-shadow()` is cast from it drawn
-                // opaque for the same reason, on an eight-bit page on either
-                // engine, the run itself still drawn translucent over it --
-                // see `chain::Cast`.
+                // A run in one flat colour the coverage route does not take
+                // -- in another space than its colour was held in, or on the
+                // GPU, where the route never plays -- is drawn opaque on an
+                // eight-bit page, its alpha the chain's gain, so that the
+                // blur rounds its alpha once, as `BlurOp::result_chain` does
+                // a path's: drawn in its translucent colour, the layer
+                // rounded its alpha to a byte before the blur and again
+                // after. A translucent run's `drop-shadow()` is cast from it
+                // drawn opaque for the same reason, the run itself still
+                // drawn translucent over it -- see `chain::Cast`.
                 let opaque = coverage
                     .as_deref()
-                    .filter(|_| {
-                        eight_bits(canvas)
-                            && (casts_from_copy(steps)
-                                || blur_mask::draws_on_cpu(canvas))
-                    })
+                    .filter(|_| eight_bits(canvas))
                     .and_then(|run| Some((run, run.picture.picture()?)));
                 let opaquely = |picture: &Picture, layer: &SkCanvas| {
                     self.draw_chained_as(layer, target, &back, |layer| {
@@ -5422,10 +5426,12 @@ struct SharedChain {
     /// What a run of text the group holds can ink -- see
     /// [`Composite::Chain`].
     reach: Option<Rect>,
-    /// The run's opaque copy its shadow is cast from, and the alpha the run
-    /// is drawn at, where it casts its shadow from one -- see
-    /// [`chain::Cast`].
-    cast: Option<(Picture, f32)>,
+    /// The run's opaque copy and the alpha the run is drawn at, where it is
+    /// blurred from it or casts its shadow from it -- see [`CoverageRun`].
+    copy: Option<(Picture, f32)>,
+    /// Whether the chain is blurred from `copy`, drawn in the run's place,
+    /// rather than casting its shadow from it -- see [`chain::Cast`].
+    blurs: bool,
 }
 
 /// An entry [`play_shared_chains`] plays: a group through a chain, or a
@@ -5456,7 +5462,8 @@ impl Leading<'_> {
                     steps,
                     paint,
                     reach,
-                    cast,
+                    copy,
+                    blurs,
                 },
                 then,
             ) => {
@@ -5468,11 +5475,16 @@ impl Leading<'_> {
                 #[cfg(test)]
                 CHAIN_CONTENT
                     .set(content.map(|content| to_device.map_rect(content).0));
+                let copied = copy
+                    .as_ref()
+                    .map(|(copy, alpha)| (Draw::Copy(group, copy), *alpha));
+                let (draw, cast) = match (copied, blurs) {
+                    (Some((copied, _)), true) => (copied, None),
+                    (cast, _) => (Draw::Group(group), cast),
+                };
                 vec![Member {
-                    draw: Draw::Group(group),
-                    cast: cast
-                        .as_ref()
-                        .map(|(copy, alpha)| (Draw::Copy(group, copy), *alpha)),
+                    draw,
+                    cast,
                     steps,
                     content,
                     depth: Depth::Floats,
@@ -6256,13 +6268,14 @@ fn casts_from_copy(steps: &[Step]) -> bool {
 
 /// Whether a run of text filed under `steps`, in `exact` at `alpha`
 /// through a paint `dither`ed or not, records the opaque copy a page on
-/// eight bits draws it again in -- see [`CoverageRun`]: one
-/// [`coverage_plays`] could play, under a sole `blur()`, in a colour placed
-/// on the bytes an eight-bit page stores, undithered; and one under a sole
-/// `drop-shadow()`, translucent, whose shadow is cast from the copy -- see
-/// [`chain::Cast`] -- on a page compositing in eight bits. Dither leaves a
-/// pixel's alpha alone, which is all a shadow is cast from. A run that
-/// could never draw the copy is recorded once.
+/// eight bits draws it again in -- see [`CoverageRun`]: one under a sole
+/// `blur()`, in a colour placed on the bytes an eight-bit page stores,
+/// undithered, which [`coverage_plays`] plays on the CPU and a chain blurs
+/// elsewhere; and one under a sole `drop-shadow()`, translucent, whose
+/// shadow is cast from the copy -- see [`chain::Cast`] -- on a page
+/// compositing in eight bits. Dither leaves a pixel's alpha alone, which is
+/// all a shadow is cast from. A run that could never draw the copy is
+/// recorded once.
 pub(crate) fn coverage_files(
     steps: &[Step],
     exact: &ExactColour,
@@ -8853,7 +8866,9 @@ mod shadow_run_tests {
     //! A translucent run of text under `drop-shadow()` on an eight-bit
     //! page, on the CPU and on the GPU: the run as Skia draws it, over the
     //! exact blur of its coverage times its alpha, tinted, composited and
-    //! rounded once -- see `chain::Cast`.
+    //! rounded once -- see `chain::Cast`. And one under `blur()`: the exact
+    //! blur of the run drawn opaque times its alpha, rounded once -- see
+    //! `CoverageRun`.
 
     use std::ops::Range;
 
@@ -9296,6 +9311,85 @@ mod shadow_run_tests {
                 "line {line} in {fill} parts from itself alone, refused {refused}"
             );
         }
+    }
+
+    /// How many alphas of `run`, under a blur of `sigma`, part from the
+    /// exact blur of the alpha of `opaque` -- the run in its colour opaque,
+    /// whose alpha is its coverage -- times `gain`, rounded once. An alpha
+    /// within [`TIE`] of a half-level may land on either side. The colour is
+    /// not held here: an edge's colour byte is the coverage route's to move
+    /// by a level -- see `chain::coverage`.
+    fn off_the_exact_blur(
+        run: &Run,
+        opaque: &Run,
+        sigma: f32,
+        gain: f64,
+    ) -> usize {
+        let (page, _) = played(run);
+        let (width, height) = run.page();
+        let (copy, _) = played(&Run {
+            filter: "none",
+            ..*opaque
+        });
+        let blurred = exact_blur::reference(&copy, width, height, sigma, sigma);
+        page.iter()
+            .zip(&blurred)
+            .skip(3)
+            .step_by(4)
+            .filter(|&(&got, &exact)| {
+                let (got, v) = (f64::from(got), exact * gain);
+                let tie = (v - v.floor() - 0.5).abs() < TIE;
+                got != v.round()
+                    && !(tie && (got == v.floor() || got == v.ceil()))
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_translucent_runs_blur_rounds_its_alpha_once() {
+        // At sigmas summed tap by tap and through the FFT, at sizes from a
+        // hinted 13px to 60px, at alphas on and off a byte's tie; on the
+        // CPU, and on the GPU alone and sharing a layer.
+        let engines = engines();
+        let mut apart = Vec::new();
+        for (rgb, given) in [
+            ("200, 80, 30", 0.6),
+            ("20, 60, 200", 0.3),
+            ("128, 128, 128", 0.55),
+        ] {
+            // The alpha the run is drawn at, on its byte.
+            let gain = (given * 255.0f64).round() / 255.0;
+            let fill = format!("rgba({rgb}, {given})");
+            let opaque = format!("rgb({rgb})");
+            for size in [13, 32, 60] {
+                for sigma in [3.0f32, 8.0] {
+                    let filter = format!("blur({sigma}px)");
+                    for &(gpu, lines) in &engines {
+                        let run = Run {
+                            fill: &fill,
+                            filter: &filter,
+                            size,
+                            gpu,
+                            lines,
+                            ..TRANSLUCENT
+                        };
+                        let opaque = Run {
+                            fill: &opaque,
+                            ..run
+                        };
+                        let off =
+                            off_the_exact_blur(&run, &opaque, sigma, gain);
+                        if off > 0 {
+                            apart.push(format!(
+                                "{fill} {size}px {filter}, gpu {gpu}, \
+                                 {lines} lines: {off}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(apart.is_empty(), "alphas off the exact blur: {apart:#?}");
     }
 
     #[test]
