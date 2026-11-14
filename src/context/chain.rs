@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
-    ColorSpace, ColorType, FilterMode, IPoint, IRect, Image, ImageFilter,
-    ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut, SamplingOptions,
-    Shader, Surface, Vector,
+    ColorSpace, ColorType, Contains, FilterMode, IPoint, IRect, Image,
+    ImageFilter, ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut,
+    SamplingOptions, Shader, Surface, Vector,
     canvas::SrcRectConstraint,
     color_filters,
     image::{CachingHint, RequiredProperties},
@@ -805,9 +805,9 @@ impl Drawn {
         }
         let mut image =
             region_of(&self.snapshot, self.at, context.as_mut(), plan)?;
-        let cast = match (cast, &from) {
+        let mut cast = match (cast, &from) {
             (Some(cast), Some(from)) => Some((
-                region_of(&from.snapshot, from.at, context.as_mut(), plan)?,
+                cast_alpha(&from.snapshot, from.at, context.as_ref(), plan)?,
                 cast.alpha,
             )),
             _ => None,
@@ -839,9 +839,7 @@ impl Drawn {
                 } => shadowed(
                     context.as_mut(),
                     &image,
-                    cast.as_ref()
-                        .filter(|_| i == 0)
-                        .map(|(cast, alpha)| (cast, *alpha)),
+                    cast.take().filter(|_| i == 0),
                     Vector::new(offset.x * scale.0, offset.y * scale.1),
                     (sigma * scale.0, sigma * scale.1),
                     (*colour, space),
@@ -884,6 +882,100 @@ fn region_of(
         true => Some(image),
         false => padded(context, &image, plan.region, plan.worked),
     }
+}
+
+/// The alpha a shadow is cast from -- see [`Cast`] -- for each pixel of
+/// the chain's worked rectangle, row by row: all [`shadow_composed`] reads
+/// of a cast, since each tint it paints takes only the alpha of what it
+/// tints.
+struct CastAlpha {
+    alpha: Vec<f32>,
+    width: usize,
+}
+
+impl CastAlpha {
+    /// The alpha as a premultiplied F32 image of `info`'s size and space,
+    /// each pixel black at its alpha, for the tints that read an image.
+    fn floats(&self, info: &ImageInfo) -> Option<Image> {
+        let info = info
+            .with_color_type(ColorType::RGBAF32)
+            .with_alpha_type(AlphaType::Premul);
+        baked_image(&info, |out, stride| {
+            out.chunks_mut(stride)
+                .zip(self.alpha.chunks(self.width))
+                .for_each(|(row, line)| {
+                    row.as_chunks_mut::<16>().0.iter_mut().zip(line).for_each(
+                        |(px, &a)| {
+                            px.as_chunks_mut::<4>()
+                                .0
+                                .iter_mut()
+                                .zip([0.0, 0.0, 0.0, a])
+                                .for_each(|(out, v): (_, f32)| {
+                                    *out = v.to_ne_bytes()
+                                });
+                        },
+                    );
+                });
+        })
+    }
+}
+
+/// What `layer`, a cast's [`Drawn`] snapshot lying at `at`, holds of
+/// `plan`'s region, as [`region_of`] copies it out and pads it with nothing
+/// to the worked rectangle: its alpha alone, read from the layer's bytes
+/// where they lie rather than copied and padded as pixels first. Each byte
+/// is made a float by [`alpha_of_byte`], as Skia's read into floats makes
+/// it. `None` for a layer not of eight bits a channel, which a cast is
+/// never drawn into -- see `layer::eight_bits_on_cpu` -- or a region
+/// outside it.
+fn cast_alpha(
+    layer: &Image,
+    at: IRect,
+    context: Option<&Gpu>,
+    plan: &Plan,
+) -> Option<CastAlpha> {
+    let bytes = matches!(
+        layer.color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    );
+    let read = plan.region.with_offset((-at.left, -at.top));
+    if !bytes || !IRect::from_size(layer.dimensions()).contains(&read) {
+        return None;
+    }
+    let raster = to_raster(context, layer)?;
+    let pixmap = raster.peek_pixels()?;
+    let row = pixmap.row_bytes();
+    let pixels = pixmap.bytes()?;
+    let width = plan.worked.width() as usize;
+    let mut alpha = vec![0.0; width * plan.worked.height() as usize];
+    let left = (plan.region.left - plan.worked.left) as usize;
+    let top = (plan.region.top - plan.worked.top) as usize;
+    let span = read.left as usize * 4..read.right as usize * 4;
+    // The alpha is the fourth byte of a pixel in either byte order.
+    alpha
+        .chunks_mut(width)
+        .skip(top)
+        .zip(
+            pixels
+                .chunks(row)
+                .skip(read.top as usize)
+                .take(read.height() as usize),
+        )
+        .for_each(|(out, line)| {
+            out[left..]
+                .iter_mut()
+                .zip(line[span.clone()].as_chunks::<4>().0)
+                .for_each(|(a, px)| *a = alpha_of_byte(px[3]));
+        });
+    Some(CastAlpha { alpha, width })
+}
+
+/// An eight-bit alpha as the float Skia's raster pipeline loads it as: the
+/// byte times the reciprocal of its largest value, a multiply rather than a
+/// divide, which part in the last bit at 126 of the 256 bytes -- see
+/// `an_alpha_byte_is_the_float_skia_reads_it_as`.
+fn alpha_of_byte(byte: u8) -> f32 {
+    f32::from(byte) * (1.0 / f32::from(u8::MAX))
 }
 
 /// The shadows of a run's chains, made in passes they share -- see
@@ -2085,11 +2177,11 @@ fn filtered(
 /// The shadow is moved unresampled where the offset is whole pixels, and
 /// bilinearly otherwise.
 ///
-/// Where `cast` is `Some`, the shadow is cast from its image instead, at its
-/// alpha -- see [`Cast`] -- as a shadow in `colour` with that alpha as a
-/// factor of its own, which is the same product: the shadow is the tint's
-/// alpha times the blurred alpha it is cast from, and the run's alpha is a
-/// third factor of it.
+/// Where `cast` is `Some`, the shadow is cast from its alpha instead, at its
+/// alpha factor -- see [`Cast`] and [`CastAlpha`] -- as a shadow in `colour`
+/// with that alpha as a factor of its own, which is the same product: the
+/// shadow is the tint's alpha times the blurred alpha it is cast from, and the
+/// run's alpha is a third factor of it.
 ///
 /// On a GPU an eight-bit layer's blurred shadow is made there instead, by
 /// [`shadowed_on_gpu`], to the same bytes but on exact ties: made on the
@@ -2100,7 +2192,7 @@ fn filtered(
 fn shadowed(
     mut context: Option<&mut Gpu>,
     image: &Image,
-    cast: Option<(&Image, f32)>,
+    cast: Option<(CastAlpha, f32)>,
     offset: Vector,
     sigma: (f32, f32),
     colour: (Color4f, &ColorSpace),
@@ -2183,13 +2275,12 @@ fn shadow_of_alpha(
     let (w, h) = (raster.width() as usize, raster.height() as usize);
     let row = pixmap.row_bytes();
     let pixels = pixmap.bytes()?;
-    // The alpha is the fourth byte of a pixel in either byte order, made a
-    // float as Skia's raster pipeline loads a byte, by a multiply.
+    // The alpha is the fourth byte of a pixel in either byte order.
     let alpha: Vec<f32> = pixels
         .chunks(row)
         .take(h)
         .flat_map(|line| line[..w * 4].as_chunks::<4>().0.iter())
-        .map(|px| f32::from(px[3]) * (1.0 / 255.0))
+        .map(|px| alpha_of_byte(px[3]))
         .collect();
     let alpha = exact_blur::blur_alpha(alpha, w, h, sigma.0, sigma.1);
     let info = raster
@@ -2288,8 +2379,8 @@ fn shadowed_on_gpu(
 
 /// [`shadowed`]'s image over its shadow, or the shadow by itself where
 /// `shadow_only`, in floats, before it is rounded. The shadow is cast from
-/// `cast` where it is `Some` -- see [`Cast`] -- an image of the same size,
-/// type and space as `image`, and from `image` otherwise.
+/// `cast` where it is `Some` -- see [`Cast`] -- the alpha of each of
+/// `image`'s pixels, and from `image` otherwise.
 ///
 /// On an eight-bit layer the shadow is the alpha it is cast from alone,
 /// blurred in f32 and then tinted -- by [`tinted_alpha`] where [`tint_colour`]
@@ -2303,7 +2394,7 @@ fn shadowed_on_gpu(
 fn shadow_composed(
     context: Option<&Gpu>,
     image: &Image,
-    cast: Option<&Image>,
+    cast: Option<CastAlpha>,
     offset: Vector,
     sigma: (f32, f32),
     (colour, space): (Color4f, &ColorSpace),
@@ -2331,14 +2422,10 @@ fn shadow_composed(
         }),
     };
     let source = in_floats(&raster)?;
-    let cast = match cast {
-        Some(cast) => Some(to_raster(context, cast)?),
-        None => None,
-    };
     // What the shadow is cast from, in floats, for the tints and blurs
-    // that read every channel: the cast drawn into floats, or the source.
+    // that read an image: the cast's alpha, black, or the source.
     let from = || match &cast {
-        Some(cast) => in_floats(cast),
+        Some(cast) => cast.floats(raster.image_info()),
         None => Some(source.clone()),
     };
     let named = tint_colour(colour, space, raster.image_info());
@@ -2348,20 +2435,29 @@ fn shadow_composed(
         image.color_type(),
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
-    // The alpha blurred is read as it lies: an eight-bit cast's bytes come
-    // back from Skia's read into floats as the floats the cast drawn into
-    // floats holds, each byte times 1/255 -- see
-    // `a_cast_read_into_floats_holds_what_it_drawn_into_floats_does` -- so
-    // the cast is not drawn into floats first.
-    let blurred_from = cast.as_ref().unwrap_or(&source);
+    // The alpha blurred: the cast's as it is, or the source's read out.
+    let floats_info = source
+        .image_info()
+        .with_color_type(ColorType::RGBAF32)
+        .with_alpha_type(AlphaType::Premul);
+    let blurred_from = || match &cast {
+        Some(cast) => Some(cast.alpha.clone()),
+        None => alpha_floats(&source),
+    };
     let shadow = match (blurred, bytes) {
         (true, true) => match named {
-            Some((rgb, alpha)) => blurred_alpha(blurred_from, sigma, |a| {
-                tinted_alpha(rgb, alpha, a)
-            })?,
+            Some((rgb, alpha)) => {
+                blurred_alpha_of(blurred_from()?, &floats_info, sigma, |a| {
+                    tinted_alpha(rgb, alpha, a)
+                })?
+            }
             None => {
-                let alpha =
-                    blurred_alpha(blurred_from, sigma, |a| [0.0, 0.0, 0.0, a])?;
+                let alpha = blurred_alpha_of(
+                    blurred_from()?,
+                    &floats_info,
+                    sigma,
+                    |a| [0.0, 0.0, 0.0, a],
+                )?;
                 filtered(None, &alpha, &tint()?, 1.0)?
             }
         },
@@ -2396,16 +2492,25 @@ fn shadow_composed(
     Some(composed)
 }
 
-/// `source`'s alpha, blurred by `sigma` along rows and columns -- see
-/// [`exact_blur::blur_alpha`] -- as a premultiplied F32 image of the
-/// source's size and space, each pixel `pixel` of its blurred alpha: that
-/// alpha alone, for a tint to colour, or the tint itself, by
-/// [`tinted_alpha`].
+/// [`blurred_alpha_of`] `source`'s alpha, as [`alpha_floats`] reads it:
+/// the shadow [`shadow_composed`] blurs from an image, which the tests of
+/// the tints hold their sums to.
+#[cfg(test)]
 fn blurred_alpha(
     source: &Image,
     sigma: (f32, f32),
     pixel: impl Fn(f32) -> [f32; 4],
 ) -> Option<Image> {
+    let info = source
+        .image_info()
+        .with_color_type(ColorType::RGBAF32)
+        .with_alpha_type(AlphaType::Premul);
+    blurred_alpha_of(alpha_floats(source)?, &info, sigma, pixel)
+}
+
+/// The alpha of each of `source`'s pixels, row by row, as Skia's read into
+/// floats makes it.
+fn alpha_floats(source: &Image) -> Option<Vec<f32>> {
     let (w, h) = (source.width() as usize, source.height() as usize);
     let info = source
         .image_info()
@@ -2413,20 +2518,31 @@ fn blurred_alpha(
         .with_alpha_type(AlphaType::Premul);
     let row_bytes = w * 4 * size_of::<f32>();
     let mut pixels = vec![0f32; w * h * 4];
-    if !source.read_pixels(
-        &info,
-        &mut pixels,
-        row_bytes,
-        (0, 0),
-        CachingHint::Disallow,
-    ) {
-        return None;
-    }
-    let alpha: Vec<f32> =
-        pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
-    drop(pixels);
+    source
+        .read_pixels(
+            &info,
+            &mut pixels,
+            row_bytes,
+            (0, 0),
+            CachingHint::Disallow,
+        )
+        .then(|| pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect())
+}
+
+/// `alpha`, the alpha of each pixel of an image of `info`'s size row by
+/// row, blurred by `sigma` along rows and columns -- see
+/// [`exact_blur::blur_alpha`] -- as a premultiplied F32 image of `info`,
+/// each pixel `pixel` of its blurred alpha: that alpha alone, for a tint to
+/// colour, or the tint itself, by [`tinted_alpha`].
+fn blurred_alpha_of(
+    alpha: Vec<f32>,
+    info: &ImageInfo,
+    sigma: (f32, f32),
+    pixel: impl Fn(f32) -> [f32; 4],
+) -> Option<Image> {
+    let (w, h) = (info.width() as usize, info.height() as usize);
     let alpha = exact_blur::blur_alpha(alpha, w, h, sigma.0, sigma.1);
-    baked_image(&info, |out, stride| {
+    baked_image(info, |out, stride| {
         out.chunks_mut(stride)
             .zip(alpha.chunks(w))
             .for_each(|(row, line)| {
@@ -2758,9 +2874,10 @@ mod tests {
     };
 
     use super::{
-        Cast, Depth, Outcome, REFUSE_PLACED, Step, TRIMMED, TRIMS_COMPOSITE,
-        apply, blurred_alpha, blurred_on_cpu, clear_unless_zeroed, exact_blur,
-        filtered, offset_tint, rounded_once, run_cast, shadow_composed,
+        Cast, CastAlpha, Depth, Outcome, Plan, REFUSE_PLACED, Step, TRIMMED,
+        TRIMS_COMPOSITE, alpha_floats, alpha_of_byte, apply, blurred_alpha,
+        blurred_on_cpu, cast_alpha, clear_unless_zeroed, exact_blur, filtered,
+        offset_tint, region_of, rounded_once, run_cast, shadow_composed,
         shadowed, tint, tint_colour, tinted_alpha, worked_on,
     };
     #[cfg(all(meo_graphite, feature = "metal"))]
@@ -4436,12 +4553,169 @@ mod tests {
     const GPU_TIE_LEVELS: f64 = 1e-3;
 
     #[test]
+    fn an_alpha_byte_is_the_float_skia_reads_it_as() {
+        // Every byte, as `alpha_of_byte` makes it, against Skia's read of
+        // an eight-bit image holding it as alpha into floats.
+        let levels = usize::from(u8::MAX) + 1;
+        let info = ImageInfo::new(
+            (levels as i32, 1),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let bytes: Vec<u8> = (0..=u8::MAX).flat_map(|a| [0, 0, 0, a]).collect();
+        let image = started::raster_from_data(
+            &info,
+            Data::new_copy(&bytes),
+            info.min_row_bytes(),
+        )
+        .expect("an image");
+        let read = alpha_floats(&image).expect("floats");
+        let parted: Vec<u8> = (0..=u8::MAX)
+            .zip(&read)
+            .filter(|&(byte, skia)| {
+                alpha_of_byte(byte).to_bits() != skia.to_bits()
+            })
+            .map(|(byte, _)| byte)
+            .collect();
+        assert!(parted.is_empty(), "bytes {parted:?} part");
+    }
+
+    #[test]
+    fn a_cast_alpha_is_the_alpha_of_its_region_padded() {
+        // Layers of both byte orders read through plans whose region lies
+        // anywhere in them and is padded on any side, or not at all: the
+        // alpha `cast_alpha` reads against the alpha of what `region_of`
+        // copies out and pads.
+        let srgb = ColorSpace::new_srgb();
+        let mut compared = 0;
+        for kind in [ColorType::RGBA8888, ColorType::BGRA8888] {
+            for scene in [0, 1] {
+                let layer = layer(40, 36, kind, &srgb, scene);
+                let at = IRect::from_xywh(100, 50, 40, 36);
+                for (region, pad) in [
+                    (IRect::from_xywh(100, 50, 40, 36), (0, 0, 0, 0)),
+                    (IRect::from_xywh(103, 57, 30, 20), (0, 0, 0, 0)),
+                    (IRect::from_xywh(103, 57, 30, 20), (5, 3, 7, 2)),
+                    (IRect::from_xywh(100, 50, 40, 36), (9, 0, 0, 11)),
+                    (IRect::from_xywh(139, 85, 1, 1), (4, 4, 4, 4)),
+                ] {
+                    let worked = IRect::from_ltrb(
+                        region.left - pad.0,
+                        region.top - pad.1,
+                        region.right + pad.2,
+                        region.bottom + pad.3,
+                    );
+                    let plan = Plan {
+                        layer: Matrix::new_identity(),
+                        rest: Matrix::new_identity(),
+                        region,
+                        worked,
+                        drawn: at,
+                        ink: None,
+                        shares: false,
+                        depth: Depth::Bytes,
+                    };
+                    let ours =
+                        cast_alpha(&layer, at, None, &plan).expect("an alpha");
+                    let padded =
+                        region_of(&layer, at, None, &plan).expect("a region");
+                    let theirs = alpha_floats(&padded).expect("floats");
+                    assert_eq!(ours.width, worked.width() as usize);
+                    let bits = |v: &[f32]| -> Vec<u32> {
+                        v.iter().map(|a| a.to_bits()).collect()
+                    };
+                    assert_eq!(
+                        bits(&ours.alpha),
+                        bits(&theirs),
+                        "{kind:?} scene {scene} {region:?} padded {pad:?}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 20);
+    }
+
+    #[test]
+    fn a_cast_alpha_tints_as_the_cast_it_was_read_from_does() {
+        // The tints a cast's shadow is painted through, unblurred, applied
+        // to the cast drawn into floats and to its alpha alone in black:
+        // both read only the alpha of what they tint, so the two land the
+        // same to the bit, through a tint this crate names and through
+        // Skia's blend.
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let colours = [
+            (Color4f::new(0.0, 0.0, 0.0, 1.0), &srgb),
+            (Color4f::new(0.78, 0.16, 0.35, 0.6), &srgb),
+            (Color4f::new(0.2, 0.9, 0.4, 0.45), &p3),
+        ];
+        let mut compared = (0, 0);
+        for kind in [ColorType::RGBA8888, ColorType::BGRA8888] {
+            for scene in [0, 1] {
+                let cast = layer(40, 36, kind, &srgb, scene);
+                let floats_info =
+                    cast.image_info().with_color_type(ColorType::RGBAF32);
+                let mut surface = started::raster(&floats_info, None, None)
+                    .expect("a surface");
+                clear_unless_zeroed(&mut surface);
+                surface.canvas().draw_image(&cast, (0, 0), None);
+                let drawn = surface.image_snapshot();
+                let alpha = CastAlpha {
+                    alpha: alpha_floats(&cast).expect("floats"),
+                    width: cast.width() as usize,
+                }
+                .floats(cast.image_info())
+                .expect("an image");
+                for (colour, space) in colours {
+                    // The tint this crate names, where it does, and Skia's
+                    // blend, which every colour can be painted through.
+                    let named = tint_colour(colour, space, cast.image_info());
+                    let tints = [
+                        named
+                            .and_then(|named| tint(Some(named), colour, space)),
+                        tint(None, colour, space),
+                    ];
+                    let bits = |image: &Image| -> Vec<u32> {
+                        floats_of_image(image)
+                            .iter()
+                            .map(|v| v.to_bits())
+                            .collect()
+                    };
+                    for (painted, through) in tints.iter().zip([0, 1]) {
+                        let Some(painted) = painted else { continue };
+                        assert_eq!(
+                            bits(
+                                &filtered(None, &alpha, painted, 1.0)
+                                    .expect("tinted")
+                            ),
+                            bits(
+                                &filtered(None, &drawn, painted, 1.0)
+                                    .expect("tinted")
+                            ),
+                            "{kind:?} scene {scene} {colour:?} tint {through}"
+                        );
+                        match through {
+                            0 => compared.0 += 1,
+                            _ => compared.1 += 1,
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared.0 > 0 && compared.1 > 0, "{compared:?}");
+    }
+
+    #[test]
     fn a_cast_read_into_floats_holds_what_it_drawn_into_floats_does() {
         // Every alpha byte, in either byte order and in two spaces, under
         // the most colour it can hold premultiplied: Skia's read of the
-        // eight-bit image into floats, which `blurred_alpha` makes, against
-        // the image drawn onto a cleared float surface of its own space,
-        // which `shadow_composed` drew a cast into before it read it.
+        // eight-bit image into floats, which `alpha_floats` makes, against
+        // the image drawn onto a cleared float surface of its own space, as
+        // `shadow_composed` draws an image into floats.
         let srgb = ColorSpace::new_srgb();
         let p3 = PixelColorSpace::DisplayP3
             .to_skia_color_space()
