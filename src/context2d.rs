@@ -6839,6 +6839,12 @@ mod overlapping_glyph_tests {
     /// does, and inside the layer landed the CPU page's bytes under
     /// `color-dodge`, `color-burn`, `soft-light` and `hue`, and under
     /// `multiply` with the runs dyed by a pattern.
+    ///
+    /// Only the controls depend on the driver. The scenes themselves are
+    /// read single-sampled and held to the CPU page's bytes, and to the
+    /// counts of roots played and read backs taken, which this crate keeps
+    /// itself: a layer played inside, not on a root of its own, fails those
+    /// counts on any backend.
     const CONTROL_SAMPLES: usize = 4;
 
     /// What a page drawn into another holds besides its fills: runs of
