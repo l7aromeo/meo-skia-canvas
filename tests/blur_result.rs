@@ -1472,16 +1472,20 @@ fn graded(ctx: &mut Context2D) {
 fn a_blurred_image_pattern_or_gradient_fill_is_the_exact_gaussian() {
     // Each paints a shader, so its paint blurs what it draws through an
     // image filter, and the chain blurs it exactly; through Skia's filter,
-    // three box blurs.
+    // three box blurs. What the chain blurs is the fill the engine makes for
+    // it: a GPU canvas makes a gradient's on the CPU, as it makes a gradient
+    // the effect does not reproduce -- see `layer::GradientDraw` -- so the
+    // blur of a gradient is held to the Gaussian of the CPU's fill on
+    // either engine, whose anti-aliased edges are not Ganesh's.
     let mut wrong = vec![];
-    for (name, dye) in [
-        ("image pattern", striped_pixels as fn(&mut Context2D)),
-        ("gradient", graded),
+    for (name, dye, made_on_the_cpu) in [
+        ("image pattern", striped_pixels as fn(&mut Context2D), false),
+        ("gradient", graded, true),
     ] {
         for gpu in [false, true] {
             for sigma in [2.0f32, 8.0] {
                 let (Some(mut drawn), Some(mut blurred)) = (
-                    dyed_triangle(gpu, dye, "none"),
+                    dyed_triangle(gpu && !made_on_the_cpu, dye, "none"),
                     dyed_triangle(gpu, dye, &format!("blur({sigma}px)")),
                 ) else {
                     continue;
@@ -1492,17 +1496,93 @@ fn a_blurred_image_pattern_or_gradient_fill_is_the_exact_gaussian() {
                     .collect();
                 let reference =
                     sampled(&drawn, SIZE.0 as usize, f64::from(sigma));
-                let misses = misses(&alpha(&mut blurred), &reference);
+                let blurred = alpha(&mut blurred);
+                let misses = misses(&blurred, &reference);
                 if !misses.is_empty() {
                     wrong.push(format!(
                         "{name} gpu {gpu} sigma {sigma}: {} pixels off",
                         misses.len(),
                     ));
                 }
+                // The one blur of the one fill, on either engine.
+                if made_on_the_cpu
+                    && gpu
+                    && let Some(mut cpu) =
+                        dyed_triangle(false, dye, &format!("blur({sigma}px)"))
+                {
+                    let apart = alpha(&mut cpu)
+                        .iter()
+                        .zip(&blurred)
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    if apart > 0 {
+                        wrong.push(format!(
+                            "{name} sigma {sigma}: {apart} pixels apart \
+                             from the CPU's"
+                        ));
+                    }
+                }
             }
         }
     }
     assert!(wrong.is_empty(), "off the exact blur: {wrong:#?}");
+}
+
+/// A gradient's `shadowColor` shadow on a GPU canvas is the one a CPU canvas
+/// casts, byte for byte: the chain casts it from the gradient's alpha, which
+/// a GPU canvas makes on the CPU -- see `layer::GradientDraw` -- rather than
+/// from Ganesh's own gradient. Judged off the triangle, where only the
+/// shadow lies; the triangle's own edges are Ganesh's.
+#[test]
+fn a_gradient_casts_the_shadow_a_cpu_canvas_casts() {
+    let shadowed = |gpu: bool, shadow: bool| {
+        let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+        canvas.set_gpu(gpu);
+        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let ctx = canvas.context();
+        if shadow {
+            ctx.set_shadow_color_css("rgb(0 0 255 / 0.8)")
+                .expect("a colour");
+            ctx.set_shadow_blur(6.0);
+            ctx.set_shadow_offset(4.0, 7.0);
+        }
+        graded(ctx);
+        ctx.begin_path();
+        let [(x0, y0), (x1, y1), (x2, y2)] = WIDE;
+        ctx.move_to(x0, y0);
+        ctx.line_to(x1, y1);
+        ctx.line_to(x2, y2);
+        ctx.close_path();
+        ctx.fill(FillRule::NonZero);
+        let data = ctx
+            .get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+            .expect("pixels");
+        Some(data.pixels().to_vec())
+    };
+    let Some(gpu) = shadowed(true, true) else {
+        return;
+    };
+    let cpu = shadowed(false, true).expect("a CPU canvas");
+    let off = [false, true].map(|gpu| shadowed(gpu, false));
+    let mut judged = 0;
+    let mut apart = 0;
+    for i in 0..cpu.len() / 4 {
+        let drawn = off
+            .iter()
+            .flatten()
+            .any(|unshadowed| unshadowed[4 * i + 3] != 0);
+        if drawn {
+            continue;
+        }
+        judged += 1;
+        if cpu[4 * i..4 * i + 4] != gpu[4 * i..4 * i + 4] {
+            apart += 1;
+        }
+    }
+    assert!(judged > 1000, "only {judged} pixels judged");
+    assert_eq!(apart, 0, "{apart} of {judged} shadow pixels apart");
 }
 
 /// The six colour functions of a filter that tints black to a sky blue,
@@ -1536,6 +1616,14 @@ fn tinted(
     Some([p[0], p[1], p[2], p[3]])
 }
 
+/// How far, in a level, the chain's colour step on a GPU may tint from the
+/// CPU's one pass: Ganesh runs it in half precision, which on Metal tints
+/// black `(0, 163, 215)` against `(0, 162, 213)`, two levels off -- measured,
+/// not chosen. A GPU that runs it in floats, as lavapipe does, lands on the
+/// one pass, which the bound takes too. It goes when the step runs in floats
+/// on every GPU (#731), which holds the legs to the one pass.
+const GPU_CHAIN_HALF_GAP: i16 = 2;
+
 /// A black square under a gradient of black alone: the tint over it runs
 /// in the gradient's shader, in one pass, on either engine.
 fn graded_black(ctx: &mut Context2D) {
@@ -1560,8 +1648,14 @@ fn graded_black(ctx: &mut Context2D) {
 /// for: a canvas or an image drawn in takes them there, and a fill under a
 /// `blur()` with them. Run a function at a time with the pixels stored
 /// between, the tint of black read `(0, 164, 217)` on the CPU and
-/// `(0, 164, 219)` on the GPU where in one pass it is `(0, 162, 213)` and,
-/// in Ganesh's half precision, `(0, 163, 215)`.
+/// `(0, 164, 219)` on the GPU where in one pass it is `(0, 162, 213)`.
+///
+/// The one pass is the CPU's, and a gradient tints there on either engine:
+/// a GPU canvas draws a gradient under a colour filter on the CPU -- see
+/// `layer::GradientDraw`. The chain's colour step on the GPU still runs in
+/// Ganesh's half precision, which tints black `(0, 163, 215)` on Metal: its
+/// legs are held within [`GPU_CHAIN_HALF_GAP`] of the one pass until the
+/// chain's colour step runs in floats there (#731).
 #[test]
 fn colour_functions_in_a_row_tint_as_one() {
     let disc: fn(&mut Context2D) = |ctx| {
@@ -1588,10 +1682,20 @@ fn colour_functions_in_a_row_tint_as_one() {
         ctx.draw_image(&image, 0.0, 0.0);
     };
     let blurred = format!("blur(5px) {TINT}");
+    let one = tinted(false, TINT, graded_black).expect("a CPU canvas");
     let mut wrong = Vec::new();
     for gpu in [false, true] {
-        let Some(one) = tinted(gpu, TINT, graded_black) else {
+        let Some(graded) = tinted(gpu, TINT, graded_black) else {
             continue;
+        };
+        if graded != one {
+            wrong.push(format!(
+                "a gradient gpu {gpu}: {graded:?} where one pass is {one:?}"
+            ));
+        }
+        let bound = match gpu {
+            true => GPU_CHAIN_HALF_GAP,
+            false => UNPREMULTIPLIED,
         };
         for (name, filter, fill) in [
             ("a blurred disc", blurred.as_str(), disc),
@@ -1607,7 +1711,7 @@ fn colour_functions_in_a_row_tint_as_one() {
                 .map(|i| (i16::from(got[i]) - i16::from(one[i])).abs())
                 .max()
                 .unwrap_or(0);
-            if off > UNPREMULTIPLIED {
+            if off > bound {
                 wrong.push(format!(
                     "{name} gpu {gpu}: {got:?} where one pass is {one:?}"
                 ));

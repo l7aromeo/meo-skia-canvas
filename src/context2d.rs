@@ -1635,14 +1635,20 @@ impl Context2D {
     /// the gradients from [`Shader::linear_gradient`] and its siblings, and
     /// the procedural noise shaders.
     pub fn set_fill_shader(&mut self, shader: &Shader) {
-        self.inner.state.fill_style =
-            Dye::Shader(shader.inner.clone(), shader.features);
+        self.inner.state.fill_style = Dye::Shader(
+            shader.inner.clone(),
+            shader.features,
+            shader.gradient.clone(),
+        );
     }
 
     /// Sets a shader as the stroke style, replacing any color.
     pub fn set_stroke_shader(&mut self, shader: &Shader) {
-        self.inner.state.stroke_style =
-            Dye::Shader(shader.inner.clone(), shader.features);
+        self.inner.state.stroke_style = Dye::Shader(
+            shader.inner.clone(),
+            shader.features,
+            shader.gradient.clone(),
+        );
     }
 
     /// Builds a repeating fill from `image`.
@@ -4857,7 +4863,100 @@ mod font_value_tests {
 #[cfg(test)]
 mod recorded_count_tests {
     use super::*;
-    use crate::context::{layer::ENTRIES_WALKED, page::COUNT_HELD_TO_WALK};
+    use crate::{
+        canvas::EngineKind,
+        context::{layer::ENTRIES_WALKED, page::COUNT_HELD_TO_WALK},
+        gpu::NEVER_GPU,
+        shader::{GradientColorSpace, GradientInterpolation, GradientStop},
+    };
+
+    /// Gradient fills one after another count what the page records for
+    /// them, on a CPU canvas and a GPU one alike. Where the page files them
+    /// -- in a process that may play it on a GPU -- they are one run, each
+    /// counting its path once, which the route a GPU canvas plays shares.
+    /// Where it does not -- a build or a machine without a GPU, see
+    /// `RenderingEngine::never_gpu` -- they are recorded as any draw is,
+    /// and count more than a path each. Both are forced here, so that each
+    /// holds in every build. The page's own check holds the count to a walk
+    /// of its entries at each read, so a draw joining the run uncounted
+    /// fails there; this holds the walk to the draws.
+    #[test]
+    fn a_run_of_gradient_fills_counts_each_draw() {
+        const FILLS: usize = 100;
+        let rect = SkRect::from_xywh(0.0, 0.0, 30.0, 20.0);
+        let path = SkPath::rect(rect, None).approximate_bytes_used();
+        let recorded = |gpu: bool, fills: usize, never_gpu: bool| {
+            NEVER_GPU.set(Some(never_gpu));
+            let bytes = (|| {
+                let mut canvas = Canvas::new(200.0, 200.0);
+                canvas.set_gpu(gpu);
+                if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                    return None;
+                }
+                let ctx = canvas.context();
+                let shader = Shader::linear_gradient(
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 30.0, y: 0.0 },
+                    &[
+                        GradientStop {
+                            position: 0.0,
+                            color: RgbaLinear::opaque(1.0, 0.5, 0.0),
+                        },
+                        GradientStop {
+                            position: 1.0,
+                            color: RgbaLinear::opaque(0.0, 0.2, 1.0),
+                        },
+                    ],
+                    GradientInterpolation::new(GradientColorSpace::Destination),
+                )
+                .expect("a gradient");
+                ctx.set_fill_shader(&shader);
+                for i in 0..fills {
+                    ctx.fill_rect(
+                        (i % 150) as f32,
+                        (i / 150) as f32,
+                        30.0,
+                        20.0,
+                    );
+                }
+                ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a read");
+                let mut bytes = 0;
+                ctx.inner.with_recorder(|recorder| {
+                    bytes = recorder.recorded_bytes();
+                });
+                Some(bytes)
+            })();
+            NEVER_GPU.set(None);
+            bytes
+        };
+        for never_gpu in [false, true] {
+            let cpu =
+                [1, 1 + FILLS].map(|fills| recorded(false, fills, never_gpu));
+            let [Some(one), Some(more)] = cpu else {
+                panic!("a CPU canvas");
+            };
+            match never_gpu {
+                false => assert_eq!(
+                    more - one,
+                    FILLS * path,
+                    "filed: a path a fill, counted once"
+                ),
+                true => assert!(
+                    more - one > FILLS * path,
+                    "recorded: {} bytes for {FILLS} fills, no more than a path each",
+                    more - one
+                ),
+            }
+            let gpu =
+                [1, 1 + FILLS].map(|fills| recorded(true, fills, never_gpu));
+            if gpu[0].is_some() {
+                assert_eq!(
+                    gpu, cpu,
+                    "never_gpu {never_gpu}: a GPU canvas counts what a CPU canvas does"
+                );
+            }
+        }
+    }
 
     /// Frames the animation is drawn and read for: enough that a count
     /// walking the recording at each read, which grows by a few entries a
