@@ -37,14 +37,16 @@
 //! sRGB, Display P3 or A98 RGB -- is taken to the page as the CPU's
 //! `SkColorSpaceXformSteps` takes it: its transfer function undone, the
 //! gamut matrix, the page's transfer function applied, each curve through
-//! Skia's own `approx_powf` rebuilt in arithmetic -- see `Toward`. That
-//! runs on the float pipeline, so it is taken only where that pipeline
-//! rounds nothing before the store.
+//! Skia's own `approx_powf` rebuilt in arithmetic -- see `Toward`. One in
+//! Oklab or Lab is first converted back to the space its stops were
+//! converted from, as the CPU's own stages do -- see `Css`. That runs on
+//! the float pipeline, so it is taken only where that pipeline rounds
+//! nothing before the store.
 //!
 //! [`GradientSpec::exact`] answers `None` where the effect cannot reproduce
-//! the CPU: an interpolation space it does not convert from (Lab, LCH,
-//! Oklab, OKLCH, HSL, HWB, ProPhoto RGB, a working space wrapped around the
-//! shader, a PQ or HLG curve); a gradient on the float pipeline -- a
+//! the CPU: an interpolation space it does not convert from (LCH, OKLCH,
+//! HSL, HWB, ProPhoto RGB, a working space wrapped around the shader, a PQ
+//! or HLG curve); a gradient on the float pipeline -- a
 //! two-point conical, or one converted to the page -- whose stops are
 //! translucent or that is drawn at an alpha (that pipeline rounds once,
 //! after blending); more stops than the largest effect holds; and Skia's
@@ -270,8 +272,10 @@ impl GradientSpec {
         // The `highp` pipeline premultiplies, scales and blends in floats
         // and rounds once, at the store; the effect hands the GPU whole
         // levels, which match it only where none of those happen.
-        // A conversion to the page runs on the float pipeline too.
-        let highp = layout.highp || !ramp.toward.is_identity();
+        // A conversion to the page runs on the float pipeline too, as
+        // does Lab's or Oklab's back to the space it was converted from.
+        let highp =
+            layout.highp || !ramp.toward.is_identity() || ramp.css != Css::None;
         if highp && (!ramp.opaque || alpha < 1.0) {
             return None;
         }
@@ -719,6 +723,9 @@ struct Ramp {
     opaque: bool,
     /// Whether the colours are premultiplied after the interpolation.
     premul_after: bool,
+    /// What converts an interpolated colour back to the space it was
+    /// converted from before interpolating -- see [`Css`].
+    css: Css,
     /// What converts an interpolated colour to the page -- see [`Toward`].
     toward: Toward,
 }
@@ -735,7 +742,11 @@ impl Ramp {
         let (colors, positions, opaque) = stops(spec)?;
         let intermediate = intermediate_space(spec, page)?;
         let toward = Toward::of(&intermediate, page)?;
+        let css = Css::of(spec.interpolation.color_space);
         let mut colors = convert(&colors, &spec.color_space, &intermediate)?;
+        for c in &mut colors {
+            *c = css.converted(*c);
+        }
         let premul = spec.interpolation.in_premul == InPremul::Yes;
         if premul {
             for c in &mut colors {
@@ -753,6 +764,7 @@ impl Ramp {
                 biases: vec![colors[0]],
                 opaque,
                 premul_after,
+                css: Css::None,
                 toward: Toward::default(),
             },
             None => evenly(&colors, opaque, premul_after),
@@ -760,6 +772,7 @@ impl Ramp {
                 general(&colors, &positions, opaque, premul_after)
             }
         };
+        ramp.css = css;
         ramp.toward = toward;
         Some(ramp)
     }
@@ -775,6 +788,7 @@ fn evenly(colors: &[[f32; 4]], opaque: bool, premul_after: bool) -> Ramp {
         biases: Vec::with_capacity(colors.len()),
         opaque,
         premul_after,
+        css: Css::None,
         toward: Toward::default(),
     };
     for (i, pair) in colors.windows(2).enumerate() {
@@ -812,6 +826,7 @@ fn general(
         biases: vec![colors[0]],
         opaque,
         premul_after,
+        css: Css::None,
         toward: Toward::default(),
     };
     let mut t_l = positions[0];
@@ -908,10 +923,11 @@ fn stops(
 /// built as Skia builds it -- see [`skia_space`]. The CPU converts an
 /// interpolated colour from it to the page -- see [`Toward`].
 ///
-/// `None` where a working space is wrapped around the shader, and for the
-/// spaces the CPU converts through code of its own after interpolating --
-/// Lab, LCH, Oklab, OkLCH, HSL and HWB -- and ProPhoto RGB, whose gamut
-/// Skia derives from its primaries at run time.
+/// Lab's is XYZ D50 made linear, and Oklab's linear sRGB, the spaces the
+/// stops are converted into and out of -- see [`Css`]. `None` where a
+/// working space is wrapped around the shader, for the polar spaces -- LCH,
+/// OkLCH, HSL and HWB -- and for ProPhoto RGB, whose gamut Skia derives from
+/// its primaries at run time.
 fn intermediate_space(
     spec: &GradientSpec,
     page: &ColorSpace,
@@ -927,6 +943,8 @@ fn intermediate_space(
             PixelColorSpace::DisplayP3.to_skia_color_space().ok()
         }
         InterpolationSpace::A98RGB => skia_space(&A98_TF, &ADOBE_RGB_GAMUT),
+        InterpolationSpace::Lab => skia_space(&LINEAR_TF, &XYZ_GAMUT),
+        InterpolationSpace::OKLab => Some(ColorSpace::new_srgb_linear()),
         _ => None,
     }
 }
@@ -1030,6 +1048,117 @@ impl Toward {
 /// `SkNamedTransferFn::kLinear`, as `g, a, b, c, d, e, f`.
 const LINEAR_TF: [f32; 7] = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
+/// `SkNamedGamut::kXYZ`, the identity, in the 16.16 fixed point
+/// [`skia_space`] takes: Lab's intermediate space is XYZ D50 itself.
+const XYZ_GAMUT: [[i32; 3]; 3] =
+    [[1 << 16, 0, 0], [0, 1 << 16, 0], [0, 0, 1 << 16]];
+
+/// A space the CPU interpolates in through code of its own: the stops are
+/// converted into it from the intermediate space once, on the host --
+/// `xyzd50_to_lab` and `lin_srgb_to_oklab` in `SkGradientBaseShader.cpp` --
+/// and each interpolated colour back -- `css_lab_to_xyz` and
+/// `css_oklab_to_linear_srgb` in `SkRasterPipeline_opts.h`. Skia builds
+/// both with `-ffp-contract=off` outside Windows, so each operation here is
+/// the one it makes, rounded where it rounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Css {
+    #[default]
+    None,
+    Lab,
+    OkLab,
+}
+
+impl Css {
+    fn of(space: InterpolationSpace) -> Css {
+        match space {
+            InterpolationSpace::Lab => Css::Lab,
+            InterpolationSpace::OKLab => Css::OkLab,
+            _ => Css::None,
+        }
+    }
+
+    /// The uniform the effect selects its conversion back by.
+    fn index(self) -> i32 {
+        self as i32
+    }
+
+    /// `c`, unpremultiplied in the intermediate space, in this space.
+    /// Ottosson's constants are written as `lin_srgb_to_oklab` writes them,
+    /// so that each rounds to the f32 Skia's does and can be checked
+    /// against it.
+    #[allow(clippy::excessive_precision)]
+    fn converted(self, c: [f32; 4]) -> [f32; 4] {
+        match self {
+            Css::None => c,
+            Css::Lab => {
+                let f: [f32; 3] = std::array::from_fn(|i| {
+                    let v = c[i] / LAB_D50[i];
+                    match v > LAB_E {
+                        true => v.cbrt(),
+                        false => (LAB_K * v + 16.0) / 116.0,
+                    }
+                });
+                [
+                    (116.0 * f[1]) - 16.0,
+                    500.0 * (f[0] - f[1]),
+                    200.0 * (f[1] - f[2]),
+                    c[3],
+                ]
+            }
+            Css::OkLab => {
+                let [r, g, b] = [c[0], c[1], c[2]];
+                let l =
+                    (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+                        .cbrt();
+                let m =
+                    (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+                        .cbrt();
+                let s =
+                    (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+                        .cbrt();
+                [
+                    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+                    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+                    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+                    c[3],
+                ]
+            }
+        }
+    }
+}
+
+/// The D50 white `xyzd50_to_lab` and `css_lab_to_xyz` divide and multiply
+/// by: CSS Color 4's `0.3457 / 0.3585`, 1, `(1 - 0.3457 - 0.3585) /
+/// 0.3585`, each worked out in f32 as Skia's `constexpr float` is.
+const LAB_D50: [f32; 3] =
+    [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+
+/// CIE's epsilon, `216 / 24389`, below which Lab's curve is linear.
+const LAB_E: f32 = 216.0 / 24389.0;
+
+/// CIE's kappa, `24389 / 27`, the linear segment's slope.
+const LAB_K: f32 = 24389.0 / 27.0;
+
+/// `css_oklab_to_linear_srgb`'s first step, Oklab to cone responses
+/// (`l_ = r + 0.3963377774f * g + 0.2158037573f * b` and its rows), one row
+/// a response: the literals as Skia writes them, so that each is the f32 it
+/// computes with.
+#[allow(clippy::excessive_precision)]
+const OKLAB_IN: [[f32; 3]; 3] = [
+    [1.0, 0.3963377774, 0.2158037573],
+    [1.0, -0.1055613458, -0.0638541728],
+    [1.0, -0.0894841775, -1.2914855480],
+];
+
+/// Its last step, the cubed cone responses to linear sRGB, one row a
+/// channel.
+#[allow(clippy::excessive_precision)]
+const OKLAB_OUT: [[f32; 3]; 3] = [
+    [4.0767416621, -3.3077115913, 0.2309699292],
+    [-1.2684380046, 2.6097574011, -0.3413193965],
+    [-0.0041960863, -0.7034186147, 1.7076147010],
+];
+
 /// `colors` converted from `from` to `to` by `SkConvertPixels`, as
 /// `SkColor4fXformer` converts them: unpremultiplied floats both sides.
 fn convert(
@@ -1117,6 +1246,11 @@ struct Offsets {
     gam_b: usize,
     enc_a: usize,
     enc_b: usize,
+    css: usize,
+    lab_a: usize,
+    lab_b: usize,
+    ok_in: [usize; 3],
+    ok_out: [usize; 3],
     ts: usize,
     factors: usize,
     biases: usize,
@@ -1159,6 +1293,11 @@ impl Offsets {
             gam_b: at("gamB")?,
             enc_a: at("encA")?,
             enc_b: at("encB")?,
+            css: at("css")?,
+            lab_a: at("labA")?,
+            lab_b: at("labB")?,
+            ok_in: [at("okIn0")?, at("okIn1")?, at("okIn2")?],
+            ok_out: [at("okOut0")?, at("okOut1")?, at("okOut2")?],
             ts: at("ts")?,
             factors: at("factors")?,
             biases: at("biases")?,
@@ -1195,6 +1334,15 @@ uniform float3 gamG;
 uniform float3 gamB;
 uniform float4 encA;
 uniform float3 encB;
+uniform int css;
+uniform float4 labA;
+uniform float4 labB;
+uniform float3 okIn0;
+uniform float3 okIn1;
+uniform float3 okIn2;
+uniform float3 okOut0;
+uniform float3 okOut1;
+uniform float3 okOut2;
 uniform float ts[{size}];
 uniform float4 factors[{size}];
 uniform float4 biases[{size}];
@@ -1267,6 +1415,31 @@ float curve(float x, float4 gabc, float3 def) {{
     return x < 0.0 ? -r : r;
 }}
 
+// `css_lab_to_xyz` and `css_oklab_to_linear_srgb`: an interpolated colour
+// back to the space the stops were converted from, in Skia's order of
+// operations, its constants handed in as the f32 it computes them as.
+float3 lab_to_xyz(float3 c) {{
+    float f1 = (c.r + 16.0) * labA.x;
+    float f0 = (c.g * labA.y) + f1;
+    float f2 = f1 - (c.b * labA.z);
+    float3 f = float3(f0, f1, f2);
+    float3 cubed = f * f * f;
+    float x = cubed.x > labB.x ? cubed.x : (116.0 * f0 - 16.0) * labA.w;
+    float y = c.r > labB.y ? cubed.y : c.r * labA.w;
+    float z = cubed.z > labB.x ? cubed.z : (116.0 * f2 - 16.0) * labA.w;
+    return float3(x * labB.z, y, z * labB.w);
+}}
+
+float row(float3 m, float3 v) {{
+    return (m.x * v.x + m.y * v.y) + m.z * v.z;
+}}
+
+float3 oklab_to_linear_srgb(float3 c) {{
+    float3 lms = float3(row(okIn0, c), row(okIn1, c), row(okIn2, c));
+    lms = lms * lms * lms;
+    return float3(row(okOut0, lms), row(okOut1, lms), row(okOut2, lms));
+}}
+
 half4 main(float2 p) {{
     float x = p.x;
     float y = p.y;
@@ -1337,6 +1510,11 @@ half4 main(float2 p) {{
         }}
     }}
     float4 c = t * f + b;
+    if (css == 1) {{
+        c.rgb = lab_to_xyz(c.rgb);
+    }} else if (css == 2) {{
+        c.rgb = oklab_to_linear_srgb(c.rgb);
+    }}
     // `SkColorSpaceXformSteps`, from the space interpolated in to the page.
     if (linearize != 0) {{
         c.rgb = float3(curve(c.r, linA, linB), curve(c.g, linA, linB),
@@ -1422,6 +1600,7 @@ fn uniforms(
         offsets.encode,
         i32::from(toward.encode.is_some()).to_ne_bytes(),
     );
+    put(offsets.css, ramp.css.index().to_ne_bytes());
     let mut floats = |at: usize, values: &[f32]| {
         for (k, v) in values.iter().enumerate() {
             put(at + 4 * k, v.to_ne_bytes());
@@ -1433,6 +1612,21 @@ fn uniforms(
     let curve = toward.encode.unwrap_or(LINEAR_TF);
     floats(offsets.enc_a, &curve[..4]);
     floats(offsets.enc_b, &curve[4..]);
+    floats(
+        offsets.lab_a,
+        &[1.0 / 116.0, 1.0 / 500.0, 1.0 / 200.0, 1.0 / LAB_K],
+    );
+    floats(
+        offsets.lab_b,
+        &[LAB_E, LAB_K * LAB_E, LAB_D50[0], LAB_D50[2]],
+    );
+    for (ats, rows) in
+        [(offsets.ok_in, &OKLAB_IN), (offsets.ok_out, &OKLAB_OUT)]
+    {
+        for (at, row) in ats.iter().zip(rows) {
+            floats(*at, row);
+        }
+    }
     // `matrix_3x3`'s `m` is column by column; the effect takes a row of
     // the matrix each.
     let m = toward.gamut.unwrap_or([0.0; 9]);

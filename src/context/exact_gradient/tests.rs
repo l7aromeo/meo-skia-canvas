@@ -429,6 +429,114 @@ fn margins_on(
 /// input in every binade -- with the matrix's contractions besides.
 const CONVERSION_ULPS: f64 = 512.0;
 
+/// The scale a dark case's stops take: sRGB 0.03 and under is Lab L under
+/// 3, inside the linear segment `css_lab_to_xyz` takes below L 8.
+const DARK: f32 = 0.03;
+
+/// How many units in the last place of the sizes it sums the conversion
+/// back from Lab or Oklab may lose on the GPU against the CPU: two sums and
+/// three products a step, which a GPU may fuse where the CPU does not.
+const CSS_ULPS: f64 = 8.0;
+
+/// `css_lab_to_xyz` and `css_oklab_to_linear_srgb`, in f32 as the CPU
+/// computes them.
+fn css_back(css: Css, c: [f32; 3]) -> [f32; 3] {
+    match css {
+        Css::None => c,
+        Css::Lab => {
+            let f1 = (c[0] + 16.0) * (1.0 / 116.0);
+            let f0 = (c[1] * (1.0 / 500.0)) + f1;
+            let f2 = f1 - (c[2] * (1.0 / 200.0));
+            let cube = |v: f32| v * v * v;
+            let x = match cube(f0) > LAB_E {
+                true => cube(f0),
+                false => (116.0 * f0 - 16.0) * (1.0 / LAB_K),
+            };
+            let y = match c[0] > LAB_K * LAB_E {
+                true => cube(f1),
+                false => c[0] * (1.0 / LAB_K),
+            };
+            let z = match cube(f2) > LAB_E {
+                true => cube(f2),
+                false => (116.0 * f2 - 16.0) * (1.0 / LAB_K),
+            };
+            [x * LAB_D50[0], y * LAB_D50[1], z * LAB_D50[2]]
+        }
+        Css::OkLab => {
+            let row = |m: [f32; 3], v: [f32; 3]| {
+                (m[0] * v[0] + m[1] * v[1]) + m[2] * v[2]
+            };
+            let lms = OKLAB_IN.map(|m| {
+                let v = row(m, c);
+                v * v * v
+            });
+            OKLAB_OUT.map(|m| row(m, lms))
+        }
+    }
+}
+
+/// [`css_back`] in f64, with, for each channel, the size of what it sums
+/// along the way: the bound on what rounding there can move it by.
+fn css_back_f64(css: Css, c: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    match css {
+        Css::None => (c, [0.0; 3]),
+        Css::Lab => {
+            let d50 = LAB_D50.map(f64::from);
+            let (e, k) = (f64::from(LAB_E), f64::from(LAB_K));
+            let f1 = (c[0] + 16.0) / 116.0;
+            let f = [c[1] / 500.0 + f1, f1, f1 - c[2] / 200.0];
+            // A cube's error is three times its root's, relative: the root
+            // sums `c / 500` or `c / 200` with `f1`.
+            let root_sizes = [
+                (c[1] / 500.0).abs() + f1.abs(),
+                f1.abs(),
+                f1.abs() + (c[2] / 200.0).abs(),
+            ];
+            let mut out = [0.0; 3];
+            let mut sizes = [0.0; 3];
+            for i in 0..3 {
+                let cubed = f[i] * f[i] * f[i];
+                let curved = match i {
+                    1 => c[0] > k * e,
+                    _ => cubed > e,
+                };
+                let (v, size) = match curved {
+                    true => {
+                        (cubed, 3.0 * f[i] * f[i] * root_sizes[i] + cubed.abs())
+                    }
+                    false => {
+                        let v = match i {
+                            1 => c[0] / k,
+                            _ => (116.0 * f[i] - 16.0) / k,
+                        };
+                        (v, (116.0 * root_sizes[i] + 16.0) / k)
+                    }
+                };
+                out[i] = v * d50[i];
+                sizes[i] = size * d50[i];
+            }
+            (out, sizes)
+        }
+        Css::OkLab => {
+            let row = |m: [f32; 3], v: [f64; 3]| {
+                (0..3).map(|j| f64::from(m[j]) * v[j]).sum::<f64>()
+            };
+            let size = |m: [f32; 3], v: [f64; 3]| {
+                (0..3).map(|j| (f64::from(m[j]) * v[j]).abs()).sum::<f64>()
+            };
+            let root = OKLAB_IN.map(|m| row(m, c));
+            let root_sizes = OKLAB_IN.map(|m| size(m, c));
+            let lms = root.map(|v| v * v * v);
+            let lms_sizes: [f64; 3] = std::array::from_fn(|j| {
+                3.0 * root[j] * root[j] * root_sizes[j] + lms[j].abs()
+            });
+            let out = OKLAB_OUT.map(|m| row(m, lms));
+            let sizes = OKLAB_OUT.map(|m| size(m, lms) + size(m, lms_sizes));
+            (out, sizes)
+        }
+    }
+}
+
 /// The CPU's `approx_log2`, in f32 as it computes it. The constants are
 /// Skia's literals as `SkRasterPipeline_opts.h` writes them, which f32
 /// rounds as the CPU's build does; kept as written so that they can be
@@ -642,7 +750,7 @@ fn margins_at(
         }
     };
     let (f, b) = (ramp.factors[interval], ramp.biases[interval]);
-    if channel == 3 || ramp.toward.is_identity() {
+    if channel == 3 || (ramp.toward.is_identity() && ramp.css == Css::None) {
         let level = (t * f64::from(f[channel]) + f64::from(b[channel]))
             .clamp(0.0, 1.0)
             * 255.0;
@@ -657,12 +765,14 @@ fn margins_at(
     // of change in `t` the same conversion's in f64.
     let t32 = t as f32;
     let rgb: [f32; 3] = std::array::from_fn(|k| t32 * f[k] + b[k]);
-    let value = toward_page(&ramp.toward, rgb)[channel];
+    let value = toward_page(&ramp.toward, css_back(ramp.css, rgb))[channel];
     let level = f64::from(value.clamp(0.0, 1.0)) * 255.0;
     let at = |t: f64| {
         let rgb =
             std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
-        toward_page_f64(&ramp.toward, rgb)[channel].clamp(0.0, 1.0) * 255.0
+        toward_page_f64(&ramp.toward, css_back_f64(ramp.css, rgb).0)[channel]
+            .clamp(0.0, 1.0)
+            * 255.0
     };
     let step = 1e-5;
     let slope = ((at(t + step) - at(t - step)) / (2.0 * step)).abs();
@@ -677,13 +787,14 @@ fn margins_at(
     // encoding curve's own, relative to the value.
     let rgb: [f64; 3] =
         std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
+    let (rgb, css_sizes) = css_back_f64(ramp.css, rgb);
     let linear = match &ramp.toward.linearize {
         Some(tf) => rgb.map(|c| curve_f64(c, tf)),
         None => rgb,
     };
     // The sum of the terms' sizes bounds both what the matrix loses and
     // what the curve before it lost, carried through it.
-    let (terms, mixed) = match &ramp.toward.gamut {
+    let (terms, mixed, css_carried) = match &ramp.toward.gamut {
         Some(m) => {
             let m = m.map(f64::from);
             let terms = (0..3)
@@ -691,9 +802,12 @@ fn margins_at(
                 .sum::<f64>();
             let mixed =
                 (0..3).map(|j| linear[j] * m[3 * j + channel]).sum::<f64>();
-            (terms, mixed)
+            let carried = (0..3)
+                .map(|j| (m[3 * j + channel] * css_sizes[j]).abs())
+                .sum::<f64>();
+            (terms, mixed, carried)
         }
-        None => (linear[channel].abs(), linear[channel]),
+        None => (linear[channel].abs(), linear[channel], css_sizes[channel]),
     };
     let encode_slope = match &ramp.toward.encode {
         Some(tf) => {
@@ -708,7 +822,7 @@ fn margins_at(
     let before = ulps(toward.linearize.is_some(), CONVERSION_ULPS)
         + ulps(toward.gamut.is_some(), MATRIX_ULPS);
     let after = ulps(toward.encode.is_some(), CONVERSION_ULPS);
-    let converting = (before * terms * encode_slope
+    let converting = ((before * terms + CSS_ULPS * css_carried) * encode_slope
         + after * f64::from(value.abs()))
         * F32_EPSILON
         * 255.0
@@ -840,6 +954,8 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
         (InterpolationSpace::DisplayP3, GradientColorSpace::DisplayP3),
         (InterpolationSpace::SRGB, GradientColorSpace::Srgb),
         (InterpolationSpace::A98RGB, GradientColorSpace::A98Rgb),
+        (InterpolationSpace::OKLab, GradientColorSpace::Oklab),
+        (InterpolationSpace::Lab, GradientColorSpace::Lab),
     ];
     let (mut drawn_cases, mut parted, mut ganesh, mut ganesh_off) =
         (0, 0, 0, 0);
@@ -852,6 +968,13 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
                 let (mut spec, _, _) = case(seed);
                 for color in &mut spec.colors {
                     color.a = 1.0;
+                    // Every fourth case near black, where Lab's curves
+                    // take their linear segments: L under 8.
+                    if seed % 4 == 0 {
+                        color.r *= DARK;
+                        color.g *= DARK;
+                        color.b *= DARK;
+                    }
                 }
                 spec.interpolation.color_space = named;
                 spec.space = ours;
@@ -1768,16 +1891,20 @@ fn consecutive_gradient_draws_share_an_entry() {
     assert_eq!(runs, vec![3, 1]);
 }
 
-/// A run of gradient draws the effect refuses -- opaque, interpolated in
-/// Oklab -- is made on the CPU over one read back of the GPU's pixels, not
-/// one for each draw, and stores what a CPU canvas stores.
+/// A run of gradient draws the effect refuses -- opaque, mixed in Rec. 2020,
+/// which a working space wrapped around the shader makes -- is made on the
+/// CPU over one read back of the GPU's pixels, not one for each draw, and
+/// stores what a CPU canvas stores.
 #[test]
 fn a_run_the_effect_refuses_reads_the_gpu_back_once() {
     let mut spec = kept_case();
-    spec.space = GradientColorSpace::Oklab;
-    spec.interpolation.color_space = InterpolationSpace::OKLab;
+    spec.space = GradientColorSpace::Rec2020;
+    spec.interpolation.color_space = InterpolationSpace::Destination;
     let page = ColorSpace::new_srgb();
-    assert!(spec.exact(&page, 1.0).is_none(), "the effect refuses Oklab");
+    assert!(
+        spec.exact(&page, 1.0).is_none(),
+        "the effect refuses Rec. 2020"
+    );
     assert!(spec.colors.iter().all(|c| c.a == 1.0), "opaque stops");
     let shader = CanvasShader {
         inner: spec.native().expect("native"),
@@ -1820,8 +1947,8 @@ fn a_gpu_canvas_asks_for_each_draws_effect_once() {
     };
     let spec = kept_case();
     let mut refused = spec.clone();
-    refused.space = GradientColorSpace::Oklab;
-    refused.interpolation.color_space = InterpolationSpace::OKLab;
+    refused.space = GradientColorSpace::Rec2020;
+    refused.interpolation.color_space = InterpolationSpace::Destination;
     assert!(refused.exact(&ColorSpace::new_srgb(), 1.0).is_none());
     let (taken, refused) = (shader_of(spec), shader_of(refused));
     let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
