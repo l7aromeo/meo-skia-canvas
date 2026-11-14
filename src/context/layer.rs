@@ -46,7 +46,7 @@ use crate::{
     context::{
         blur_mask,
         chain::{self, Depth, Step},
-        chain_cache, coverage_of, exact_blur,
+        chain_cache, coverage_of,
         exact_gradient::{Exact, GradientSpec},
         faint::{Faint, composited},
         kept::CoverageInput,
@@ -3796,12 +3796,7 @@ impl Group {
                     && let [Step::Blur(sigma)] = &steps[..]
                     // Undithered: `coverage_files` records no copy of a
                     // dithered run.
-                    && coverage_plays(
-                        canvas,
-                        &run.exact,
-                        false,
-                        sigma * replay_scale(canvas),
-                    )
+                    && coverage_plays(canvas, &run.exact, false)
                     && let Some(at) =
                         chain::coverage::Placement::of(canvas, *sigma, content)
                 {
@@ -3894,14 +3889,49 @@ impl Group {
                     Target::Pixels => Step::for_pixels(steps),
                     Target::Document => None,
                 };
-                let outcome = chain::run(
-                    canvas,
-                    pixels.as_deref().unwrap_or(steps),
-                    content,
-                    Depth::Floats,
-                    &paint,
-                    |layer| self.draw_chained(layer, target, &back),
-                );
+                let steps = pixels.as_deref().unwrap_or(steps);
+                // A run in one flat colour the route does not take -- in
+                // another space than its colour was held in -- is drawn
+                // opaque on an eight-bit page on the CPU, its alpha the
+                // chain's gain, so that the blur rounds
+                // its alpha once, as `BlurOp::result_chain` does a path's:
+                // drawn in its translucent colour, the layer rounded its
+                // alpha to a byte before the blur and again after.
+                let opaque = coverage
+                    .as_deref()
+                    .filter(|_| eight_bits_on_cpu(canvas))
+                    .and_then(|run| Some((run.alpha, run.picture.picture()?)));
+                let outcome = match opaque {
+                    Some((alpha, picture)) => {
+                        let mut gained = paint.clone();
+                        gained.set_alpha_f(paint.alpha_f() * byte_alpha(alpha));
+                        chain::run(
+                            canvas,
+                            steps,
+                            content,
+                            Depth::Floats,
+                            &gained,
+                            |layer| {
+                                self.draw_chained_as(
+                                    layer,
+                                    target,
+                                    &back,
+                                    |layer| {
+                                        layer.draw_picture(picture, None, None);
+                                    },
+                                )
+                            },
+                        )
+                    }
+                    None => chain::run(
+                        canvas,
+                        steps,
+                        content,
+                        Depth::Floats,
+                        &paint,
+                        |layer| self.draw_chained(layer, target, &back),
+                    ),
+                };
                 if let Some(outcome) = outcome {
                     outcome.composite(canvas, &paint);
                     if let Some(key) = key {
@@ -5397,40 +5427,41 @@ fn replay_scale(canvas: &SkCanvas) -> f32 {
 
 /// Whether a blur in `exact`, a colour placed on the bytes an eight-bit page
 /// stores, is made on `canvas` from its coverage alone -- see
-/// [`chain::coverage`] -- at `device_sigma`, in `canvas`'s device pixels:
-/// the half of the route's conditions a draw asks as it is played. A
-/// blurred path asks it in [`BlurOp::coverage_colour`] and a run of text in
-/// [`Composite::Chain`]'s playback; a run asks [`coverage_files`] as it is
-/// recorded, which keeps it from recording a copy this would never play.
+/// [`chain::coverage`]: the half of the route's conditions a draw asks as it
+/// is played. A blurred path asks it in [`BlurOp::coverage_colour`] and a run
+/// of text in [`Composite::Chain`]'s playback; a run asks [`coverage_files`]
+/// as it is recorded, which keeps it from recording a copy this would never
+/// play.
 ///
 /// `false` on a page that is not eight bits a channel in RGBA or BGRA; on a
 /// canvas that is not a raster on the CPU -- the GPU, a recording, a
 /// document; on a page in another space than the colour was held in, as a
-/// canvas drawn into one in another space is; for a dithered paint, whose
-/// colour varies from pixel to pixel; and for a sigma through the FFT, which
-/// blurs a plane's rows in pairs and so rounds an alpha unlike the chain's
-/// sums.
+/// canvas drawn into one in another space is; and for a dithered paint,
+/// whose colour varies from pixel to pixel. Any sigma: through the FFT, as
+/// tap by tap, the route rounds each value once from the exact product, but
+/// for exact ties.
 fn coverage_plays(
     canvas: &SkCanvas,
     exact: &ExactColour,
     dither: bool,
-    device_sigma: f32,
 ) -> bool {
     #[cfg(test)]
     if !COVERAGE_ROUTE.with(Cell::get) {
         return false;
     }
-    let eight = matches!(
-        canvas.image_info().color_type(),
-        ColorType::RGBA8888 | ColorType::BGRA8888
-    );
     let same_space =
         canvas.image_info().color_space().as_ref() == Some(&exact.space);
-    eight
-        && same_space
-        && !dither
-        && device_sigma < exact_blur::FFT_FROM_SIGMA
-        && blur_mask::draws_on_cpu(canvas)
+    eight_bits_on_cpu(canvas) && same_space && !dither
+}
+
+/// Whether `canvas` is a raster on the CPU of eight bits a channel in RGBA
+/// or BGRA: where a blur's alpha, stored on a byte, could be rounded to one
+/// before the blur as well as after it.
+fn eight_bits_on_cpu(canvas: &SkCanvas) -> bool {
+    matches!(
+        canvas.image_info().color_type(),
+        ColorType::RGBA8888 | ColorType::BGRA8888
+    ) && blur_mask::draws_on_cpu(canvas)
 }
 
 /// Whether a run of text filed under `steps`, in `exact` through a paint
@@ -5514,9 +5545,7 @@ impl BlurOp {
                 // On an eight-bit page on the CPU a placed colour's blur is
                 // made from the draw's coverage alone -- see
                 // `chain::coverage` -- and the chain's layer is not drawn.
-                if let Some(rgb) =
-                    self.coverage_colour(canvas, self.paint.sigma * replay)
-                {
+                if let Some(rgb) = self.coverage_colour(canvas) {
                     let gain = chain.gain.alpha_f();
                     let info = canvas.image_info();
                     // The plane holds coverage alone, so a fill draws it
@@ -5647,16 +5676,11 @@ impl BlurOp {
     /// in -- see [`chain::coverage`] -- or `None` for the chain's layer: for
     /// a colour not placed on the bytes an eight-bit page stores, and
     /// wherever [`coverage_plays`] says no.
-    fn coverage_colour(
-        &self,
-        canvas: &SkCanvas,
-        device_sigma: f32,
-    ) -> Option<[f32; 3]> {
+    fn coverage_colour(&self, canvas: &SkCanvas) -> Option<[f32; 3]> {
         let exact = self.paint.exact.as_ref()?;
         let placed = matches!(self.paint.faint, Faint::Dropped) && exact.bytes;
-        (placed
-            && coverage_plays(canvas, exact, self.paint.dither, device_sigma))
-        .then(|| exact.at(self.paint.color.a).0.rgb)
+        (placed && coverage_plays(canvas, exact, self.paint.dither))
+            .then(|| exact.at(self.paint.color.a).0.rgb)
     }
 
     /// The paths the op draws: its one, or each of a run's.
@@ -7217,6 +7241,7 @@ mod coverage_run_tests {
 
     use super::{COVERAGE_ROUTE, COVERAGE_RUNS};
     use crate::{
+        context::exact_blur,
         pixels::{PixelColorSpace, PixelDepth},
         prelude::*,
     };
@@ -7225,12 +7250,22 @@ mod coverage_run_tests {
     /// cannot be found as a system font of the same name instead.
     const OSWALD: &str = "CoverageRunOswald";
 
+    /// The page every run is played on, wide enough for 60px Oswald
+    /// "Hamburgefonstiv" and a reach of 8 pixels' blur either side.
+    const PAGE: (usize, usize) = (220, 70);
+
+    /// Further from a half-level than float noise moves a sum: an alpha
+    /// nearer a tie than this may round to either side of it.
+    const TIE: f64 = 1e-3;
+
     /// A run of text through `filter`, how it is filled, the page it is
     /// drawn on, and the depth and space of the page that one is drawn
     /// onto, if any.
     struct Run {
         filter: &'static str,
         fill: &'static str,
+        /// The font's size, in pixels.
+        size: u32,
         gradient: bool,
         decoration: &'static str,
         depth: PixelDepth,
@@ -7240,6 +7275,7 @@ mod coverage_run_tests {
     const OPAQUE: Run = Run {
         filter: "blur(3px)",
         fill: "rgb(200, 80, 30)",
+        size: 32,
         gradient: false,
         decoration: "none",
         depth: PixelDepth::Uint8,
@@ -7258,8 +7294,8 @@ mod coverage_run_tests {
             .expect("registers");
         COVERAGE_ROUTE.with(|route| route.set(coverage));
         let mut canvas = Canvas::with_options(
-            220.0,
-            70.0,
+            PAGE.0 as f32,
+            PAGE.1 as f32,
             CanvasOptions {
                 color_type: run.depth,
                 gpu: false,
@@ -7268,7 +7304,7 @@ mod coverage_run_tests {
         )
         .expect("a canvas");
         let ctx = canvas.context();
-        assert!(ctx.set_font_css(&format!("32px {OSWALD}")));
+        assert!(ctx.set_font_css(&format!("{}px {OSWALD}", run.size)));
         match run.gradient {
             true => {
                 let stop = |position, css| GradientStop {
@@ -7294,8 +7330,8 @@ mod coverage_run_tests {
         let mut page = match run.onto {
             Some((depth, space)) => {
                 let mut page = Canvas::with_options(
-                    220.0,
-                    70.0,
+                    PAGE.0 as f32,
+                    PAGE.1 as f32,
                     CanvasOptions {
                         color_type: depth,
                         color_space: space,
@@ -7327,6 +7363,123 @@ mod coverage_run_tests {
         (pixels, COVERAGE_RUNS.with(|runs| runs.get()) - before)
     }
 
+    /// The alpha bytes of premultiplied `pixels`.
+    fn alphas(pixels: &[u8]) -> Vec<u8> {
+        pixels.chunks(4).map(|p| p[3]).collect()
+    }
+
+    /// The pixels where the alphas of `route` and `chain` part and the
+    /// exact blur by `sigma` of `opaque` -- the run in its colour opaque and
+    /// unblurred, whose alpha is its coverage -- at `gain` is no tie. Each
+    /// rounds the exact product once, but through the FFT a value within
+    /// float noise of a half-level lands on either side of it, and which
+    /// side depends on the FFT's algorithm, which rustfft picks for the
+    /// machine.
+    fn apart_off_ties(
+        route: &[u8],
+        chain: &[u8],
+        opaque: &Run,
+        sigma: f32,
+        gain: f64,
+    ) -> Vec<usize> {
+        let (route, chain) = (alphas(route), alphas(chain));
+        let parted: Vec<usize> =
+            (0..route.len()).filter(|&i| route[i] != chain[i]).collect();
+        if parted.is_empty() {
+            return parted;
+        }
+        let (plain, _) = played(opaque, false);
+        let exact = exact_blur::reference(&plain, PAGE.0, PAGE.1, sigma, sigma);
+        parted
+            .into_iter()
+            .filter(|&i| {
+                let v = exact[i * 4 + 3] * gain;
+                (v - v.floor() - 0.5).abs() >= TIE
+            })
+            .collect()
+    }
+
+    #[test]
+    fn translucent_text_in_the_chain_keeps_the_routes_alpha() {
+        // Where the route does not play, a run in one flat colour through
+        // the chain's layer is drawn opaque, its alpha the chain's gain, so
+        // that its alpha is rounded once, as the route's is: byte for byte
+        // the route's but on a tie -- see `apart_off_ties` -- at sigmas tap
+        // by tap and through the FFT, at sizes from a hinted 13px to 60px,
+        // at alphas on and off a byte's tie.
+        let mut apart = Vec::new();
+        for (fill, opaque, given) in [
+            ("rgba(200, 80, 30, 0.6)", "rgb(200, 80, 30)", 0.6),
+            ("rgba(20, 60, 200, 0.3)", "rgb(20, 60, 200)", 0.3),
+            ("rgba(128, 128, 128, 0.55)", "rgb(128, 128, 128)", 0.55),
+        ] {
+            // The alpha the run is drawn at, on its byte.
+            let gain = (given * 255.0f64).round() / 255.0;
+            for (filter, sigma) in [("blur(3px)", 3.0), ("blur(8px)", 8.0)] {
+                for size in [13, 32, 60] {
+                    let run = Run {
+                        fill,
+                        filter,
+                        size,
+                        ..OPAQUE
+                    };
+                    let (route, runs) = played(&run, true);
+                    let (chain, chained) = played(&run, false);
+                    assert_eq!(
+                        (runs, chained),
+                        (1, 0),
+                        "{fill} {filter} {size}px"
+                    );
+                    let plain = Run {
+                        fill: opaque,
+                        filter: "none",
+                        size,
+                        ..OPAQUE
+                    };
+                    let off =
+                        apart_off_ties(&route, &chain, &plain, sigma, gain);
+                    if !off.is_empty() {
+                        apart.push(format!(
+                            "{fill} {filter} {size}px: {} alphas off a tie",
+                            off.len()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(apart.is_empty(), "the chain's alpha moved: {apart:#?}");
+    }
+
+    #[test]
+    fn translucent_text_drawn_onto_another_space_keeps_the_routes_alpha() {
+        // A page drawn onto one in another space is where the route does
+        // not play and the chain does: its alpha is the route's, byte for
+        // byte but on a tie -- see `apart_off_ties` -- as it would be on a
+        // page of its own space.
+        let plain = Run {
+            fill: "rgb(20, 60, 200)",
+            filter: "none",
+            ..OPAQUE
+        };
+        let gain = (0.3f64 * 255.0).round() / 255.0;
+        for (filter, sigma) in [("blur(3px)", 3.0), ("blur(8px)", 8.0)] {
+            let run = Run {
+                fill: "rgba(20, 60, 200, 0.3)",
+                filter,
+                ..OPAQUE
+            };
+            let (own, runs) = played(&run, true);
+            let onto = Run {
+                onto: Some((PixelDepth::Uint8, PixelColorSpace::DisplayP3)),
+                ..run
+            };
+            let (other, chained) = played(&onto, true);
+            assert_eq!((runs, chained), (1, 0), "{filter}");
+            let off = apart_off_ties(&own, &other, &plain, sigma, gain);
+            assert!(off.is_empty(), "{filter}: {} alphas off a tie", off.len());
+        }
+    }
+
     #[test]
     fn opaque_text_keeps_the_chains_alpha() {
         // The route blurs the same coverage the chain's layer holds, so an
@@ -7335,10 +7488,7 @@ mod coverage_run_tests {
         let (route, runs) = played(&OPAQUE, true);
         let (chain, chained) = played(&OPAQUE, false);
         assert_eq!((runs, chained), (1, 0), "the route took the run once");
-        let alpha = |pixels: &[u8]| -> Vec<u8> {
-            pixels.chunks(4).map(|p| p[3]).collect()
-        };
-        assert_eq!(alpha(&route), alpha(&chain), "the alpha moved");
+        assert_eq!(alphas(&route), alphas(&chain), "the alpha moved");
         assert_ne!(route, chain, "the colour did not move");
     }
 
@@ -7355,7 +7505,7 @@ mod coverage_run_tests {
             ),
             (
                 "a sigma through the FFT",
-                0,
+                1,
                 Run {
                     filter: "blur(6px)",
                     ..OPAQUE

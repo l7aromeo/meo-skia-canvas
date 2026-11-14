@@ -13,14 +13,21 @@
 //!
 //! A layer is kept only for the canvas a playback is under way on, named by
 //! the [`LayerScope`] the code that made that canvas's surface opens, with
-//! the `msaa` it made it with. A layer takes its canvas's sample count, which
-//! the canvas does not tell, and one of another count draws edges another
-//! way; two surfaces made on one context with the same `msaa` have the same
-//! count, so the scope is what makes a kept layer one the canvas would have
-//! made. A layer for any other canvas is made as before and let go after.
+//! the samples a pixel of that surface has. A layer takes its canvas's sample
+//! count, which the canvas does not tell, and one of another count draws
+//! edges another way, so the scope is what makes a kept layer one the canvas
+//! would have made. A layer for any other canvas is made as before and let
+//! go after.
 //!
-//! At most [`KEPT`] are kept on a thread, and [`release`] lets them go on
-//! the thread they belong to once rendering stops:
+//! A thread keeps layers while together they hold no more than
+//! [`KEPT_BYTES`], letting the oldest go first, and keeps the newest
+//! [`ALWAYS_KEPT`] whatever they hold. A page's layers are not all one size:
+//! a chain whose region crosses the page's edge takes a layer of its own
+//! size -- see [`placed`](super::placed). 60 shadowed panels turned 0.15
+//! radians on a 1200 by 900 page take seven layers of six sizes; with two
+//! kept, every read of the page made six of them again, and within the
+//! budget a read of the same page makes none. [`release`] lets the kept
+//! layers go on the thread they belong to once rendering stops:
 //!
 //! - on a JavaScript thread, the main one included, by the post
 //!   `crate::memory`'s watcher makes when rendering has stopped (see
@@ -30,8 +37,9 @@
 //!
 //! A thread neither reaches -- one of a crate user's own -- lets a layer go
 //! at its next GPU use once the layer has gone unused for [`KEPT_FOR`], and
-//! until then holds at most [`KEPT`] layers of the largest page it drew: at
-//! 6000 by 4000 and four samples, 960 MB at eight bits and 1.9 GB in `F16`.
+//! until then holds [`KEPT_BYTES`] or [`ALWAYS_KEPT`] layers of the largest
+//! page it drew, whichever is more: at 6000 by 4000 and four samples, 960 MB
+//! at eight bits and 1.9 GB in `F16`.
 //!
 //! The coverage route's planes on the CPU -- see
 //! [`coverage`](super::coverage) -- are kept too, but only while a
@@ -58,12 +66,20 @@ use skia_safe::{
     Canvas as SkCanvas, ColorType, ISize, ImageInfo, Surface, SurfaceProps,
 };
 
-use crate::context::chain::coverage::Plane;
+use crate::{context::chain::coverage::Plane, gpu::multisample_bytes};
 
-/// How many layers a thread keeps: two. A run holds two open at most -- it
-/// lets each layer go once the next is drawn, see `layer::Run::play` -- so
-/// two kept are what a run of chains like the last needs.
-const KEPT: usize = 2;
+/// How many layers a thread keeps whatever they hold: two. A run holds two
+/// open at most -- it lets each layer go once the next is drawn, see
+/// `layer::Run::play` -- so two kept are what a run of chains like the last
+/// needs, at any page size.
+const ALWAYS_KEPT: usize = 2;
+
+/// How many bytes the layers a thread keeps past [`ALWAYS_KEPT`] may hold
+/// together: 256 MB, the default budget of Skia's resource cache
+/// (`GrResourceCache::kDefaultMaxSize`), so that the pool holds beside the
+/// cache no more than the cache itself holds unless set. A layer's bytes are
+/// [`Key::bytes`].
+const KEPT_BYTES: usize = 256 << 20;
 
 /// How long a kept layer outlives its last use: the span a thread's GPU
 /// context is kept unused for (`MTL_CONTEXT_LIFESPAN`,
@@ -86,18 +102,29 @@ const KEPT_FOR: Duration = Duration::from_secs(5);
 pub(crate) struct Key {
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     context: DirectContextId,
-    /// The `msaa` the scope's canvas was made with, which with the context
-    /// decides the sample count.
-    msaa: Option<usize>,
+    /// The samples a pixel of the scope's canvas has, which a layer made on
+    /// it takes.
+    samples: usize,
     info: ImageInfo,
     props: SurfaceProps,
+}
+
+impl Key {
+    /// The bytes a layer kept under this holds: its pixels, and the
+    /// multisample buffer Ganesh keeps beside them -- see
+    /// [`multisample_bytes`].
+    fn bytes(&self) -> usize {
+        self.info.compute_min_byte_size()
+            + multisample_bytes(&self.info, self.samples)
+    }
 }
 
 /// A thread's open scopes and the layers it keeps.
 #[derive(Default)]
 struct Pool {
-    /// Each open scope's canvas, by address, and its `msaa`.
-    scopes: Vec<(usize, Option<usize>)>,
+    /// Each open scope's canvas, by address, and the samples a pixel of it
+    /// has.
+    scopes: Vec<(usize, usize)>,
     /// The layers kept, oldest first, with when each was let go.
     kept: Vec<(Key, Surface, Instant)>,
     /// How many [`PlaneScope`]s are open.
@@ -110,19 +137,20 @@ thread_local! {
     static POOL: RefCell<Pool> = RefCell::default();
 }
 
-/// Names the canvas a playback is under way on, and the `msaa` its surface
-/// was made with, for as long as it is held, so that chain layers for that
+/// Names the canvas a playback is under way on, and the samples a pixel of its
+/// surface has, for as long as it is held, so that chain layers for that
 /// canvas are kept -- see the module's documentation. Opened by the code that
-/// made the surface; scopes nest.
+/// made the surface, which knows the count; scopes nest.
 ///
 /// A layer scope is a [`PlaneScope`] too.
 pub(crate) struct LayerScope(PhantomData<*const ()>, PlaneScope);
 
 impl LayerScope {
-    /// Opens a scope for `canvas`, whose surface was made with `msaa`.
-    pub(crate) fn open(canvas: &SkCanvas, msaa: Option<usize>) -> Self {
+    /// Opens a scope for `canvas`, whose surface has `samples` samples a
+    /// pixel.
+    pub(crate) fn open(canvas: &SkCanvas, samples: usize) -> Self {
         let at = address(canvas);
-        POOL.with_borrow_mut(|pool| pool.scopes.push((at, msaa)));
+        POOL.with_borrow_mut(|pool| pool.scopes.push((at, samples)));
         Self(PhantomData, PlaneScope::open())
     }
 }
@@ -184,16 +212,16 @@ pub(crate) fn key(canvas: &SkCanvas, info: &ImageInfo) -> Option<Key> {
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     {
         let at = address(canvas);
-        let msaa = POOL.with_borrow(|pool| {
+        let samples = POOL.with_borrow(|pool| {
             pool.scopes
                 .iter()
                 .rev()
                 .find(|(scope, _)| *scope == at)
-                .map(|(_, msaa)| *msaa)
+                .map(|(_, samples)| *samples)
         })?;
         Some(Key {
             context: canvas.direct_context()?.id(),
-            msaa,
+            samples,
             info: info.clone(),
             props: canvas.props()?,
         })
@@ -210,7 +238,8 @@ pub(crate) fn take(key: &Key) -> Option<Surface> {
     })
 }
 
-/// Keeps `surface` under `key`, letting the oldest go past [`KEPT`].
+/// Keeps `surface` under `key`, letting the oldest go while those kept hold
+/// more than [`KEPT_BYTES`] and number more than [`ALWAYS_KEPT`].
 ///
 /// `surface` is a GPU target: [`key`] names none but a GPU canvas's layer.
 /// One in main memory would break [`Drawn::new`](super::Drawn::new), which
@@ -224,9 +253,7 @@ pub(crate) fn keep(key: Key, mut surface: Surface) {
     POOL.with_borrow_mut(|pool| {
         pool.expire();
         pool.kept.push((key, surface, Instant::now()));
-        if pool.kept.len() > KEPT {
-            pool.kept.remove(0);
-        }
+        pool.fit();
     });
 }
 
@@ -316,6 +343,24 @@ impl Pool {
         let kept_for = kept_for();
         self.kept.retain(|(.., since)| since.elapsed() <= kept_for);
     }
+
+    /// Lets the oldest layers go while those kept hold more than
+    /// [`KEPT_BYTES`] and number more than [`ALWAYS_KEPT`].
+    fn fit(&mut self) {
+        let held = self.kept.iter().map(|(key, ..)| key.bytes()).sum();
+        let over = self
+            .kept
+            .iter()
+            .take(self.kept.len().saturating_sub(ALWAYS_KEPT))
+            .scan(held, |held: &mut usize, (key, ..)| {
+                let past = *held > KEPT_BYTES;
+                *held -= key.bytes();
+                Some(past)
+            })
+            .take_while(|past| *past)
+            .count();
+        self.kept.drain(..over);
+    }
 }
 
 /// How long a layer is kept on this thread: [`KEPT_FOR`].
@@ -361,18 +406,22 @@ thread_local! {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use skia_safe::ImageInfo;
+    use skia_safe::{AlphaType, ColorType, ImageInfo};
 
-    use super::{KEEP, KEPT_FOR, KEPT_FOR_HERE};
+    use super::{
+        ALWAYS_KEPT, KEEP, KEPT_BYTES, KEPT_FOR, KEPT_FOR_HERE, LayerScope,
+        Pool,
+    };
     use crate::{
         context::{
             chain::{MADE_LAYERS, shares_layers},
-            page::ExportOptions,
+            page::{ExportOptions, Page},
         },
         gpu::RenderingEngine,
         prelude::*,
+        started,
     };
 
     /// Whether this machine has a GPU engine to keep layers on.
@@ -564,5 +613,188 @@ mod tests {
             let differ = fresh.iter().zip(page).filter(|(a, b)| a != b).count();
             assert_eq!(differ, 0, "the {name} page changed with layers kept");
         }
+    }
+
+    /// A page whose blurred shapes cross each of its edges by its own amount,
+    /// each taking a layer of its own size, read twice: the second read takes
+    /// back every layer the first made, and reads the bytes the page reads
+    /// with every layer made afresh. The shapes are opaque, so their layers
+    /// are eight-bit, about 22 MB each at four samples, and fit the budget
+    /// together; translucent, they take `F16` layers twice that size, which
+    /// do not.
+    #[test]
+    fn layers_of_several_sizes_that_fit_the_budget_are_all_taken_back() {
+        if !on_gpu() {
+            return;
+        }
+        const SIZE: (f32, f32) = (1200.0, 900.0);
+        let shapes = [
+            (-20.3, 100.4, 80.0, 40.0, "rgb(200 40 20)"),
+            (1150.6, 300.2, 90.0, 40.0, "rgb(20 60 200)"),
+            (400.1, -15.2, 80.0, 40.0, "rgb(200 40 20)"),
+            (700.7, 870.4, 80.0, 50.0, "rgb(20 60 200)"),
+            (-30.5, -25.5, 90.0, 60.0, "rgb(200 40 20)"),
+            (1170.2, 860.9, 70.0, 70.0, "rgb(20 60 200)"),
+            (300.3, 400.6, 80.0, 40.0, "rgb(200 40 20)"),
+            (800.8, 500.1, 80.0, 40.0, "rgb(20 60 200)"),
+        ];
+        let (fresh, _) = read(SIZE, &shapes, false);
+        // Counted however slowly the device draws -- see `KEPT_FOR_HERE`.
+        KEPT_FOR_HERE.set(Duration::MAX);
+        super::release();
+        let (first, made_first) = read(SIZE, &shapes, true);
+        let (second, made_second) = read(SIZE, &shapes, true);
+        KEPT_FOR_HERE.set(KEPT_FOR);
+        assert!(made_first > 2, "the page took {made_first} layers");
+        assert_eq!(made_second, 0, "the second read made layers again");
+        for (name, page) in [("first", &first), ("second", &second)] {
+            let differ = fresh.iter().zip(page).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "the {name} page changed with layers kept");
+        }
+    }
+
+    /// The pool lets the oldest layers go once those kept hold more than the
+    /// budget, counting each layer's multisample buffer, and keeps the newest
+    /// two whatever they hold.
+    ///
+    /// The sizes are chosen against [`KEPT_BYTES`]: twenty 300 by 200 layers
+    /// at four samples hold 1.2 MB each, pixels and samples; a 3531 by 3521
+    /// one holds 248.65 MB, so with the twenty it is 4.2 MB past the budget,
+    /// which letting three go does not cover and four does.
+    #[test]
+    fn layers_are_kept_while_they_fit_the_budget() {
+        if !on_gpu() {
+            return;
+        }
+        const SAMPLES: usize = 4;
+        const SMALL: usize = 20;
+        assert_eq!(KEPT_BYTES, 268_435_456, "the sizes below assume 256 MB");
+        assert_eq!(ALWAYS_KEPT, 2, "the last step assumes two");
+        let mut page = RenderingEngine::GPU
+            .make_surface(
+                &ImageInfo::new_n32_premul((1, 1), None),
+                &ExportOptions::default(),
+            )
+            .expect("a GPU surface");
+        let canvas = page.canvas();
+        let _scope = LayerScope::open(canvas, SAMPLES);
+        let key = |size: (i32, i32)| {
+            super::key(canvas, &ImageInfo::new_n32_premul(size, None))
+                .expect("a key")
+        };
+        // Each entry is told apart by its stand-in surface's width: the pool
+        // reads only the key.
+        let entry = |key: super::Key, tag: i32| {
+            let surface =
+                started::raster_n32_premul((tag, 1)).expect("a stand-in");
+            (key, surface, Instant::now())
+        };
+        let left = |pool: &Pool| -> Vec<i32> {
+            pool.kept
+                .iter()
+                .map(|(_, surface, _)| surface.width())
+                .collect()
+        };
+        let mut pool = Pool::default();
+        for tag in 1..=SMALL as i32 {
+            pool.kept.push(entry(key((300, 200)), tag));
+            pool.fit();
+        }
+        assert_eq!(left(&pool), (1..=20).collect::<Vec<_>>(), "small layers");
+        pool.kept.push(entry(key((3531, 3521)), 100));
+        pool.fit();
+        assert_eq!(
+            left(&pool),
+            (5..=20).chain([100]).collect::<Vec<_>>(),
+            "a large layer past the budget"
+        );
+        pool.kept.push(entry(key((3531, 3521)), 200));
+        pool.fit();
+        assert_eq!(left(&pool), [100, 200], "two large layers");
+    }
+
+    /// Each export that composites a page on this thread keeps its layers for
+    /// its own sample count: after an export at the default count keeps its
+    /// layer, an export of the same page at one sample makes its own and reads
+    /// the bytes it reads with every layer made afresh. Each export is of a
+    /// page of its own, so that no page cache answers it without drawing.
+    #[test]
+    fn every_export_keeps_layers_for_its_own_sample_count() {
+        if !on_gpu() {
+            return;
+        }
+        const SIZE: (i32, i32) = (600, 400);
+        /// A page of one blurred rounded rectangle, and the canvas it is
+        /// from, which an export needs alive to file the page.
+        fn page() -> (Canvas, Page) {
+            let mut canvas = Canvas::new(SIZE.0 as f32, SIZE.1 as f32);
+            canvas.set_gpu(true);
+            let ctx = canvas.context();
+            ctx.set_filter_css("blur(4px)").expect("a filter");
+            ctx.set_fill_style_css("rgb(20 60 200)").expect("a colour");
+            ctx.begin_path();
+            ctx.round_rect(260.3, 170.6, 80.0, 40.0, [12.0; 4])
+                .expect("a rounded rectangle");
+            ctx.fill(FillRule::NonZero);
+            let mut page = None;
+            canvas
+                .context()
+                .inner
+                .with_recorder(|mut recorder| page = Some(recorder.page()));
+            (canvas, page.expect("a page"))
+        }
+        let info =
+            ImageInfo::new(SIZE, ColorType::RGBA8888, AlphaType::Premul, None);
+        type Export = fn(&Page, &ExportOptions, &ImageInfo) -> Vec<u8>;
+        let exports: [(&str, Export); 3] = [
+            ("composite", |page, options, info| {
+                let image = page
+                    .composite(options, RenderingEngine::GPU)
+                    .expect("an image");
+                let mut pixels = vec![0; info.compute_min_byte_size()];
+                assert!(image.read_pixels(
+                    info,
+                    &mut pixels,
+                    info.min_row_bytes(),
+                    (0, 0),
+                    skia_safe::image::CachingHint::Disallow,
+                ));
+                pixels
+            }),
+            ("composite_into", |page, options, info| {
+                page.composite_into(options, RenderingEngine::GPU, info)
+                    .expect("pixels")
+            }),
+            ("composite_pixels", |page, options, info| {
+                page.composite_pixels(options, RenderingEngine::GPU, info)
+                    .expect("pixels")
+            }),
+        ];
+        let single = ExportOptions {
+            msaa: Some(1),
+            ..ExportOptions::default()
+        };
+        KEPT_FOR_HERE.set(Duration::MAX);
+        for (name, export) in exports {
+            let (_one, fresh_page) = page();
+            KEEP.set(false);
+            let fresh = export(&fresh_page, &single, &info);
+            KEEP.set(true);
+            super::release();
+            let (_two, default_page) = page();
+            export(&default_page, &ExportOptions::default(), &info);
+            let (_three, single_page) = page();
+            let made = MADE_LAYERS.get();
+            let kept = export(&single_page, &single, &info);
+            let made = MADE_LAYERS.get() - made;
+            assert_eq!(made, 1, "{name}: one sample took a kept layer");
+            let differ =
+                fresh.iter().zip(&kept).filter(|(a, b)| a != b).count();
+            assert_eq!(
+                differ, 0,
+                "{name}: one sample changed with layers kept"
+            );
+        }
+        KEPT_FOR_HERE.set(KEPT_FOR);
     }
 }
