@@ -4866,9 +4866,112 @@ mod recorded_count_tests {
     use crate::{
         canvas::EngineKind,
         context::{layer::ENTRIES_WALKED, page::COUNT_HELD_TO_WALK},
+        export::{EncodeOptions, ImageFormat},
         gpu::NEVER_GPU,
         shader::{GradientColorSpace, GradientInterpolation, GradientStop},
     };
+
+    /// Registers the face the colour glyph scenes draw in, once on each
+    /// thread: a face another test thread registered is not found on this
+    /// one.
+    fn register() {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if REGISTERED.replace(true) {
+            return;
+        }
+        crate::font::FontLibrary::new()
+            .register_font_from_path(
+                "CountedPalettes",
+                "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
+            )
+            .expect("a bundled face registers");
+    }
+
+    /// A CPU canvas of a run of colour glyphs, whose recording for a
+    /// document is made when a target first plays it -- see
+    /// `layer::ColourText`.
+    fn colour_page() -> Canvas {
+        let mut canvas = Canvas::new(320.0, 160.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css("40px CountedPalettes"));
+        ctx.fill_text("Abcdef", 10.0, 60.0, None);
+        canvas
+    }
+
+    /// A page holding a picture recorded when a target first plays it,
+    /// through a canvas drawn in once or twice, counts it once for each
+    /// time it holds it once it is recorded, as a walk of its entries does:
+    /// a run of colour glyphs, whose document picture a PDF of the page
+    /// records, after which the page drawn into another holds its count to
+    /// its walk -- see `page::PageRecorder::recorded_bytes`. Counted for the
+    /// first page that filed it alone, the page drawn into fell short of its
+    /// walk.
+    #[test]
+    fn a_picture_recorded_later_counts_in_every_page_holding_it() {
+        register();
+        for times in [1, 2] {
+            let mut inner = colour_page();
+            let mut middle = Canvas::new(320.0, 160.0);
+            middle.set_gpu(false);
+            for _ in 0..times {
+                middle.context().draw_canvas(&mut inner, 0.0, 0.0);
+            }
+            middle
+                .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+                .expect("a PDF");
+            let mut outer = Canvas::new(320.0, 160.0);
+            outer.set_gpu(false);
+            outer.context().draw_canvas(&mut middle, 0.0, 0.0);
+            let mut bytes = 0;
+            middle.context().inner.with_recorder(|recorder| {
+                bytes = recorder.recorded_bytes();
+            });
+            assert!(bytes > 0, "drawn in {times}: counted");
+        }
+    }
+
+    /// A picture filed into pages that are then dropped holds counts only
+    /// for those alive, the next time a page files it: a canvas drawn into a
+    /// fresh canvas every frame holds two, its own and the frame's, however
+    /// many frames there were.
+    #[test]
+    fn a_picture_holds_counts_only_for_the_pages_alive() {
+        /// The frames, each a canvas drawn into and dropped.
+        const FRAMES: usize = 50;
+        register();
+        let mut inner = colour_page();
+        let text = inner
+            .context()
+            .inner
+            .page()
+            .layers
+            .iter()
+            .find_map(|layer| match layer {
+                crate::context::layer::Layer::ColourText(text) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("a run of colour glyphs kept");
+        let frame = |inner: &mut Canvas| {
+            let mut canvas = Canvas::new(320.0, 160.0);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.draw_canvas(inner, 0.0, 0.0);
+            ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a read");
+            canvas
+        };
+        for _ in 0..FRAMES {
+            drop(frame(&mut inner));
+        }
+        let live = frame(&mut inner);
+        assert_eq!(text.recording.counts(), 2, "its own page and the live one");
+        drop(live);
+    }
 
     /// Gradient fills one after another count what the page records for
     /// them, on a CPU canvas and a GPU one alike. Where the page files them

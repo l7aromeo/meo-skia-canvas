@@ -25,7 +25,7 @@ use std::{
     fmt,
     marker::PhantomData,
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, Weak,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -281,26 +281,62 @@ impl RecordedCount {
     pub(crate) fn bytes(&self) -> usize {
         self.0.load(Ordering::Relaxed)
     }
+
+    /// The count, held without keeping it: gone once the generation it
+    /// counts is.
+    fn weak(&self) -> WeakCount {
+        WeakCount(Arc::downgrade(&self.0))
+    }
+}
+
+/// A [`RecordedCount`] held weakly, by a [`LazyPicture`] filed into it.
+#[derive(Debug)]
+struct WeakCount(Weak<AtomicUsize>);
+
+impl WeakCount {
+    /// Whether this holds `count`.
+    fn holds(&self, count: &RecordedCount) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&count.0))
+    }
+
+    /// Whether the generation it counts is gone.
+    fn is_gone(&self) -> bool {
+        self.0.strong_count() == 0
+    }
+
+    fn add(&self, bytes: usize) {
+        if let Some(count) = self.0.upgrade() {
+            count.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A picture recorded the first time a target asks for it, which then adds
-/// its bytes to the count of the page that filed it -- see
-/// [`Layer::count_into`]. The thread that records it adds them after the
-/// picture is in place, so a count never runs ahead of the pictures a walk
-/// of the page finds.
+/// its bytes to the count of every page that filed it, once for each time
+/// that page filed it -- see [`Layer::count_into`]. A page holds it through
+/// another canvas drawn in as well as through its own draws, since a canvas
+/// drawn in brings its page's entries without copying them, and a walk of
+/// the page counts it once for each entry holding it. The thread that
+/// records it adds them after the picture is in place, so a count never
+/// runs ahead of the pictures a walk of the page finds.
 #[derive(Debug, Default)]
 pub struct LazyPicture {
     picture: OnceLock<Option<Picture>>,
-    counted_by: OnceLock<RecordedCount>,
+    /// Each count the picture was filed into, with how many times. Held
+    /// weakly, and those whose generation is gone dropped each time it is
+    /// filed into another, so that it holds one for each live generation
+    /// filing it -- each of which holds the picture itself -- however many
+    /// pages filed it and went: a canvas drawn into a fresh one every frame.
+    counted_by: Mutex<Vec<(WeakCount, usize)>>,
 }
 
 impl Clone for LazyPicture {
-    /// The picture as it stands, counted by the page that files the clone
-    /// rather than by the one that filed this.
+    /// The picture as it stands, counted by the pages that file the clone
+    /// rather than by those that filed this.
     fn clone(&self) -> Self {
         Self {
             picture: self.picture.clone(),
-            counted_by: OnceLock::new(),
+            counted_by: Mutex::default(),
         }
     }
 }
@@ -310,7 +346,7 @@ impl From<Option<Picture>> for LazyPicture {
     fn from(picture: Option<Picture>) -> Self {
         Self {
             picture: OnceLock::from(picture),
-            counted_by: OnceLock::new(),
+            counted_by: Mutex::default(),
         }
     }
 }
@@ -323,7 +359,7 @@ impl LazyPicture {
     }
 
     /// The picture, recorded by `record` now if nothing has asked for it
-    /// yet, its bytes then added to the count it was filed into.
+    /// yet, its bytes then added to the counts it was filed into.
     pub(crate) fn get_or_record(
         &self,
         record: impl FnOnce() -> Option<Picture>,
@@ -334,10 +370,10 @@ impl LazyPicture {
             made = picture.as_ref().map_or(0, Picture::approximate_bytes_used);
             picture
         });
-        if made > 0
-            && let Some(count) = self.counted_by.get()
-        {
-            count.add(made);
+        if made > 0 {
+            for (count, times) in self.counted_by.lock().iter() {
+                count.add(made * times);
+            }
         }
         picture.as_ref()
     }
@@ -350,10 +386,21 @@ impl LazyPicture {
             .map_or(0, Picture::approximate_bytes_used)
     }
 
-    /// Adds the picture's bytes to `count` when it is recorded. Kept for the
-    /// first page that files it, the only one that holds it.
+    /// Adds the picture's bytes to `count` when it is recorded, once more
+    /// for each time this is asked with it.
     fn count_into(&self, count: &RecordedCount) {
-        let _ = self.counted_by.set(count.clone());
+        let mut counts = self.counted_by.lock();
+        counts.retain(|(count, _)| !count.is_gone());
+        match counts.iter_mut().find(|(held, _)| held.holds(count)) {
+            Some((_, times)) => *times += 1,
+            None => counts.push((count.weak(), 1)),
+        }
+    }
+
+    /// How many counts the picture is filed into.
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> usize {
+        self.counted_by.lock().len()
     }
 }
 
