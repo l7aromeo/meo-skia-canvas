@@ -3012,6 +3012,31 @@ impl PatternDraw {
     fn reach(&self) -> Rect {
         self.plain.cull_rect()
     }
+
+    /// Whether the draw is a run of text drawn under a blend read in the
+    /// shader -- see [`blends_by_coefficients`] -- which a GPU draws apart
+    /// where its glyphs overlap, as it does a [`ReplayedText`]'s.
+    pub(crate) fn reads_the_page(&self) -> bool {
+        matches!(self.replay, Replay::Text { .. })
+            && !blends_by_coefficients(
+                self.paint.blend_mode_or(BlendMode::SrcOver),
+            )
+    }
+
+    /// What the draw inks on a canvas whose transform is `device`, within
+    /// `clip`, in that canvas's pixels, as [`ReplayedText::ink_under`]
+    /// finds it: its replay recorded under `device`, the pattern left out,
+    /// which inks nothing the draw's shape does not, and widened by
+    /// [`HINTED_INK_DRIFT`]. Its own clip, where it has one, is left out
+    /// too, which only widens it.
+    fn ink_under(&self, device: &Matrix, clip: IRect) -> IRect {
+        let _whole = WholeRuns::hold();
+        let inked = inked_by(Rect::from(clip), device, |canvas| {
+            self.replay.draw(canvas, &self.matrix, &self.paint);
+        });
+        let inked = inked.with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
+        IRect::intersect(&inked.round_out(), &clip).unwrap_or_default()
+    }
 }
 
 thread_local! {
@@ -4397,10 +4422,10 @@ fn drawn_on_their_backdrop(
     true
 }
 
-/// Plays the runs of [`ReplayedText`] `entries` opens with, each under a
-/// blend read in the shader -- see [`ReplayedText::reads_the_page`] -- and
-/// each alone or a piece of a clip's run -- see [`read_on_the_cpu`] -- onto
-/// a GPU canvas as the CPU draws them, over one read back of the pixels they
+/// Plays the runs of text `entries` opens with, each under a blend read in
+/// the shader, a [`ReplayedText`] or a run dyed by a canvas pattern, alone
+/// or a piece of a clip's run -- see [`read_on_the_cpu`] -- onto a GPU
+/// canvas as the CPU draws them, over one read back of the pixels they
 /// ink -- see [`drawn_on_their_backdrop`]: on the CPU a run is drawn whole
 /// and composites each glyph over the last, where Ganesh, with no
 /// framebuffer fetch on Metal, copies the page for every draw that reads it
@@ -4442,31 +4467,24 @@ fn replayed_on_their_backdrop(
     // What each run inks, recorded under the transform it is played under,
     // within the bounds of the clip it is drawn under where it has one; what
     // it reaches where that cannot be had.
-    let reach_of_run = |text: &ReplayedText, within: Option<Rect>| {
-        let reach = match text.blend {
-            Some(_) => return BackdropReach::Beyond,
-            None => text.ink_under(&device, clip).map_or(
-                BackdropReach::Local(text.reach()),
-                BackdropReach::Device,
-            ),
-        };
-        match (reach, within) {
-            (reach, None) => reach,
-            (BackdropReach::Device(inks), Some(within)) => {
-                let within = device.map_rect(within).0.round_out();
-                BackdropReach::Device(
-                    IRect::intersect(&inks, &within).unwrap_or_default(),
-                )
-            }
-            (BackdropReach::Local(reach), Some(within)) => {
-                let mut reach = reach;
-                if !reach.intersect(within) {
-                    reach = Rect::new_empty();
-                }
-                BackdropReach::Local(reach)
-            }
-            (BackdropReach::Beyond, Some(_)) => BackdropReach::Beyond,
+    let reach_of_run = |run: &KeptRun<'_>, within: Option<Rect>| match (
+        run.reach(&device, clip),
+        within,
+    ) {
+        (reach, None) => reach,
+        (BackdropReach::Device(inks), Some(within)) => {
+            let within = device.map_rect(within).0.round_out();
+            BackdropReach::Device(
+                IRect::intersect(&inks, &within).unwrap_or_default(),
+            )
         }
+        (BackdropReach::Local(mut reach), Some(within)) => {
+            if !reach.intersect(within) {
+                reach = Rect::new_empty();
+            }
+            BackdropReach::Local(reach)
+        }
+        (BackdropReach::Beyond, Some(_)) => BackdropReach::Beyond,
     };
     let in_pixels = |reach: &BackdropReach| match reach {
         BackdropReach::Beyond => clip,
@@ -4477,8 +4495,8 @@ fn replayed_on_their_backdrop(
     let mut between: Vec<IRect> = vec![];
     for (at, entry) in entries.iter().enumerate() {
         match read_on_the_cpu(entry) {
-            Some((text, within)) => {
-                let reach = reach_of_run(text, within);
+            Some((run, within)) => {
+                let reach = reach_of_run(&run, within);
                 let inks = in_pixels(&reach);
                 if between.iter().any(|drawn| IRect::intersects(drawn, &inks)) {
                     break;
@@ -4555,24 +4573,67 @@ fn replayed_on_their_backdrop(
     last + 1
 }
 
-/// The kept run `entry` draws under a blend read in the shader -- see
-/// [`ReplayedText::reads_the_page`] -- which [`replayed_on_their_backdrop`]
-/// draws on the CPU, and the bounds of the clip it is drawn under, in the
-/// coordinates it is played back under, where it is a piece of a clip's run
-/// -- see [`Clipped`]: played onto the raster, the piece applies its clip
-/// there as the CPU page applies it. `None` for any other entry.
-fn read_on_the_cpu(entry: &Layer) -> Option<(&ReplayedText, Option<Rect>)> {
-    match entry {
-        Layer::ReplayedText(text) if text.reads_the_page() => {
-            Some((text, None))
+/// A draw of text under a blend read in the shader that
+/// [`replayed_on_their_backdrop`] draws on the CPU: a kept run -- see
+/// [`ReplayedText::reads_the_page`] -- or a run dyed by a canvas pattern --
+/// see [`PatternDraw::reads_the_page`], whose tile a raster makes on the CPU
+/// as the CPU page makes it.
+enum KeptRun<'a> {
+    Text(&'a ReplayedText),
+    Pattern(&'a PatternDraw),
+}
+
+impl KeptRun<'_> {
+    /// What the run can change on a canvas whose transform is `device`,
+    /// within `clip`: what it inks, the whole clip where its blend covers
+    /// beyond the draw, or what it reaches where its ink cannot be had.
+    fn reach(&self, device: &Matrix, clip: IRect) -> BackdropReach {
+        match self {
+            KeptRun::Text(text) if text.blend.is_some() => {
+                BackdropReach::Beyond
+            }
+            KeptRun::Text(text) => text.ink_under(device, clip).map_or(
+                BackdropReach::Local(text.reach()),
+                BackdropReach::Device,
+            ),
+            KeptRun::Pattern(draw) => {
+                BackdropReach::Device(draw.ink_under(device, clip))
+            }
         }
-        Layer::Clipped(piece) => match piece.entry() {
+    }
+}
+
+/// The run `entry` draws that [`replayed_on_their_backdrop`] draws on the
+/// CPU -- see [`KeptRun`] -- and the bounds of the clip path it applies
+/// itself, in the coordinates it is played back under, where it applies
+/// one: as a piece of a clip's run -- see [`Clipped`] -- or a pattern's
+/// draw under its own clip. Played onto the raster, it applies that clip
+/// there as the CPU page applies it. `None` for any other entry.
+fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
+    fn kept(entry: &Layer) -> Option<KeptRun<'_>> {
+        match entry {
             Layer::ReplayedText(text) if text.reads_the_page() => {
-                Some((text, Some(piece.bounds)))
+                Some(KeptRun::Text(text))
+            }
+            Layer::Pattern(draw) if draw.reads_the_page() => {
+                Some(KeptRun::Pattern(draw))
             }
             _ => None,
-        },
-        _ => None,
+        }
+    }
+    match entry {
+        Layer::Clipped(piece) => {
+            Some((kept(piece.entry())?, Some(piece.bounds)))
+        }
+        Layer::Pattern(draw) => {
+            let clip = draw
+                .clip
+                .as_ref()
+                .and_then(Path::deserialize)
+                .map(|clip| *clip.bounds());
+            Some((kept(entry)?, clip))
+        }
+        entry => Some((kept(entry)?, None)),
     }
 }
 
