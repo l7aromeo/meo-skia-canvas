@@ -163,6 +163,9 @@ fn skia_patches(skia: &Mode) {
     for patch in &SKIA_PATCHES {
         println!("cargo:rustc-check-cfg=cfg({})", patch.cfg);
     }
+    // The atlas patch `tests/gpu_atlas_placement.rs` waits for has no file
+    // yet, so nothing sets its cfg; it joins `SKIA_PATCHES` with the patch.
+    println!("cargo:rustc-check-cfg=cfg(meo_atlas_placement)");
     if let Mode::Binaries { tree, cfgs } = skia {
         for cfg in cfgs {
             println!("cargo:rustc-cfg={cfg}");
