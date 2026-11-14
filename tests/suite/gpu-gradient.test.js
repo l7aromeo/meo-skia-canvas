@@ -631,12 +631,13 @@ describe("a canvas drawn as an image into a GPU canvas", () => {
       { skip },
       () => {
         // The shadow is cast a whole source below the draw, on a canvas
-        // twice as tall, so that the draw's rows hold no shadow. A GPU
-        // canvas composites a shadow over what lies beneath it at half
-        // precision, as it blends any image, so its rows stand a level from
-        // the CPU's near a tie, whatever casts it. Cast from Ganesh's
-        // replay of the source's picture, the colour glyphs' shadow stood 3
-        // levels off.
+        // twice as tall, so that the draw's rows hold no shadow. Its rows
+        // stand a level from the CPU canvas's whatever casts it: Metal
+        // composites a shadow over what lies beneath it at half precision,
+        // a level off near a tie, and an x86 CPU canvas composites it up to
+        // a level off the exact composite the GPU makes on Vulkan. Cast
+        // from Ganesh's replay of the source's picture, the colour glyphs'
+        // shadow stood 3 levels off.
         const tall = 2 * SIDE;
         const backdrop = drawnOnto(false, () => {}, tall);
         const rows = (data, from, to) =>

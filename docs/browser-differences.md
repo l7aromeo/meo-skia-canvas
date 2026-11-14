@@ -1579,8 +1579,10 @@ pixels, every one within float noise of a half level or a stop. A canvas
 holding such a draw, drawn with `drawImage` into a GPU canvas, is drawn on the
 CPU over the GPU's pixels as well (#703), and lands on the CPU canvas's
 bytes under a scale, a rotation, a `globalAlpha`, `multiply`, `copy` and a
-shadow, the shadow cast from the CPU's draw and composited, as Metal
-composites any shadow, at half precision: a level from the CPU's near a tie.
+shadow, the shadow cast from the CPU's draw and standing within a level of
+the CPU canvas's: Metal composites any shadow at half precision, a level off
+near a tie, and an x86 CPU canvas composites one up to a level off the
+exact composite the GPU makes on Vulkan.
 The image of a canvas is backed by its page's picture, and Ganesh replaying
 that picture draws the hard stops as its own gradient. What stays apart:
 those ties; a shape's anti-aliased edge, which is Ganesh's coverage as for a
