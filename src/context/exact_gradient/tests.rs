@@ -1070,13 +1070,13 @@ fn the_effect_stores_the_cpus_bytes_but_on_ties() {
 
 /// The spaces Skia interpolates in apart from the page and converts from
 /// afterwards on the float pipeline -- linear sRGB, Display P3, sRGB, A98
-/// RGB, Oklab, Lab, LCH, OkLCH, HSL and HWB -- on an sRGB and a Display P3
-/// page: over the corpus's gradients, made opaque and drawn at full alpha,
-/// the effect stores the CPU's bytes but on ties, the conversion's noise
-/// counted in -- see [`CONVERSION_ULPS`] and [`CSS_ULPS`]. Every fourth
-/// case is drawn near black, every third greys a stop in three, whose hue
-/// is then powerless, and the hue methods take turns. Skia's own GPU
-/// gradient is judged beside it.
+/// RGB, Oklab, Lab, LCH, OkLCH, HSL, HWB and ProPhoto RGB -- on an sRGB and
+/// a Display P3 page: over the corpus's gradients, made opaque and drawn at
+/// full alpha, the effect stores the CPU's bytes but on ties, the
+/// conversion's noise counted in -- see [`CONVERSION_ULPS`] and
+/// [`CSS_ULPS`]. Every fourth case is drawn near black, every third greys a
+/// stop in three, whose hue is then powerless, and the hue methods take
+/// turns. Skia's own GPU gradient is judged beside it.
 #[test]
 fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
     let spaces = [
@@ -1093,6 +1093,10 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
         (InterpolationSpace::OKLCH, GradientColorSpace::Oklch),
         (InterpolationSpace::HSL, GradientColorSpace::Hsl),
         (InterpolationSpace::HWB, GradientColorSpace::Hwb),
+        (
+            InterpolationSpace::ProphotoRGB,
+            GradientColorSpace::ProphotoRgb,
+        ),
     ];
     let methods = [
         HueMethod::Shorter,
@@ -1233,6 +1237,52 @@ fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// [`primaries_to_xyzd50`] makes, to the bit, the gamut Skia's own
+/// `SkColorSpacePrimaries::toXYZD50` makes: `SkColorSpace::MakeCICP` builds
+/// every space H.273 names from its primaries through it, but for Rec. 709,
+/// Rec. 2020 and Display P3, which it takes from tables. ProPhoto RGB is
+/// not among them, so its gamut is held to Skia's by the arithmetic these
+/// share.
+#[test]
+fn primaries_make_skias_gamut_to_the_bit() {
+    use skia_safe::named_primaries::{self as p, CicpId};
+    let derived = [
+        (CicpId::Rec470SystemM, p::REC470_SYSTEM_M),
+        (CicpId::Rec470SystemBG, p::REC470_SYSTEM_BG),
+        (CicpId::Rec601, p::REC601),
+        (CicpId::SMPTE_ST_240, p::SMPTE_ST_240),
+        (CicpId::GenericFilm, p::GENERIC_FILM),
+        (CicpId::SMPTE_ST_428_1, p::SMPTE_ST_428_1),
+        (CicpId::SMPTE_RP_431_2, p::SMPTE_RP_431_2),
+        (CicpId::ITU_T_H273_Value22, p::ITU_T_H273_VALUE22),
+    ];
+    for (id, primaries) in derived {
+        let skia = ColorSpace::new_cicp(id, named_transfer_fn::CicpId::Linear)
+            .expect("a space H.273 names");
+        // `SkColorSpace::serialize`: a four-byte header, the transfer
+        // function's seven floats, then the matrix's nine.
+        let floats: Vec<u32> = skia
+            .serialize()
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .skip(1 + 7)
+            .map(|bytes| u32::from_ne_bytes(*bytes))
+            .collect();
+        let ours = primaries_to_xyzd50(&primaries).expect("a gamut");
+        let ours: Vec<u32> =
+            ours.iter().flatten().map(|v| v.to_bits()).collect();
+        assert_eq!(ours, floats, "{id:?}");
+        let built = skia_space(
+            &LINEAR_TF,
+            &primaries_to_xyzd50(&primaries).expect("a gamut"),
+        )
+        .expect("a space");
+        assert_eq!(built.to_xyzd50_hash(), skia.to_xyzd50_hash(), "{id:?}");
+    }
 }
 
 /// `SK_FloatPI`, `3.14159265f` in `SkFloatingPoint.h`, is the f32 Rust's

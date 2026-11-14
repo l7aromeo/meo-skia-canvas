@@ -34,8 +34,8 @@
 //! value lies within that of a half level can round the other way.
 //!
 //! A gradient interpolated in a space other than the page's -- linear sRGB,
-//! sRGB, Display P3 or A98 RGB -- is taken to the page as the CPU's
-//! `SkColorSpaceXformSteps` takes it: its transfer function undone, the
+//! sRGB, Display P3, A98 RGB or ProPhoto RGB -- is taken to the page as the
+//! CPU's `SkColorSpaceXformSteps` takes it: its transfer function undone, the
 //! gamut matrix, the page's transfer function applied, each curve through
 //! Skia's own `approx_powf` rebuilt in arithmetic -- see `Toward`. One in
 //! Oklab, Lab, LCH, OkLCH, HSL or HWB is first converted back to the space
@@ -46,8 +46,8 @@
 //! that pipeline rounds nothing before the store.
 //!
 //! [`GradientSpec::exact`] answers `None` where the effect cannot reproduce
-//! the CPU: an interpolation space it does not convert from (ProPhoto RGB,
-//! a working space wrapped around the shader, a PQ or HLG curve); a
+//! the CPU: an interpolation space it does not convert from (a working
+//! space wrapped around the shader, a PQ or HLG curve); a
 //! gradient on the float pipeline -- a
 //! two-point conical, or one converted to the page -- whose stops are
 //! translucent or that is drawn at an alpha (that pipeline rounds once,
@@ -59,9 +59,10 @@ use std::cell::Cell;
 use std::cell::RefCell;
 
 use skia_safe::{
-    AlphaType, Color4f, ColorSpace, ColorSpaceTransferFn, ColorType, Data,
-    FilterMode, IRect, ImageInfo, Matrix, MipmapMode, Paint, PictureRecorder,
-    Pixmap, Point, Rect, RuntimeEffect, SamplingOptions, Shader, TileMode,
+    AlphaType, Color4f, ColorSpace, ColorSpacePrimaries, ColorSpaceTransferFn,
+    ColorType, Data, FilterMode, IRect, ImageInfo, Matrix, MipmapMode, Paint,
+    PictureRecorder, Pixmap, Point, Rect, RuntimeEffect, SamplingOptions,
+    Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
         interpolation::{
@@ -69,7 +70,7 @@ use skia_safe::{
         },
         shaders as gradient_shaders,
     },
-    images,
+    images, named_primaries, named_transfer_fn,
 };
 
 use crate::{
@@ -1072,9 +1073,9 @@ const HALF_TURN: f32 = 180.0;
 ///
 /// Lab's and LCH's is XYZ D50 made linear, Oklab's and OkLCH's linear sRGB,
 /// and HSL's and HWB's sRGB, the spaces the stops are converted into and
-/// out of -- see [`Css`]. `None` where a working space is wrapped around
-/// the shader, and for ProPhoto RGB, whose gamut Skia derives from its
-/// primaries at run time.
+/// out of -- see [`Css`]. ProPhoto RGB's gamut is derived from its
+/// primaries, as Skia derives it -- see [`primaries_to_xyzd50`]. `None`
+/// where a working space is wrapped around the shader.
 fn intermediate_space(
     spec: &GradientSpec,
     page: &ColorSpace,
@@ -1089,9 +1090,16 @@ fn intermediate_space(
         InterpolationSpace::DisplayP3 => {
             PixelColorSpace::DisplayP3.to_skia_color_space().ok()
         }
-        InterpolationSpace::A98RGB => skia_space(&A98_TF, &ADOBE_RGB_GAMUT),
+        InterpolationSpace::A98RGB => skia_space(
+            &transfer_floats(&named_transfer_fn::A98_RGB),
+            &from_fixed(&ADOBE_RGB_GAMUT),
+        ),
+        InterpolationSpace::ProphotoRGB => skia_space(
+            &transfer_floats(&named_transfer_fn::PRO_PHOTO_RGB),
+            &primaries_to_xyzd50(&named_primaries::PRO_PHOTO_RGB)?,
+        ),
         InterpolationSpace::Lab | InterpolationSpace::LCH => {
-            skia_space(&LINEAR_TF, &XYZ_GAMUT)
+            skia_space(&LINEAR_TF, &from_fixed(&XYZ_GAMUT))
         }
         InterpolationSpace::OKLab | InterpolationSpace::OKLCH => {
             Some(ColorSpace::new_srgb_linear())
@@ -1102,11 +1110,6 @@ fn intermediate_space(
         _ => None,
     }
 }
-
-/// The 2.2 power curve Skia names `k2Dot2` and builds A98 RGB with
-/// (`SkNamedTransferFn::kA98RGB` in `SkColorSpace.h`), as `g, a, b, c, d,
-/// e, f`.
-const A98_TF: [f32; 7] = [2.2, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
 /// `SkNamedGamut::kAdobeRGB` in `SkColorSpace.h`: the gamut's matrix to XYZ
 /// D50 in ICC 16.16 fixed point, row by row, which Skia turns into floats
@@ -1123,17 +1126,147 @@ const ADOBE_RGB_GAMUT: [[i32; 3]; 3] = [
 const SERIALIZED_VERSION: u8 = 1;
 
 /// The space Skia's `SkColorSpace::MakeRGB` makes from the transfer function
-/// `tf` and the 16.16 fixed-point matrix to XYZ D50 `gamut`: built through
-/// `SkColorSpace::Deserialize`, which takes the same sixteen floats and
-/// calls `MakeRGB` with them, so that it compares equal to the one Skia's
-/// gradient builds -- skia-safe does not bind `MakeRGB` itself.
-fn skia_space(tf: &[f32; 7], gamut: &[[i32; 3]; 3]) -> Option<ColorSpace> {
-    // `SkFixedToFloat`: a 16.16 fixed-point value times 2^-16.
-    let fixed = |v: i32| v as f32 * (1.0 / (1u32 << 16) as f32);
+/// `tf`, as `g, a, b, c, d, e, f`, and the matrix to XYZ D50 `gamut`: built
+/// through `SkColorSpace::Deserialize`, which takes the same sixteen floats
+/// and calls `MakeRGB` with them, so that it compares equal to the one
+/// Skia's gradient builds -- skia-safe does not bind `MakeRGB` itself.
+fn skia_space(tf: &[f32; 7], gamut: &Matrix3) -> Option<ColorSpace> {
     let mut bytes = vec![SERIALIZED_VERSION, 0, 0, 0];
     bytes.extend(tf.iter().flat_map(|v| v.to_ne_bytes()));
-    bytes.extend(gamut.iter().flatten().flat_map(|&v| fixed(v).to_ne_bytes()));
+    bytes.extend(gamut.iter().flatten().flat_map(|v| v.to_ne_bytes()));
     Some(ColorSpace::deserialize(Data::new_copy(&bytes)))
+}
+
+/// `tf` as `g, a, b, c, d, e, f`.
+fn transfer_floats(tf: &ColorSpaceTransferFn) -> [f32; 7] {
+    [tf.g, tf.a, tf.b, tf.c, tf.d, tf.e, tf.f]
+}
+
+/// A gamut Skia writes in ICC 16.16 fixed point, as `SkFixedToFloat` turns
+/// it into floats: each value times 2^-16.
+fn from_fixed(gamut: &[[i32; 3]; 3]) -> Matrix3 {
+    gamut.map(|row| row.map(|v| v as f32 * (1.0 / (1u32 << 16) as f32)))
+}
+
+/// A 3x3 matrix as skcms keeps one, row by row.
+type Matrix3 = [[f32; 3]; 3];
+
+/// The D50 white skcms adapts to, `wXYZD50` in `skcms_AdaptToXYZD50`.
+const D50_XYZ: [f32; 3] = [0.96422, 1.0, 0.82521];
+
+/// Bradford's cone response matrix, `xyz_to_lms` in `skcms_AdaptToXYZD50`.
+const BRADFORD: Matrix3 = [
+    [0.8951, 0.2664, -0.1614],
+    [-0.7502, 1.7135, 0.0367],
+    [0.0389, -0.0685, 1.0296],
+];
+
+/// Its inverse as skcms writes it, `lms_to_xyz`: to seven figures, not the
+/// inverse of [`BRADFORD`] in f32.
+#[allow(clippy::excessive_precision)]
+const BRADFORD_INVERSE: Matrix3 = [
+    [0.9869929, -0.1470543, 0.1599627],
+    [0.4323053, 0.5183603, 0.0492912],
+    [-0.0085287, 0.0400428, 0.9684867],
+];
+
+/// `mv_mul` in `skcms.cc`: `m` times `v`.
+fn mv_mul(m: &Matrix3, v: &[f32; 3]) -> [f32; 3] {
+    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+}
+
+/// `skcms_Matrix3x3_concat`: `a` times `b`.
+fn concat(a: &Matrix3, b: &Matrix3) -> Matrix3 {
+    std::array::from_fn(|r| {
+        std::array::from_fn(|c| {
+            a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c]
+        })
+    })
+}
+
+/// `skcms_Matrix3x3_invert`: by cofactors in f64, each entry rounded to f32
+/// at the end, the names its own -- `a01` is row 1, column 0. `None` where
+/// skcms refuses: a singular matrix, or an inverse f32 cannot hold.
+fn invert(m: &Matrix3) -> Option<Matrix3> {
+    let a = |r: usize, c: usize| f64::from(m[r][c]);
+    let (a00, a01, a02) = (a(0, 0), a(1, 0), a(2, 0));
+    let (a10, a11, a12) = (a(0, 1), a(1, 1), a(2, 1));
+    let (a20, a21, a22) = (a(0, 2), a(1, 2), a(2, 2));
+    let b = [
+        a00 * a11 - a01 * a10,
+        a00 * a12 - a02 * a10,
+        a01 * a12 - a02 * a11,
+        a20,
+        a21,
+        a22,
+    ];
+    let determinant = b[0] * b[5] - b[1] * b[4] + b[2] * b[3];
+    if determinant == 0.0 {
+        return None;
+    }
+    let invdet = 1.0 / determinant;
+    let limit = f64::from(f32::MAX);
+    if invdet > limit || invdet < -limit || !(invdet as f32).is_finite() {
+        return None;
+    }
+    let [b0, b1, b2, b3, b4, b5] = b.map(|v| v * invdet);
+    let inverse = [
+        [
+            a11 * b5 - a12 * b4,
+            a12 * b3 - a10 * b5,
+            a10 * b4 - a11 * b3,
+        ],
+        [
+            a02 * b4 - a01 * b5,
+            a00 * b5 - a02 * b3,
+            a01 * b3 - a00 * b4,
+        ],
+        [b2, -b1, b0],
+    ]
+    .map(|row| row.map(|v| v as f32));
+    inverse
+        .iter()
+        .flatten()
+        .all(|v| v.is_finite())
+        .then_some(inverse)
+}
+
+/// `skcms_AdaptToXYZD50`: Bradford's adaptation from the white `wx, wy` to
+/// D50.
+fn adapt_to_d50(wx: f32, wy: f32) -> Matrix3 {
+    let white = [wx / wy, 1.0, (1.0 - wx - wy) / wy];
+    let from = mv_mul(&BRADFORD, &white);
+    let to = mv_mul(&BRADFORD, &D50_XYZ);
+    let scale = [
+        [to[0] / from[0], 0.0, 0.0],
+        [0.0, to[1] / from[1], 0.0],
+        [0.0, 0.0, to[2] / from[2]],
+    ];
+    concat(&BRADFORD_INVERSE, &concat(&scale, &BRADFORD))
+}
+
+/// `skcms_PrimariesToXYZD50`, which `SkColorSpacePrimaries::toXYZD50` calls:
+/// the matrix from linear RGB on `p`'s primaries to XYZ D50, in skcms's f32
+/// order of operations, which Skia builds with `-ffp-contract=off` outside
+/// Windows. Skia derives ProPhoto RGB's gamut this way when a gradient is
+/// interpolated in it, rather than from a table.
+fn primaries_to_xyzd50(p: &ColorSpacePrimaries) -> Option<Matrix3> {
+    let in_unit = |v: f32| (0.0..=1.0).contains(&v);
+    if ![p.rx, p.ry, p.gx, p.gy, p.bx, p.by, p.wx, p.wy]
+        .into_iter()
+        .all(in_unit)
+    {
+        return None;
+    }
+    let xy = [
+        [p.rx, p.gx, p.bx],
+        [p.ry, p.gy, p.by],
+        [1.0 - p.rx - p.ry, 1.0 - p.gx - p.gy, 1.0 - p.bx - p.by],
+    ];
+    let white = [p.wx / p.wy, 1.0, (1.0 - p.wx - p.wy) / p.wy];
+    let xyz = mv_mul(&invert(&xy)?, &white);
+    let scale = [[xyz[0], 0.0, 0.0], [0.0, xyz[1], 0.0], [0.0, 0.0, xyz[2]]];
+    Some(concat(&adapt_to_d50(p.wx, p.wy), &concat(&xy, &scale)))
 }
 
 /// What the CPU converts an interpolated colour through to reach the page,
@@ -1159,8 +1292,10 @@ impl Toward {
         if from.hash() == to.hash() {
             return Some(Toward::default());
         }
-        let tf = |f: ColorSpaceTransferFn| [f.g, f.a, f.b, f.c, f.d, f.e, f.f];
-        let (source, page) = (tf(from.transfer_fn()), tf(to.transfer_fn()));
+        let (source, page) = (
+            transfer_floats(&from.transfer_fn()),
+            transfer_floats(&to.transfer_fn()),
+        );
         // `skcms_TransferFunction_getType` tells PQ and HLG by a negative
         // `g`.
         if source[0] < 0.0 || page[0] < 0.0 {
@@ -1171,7 +1306,8 @@ impl Toward {
         let mut toward = Toward {
             linearize: (!linear(&source)).then_some(source),
             gamut: None,
-            encode: (!linear(&page)).then(|| tf(to.inv_transfer_fn())),
+            encode: (!linear(&page))
+                .then(|| transfer_floats(&to.inv_transfer_fn())),
         };
         if from.to_xyzd50_hash() != to.to_xyzd50_hash() {
             // The matrix's columns are what it makes of each primary,
