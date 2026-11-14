@@ -434,12 +434,18 @@ thread_local! {
 
 /// One chain's drop shadow in a batch -- see [`shadows`]: its lane of the
 /// source, which is the chain's 8-bit input, `size` of it from `from`, of
-/// which only `reads` holds the draw; and how its shadow is cast: moved by
-/// `offset`, tinted to `rgb` at `alpha` of the blurred alpha, scaled by
-/// `gain`, and with `shadow_only`, without the draw over it.
+/// which only `reads` holds the draw; its lane of the image its shadow is
+/// cast from, of the same size and read the same, from `casts`; and how its
+/// shadow is cast: moved by `offset`, tinted to `rgb` at `alpha` of the
+/// blurred alpha, scaled by `gain`, and with `shadow_only`, without the draw
+/// over it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ShadowJob {
     pub(crate) from: (i32, i32),
+    /// Where the lane the shadow is cast from lies in the cast image: `from`
+    /// in the source itself for a shadow cast from the draw, and elsewhere
+    /// for one cast from another image -- see `chain::Cast`.
+    pub(crate) casts: (i32, i32),
     pub(crate) reads: IRect,
     pub(crate) size: (usize, usize),
     pub(crate) offset: (f32, f32),
@@ -449,11 +455,14 @@ pub(crate) struct ShadowJob {
 }
 
 /// `image`, an 8-bit layer `(width, height)`, over its drop shadow, made on
-/// `context`: [`shadows`] of one chain reading all of `image`.
+/// `context`: [`shadows`] of one chain reading all of `image`, its shadow
+/// cast from `cast`, an 8-bit image of the same size, where it is `Some`,
+/// and from `image` otherwise.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shadow(
     context: &mut RecordingContext,
     image: &Image,
+    cast: Option<&Image>,
     (width, height): (usize, usize),
     sigma: (f32, f32),
     offset: (f32, f32),
@@ -463,6 +472,7 @@ pub(crate) fn shadow(
 ) -> Option<Image> {
     let job = ShadowJob {
         from: (0, 0),
+        casts: (0, 0),
         reads: IRect::from_wh(width as i32, height as i32),
         size: (width, height),
         offset,
@@ -470,13 +480,16 @@ pub(crate) fn shadow(
         gain,
         shadow_only,
     };
-    shadows(context, image, sigma, &[job]).map(|(image, _)| image)
+    shadows(context, (image, cast.unwrap_or(image)), sigma, &[job])
+        .map(|(image, _)| image)
 }
 
 /// Each of `jobs` over its drop shadow, made on `context` from `source`, an
-/// 8-bit image holding every job's draw, all of them blurred by the same
-/// `(sigma_x, sigma_y)`: each one's alpha blurred along rows and columns by
-/// the passes [`Gpu::axis`] makes, its value and remainder packed, tinted,
+/// 8-bit image holding every job's draw, and `casts`, one holding every
+/// job's lane its shadow is cast from -- `source` itself where each is cast
+/// from its draw -- all of them blurred by the same `(sigma_x, sigma_y)`:
+/// the alpha each casts from blurred along rows and columns by the passes
+/// [`Gpu::axis`] makes, its value and remainder packed, tinted,
 /// moved and composited under the draw by [`SHADOW`], scaled by its gain and
 /// rounded once to `source`'s own 8-bit type. One target per pass serves
 /// every job, each writing into a place of its own and reading only its own
@@ -489,14 +502,18 @@ pub(crate) fn shadow(
 /// job then takes alone, or the CPU.
 pub(crate) fn shadows(
     context: &mut RecordingContext,
-    source: &Image,
+    (source, casts): (&Image, &Image),
     (sigma_x, sigma_y): (f32, f32),
     jobs: &[ShadowJob],
 ) -> Option<(Image, Vec<(i32, i32)>)> {
     let out_type = source.color_type();
-    if !matches!(out_type, ColorType::RGBA8888 | ColorType::BGRA8888)
-        || jobs.is_empty()
-    {
+    let bytes = |image: &Image| {
+        matches!(
+            image.color_type(),
+            ColorType::RGBA8888 | ColorType::BGRA8888
+        )
+    };
+    if !(bytes(source) && bytes(casts)) || jobs.is_empty() {
         return None;
     }
     let reaches = |sigma: f32, n: usize| {
@@ -526,10 +543,12 @@ pub(crate) fn shadows(
         zero: zero.clone(),
         packed: true,
     };
+    // The blur reads each lane the job casts from; the composite reads
+    // its draw where it lies in the source.
     let lanes: Vec<Lane> = jobs
         .iter()
         .map(|job| Lane {
-            from: job.from,
+            from: job.casts,
             reads: job.reads,
             size: job.size,
         })
@@ -537,7 +556,7 @@ pub(crate) fn shadows(
     let rows_lines: Vec<(usize, usize)> =
         jobs.iter().map(|job| (job.size.0, job.size.1)).collect();
     let (rows, rows_lanes) = gpu.axis(
-        (source.clone(), zero),
+        (casts.clone(), zero),
         Input::Bytes,
         [1.0, 0.0],
         &lanes,
@@ -1311,6 +1330,7 @@ mod tests {
         let src = noise(w, h);
         let job = |from, reads, size, offset, shadow_only| ShadowJob {
             from,
+            casts: from,
             reads,
             size,
             offset,
@@ -1352,8 +1372,9 @@ mod tests {
         for sigma in [(2.0, 3.0), (7.0, 6.5)] {
             let (up, source) = uploaded(&src, w, h).expect("an upload");
             let mut context = up.recording_context().expect("a context");
-            let (shared, places) = shadows(&mut context, &source, sigma, &jobs)
-                .expect("shared passes");
+            let (shared, places) =
+                shadows(&mut context, (&source, &source), sigma, &jobs)
+                    .expect("shared passes");
             for (i, (job, &(x, y))) in jobs.iter().zip(&places).enumerate() {
                 let (jw, jh) = job.size;
                 // The job's lane, all but what it reads cleared.
@@ -1380,6 +1401,7 @@ mod tests {
                 let alone = shadow(
                     &mut context,
                     &alone,
+                    None,
                     (jw, jh),
                     sigma,
                     job.offset,

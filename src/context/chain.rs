@@ -803,14 +803,53 @@ impl Drawn {
         if let (Some(cast), None) = (&cast, &from) {
             from = Some(cast.drawn(plan)?);
         }
+        let cast = cast
+            .zip(from.as_ref())
+            .map(|(cast, from)| (from, cast.alpha));
+        self.finish_from(plan, steps, paint, cast, input)
+    }
+
+    /// [`Self::finish`], a shadow cast by the chain's first step cast from
+    /// what `cast`'s layer holds of the chain's region, at its alpha -- see
+    /// [`Cast`] -- a layer of `plan` drawn already: what chains sharing their
+    /// layers on the GPU take, their casts drawn into a layer they share too.
+    pub(crate) fn finish_drawn_cast(
+        &mut self,
+        plan: &Plan,
+        steps: &[Step],
+        paint: &Paint,
+        cast: (&Drawn, f32),
+    ) -> Option<Outcome> {
+        self.finish_from(plan, steps, paint, Some(cast), None)
+    }
+
+    /// The chain's steps run on what the layer holds of `plan`'s region, a
+    /// shadow cast by its first step cast from what `cast`'s layer holds of
+    /// it where that is `Some`, and the result kept under `input` where it
+    /// is `Some` -- see `kept`.
+    fn finish_from(
+        &mut self,
+        plan: &Plan,
+        steps: &[Step],
+        paint: &Paint,
+        cast: Option<(&Drawn, f32)>,
+        input: Option<ChainInput>,
+    ) -> Option<Outcome> {
+        let Plan {
+            layer,
+            rest,
+            worked,
+            ..
+        } = *plan;
+        let scale = (layer.scale_x().abs(), layer.scale_y().abs());
+        let context = &mut self.context;
         let mut image =
             region_of(&self.snapshot, self.at, context.as_mut(), plan)?;
-        let mut cast = match (cast, &from) {
-            (Some(cast), Some(from)) => Some((
-                cast_alpha(&from.snapshot, from.at, context.as_ref(), plan)?,
-                cast.alpha,
-            )),
-            _ => None,
+        let mut cast = match cast {
+            Some((from, alpha)) => {
+                Some((CastInput::of(from, context.as_mut(), plan)?, alpha))
+            }
+            None => None,
         };
 
         let last = steps.len().saturating_sub(1);
@@ -920,25 +959,75 @@ impl CastAlpha {
     }
 }
 
+/// What a shadow is cast from, where it is not the chain's input -- see
+/// [`Cast`]: on the GPU, the cast's region as [`region_of`] copies it out
+/// and pads it, for [`shadowed_on_gpu`] to blur where its layer lives; on
+/// the CPU, its alpha alone, all [`shadow_composed`] reads of it.
+enum CastInput {
+    Image(Image),
+    Alpha(CastAlpha),
+}
+
+impl CastInput {
+    /// What `from`, a cast's layer of `plan`, holds of its region: as an
+    /// image where `context` is a GPU's, and as its alpha otherwise.
+    fn of(
+        from: &Drawn,
+        context: Option<&mut Gpu>,
+        plan: &Plan,
+    ) -> Option<Self> {
+        match context {
+            Some(context) => {
+                region_of(&from.snapshot, from.at, Some(context), plan)
+                    .map(Self::Image)
+            }
+            None => cast_alpha(
+                &from.snapshot,
+                from.at,
+                None,
+                plan.region,
+                plan.worked,
+            )
+            .map(Self::Alpha),
+        }
+    }
+
+    /// The alpha [`shadow_composed`] casts from, read from the GPU where the
+    /// cast lies there.
+    fn alpha(self, context: Option<&Gpu>) -> Option<CastAlpha> {
+        match self {
+            Self::Alpha(alpha) => Some(alpha),
+            // The image is the worked rectangle itself, already padded.
+            Self::Image(image) => {
+                #[cfg(test)]
+                CASTS_READ_BACK.with(|read| read.set(read.get() + 1));
+                let whole = IRect::from_size(image.dimensions());
+                cast_alpha(&image, whole, context, whole, whole)
+            }
+        }
+    }
+}
+
 /// What `layer`, a cast's [`Drawn`] snapshot lying at `at`, holds of
-/// `plan`'s region, as [`region_of`] copies it out and pads it with nothing
-/// to the worked rectangle: its alpha alone, read from the layer's bytes
+/// `region`, as [`region_of`] copies it out and pads it with nothing to
+/// `worked`: its alpha alone, read from the layer's bytes
 /// where they lie rather than copied and padded as pixels first. Each byte
 /// is made a float by [`alpha_of_byte`], as Skia's read into floats makes
 /// it. `None` for a layer not of eight bits a channel, which a cast is
-/// never drawn into -- see `layer::eight_bits_on_cpu` -- or a region
+/// never drawn into -- see `layer::eight_bits` -- or a region
 /// outside it.
 fn cast_alpha(
     layer: &Image,
     at: IRect,
     context: Option<&Gpu>,
-    plan: &Plan,
+    region: IRect,
+    worked: IRect,
 ) -> Option<CastAlpha> {
     let bytes = matches!(
         layer.color_type(),
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
-    let read = plan.region.with_offset((-at.left, -at.top));
+    let read = region.with_offset((-at.left, -at.top));
     if !bytes || !IRect::from_size(layer.dimensions()).contains(&read) {
         return None;
     }
@@ -946,10 +1035,10 @@ fn cast_alpha(
     let pixmap = raster.peek_pixels()?;
     let row = pixmap.row_bytes();
     let pixels = pixmap.bytes()?;
-    let width = plan.worked.width() as usize;
-    let mut alpha = vec![0.0; width * plan.worked.height() as usize];
-    let left = (plan.region.left - plan.worked.left) as usize;
-    let top = (plan.region.top - plan.worked.top) as usize;
+    let width = worked.width() as usize;
+    let mut alpha = vec![0.0; width * worked.height() as usize];
+    let left = (region.left - worked.left) as usize;
+    let top = (region.top - worked.top) as usize;
     let span = read.left as usize * 4..read.right as usize * 4;
     // The alpha is the fourth byte of a pixel in either byte order.
     alpha
@@ -988,11 +1077,16 @@ fn alpha_of_byte(byte: u8) -> f32 {
 /// render pass of its own. Each
 /// chain reads only its own region of its lane, as a chain alone reads its
 /// region copied out of its layer, so its bytes are those it makes alone.
+/// A chain whose shadow is cast from another layer -- see [`Cast`] -- takes
+/// a second lane, which that layer's region is copied into and its shadow
+/// is blurred from, while its first holds what the shadow lies under.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) struct ShadowAtlas {
     /// Where each of the run's chains lies in the atlas, its worked
-    /// rectangle's origin: `None` for a chain the atlas leaves alone.
-    places: Vec<Option<(i32, i32)>>,
+    /// rectangle's origin, and where the lane its shadow is cast from lies
+    /// where that is a lane of its own: `None` for a chain the atlas leaves
+    /// alone.
+    places: Vec<Option<Places>>,
     /// The atlas's size, which holds every place.
     size: (usize, usize),
     /// The atlas, made with the first chain copied into it, of that chain's
@@ -1001,6 +1095,11 @@ pub(crate) struct ShadowAtlas {
     /// Each chain copied in.
     jobs: Vec<Staged>,
 }
+
+/// Where a chain lies in a [`ShadowAtlas`]: its lane, and the lane of the
+/// layer its shadow is cast from where it is cast from another.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+type Places = ((i32, i32), Option<(i32, i32)>);
 
 /// A chain [`ShadowAtlas`] holds.
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -1021,28 +1120,37 @@ struct Staged {
 impl ShadowAtlas {
     /// An atlas for those of `chains` that cast a blurred shadow and
     /// nothing else, as many of them, in order, as one target of at most
-    /// `max` pixels a side holds. `None` where fewer than two would share it,
-    /// which gains nothing.
+    /// `max` pixels a side holds, each with a second lane where it says its
+    /// shadow is cast from another layer. `None` where fewer than two would
+    /// share it, which gains nothing.
     pub(crate) fn plan(
-        chains: &[(&Plan, &[Step])],
+        chains: &[(&Plan, &[Step], bool)],
         max: usize,
     ) -> Option<Self> {
-        let candidates: Vec<(usize, (usize, usize))> = chains
+        let candidates: Vec<(usize, (usize, usize), bool)> = chains
             .iter()
             .enumerate()
-            .filter(|(_, (plan, steps))| shadow_sigma(plan, steps).is_some())
-            .map(|(i, (plan, _))| {
+            .filter(|(_, (plan, steps, _))| shadow_sigma(plan, steps).is_some())
+            .map(|(i, (plan, _, casts))| {
                 let worked = plan.worked;
-                (i, (worked.width() as usize, worked.height() as usize))
+                let size = (worked.width() as usize, worked.height() as usize);
+                (i, size, *casts)
             })
             .collect();
-        let sizes: Vec<(usize, usize)> =
-            candidates.iter().map(|&(_, size)| size).collect();
+        // Each candidate's lanes, the one cast from after its own.
+        let lanes = |n: usize| -> Vec<(usize, usize)> {
+            candidates[..n]
+                .iter()
+                .flat_map(|&(_, size, casts)| {
+                    std::iter::once(size).chain(casts.then_some(size))
+                })
+                .collect()
+        };
         // The longest leading run of candidates one target holds: what fits
         // shrinks with what is left out, so the lengths that fit are those
         // up to some length, found by halving.
-        let fits = |n: usize| exact_blur_gpu::shelves(&sizes[..n], max);
-        let (mut lo, mut hi) = (0, sizes.len());
+        let fits = |n: usize| exact_blur_gpu::shelves(&lanes(n), max);
+        let (mut lo, mut hi) = (0, candidates.len());
         while lo < hi {
             let mid = (lo + hi).div_ceil(2);
             match fits(mid) {
@@ -1055,8 +1163,14 @@ impl ShadowAtlas {
         }
         let (size, at) = fits(lo)?;
         let mut places = vec![None; chains.len()];
-        for (&(i, _), place) in candidates.iter().zip(at) {
-            places[i] = Some(place);
+        let mut at = at.into_iter();
+        for &(i, _, casts) in &candidates[..lo] {
+            let own = at.next()?;
+            let cast = match casts {
+                true => Some(at.next()?),
+                false => None,
+            };
+            places[i] = Some((own, cast));
         }
         Some(Self {
             places,
@@ -1091,9 +1205,11 @@ impl ShadowAtlas {
                 self.jobs.iter().filter(|job| job.sigma == sigma).collect();
             let jobs: Vec<exact_blur_gpu::ShadowJob> =
                 batch.iter().map(|job| job.job).collect();
+            // The atlas holds both what each shadow lies under and the lane
+            // it is cast from.
             match exact_blur_gpu::shadows(
                 context,
-                &atlas,
+                (&atlas, &atlas),
                 (f32::from_bits(sigma.0), f32::from_bits(sigma.1)),
                 &jobs,
             ) {
@@ -1134,18 +1250,29 @@ fn shadow_sigma(plan: &Plan, steps: &[Step]) -> Option<(f32, f32)> {
 impl Drawn {
     /// Copies the chain the run knows as `index`, planned into this layer
     /// as `plan`, with its steps and the paint its last step takes the
-    /// alpha of, into `atlas`, to be finished there -- see [`ShadowAtlas`].
-    /// Whether it did: a chain the atlas has no place for, one on a layer
-    /// that is not a GPU layer of bytes in the atlas's type and colour
-    /// space, and one whose shadow colour has no tint, are finished alone.
+    /// alpha of, into `atlas`, to be finished there -- see [`ShadowAtlas`]:
+    /// its shadow cast from `cast`, a layer of the same plan, at its alpha,
+    /// where that is `Some` -- see [`Cast`]. Whether it did: a chain the
+    /// atlas has no place for, or a place for a cast it was not given or
+    /// none for one it was, one on a layer that is not a GPU layer of bytes
+    /// in the atlas's type and colour space, and one whose shadow colour has
+    /// no tint, are finished alone.
     pub(crate) fn stage(
         &mut self,
         atlas: &mut ShadowAtlas,
         index: usize,
         (plan, steps, paint): (&Plan, &[Step], &Paint),
+        cast: Option<(&Drawn, f32)>,
     ) -> bool {
-        let Some(place) = atlas.places.get(index).copied().flatten() else {
+        let Some((place, cast_place)) =
+            atlas.places.get(index).copied().flatten()
+        else {
             return false;
+        };
+        let cast = match (cast, cast_place) {
+            (Some((from, alpha)), Some(at)) => Some((from, alpha, at)),
+            (None, None) => None,
+            _ => return false,
         };
         let (
             Some(sigma),
@@ -1172,7 +1299,25 @@ impl Drawn {
         ) {
             return false;
         }
-        let Some(tint) = tint_colour(*colour, space, info) else {
+        // A cast's layer is the chain's, made alike, but taken from the pool
+        // it could differ; it has to be what the atlas holds.
+        if let Some((from, ..)) = cast {
+            let held = from.snapshot.image_info();
+            let alike = held.color_type() == info.color_type()
+                && held.color_space() == info.color_space();
+            if !alike {
+                return false;
+            }
+        }
+        // The run's alpha is a factor of the tint's, as on the CPU -- see
+        // [`shadowed`].
+        let colour = match cast {
+            Some((_, alpha, _)) => {
+                Color4f::new(colour.r, colour.g, colour.b, colour.a * alpha)
+            }
+            None => *colour,
+        };
+        let Some(tint) = tint_colour(colour, space, info) else {
             return false;
         };
         let surface = match &mut atlas.surface {
@@ -1201,30 +1346,39 @@ impl Drawn {
         let (region, worked) = (plan.region, plan.worked);
         // The region, byte for byte, where it lies in the chain's worked
         // rectangle at its place: what a chain alone copies out of its layer.
-        let from = IRect::from_xywh(
-            region.left - self.at.left,
-            region.top - self.at.top,
-            region.width(),
-            region.height(),
-        );
-        let to = IRect::from_xywh(
-            place.0 + region.left - worked.left,
-            place.1 + region.top - worked.top,
-            region.width(),
-            region.height(),
-        );
-        let mut copy = Paint::default();
-        copy.set_blend_mode(BlendMode::Src);
-        surface.canvas().draw_image_rect_with_sampling_options(
-            &self.snapshot,
-            Some((&Rect::from(from), SrcRectConstraint::Strict)),
-            Rect::from(to),
-            SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
-            &copy,
-        );
+        let mut copy = |layer: &Drawn, place: (i32, i32)| {
+            let from = IRect::from_xywh(
+                region.left - layer.at.left,
+                region.top - layer.at.top,
+                region.width(),
+                region.height(),
+            );
+            let to = IRect::from_xywh(
+                place.0 + region.left - worked.left,
+                place.1 + region.top - worked.top,
+                region.width(),
+                region.height(),
+            );
+            let mut copy = Paint::default();
+            copy.set_blend_mode(BlendMode::Src);
+            surface.canvas().draw_image_rect_with_sampling_options(
+                &layer.snapshot,
+                Some((&Rect::from(from), SrcRectConstraint::Strict)),
+                Rect::from(to),
+                SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+                &copy,
+            );
+        };
+        copy(self, place);
+        if let Some((from, _, at)) = cast {
+            copy(from, at);
+            #[cfg(test)]
+            CAST_LANES.with(|lanes| lanes.set(lanes.get() + 1));
+        }
         let scale = (plan.layer.scale_x().abs(), plan.layer.scale_y().abs());
         let job = exact_blur_gpu::ShadowJob {
             from: place,
+            casts: cast.map_or(place, |(.., at)| at),
             reads: IRect::from_xywh(
                 region.left - worked.left,
                 region.top - worked.top,
@@ -1301,6 +1455,14 @@ thread_local! {
     /// How many layers a [`Cast`] has been drawn into on this thread, which
     /// the tests of a cast's kept results count by.
     pub(crate) static CAST_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// How many chains [`ShadowAtlas`] has taken with a lane cast from on
+    /// this thread, which the tests of a cast on the GPU count by.
+    pub(crate) static CAST_LANES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// How many casts on the GPU have been read back to main memory for
+    /// their shadows to be made on the CPU, on this thread.
+    pub(crate) static CASTS_READ_BACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
     /// The region of the last chain run with a [`Cast`] on this thread, for
     /// the tests of a cast's kept results to tell inputs of one size apart
@@ -2184,15 +2346,15 @@ fn filtered(
 /// run's alpha is a third factor of it.
 ///
 /// On a GPU an eight-bit layer's blurred shadow is made there instead, by
-/// [`shadowed_on_gpu`], to the same bytes but on exact ties: made on the
-/// CPU it costs a read of the layer back from the GPU each draw, which
-/// waits for the GPU to finish everything before it. A shadow cast from
-/// another image is made on the CPU.
+/// [`shadowed_on_gpu`], to the same bytes but on exact ties, whether it is
+/// cast from the layer or from another image: made on the CPU it costs a
+/// read of the layer back from the GPU each draw, which waits for the GPU
+/// to finish everything before it.
 #[allow(clippy::too_many_arguments)]
 fn shadowed(
     mut context: Option<&mut Gpu>,
     image: &Image,
-    cast: Option<(CastAlpha, f32)>,
+    cast: Option<(CastInput, f32)>,
     offset: Vector,
     sigma: (f32, f32),
     colour: (Color4f, &ColorSpace),
@@ -2201,13 +2363,30 @@ fn shadowed(
 ) -> Option<Image> {
     if let Some((from, alpha)) = cast {
         let (tint, space) = colour;
+        let colour =
+            (Color4f::new(tint.r, tint.g, tint.b, tint.a * alpha), space);
+        if let (Some(context), CastInput::Image(cast)) =
+            (context.as_deref_mut(), &from)
+            && let Some(on_gpu) = shadowed_on_gpu(
+                context,
+                image,
+                Some(cast),
+                offset,
+                sigma,
+                colour,
+                gain,
+                shadow_only,
+            )
+        {
+            return Some(on_gpu);
+        }
         let composed = shadow_composed(
             context.as_deref(),
             image,
-            Some(from),
+            Some(from.alpha(context.as_deref())?),
             offset,
             sigma,
-            (Color4f::new(tint.r, tint.g, tint.b, tint.a * alpha), space),
+            colour,
             shadow_only,
         )?;
         return rounded_once(&composed, image.image_info(), gain);
@@ -2216,6 +2395,7 @@ fn shadowed(
         && let Some(on_gpu) = shadowed_on_gpu(
             context,
             image,
+            None,
             offset,
             sigma,
             colour,
@@ -2318,7 +2498,9 @@ fn shadow_of_alpha(
 }
 
 /// [`shadowed`] made on the GPU `image` lives on, through
-/// [`exact_blur_gpu::shadow`], or `None` for the CPU to make as before:
+/// [`exact_blur_gpu::shadow`], the shadow cast from `cast` -- an image of
+/// `image`'s size on the same GPU -- where it is `Some`, or `None` for the
+/// CPU to make as before:
 ///
 /// - an unblurred shadow, which is a tint and a composite alone;
 /// - a layer not of eight bits a channel, whose floats the GPU's targets do not
@@ -2331,10 +2513,12 @@ fn shadow_of_alpha(
 ///
 /// The offset and sigma come in layer pixels, the chain's scale already
 /// applied, so no transform reaches the pass.
+#[allow(clippy::too_many_arguments)]
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 fn shadowed_on_gpu(
     context: &mut Gpu,
     image: &Image,
+    cast: Option<&Image>,
     offset: Vector,
     sigma: (f32, f32),
     (colour, space): (Color4f, &ColorSpace),
@@ -2354,6 +2538,7 @@ fn shadowed_on_gpu(
     exact_blur_gpu::shadow(
         context,
         image,
+        cast,
         size,
         sigma,
         (offset.x, offset.y),
@@ -2364,10 +2549,12 @@ fn shadowed_on_gpu(
 }
 
 /// [`shadowed`] on a build with no GPU backend: never.
+#[allow(clippy::too_many_arguments)]
 #[cfg(not(any(feature = "metal", feature = "vulkan")))]
 fn shadowed_on_gpu(
     context: &mut Gpu,
     _: &Image,
+    _: Option<&Image>,
     _: Vector,
     _: (f32, f32),
     _: (Color4f, &ColorSpace),
@@ -4617,7 +4804,8 @@ mod tests {
                         depth: Depth::Bytes,
                     };
                     let ours =
-                        cast_alpha(&layer, at, None, &plan).expect("an alpha");
+                        cast_alpha(&layer, at, None, plan.region, plan.worked)
+                            .expect("an alpha");
                     let padded =
                         region_of(&layer, at, None, &plan).expect("a region");
                     let theirs = alpha_floats(&padded).expect("floats");
@@ -4919,6 +5107,7 @@ mod tests {
                                 let Some(gpu) = shadowed_on_gpu(
                                     &mut context,
                                     &texture,
+                                    None,
                                     offset,
                                     sigma,
                                     (colour, &srgb),
