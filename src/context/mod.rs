@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use neon::prelude::*;
+use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data, IRect,
@@ -30,6 +31,7 @@ pub(crate) mod chain_cache;
 pub(crate) mod exact_blur;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) mod exact_blur_gpu;
+pub(crate) mod exact_gradient;
 pub(crate) mod faint;
 pub(crate) mod fold;
 pub(crate) mod kept;
@@ -41,8 +43,10 @@ pub mod typesetting;
 
 #[cfg(test)]
 use crate::node::typography::Painter;
+use exact_gradient::GradientSpec;
+
 use crate::{
-    cache_map::KeptSets,
+    cache_map::{GOLDEN_RATIO_64, KeptSets},
     context2d::{FontKerning, TextRendering, font_spec_from_css},
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
     export::{VectorFeatures, blend_features},
@@ -1250,7 +1254,10 @@ impl Context2D {
     /// route its dye and filter take. `replay`, where the draw's kind can be
     /// kept whole, is what a canvas's pattern is drawn through at playback
     /// -- see [`Replay`]. `text` where the draw is a run of text -- see
-    /// [`TextRun`]; `f` is told which [`Pass`] it draws.
+    /// [`TextRun`]. `gradient` where the dye is a gradient, its description,
+    /// from which a GPU canvas draws it in the CPU's bytes -- see
+    /// [`GradientDye`]. `f` is told which [`Pass`] it draws.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_to_canvas<F>(
         &self,
         paint: &Paint,
@@ -1258,6 +1265,7 @@ impl Context2D {
         features: VectorFeatures,
         replay: Option<Replay>,
         text: Option<TextRun>,
+        gradient: Option<GradientDye<'_>>,
         f: F,
     ) where
         F: Fn(&SkCanvas, &Paint, Pass),
@@ -1269,6 +1277,7 @@ impl Context2D {
                 exact,
                 features,
                 text.as_ref(),
+                gradient.is_some(),
                 &f,
                 None,
             )
@@ -1280,7 +1289,7 @@ impl Context2D {
             _ => paint,
         };
         // A run holding colour glyphs casts its shadow where it is filed --
-        // see `Self::files_as_colour_text`.
+        // see `Self::files_as_replayed_text`.
         let colour_run =
             text.as_ref().is_some_and(|text| text.colour.is_some());
         let cast_apart = !colour_run
@@ -1288,6 +1297,7 @@ impl Context2D {
                 paint,
                 features,
                 text.as_ref(),
+                gradient.is_some(),
                 &f,
             );
         // A draw under a filter of its own whose shadow is filed apart is
@@ -1299,6 +1309,7 @@ impl Context2D {
                 exact,
                 features,
                 text.as_ref(),
+                gradient.is_some(),
                 &f,
                 self.exact_steps(),
             )
@@ -1329,13 +1340,17 @@ impl Context2D {
 
         let beyond =
             covers_beyond_the_draw(self.state.global_composite_operation);
-        // The draw into one recording, under the canvas's transform: for
-        // blend modes that affect regions of the canvas outside of the
-        // bounds of the object being drawn, through an intermediate picture,
-        // one for each recording, each with that recording's paint.
-        let draw = |canvas: &SkCanvas, recording: Recording| match beyond {
+        // The draw into one recording, under the canvas's transform, in
+        // `drawn` and casting its shadow from `cast`: for blend modes that
+        // affect regions of the canvas outside of the bounds of the object
+        // being drawn, through an intermediate picture, one for each
+        // recording, each with that recording's paint.
+        let draw_in = |canvas: &SkCanvas,
+                       recording: Recording,
+                       drawn: &Paint,
+                       cast: &Paint| match beyond {
             true => {
-                let mut layer_paint = paint_for(recording).clone();
+                let mut layer_paint = drawn.clone();
                 layer_paint.set_blend_mode(BlendMode::SrcOver);
                 let mut layer_recorder = PictureRecorder::new();
                 layer_recorder.begin_recording(self.bounds, true);
@@ -1365,10 +1380,13 @@ impl Context2D {
             }
             false => {
                 // draw the dropshadow (if applicable)
-                render_shadow(canvas, paint, recording);
+                render_shadow(canvas, cast, recording);
                 // draw with the normal paint
-                f(canvas, paint_for(recording), Pass::Draw);
+                f(canvas, drawn, Pass::Draw);
             }
+        };
+        let draw = |canvas: &SkCanvas, recording: Recording| {
+            draw_in(canvas, recording, paint_for(recording), paint)
         };
         let replayed = text
             .as_ref()
@@ -1389,6 +1407,82 @@ impl Context2D {
             true => features.without(VectorFeatures::IMAGE_FILTER),
             false => features,
         };
+        // A draw dyed by a gradient on an eight-bit page is filed as a
+        // `GradientDraw`, which a GPU canvas draws in the CPU's bytes -- see
+        // `layer::GradientDraw`. A float page is drawn on the CPU whichever
+        // engine is asked for -- see `RenderingEngine::for_canvas` -- and
+        // has nothing to choose; nor has a page in a process no GPU can play
+        // it in -- see `RenderingEngine::never_gpu`.
+        #[cfg(test)]
+        let gradient = gradient.filter(|_| FILES_GRADIENTS.get());
+        if let Some(dye) = gradient.filter(|_| self.files_gradients()) {
+            let dual = self.records_pixels_apart();
+            let pixels = match dual {
+                true => Recording::Pixels,
+                false => Recording::Shared,
+            };
+            // Recorded for a document only where it draws apart from the
+            // pixels -- a shadow, or an exact paint of its own; a piece with
+            // no document plays its pixels for one, as a page's recordings
+            // that have not forked do -- see `PageRecorder::append_alike`.
+            // One recorded for every draw was 15% of a CPU canvas's time
+            // filling 2000 small gradients.
+            let document = || {
+                (dual && !alike)
+                    .then(|| {
+                        self.recorded(&|canvas| {
+                            draw(canvas, Recording::Document)
+                        })
+                    })
+                    .flatten()
+            };
+            // A path the effect reproduces is kept rather than recorded.
+            let piece = match self.gradient_path(
+                &dye,
+                paint,
+                paint_for(pixels),
+                beyond,
+            ) {
+                Some(path) => layer::GradientPiece {
+                    pixels: layer::GradientPixels::Path(path.clone()),
+                    document: document(),
+                    gpu: layer::OnGpu::Path(path),
+                },
+                None => {
+                    let Some(native) =
+                        self.recorded(&|canvas| draw(canvas, pixels))
+                    else {
+                        return;
+                    };
+                    let gpu = self.gradient_on_gpu(
+                        &dye,
+                        paint,
+                        paint_for(pixels),
+                        beyond,
+                        native.cull_rect(),
+                        &|canvas, paint| draw_in(canvas, pixels, paint, paint),
+                        &|canvas, paint| render_shadow(canvas, paint, pixels),
+                        &|canvas, paint| f(canvas, paint, Pass::Draw),
+                    );
+                    let Some(gpu) = gpu else {
+                        return;
+                    };
+                    layer::GradientPiece {
+                        pixels: layer::GradientPixels::Recorded(native),
+                        document: document(),
+                        gpu,
+                    }
+                }
+            };
+            self.with_recorder(|mut recorder| {
+                recorder.append_gradient(
+                    piece,
+                    self.state.clip.as_ref(),
+                    features,
+                );
+            });
+            return;
+        }
         self.append_draw(features, alike, draw);
     }
 
@@ -1433,11 +1527,15 @@ impl Context2D {
     /// a CanvasKit filter, which Skia's layer runs in the draw's own units;
     /// and for one under a blend that covers beyond it, which
     /// `render_to_canvas` composites with its shadow through one layer.
+    /// `gradient` says the draw is dyed by a gradient, whose alpha the shadow
+    /// casts, which a GPU canvas then makes on the CPU for the chain -- see
+    /// [`Self::chain_input`].
     fn files_shadow_through_chain<F>(
         &self,
         paint: &Paint,
         features: VectorFeatures,
         text: Option<&TextRun>,
+        gradient: bool,
         f: &F,
     ) -> bool
     where
@@ -1516,6 +1614,7 @@ impl Context2D {
         let Some((entry, reach)) = entry else {
             return false;
         };
+        let entry = self.chain_input(gradient, entry);
         // The group composites through the blend, and a document through
         // Skia's shadow filter in the colour it names, of what the draw's
         // own filter makes.
@@ -1558,6 +1657,221 @@ impl Context2D {
             );
         });
         true
+    }
+
+    /// Whether a draw dyed by a gradient is kept so that a GPU canvas can
+    /// draw it in the CPU's bytes -- see `layer::GradientDraw`: on an
+    /// eight-bit page, in a process where a GPU can play one.
+    fn files_gradients(&self) -> bool {
+        !self.composites_in_floats() && !RenderingEngine::never_gpu()
+    }
+
+    /// `entry`, a draw recorded for a chain to run -- see
+    /// [`Self::files_through_chain`] -- as a run a GPU canvas draws in the
+    /// CPU's bytes, where the draw is dyed by a gradient: made on the CPU
+    /// onto the chain's layer -- see `layer::OnGpu::Alone` -- rather than
+    /// by Ganesh's own gradient, which the chain would otherwise blur, tint
+    /// or cast a shadow from up to four levels off what a CPU canvas runs it
+    /// on. Not the effect, whose image covers only the page, where a chain
+    /// reads past it: a blur draws in what lies beyond the page's edge.
+    /// Any other entry, and any on a page that files no gradient draws, as
+    /// it is.
+    fn chain_input(&self, gradient: bool, entry: Layer) -> Layer {
+        #[cfg(test)]
+        let gradient = gradient && FILES_GRADIENTS.get();
+        if !gradient || !self.files_gradients() {
+            return entry;
+        }
+        let (pixels, document) = match entry {
+            Layer::Picture(pixels) => (pixels, None),
+            Layer::Targeted(pair) => {
+                let (pixels, document) = Arc::unwrap_or_clone(pair);
+                (pixels, Some(document))
+            }
+            entry => return entry,
+        };
+        Layer::Gradient(Arc::new(layer::GradientDraw {
+            draws: vec![layer::GradientPiece {
+                gpu: layer::OnGpu::Alone,
+                pixels: layer::GradientPixels::Recorded(pixels),
+                document,
+            }],
+            clip: None,
+        }))
+    }
+
+    /// `draw`, recorded on its own under the canvas's transform.
+    fn recorded(&self, draw: &dyn Fn(&SkCanvas)) -> Option<Picture> {
+        let mut recorder = PictureRecorder::new();
+        let canvas = recorder.begin_recording(self.bounds, true);
+        canvas.set_matrix(&self.state.matrix.into());
+        draw(canvas);
+        recorder.finish_recording_as_picture(None)
+    }
+
+    /// How a GPU canvas draws a draw made with `paint`, dyed by `dye`, in
+    /// the bytes the CPU draws it in -- see `layer::OnGpu`: with the effect
+    /// where the effect reproduces the draw -- see [`Self::takes_the_effect`]
+    /// -- made where the page is played for a path, which is kept -- see
+    /// `layer::GradientPath` -- and now, over what the draw reaches,
+    /// `reach`, in device pixels, for anything else -- see
+    /// [`Self::gradient_effect`]; and otherwise made on the CPU, each layer
+    /// of it composited through the
+    /// blend by itself -- the draw's shadow, then the draw; and under a
+    /// blend that changes what lies `beyond` the draw, the two in one layer,
+    /// as a draw through such a blend is composited.
+    ///
+    /// `whole` draws with the given paint what the draw records, its shadow
+    /// included; `shadow` and `shape` its shadow and itself. `pixels` is
+    /// the paint the page's pixels recording draws with.
+    #[allow(clippy::too_many_arguments)]
+    fn gradient_on_gpu(
+        &self,
+        dye: &GradientDye<'_>,
+        paint: &Paint,
+        pixels: &Paint,
+        beyond: bool,
+        reach: Rect,
+        whole: &dyn Fn(&SkCanvas, &Paint),
+        shadow: &dyn Fn(&SkCanvas, &Paint),
+        shape: &dyn Fn(&SkCanvas, &Paint),
+    ) -> Option<layer::OnGpu> {
+        let mut over = pixels.clone();
+        over.set_blend_mode(BlendMode::SrcOver);
+        let blend = self.state.global_composite_operation;
+        if let Some(effect) = self.gradient_effect(dye, paint, reach) {
+            // Recorded once more with `SrcOver` only where the draw blends
+            // otherwise, for a layer to composite through its blend.
+            let over = match blend {
+                BlendMode::SrcOver => None,
+                _ => Some(self.recorded(&|canvas| shape(canvas, &over))?),
+            };
+            return self.recorded(&|canvas| whole(canvas, &effect)).map(
+                |picture| layer::OnGpu::Effect {
+                    picture,
+                    over,
+                    blend,
+                    beyond,
+                },
+            );
+        }
+        let mut cast = paint.clone();
+        cast.set_blend_mode(BlendMode::SrcOver);
+        let layers: Vec<Picture> = match beyond {
+            true => self
+                .recorded(&|canvas| {
+                    shadow(canvas, &over);
+                    shape(canvas, &over);
+                })
+                .into_iter()
+                .collect(),
+            false => [
+                self.casts_shadow()
+                    .then(|| self.recorded(&|canvas| shadow(canvas, &cast)))
+                    .flatten(),
+                self.recorded(&|canvas| shape(canvas, &over)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        };
+        Some(layer::OnGpu::Raster {
+            layers,
+            blend,
+            beyond,
+        })
+    }
+
+    /// `dye`'s path kept as what it is made from -- see `layer::GradientPath`
+    /// -- where the draw is a path the effect reproduces, through a blend
+    /// that leaves what lies beyond it alone, drawn with `paint` on the GPU
+    /// and `pixels` on the CPU: `None` for one that is not, or reaches
+    /// nothing on the page, which is then recorded.
+    fn gradient_path(
+        &self,
+        dye: &GradientDye<'_>,
+        paint: &Paint,
+        pixels: &Paint,
+        beyond: bool,
+    ) -> Option<Arc<layer::GradientPath>> {
+        let (path, bounds) = dye.path?;
+        // A blend that changes what lies beyond the draw composites a
+        // recording of it over the whole page -- see `render_to_canvas` --
+        // which a path drawn through the blend does not.
+        if beyond || !self.takes_the_effect(paint) {
+            return None;
+        }
+        let area =
+            IRect::intersect(&bounds.round_out(), &self.bounds.round_out())?;
+        let mut drawn = paint.clone();
+        drawn
+            .set_shader(None)
+            .set_alpha_f(1.0)
+            .set_anti_alias(paint.is_anti_alias() && !dye.whole_pixels);
+        Some(Arc::new(layer::GradientPath {
+            path: Mutex::new(path.clone()),
+            bounds,
+            matrix: self.state.matrix,
+            paint: drawn,
+            pixels: self.faint().drawable(pixels).into_owned(),
+            spec: dye.spec.clone(),
+            page: self.canvas_color_space.clone(),
+            alpha: paint.alpha_f(),
+            area,
+            whole_pixels: dye.whole_pixels,
+            blend: self.state.global_composite_operation,
+            beyond,
+        }))
+    }
+
+    /// The paint the effect draws `dye` in on a GPU canvas, for a draw that
+    /// is not a path -- a run of text -- in the bytes the CPU stores for it,
+    /// over what the draw reaches on the page, `reach`, in device pixels --
+    /// see [`GradientSpec::sampled`]: `None` where the draw goes through
+    /// anything the effect does not reproduce -- see
+    /// [`Self::takes_the_effect`] -- which the CPU then draws -- see
+    /// `layer::OnGpu::Raster` -- or reaches nothing on the page. A path is
+    /// kept instead and its effect made where the page is played -- see
+    /// `layer::GradientPath`.
+    fn gradient_effect(
+        &self,
+        dye: &GradientDye<'_>,
+        paint: &Paint,
+        reach: Rect,
+    ) -> Option<Paint> {
+        if !self.takes_the_effect(paint) {
+            return None;
+        }
+        let area =
+            IRect::intersect(&reach.round_out(), &self.bounds.round_out())?;
+        let shader = dye.spec.sampled(
+            &self.canvas_color_space,
+            paint.alpha_f(),
+            &self.state.matrix,
+            area,
+        )?;
+        let mut effect = paint.clone();
+        effect.set_shader(shader).set_alpha_f(1.0);
+        Some(effect)
+    }
+
+    /// Whether the effect reproduces what the CPU draws with `paint`.
+    ///
+    /// The effect hands the GPU the bytes the CPU's eight-bit pipeline
+    /// (`lowp`) makes of the gradient. A filter, a mask, dither or a shadow
+    /// works on the gradient's colours in the CPU's float pipeline or in
+    /// Ganesh's half precision, and a blend `lowp` has no stage for -- see
+    /// [`blends_in_eight_bits`] -- sends the whole draw through the float
+    /// pipeline, which rounds once, after blending.
+    fn takes_the_effect(&self, paint: &Paint) -> bool {
+        !(self.casts_shadow()
+            || paint.color_filter().is_some()
+            || paint.image_filter().is_some()
+            || paint.mask_filter().is_some()
+            || paint.is_dither()
+            || !blends_in_eight_bits(
+                paint.as_blend_mode().unwrap_or(BlendMode::SrcOver),
+            ))
     }
 
     /// Files a run of text holding colour glyphs as a
@@ -2036,13 +2350,17 @@ impl Context2D {
     /// `steps`, where given, is the chain run instead of the one
     /// [`Self::draw_chain`] picks: the whole of the draw's filter, for a
     /// draw whose shadow is filed as a group of its own -- see
-    /// `render_to_canvas` -- which is then filed casting none.
+    /// `render_to_canvas` -- which is then filed casting none. `gradient`
+    /// says the draw is dyed by a gradient, which a GPU canvas then makes on
+    /// the CPU for the chain -- see [`Self::chain_input`].
+    #[allow(clippy::too_many_arguments)]
     fn files_through_chain<F>(
         &self,
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
         text: Option<&TextRun>,
+        gradient: bool,
         f: &F,
         steps: Option<Arc<[Step]>>,
     ) -> bool
@@ -2183,7 +2501,8 @@ impl Context2D {
                 Some(colour_entry(run, recorded, Some(document)))
             }
             (entry, _) => entry,
-        };
+        }
+        .map(|entry| self.chain_input(gradient, entry));
         // A run of text in one flat colour that the coverage route could
         // play is drawn once more, in its colour opaque, through the paint
         // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
@@ -2989,11 +3308,49 @@ impl Context2D {
             .flatten();
         if let Some(clip) = self.cut_clip(&path, &paint, style) {
             let (matrix, faint) = (self.state.matrix, self.faint());
+            // A cut draw dyed by a gradient is drawn on a GPU canvas in the
+            // CPU's bytes, as one filed as a `GradientDraw` is.
+            let gradient = self.state.dye(style).gradient();
+            #[cfg(test)]
+            let gradient = gradient.filter(|_| FILES_GRADIENTS.get());
+            let gpu =
+                gradient
+                    .filter(|_| self.files_gradients())
+                    .and_then(|spec| {
+                        let bounds =
+                            drawn_bounds(&path, &paint, style, &matrix, false);
+                        let dye = GradientDye {
+                            spec,
+                            path: Some((&path, bounds)),
+                            whole_pixels: false,
+                        };
+                        let shape = |canvas: &SkCanvas, paint: &Paint| {
+                            canvas.draw_path(&path, &faint.drawable(paint));
+                        };
+                        let pixels = exact.as_ref().unwrap_or(&paint);
+                        let beyond = covers_beyond_the_draw(
+                            self.state.global_composite_operation,
+                        );
+                        match self.gradient_path(&dye, &paint, pixels, beyond) {
+                            Some(path) => Some(layer::OnGpu::Path(path)),
+                            None => self.gradient_on_gpu(
+                                &dye,
+                                &paint,
+                                pixels,
+                                beyond,
+                                bounds,
+                                &shape,
+                                &|_, _| {},
+                                &shape,
+                            ),
+                        }
+                    });
             self.with_recorder(|mut recorder| {
                 recorder.append_cut(
                     clip,
                     matrix,
                     features,
+                    gpu,
                     |canvas, recording| {
                         let paint = match (recording, exact.as_ref()) {
                             (Recording::Pixels, Some(exact)) => exact,
@@ -3008,12 +3365,29 @@ impl Context2D {
         // Kept only for a canvas's pattern, the one dye that takes it.
         let replay = matches!(self.state.dye(style), Dye::Pattern(_))
             .then(|| Replay::Path(path.serialize(), self.faint()));
+        let whole_pixels = style == PaintStyle::Fill
+            && self.state.clip.is_none()
+            && fills_whole_pixels(&path, &self.state.matrix);
         self.render_to_canvas(
             &paint,
             exact.as_ref(),
             features,
             replay,
             None,
+            self.state.dye(style).gradient().map(|spec| GradientDye {
+                spec,
+                path: Some((
+                    &path,
+                    drawn_bounds(
+                        &path,
+                        &paint,
+                        style,
+                        &self.state.matrix,
+                        false,
+                    ),
+                )),
+                whole_pixels,
+            }),
             |canvas, paint, _| {
                 self.fill_or_stroke(canvas, &path, paint, style, mark.as_ref());
             },
@@ -3054,6 +3428,7 @@ impl Context2D {
             &paint,
             features,
             None,
+            self.state.dye(style).gradient().is_some(),
             &|canvas, paint, _| {
                 self.fill_or_stroke(canvas, path, paint, style, mark.as_ref());
             },
@@ -3551,6 +3926,7 @@ impl Context2D {
             features,
             None,
             None,
+            None,
             |canvas, paint, _| {
                 // A paint here makes Skia draw the picture through a temporary
                 // layer, which is what keeps the source's own compositing to
@@ -3709,7 +4085,9 @@ impl Context2D {
                     &self.faint().drawable(paint),
                 );
             };
-            self.files_shadow_through_chain(&paint, features, None, &draw)
+            self.files_shadow_through_chain(
+                &paint, features, None, false, &draw,
+            )
         };
         if cast_apart {
             let (color, space) = self.state.shadow_color.clone();
@@ -3794,6 +4172,7 @@ impl Context2D {
             &paint,
             pixels.as_ref(),
             features,
+            None,
             None,
             None,
             |canvas, paint, _| {
@@ -4296,6 +4675,11 @@ impl Context2D {
                     colour,
                     blended,
                     own_colours: &own_colours,
+                }),
+                self.state.dye(style).gradient().map(|spec| GradientDye {
+                    spec,
+                    path: None,
+                    whole_pixels: false,
                 }),
                 |canvas, paint, pass| {
                     // The kept run, or, the first time a run is drawn, the run
@@ -4997,6 +5381,43 @@ pub enum Pass {
     AlphaInShadow,
 }
 
+/// A draw's gradient as the draw hands it to the page: what it is made
+/// from -- see [`Dye::gradient`] -- and whether the draw is a rectangle on
+/// whole device pixels.
+pub struct GradientDye<'a> {
+    pub spec: Arc<GradientSpec>,
+    /// The path drawn, where the draw is one, and what it reaches in device
+    /// pixels -- see [`drawn_bounds`]: kept, rather than a recording of it,
+    /// so that a GPU canvas makes the effect for it where the page is played
+    /// -- see `layer::GradientPath`.
+    pub path: Option<(&'a Path, Rect)>,
+    /// Whether the draw fills a rectangle whose edges lie on whole device
+    /// pixels, under no clip -- see [`fills_whole_pixels`]. Drawn aliased,
+    /// which covers the same pixels whole, it is the one shape Ganesh hands
+    /// the effect each pixel centre's coordinates for exactly, so a GPU
+    /// canvas draws it with the effect itself and needs no image of it --
+    /// see [`GradientSpec::sampled`].
+    pub whole_pixels: bool,
+}
+
+/// Whether `path` is a rectangle `matrix` maps onto whole device pixels: a
+/// translation by whole pixels and edges on whole units.
+fn fills_whole_pixels(path: &Path, matrix: &Matrix) -> bool {
+    let Some(rect) = path.is_rect().map(|(rect, ..)| rect) else {
+        return false;
+    };
+    matrix.is_translate()
+        && !path.is_inverse_fill_type()
+        && [
+            rect.left + matrix.translate_x(),
+            rect.top + matrix.translate_y(),
+            rect.right + matrix.translate_x(),
+            rect.bottom + matrix.translate_y(),
+        ]
+        .iter()
+        .all(|edge| edge.fract() == 0.0)
+}
+
 //
 // Dye abstraction for Color / CanvasGradient / CanvasPattern
 //
@@ -5017,8 +5438,9 @@ pub enum Dye {
     /// A reusable Skia shader (e.g. fractal noise / turbulence) set as a
     /// fill or stroke style, with what a vector backend has to reckon with:
     /// the gradient factories are paint servers SVG can name, the noise ones
-    /// are not.
-    Shader(SkShader, VectorFeatures),
+    /// are not. And, for a gradient, what it is made from -- see
+    /// [`GradientSpec`].
+    Shader(SkShader, VectorFeatures, Option<Arc<GradientSpec>>),
 }
 
 impl Dye {
@@ -5038,6 +5460,7 @@ impl Dye {
             Some(Dye::Shader(
                 shader.borrow().inner.clone(),
                 shader.borrow().features,
+                None,
             ))
         } else {
             // Tagged either way by `color4f_in`: a CSS colour with the space
@@ -5092,7 +5515,18 @@ impl Dye {
                 VectorFeatures::PLAIN
             }
             Dye::Gradient(gradient) => gradient.vector_features(),
-            Dye::Shader(_, features) => *features,
+            Dye::Shader(_, features, _) => *features,
+        }
+    }
+
+    /// What the gradient this dye paints with is made from: `None` for a
+    /// dye that is not a gradient, and for one the Canvas standard says
+    /// paints nothing.
+    pub fn gradient(&self) -> Option<Arc<GradientSpec>> {
+        match self {
+            Dye::Gradient(gradient) => gradient.spec().map(Arc::new),
+            Dye::Shader(_, _, spec) => spec.clone(),
+            _ => None,
         }
     }
 
@@ -5144,7 +5578,7 @@ impl Dye {
                 let (color, space) = texture.to_color4f(alpha, onto);
                 paint.set_color4f(color, &space);
             }
-            Dye::Shader(shader, _) => {
+            Dye::Shader(shader, ..) => {
                 paint.set_shader(Some(shader.clone())).set_alpha_f(alpha);
             }
         };
@@ -5185,6 +5619,15 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
+    /// Whether a draw dyed by a gradient is filed as a
+    /// [`GradientDraw`](layer::GradientDraw) on this thread: off, it is
+    /// recorded as any other draw, the reference what a CPU canvas and a
+    /// document make of one is held to.
+    pub(crate) static FILES_GRADIENTS: Cell<bool> = const { Cell::new(true) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Whether [`Context2D::exact_paint`] takes what it made of a flat colour
     /// kept in [`FILLS`]: off, every draw makes it afresh, the reference the
     /// kept ones are held to; and how many draws took one kept.
@@ -5217,11 +5660,6 @@ struct FillKey {
     floats: bool,
 }
 
-/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
-/// hashing by multiplication (The Art of Computer Programming, vol. 3,
-/// section 6.4), as the verdicts of `layer::ExactColour` are filed by.
-const FILL_SLOT_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
-
 /// How many sets of flat colours [`FILLS`] keeps on a thread, and how many
 /// a set holds: 1,024 colours, each 64 bytes with what was made of it,
 /// 64 KiB a thread once the first is kept. A page of 200 colours, each set
@@ -5243,8 +5681,8 @@ thread_local! {
 
 impl FillKey {
     /// Where [`FILLS`] files this key: its bits folded together and
-    /// multiplied by [`FILL_SLOT_MULTIPLIER`], which carries every bit into
-    /// the top ones a set is taken from.
+    /// multiplied by [`GOLDEN_RATIO_64`], which carries every bit into the
+    /// top ones a set is taken from.
     fn hash(&self) -> u64 {
         let [r, g, b, a] = self.colour.map(u64::from);
         let key =
@@ -5252,7 +5690,7 @@ impl FillKey {
                 ^ u64::from(self.alpha).rotate_left(8)
                 ^ (self.page as u64) << 56
                 ^ u64::from(self.floats) << 63;
-        key.wrapping_mul(FILL_SLOT_MULTIPLIER)
+        key.wrapping_mul(GOLDEN_RATIO_64)
     }
 
     fn of(
@@ -5349,6 +5787,40 @@ fn composites_in_floats(color_type: ColorType) -> bool {
     matches!(
         color_type,
         ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32
+    )
+}
+
+/// Whether the CPU's eight-bit pipeline (`lowp`) has a stage for `blend`,
+/// so that a draw through it stays on that pipeline: the separable modes and
+/// the Porter-Duff ones `SkRasterPipeline_opts.h` writes a `BLEND_MODE` for,
+/// and `Src` and `Dst`, which need none. The rest -- the dodge, the burn,
+/// the soft light and the four non-separable modes -- take the float
+/// pipeline (`highp`).
+fn blends_in_eight_bits(blend: BlendMode) -> bool {
+    matches!(
+        blend,
+        BlendMode::Clear
+            | BlendMode::Src
+            | BlendMode::Dst
+            | BlendMode::SrcOver
+            | BlendMode::DstOver
+            | BlendMode::SrcIn
+            | BlendMode::DstIn
+            | BlendMode::SrcOut
+            | BlendMode::DstOut
+            | BlendMode::SrcATop
+            | BlendMode::DstATop
+            | BlendMode::Xor
+            | BlendMode::Plus
+            | BlendMode::Modulate
+            | BlendMode::Screen
+            | BlendMode::Overlay
+            | BlendMode::Darken
+            | BlendMode::Lighten
+            | BlendMode::HardLight
+            | BlendMode::Difference
+            | BlendMode::Exclusion
+            | BlendMode::Multiply
     )
 }
 

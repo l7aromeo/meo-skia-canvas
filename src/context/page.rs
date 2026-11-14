@@ -48,9 +48,10 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Entries, Group, Layer, LayerRec, PatternDraw, RecordedCount,
-            ReplayedText, Target, TileScope, holds_a_cut, in_document_space,
-            play_entries, tiles_exactly,
+            Entries, GradientDraw, GradientPiece, GradientPixels, Group, Layer,
+            LayerRec, OnGpu, PatternDraw, RecordedCount, ReplayedText, Target,
+            TileScope, holds_a_cut, in_document_space, play_entries,
+            tiles_exactly,
         },
         resident::{Place, SharedSurface},
     },
@@ -416,6 +417,13 @@ pub struct PageRecorder {
     /// The frame the last layer, a [`CutOp`], was opened in while it can
     /// still be joined, as `blur_run` is for a [`BlurOp`].
     cut_run: Option<u64>,
+    /// The frame the last entry filed, a [`GradientDraw`], was opened in
+    /// while it can still be joined, as `blur_run` is for a [`BlurOp`].
+    gradient_run: Option<u64>,
+    /// The image-filtered draws the last `GradientDraw` filed as an isolated
+    /// layer holds, counted as [`Self::filled_with_filtered`] counts those
+    /// of an isolated layer in `current` -- see [`Self::append_gradient`].
+    gradient_filtered: usize,
     /// What is drawn under the frame's clip, recorded without it, while the
     /// frame lasts -- see [`Run`].
     run: Option<Run>,
@@ -1001,6 +1009,24 @@ impl Spare {
     const IDLE_FRAMES: u32 = 64;
 }
 
+/// The most ops a page's recording can hold and be filed as it is finished,
+/// rather than wrapped in a picture holding it as one op. Chosen, not
+/// derived: any value from 4 to about 64 measured the same, and 16 sits
+/// inside that range.
+///
+/// It trades the wrapper's cost against culling. The wrapper is what lets a
+/// canvas drawn into another under a clip replay only what the clip shows;
+/// "a clipped nested draw costs the region, not the page", in
+/// `tests/suite/canvas.test.js`, holds that side, and fails with nothing
+/// wrapped. The wrapper costs a recorder begun and finished for every
+/// recording the page files, and where gradient fills alternate with flat
+/// ones each flat fill is a recording of 4 ops: a frame of 2000 of each
+/// took 13.6 ms with them wrapped and 12.6 unwrapped. Unwrapped, a clipped
+/// draw of a nested source holding up to 32 fills cost what wrapped did,
+/// 0.40 to 0.45 ms; 128 fills cost 0.48 against 0.40, and 2000 cost 0.90
+/// against 0.42.
+const UNWRAPPED_OPS: usize = 16;
+
 impl PageRecorder {
     /// The bytes this page holds in pixels. See
     /// [`RecordingSurface::resident_bytes`].
@@ -1127,6 +1153,8 @@ impl PageRecorder {
             frame: 0,
             blur_run: None,
             cut_run: None,
+            gradient_run: None,
+            gradient_filtered: 0,
             run: None,
             spare: None,
             cut_spare: None,
@@ -2042,24 +2070,26 @@ impl PageRecorder {
         // would change a layer a cache has already drawn.
         self.blur_run = None;
         self.cut_run = None;
+        self.gradient_run = None;
         if !self.changed {
             return;
         }
 
-        // store layer as a drawable (so copies are deduplicated) wrapped in
-        // a picture (so it can be sent to other threads)
+        // Wrapped in a picture of its own where it holds more than a few
+        // ops, which is what lets a canvas drawn into another under a clip
+        // replay only what the clip shows -- see `UNWRAPPED_OPS`.
         let bounds = self.bounds;
         let filed = self.current.as_mut().and_then(|recorders| {
             let entry = recorders.finish(|recorder| {
-                recorder.finish_recording_as_drawable().and_then(
-                    |mut drawable| {
-                        let mut wrapper = PictureRecorder::new();
-                        wrapper
-                            .begin_recording(bounds, true)
-                            .draw_drawable(&mut drawable, None);
-                        wrapper.finish_recording_as_picture(None)
-                    },
-                )
+                let picture = recorder.finish_recording_as_picture(None)?;
+                if picture.approximate_op_count() <= UNWRAPPED_OPS {
+                    return Some(picture);
+                }
+                let mut wrapper = PictureRecorder::new();
+                wrapper
+                    .begin_recording(bounds, true)
+                    .draw_picture(&picture, None, None);
+                wrapper.finish_recording_as_picture(None)
             });
             recorders.begin_with(bounds, true);
             entry
@@ -2177,6 +2207,21 @@ impl PageRecorder {
         // through `restore` and would not apply to what is already recorded;
         // a different set of features; and `flush` itself, which every
         // export goes through.
+        if self.joins_gradient(features) {
+            let piece = self.native_piece(alike, &f);
+            let filled =
+                fills_with_filtered(features, &mut self.gradient_filtered);
+            if let Some(op) = self.joinable_gradient(features, true) {
+                let bytes =
+                    piece.iter().map(GradientPiece::recorded_bytes).sum();
+                op.draws.extend(piece);
+                self.recorded.add(bytes);
+            }
+            if filled {
+                self.gradient_run = None;
+            }
+            return;
+        }
         if self.isolated != Some(features) || self.state_dirty {
             self.close_run();
             self.flush();
@@ -2214,15 +2259,7 @@ impl PageRecorder {
     /// `Page::play_as_document` -- and the same draws, in the same order, on
     /// a raster.
     fn filled_with_filtered(&mut self, features: VectorFeatures) -> bool {
-        if !features.refused_by(VectorFeatures::IMAGE_FILTER) {
-            return false;
-        }
-        #[cfg(test)]
-        if pacing::tests::UNSPLIT.with(Cell::get) {
-            return false;
-        }
-        self.filtered += 1;
-        self.filtered >= pacing::LAYERS_PER_FLUSH
+        fills_with_filtered(features, &mut self.filtered)
     }
 
     /// Records `draw` as a [`BlurOp`], so that its blur is made where the
@@ -2355,6 +2392,169 @@ impl PageRecorder {
         );
     }
 
+    /// Files `piece`, a draw dyed by a gradient, in a run of such draws --
+    /// see [`GradientDraw`](crate::context::layer::GradientDraw) -- under
+    /// `clip`, the frame's clip, where the page would have recorded the
+    /// draw, so that a CPU canvas and a document play what they would have:
+    ///
+    /// - A draw asking a vector backend for nothing, or one inside an open
+    ///   `saveLayer`, is filed as colour text is by
+    ///   [`Self::append_colour_text`]: a piece of the frame's run where one is
+    ///   open, so that a document writes the run's clip once around it and the
+    ///   draws beside it.
+    /// - A draw on the page asking for features is filed as
+    ///   [`Self::append_isolated`] opens an isolated layer: after what the page
+    ///   has recorded, holding the clip itself, so that a document writes the
+    ///   clip again for it as it does for each isolated layer. The isolated
+    ///   draws after it that would share the layer join it -- see
+    ///   [`Self::joins_gradient`] -- and it holds as many image-filtered draws
+    ///   as a layer does.
+    ///
+    /// A draw straight after a `GradientDraw` it can join -- nothing recorded
+    /// between them, the frame and the layer it is filed in unchanged since,
+    /// and on the page the same `features` -- joins it rather than opening an
+    /// op of its own, as a blur joins a [`BlurOp`]: so that a run of
+    /// gradients is one entry, not one each, as it is one recording.
+    ///
+    /// An isolated layer the page holds open when the draw comes is closed
+    /// first, though the page would have recorded the draw into it: its
+    /// frame is recorded inside it, which the op cannot join. A document of
+    /// such a page writes the clip twice where it wrote it once.
+    ///
+    /// Taken by value, so that a draw joining a run is moved into it: a run
+    /// of 2000 small fills allocates nothing for each beyond the piece.
+    pub fn append_gradient(
+        &mut self,
+        piece: GradientPiece,
+        clip: Option<&Path>,
+        features: VectorFeatures,
+    ) {
+        let isolated = features.any() && self.open.is_empty();
+        if self.isolated.is_some() {
+            self.flush();
+        }
+        self.settle();
+        if let Some(last) = self.joinable_gradient(features, isolated) {
+            let bytes = piece.recorded_bytes();
+            last.draws.push(piece);
+            self.recorded.add(bytes);
+            if let Some(layer) = self.open.last_mut() {
+                layer.features = layer.features.with(features);
+            }
+            if isolated
+                && fills_with_filtered(features, &mut self.gradient_filtered)
+            {
+                self.gradient_run = None;
+            }
+            return;
+        }
+        if isolated {
+            // What `append_isolated` does to open a layer, the op standing
+            // for it.
+            self.close_run();
+            self.flush();
+            let op = GradientDraw {
+                draws: vec![piece],
+                clip: clip.map(Path::serialize),
+            };
+            self.file_entry(Layer::Gradient(Arc::new(op)), features);
+            self.gradient_filtered = 0;
+            self.gradient_run =
+                (!fills_with_filtered(features, &mut self.gradient_filtered))
+                    .then_some(self.frame);
+            return;
+        }
+        self.append_under_clip(
+            |clip| {
+                Layer::Gradient(Arc::new(GradientDraw {
+                    draws: vec![piece],
+                    clip,
+                }))
+            },
+            clip,
+            features,
+        );
+        self.gradient_run = Some(self.frame);
+    }
+
+    /// The `GradientDraw` a draw asking for `features` joins -- see
+    /// [`Self::append_gradient`] -- where the last entry filed is one and
+    /// nothing has been recorded since, in the same frame; an op filed as an
+    /// isolated layer where `isolated`, and otherwise one filed bare or as
+    /// a piece of the open run. `None` where the draw opens an op of its
+    /// own, as for a page snapshot holding the op, which is not grown.
+    fn joinable_gradient(
+        &mut self,
+        features: VectorFeatures,
+        isolated: bool,
+    ) -> Option<&mut GradientDraw> {
+        if self.gradient_run != Some(self.frame) || self.pending() {
+            return None;
+        }
+        let run = self.run.as_ref().map(|run| run.id);
+        let (entries, last_features) = match self.open.last_mut() {
+            Some(layer) => (&mut layer.entries, layer.entry_features.last()),
+            None => (Arc::make_mut(&mut self.layers), self.features.last()),
+        };
+        if last_features.is_some_and(|last| *last != features) {
+            return None;
+        }
+        let last = match entries.last_mut() {
+            Some(Layer::Gradient(last)) if isolated || run.is_none() => last,
+            Some(Layer::Clipped(piece))
+                if !isolated && Some(piece.run) == run =>
+            {
+                match Arc::get_mut(piece)?.entry_mut() {
+                    Layer::Gradient(last) => last,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        Arc::get_mut(last)
+    }
+
+    /// Whether an isolated draw on the page asking for `features` joins
+    /// the `GradientDraw` filed last, the layer the page would have recorded
+    /// it into -- see [`Self::append_gradient`] -- rather than opening an
+    /// isolated layer of its own: so that a document writes the frame's
+    /// clip once for both, as it did.
+    fn joins_gradient(&mut self, features: VectorFeatures) -> bool {
+        self.open.is_empty()
+            && self.isolated.is_none()
+            && self.joinable_gradient(features, true).is_some()
+    }
+
+    /// Records `f` as a draw of a `GradientDraw` played as recorded on
+    /// every target -- see [`OnGpu::Native`] -- into each recording the page
+    /// keeps, under the page's transform; `alike` where `f` records the
+    /// same into each.
+    fn native_piece<F>(&self, alike: bool, f: &F) -> Option<GradientPiece>
+    where
+        F: Fn(&SkCanvas, Recording),
+    {
+        let record = |recording: Recording| {
+            let mut recorder = PictureRecorder::new();
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.set_matrix(&self.matrix.into());
+            f(canvas, recording);
+            recorder.finish_recording_as_picture(None)
+        };
+        let dual = self.dual;
+        let pixels = record(match dual {
+            true => Recording::Pixels,
+            false => Recording::Shared,
+        })?;
+        let document = (dual && !alike)
+            .then(|| record(Recording::Document))
+            .flatten();
+        Some(GradientPiece {
+            pixels: GradientPixels::Recorded(pixels),
+            document,
+            gpu: OnGpu::Native,
+        })
+    }
+
     /// Files the entry `entry` makes, under `clip`, the frame's clip: a
     /// piece of the frame's run where one is open, which applies the clip,
     /// the entry made with no clip of its own; and made holding the clip,
@@ -2398,11 +2598,15 @@ impl PageRecorder {
     ///
     /// Inside an open `saveLayer` the op is filed among the layer's entries,
     /// as a blur is, and played inside the layer when it closes.
+    ///
+    /// `gpu` is how a GPU canvas draws a draw dyed by a gradient, in the
+    /// bytes the CPU draws it in -- see [`OnGpu`].
     pub fn append_cut<F>(
         &mut self,
         clip: &Path,
         matrix: Matrix,
         features: VectorFeatures,
+        gpu: Option<OnGpu>,
         draw: F,
     ) where
         F: Fn(&SkCanvas, Recording),
@@ -2438,7 +2642,7 @@ impl PageRecorder {
                 && last_features.is_none_or(|last| *last == features)
                 && let Some(op) = Arc::get_mut(op)
             {
-                let added = op.extend(drawn);
+                let added = op.extend(drawn, gpu);
                 self.recorded.add(added);
                 if let Some(layer) = self.open.last_mut() {
                     layer.features = layer.features.with(features);
@@ -2455,7 +2659,7 @@ impl PageRecorder {
         let Some(coverage) = coverage else {
             return;
         };
-        let Some(op) = CutOp::new(&shape, coverage, drawn) else {
+        let Some(op) = CutOp::new(&shape, coverage, drawn, gpu) else {
             return;
         };
         let op = Layer::Cut(Arc::new(op));
@@ -8638,6 +8842,7 @@ mod tests {
                     &clip,
                     shifted,
                     VectorFeatures::PLAIN,
+                    None,
                     rect(8.0, 8.0, (30, 160, 60, 200)),
                 );
                 recorder.append(rect(0.0, 0.0, (200, 30, 40, 180)));
@@ -11040,6 +11245,7 @@ mod tests {
                     Layer::Pattern(_) => "tile",
                     Layer::Deferred(_) => "deferred",
                     Layer::ReplayedText(_) => "colour text",
+                    Layer::Gradient(_) => "gradient",
                 })
                 .collect();
             kinds.join(" ")
@@ -11981,4 +12187,20 @@ mod tests {
             assert!(!image.is_texture_backed(), "in main memory");
         }
     }
+}
+
+/// Counts a draw asking for `features` into `count`, the image-filtered
+/// draws an isolated layer holds, answering whether the layer now holds as
+/// many as one entry is filed with -- see
+/// [`PageRecorder::filled_with_filtered`].
+fn fills_with_filtered(features: VectorFeatures, count: &mut usize) -> bool {
+    if !features.refused_by(VectorFeatures::IMAGE_FILTER) {
+        return false;
+    }
+    #[cfg(test)]
+    if pacing::tests::UNSPLIT.with(Cell::get) {
+        return false;
+    }
+    *count += 1;
+    *count >= pacing::LAYERS_PER_FLUSH
 }

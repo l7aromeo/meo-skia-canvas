@@ -34,19 +34,20 @@ use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
     ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IPoint,
-    IRect, Image, ImageFilter, ImageInfo, MaskFilter, Matrix, Paint, PaintCap,
-    PaintJoin, PaintStyle, Path, PathDirection, Picture, PictureRecorder,
-    Point, Rect, RoundOut, RuntimeEffect, SamplingOptions, Shader, Surface,
-    TileMode, Vector, canvas::SaveLayerRec, color_filters, image_filters,
-    shaders,
+    IRect, ISize, Image, ImageFilter, ImageInfo, MaskFilter, Matrix,
+    MipmapMode, Paint, PaintCap, PaintJoin, PaintStyle, Path, PathDirection,
+    Picture, PictureRecorder, Point, Rect, RoundOut, RuntimeEffect,
+    SamplingOptions, Shader, Surface, TileMode, Vector, canvas::SaveLayerRec,
+    color_filters, image_filters, shaders,
 };
 
 use crate::{
-    cache_map::KeptSets,
+    cache_map::{GOLDEN_RATIO_64, KeptSets},
     context::{
         blur_mask,
         chain::{self, Depth, Step},
         chain_cache, coverage_of, exact_blur,
+        exact_gradient::GradientSpec,
         faint::{Faint, composited},
         kept::CoverageInput,
         page::{ExportOptions, Page},
@@ -106,6 +107,9 @@ pub enum Layer {
     /// A run of text holding colour glyphs, drawn again where it is played
     /// back on pixels -- see [`ReplayedText`].
     ReplayedText(Arc<ReplayedText>),
+    /// A run of draws dyed by gradients, drawn on a GPU canvas in the bytes
+    /// the CPU draws them in -- see [`GradientDraw`].
+    Gradient(Arc<GradientDraw>),
 }
 
 impl Layer {
@@ -129,6 +133,7 @@ impl Layer {
                 }
             }
             Layer::ReplayedText(text) => text.playback(canvas, target),
+            Layer::Gradient(op) => op.playback(canvas, target),
         }
     }
 
@@ -158,6 +163,7 @@ impl Layer {
                 }),
             ),
             Layer::ReplayedText(text) => Some(text.reach()),
+            Layer::Gradient(op) => Some(op.reach()),
         }
     }
 
@@ -189,12 +195,21 @@ impl Layer {
                 pictures.0.approximate_bytes_used()
                     + pictures.1.approximate_bytes_used()
             }
-            Layer::Cut(op) => op
-                .draws
-                .iter()
-                .chain(op.documents.iter().flatten())
-                .map(Picture::approximate_bytes_used)
-                .sum(),
+            Layer::Cut(op) => {
+                op.draws
+                    .iter()
+                    .chain(op.documents.iter().flatten())
+                    .map(Picture::approximate_bytes_used)
+                    .sum::<usize>()
+                    + op.gpu
+                        .iter()
+                        .flatten()
+                        .map(OnGpu::recorded_bytes)
+                        .sum::<usize>()
+            }
+            Layer::Gradient(op) => {
+                op.draws.iter().map(GradientPiece::recorded_bytes).sum()
+            }
             Layer::Clipped(piece) => piece.entry.recorded_bytes(),
             Layer::Pattern(tile) => tile.plain.approximate_bytes_used(),
             Layer::Deferred(deferred) => {
@@ -244,6 +259,7 @@ impl Layer {
             | Layer::Blur(_)
             | Layer::Targeted(_)
             | Layer::Cut(_)
+            | Layer::Gradient(_)
             | Layer::Pattern(_) => {}
         }
     }
@@ -364,6 +380,9 @@ thread_local! {
     /// How many entries [`Layer::recorded_bytes`] has been asked of on this
     /// thread, a group's own and each it holds counted apart.
     pub(crate) static ENTRIES_WALKED: Cell<usize> = const { Cell::new(0) };
+    /// How many times [`drawn_on_their_backdrop`] has read a GPU canvas's
+    /// pixels back on this thread.
+    pub(crate) static BACKDROPS_READ: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many of a [`DeferredPicture`]'s recordings were made: those played as
@@ -821,12 +840,6 @@ const NUDGES: usize = 3;
 const VERDICTS_KEPT: usize = 4096;
 
 const _: () = assert!(VERDICTS_KEPT.is_power_of_two());
-
-/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
-/// hashing by multiplication (The Art of Computer Programming, vol. 3,
-/// section 6.4), whose product carries every bit of a key into its top
-/// bits, which [`verdict_slot`] takes.
-const GOLDEN_RATIO_64: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// A placed colour's page space and the premultiplied bytes it is to store.
 type VerdictKey = (PixelColorSpace, [u8; 4]);
@@ -2002,42 +2015,18 @@ impl ReplayedText {
     /// transform the draw was made under; a run kept whole places them where
     /// it is played -- see [`Replay`].
     fn rasterized(&self, canvas: &SkCanvas, format: &Format) {
-        let Some(recorded) = self.recorded() else {
-            return;
-        };
-        let device = canvas.local_to_device_as_3x3();
-        if device.has_perspective() {
-            recorded.playback(canvas);
-            return;
+        if let Some(recorded) = self.recorded() {
+            rasterized_onto(
+                canvas,
+                recorded,
+                Some(
+                    self.inked
+                        .with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT)),
+                ),
+                format,
+                &Paint::default(),
+            );
         }
-        let Some(clip) = canvas.device_clip_bounds() else {
-            return;
-        };
-        let inked = device
-            .map_rect(self.inked)
-            .0
-            .with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
-        let Some(area) = IRect::intersect(&inked.round_out(), &clip) else {
-            return;
-        };
-        let Some(mut surface) =
-            started::raster(&format.image_info(area.size()), None, None)
-        else {
-            return;
-        };
-        let raster = surface.canvas();
-        raster.translate((-area.left as f32, -area.top as f32));
-        raster.concat(&device);
-        recorded.playback(raster);
-        canvas.save();
-        canvas.reset_matrix();
-        composite_onto(
-            canvas,
-            &surface.image_snapshot(),
-            IPoint::new(area.left, area.top),
-            &Paint::default(),
-        );
-        canvas.restore();
     }
 
     /// What the run reaches, under the transform it is played back under:
@@ -2058,6 +2047,886 @@ impl ReplayedText {
     /// Whether this stands for a pair of recordings -- see [`holds_a_pair`].
     pub(crate) fn is_pair(&self) -> bool {
         self.document.is_some()
+    }
+}
+
+/// Draws `recorded` onto `canvas` through a raster made on the CPU in
+/// `format`, under the transform `canvas` carries, composited as an image at
+/// whole device pixels through `through`: the same steps whichever engine
+/// `canvas` draws on, so that a GPU canvas composites the pixels the CPU
+/// made. Played as recorded under a perspective, which a raster cannot
+/// follow.
+///
+/// The raster covers `inked`, in the coordinates `canvas` is drawn in, where
+/// the draw inks, within the clip; and the clip's bounds whole where `inked`
+/// is `None`, for a blend that changes what lies beyond the draw. It starts
+/// transparent, so the draw is composited as the CPU composites a layer of
+/// it: on pixels it covers whole, through `through`'s blend, the bytes the
+/// CPU would draw there.
+pub(crate) fn rasterized_onto(
+    canvas: &SkCanvas,
+    recorded: &Picture,
+    inked: Option<Rect>,
+    format: &Format,
+    through: &Paint,
+) {
+    let device = canvas.local_to_device_as_3x3();
+    if device.has_perspective() {
+        recorded.playback(canvas);
+        return;
+    }
+    let Some(clip) = canvas.device_clip_bounds() else {
+        return;
+    };
+    let area = match inked {
+        Some(inked) => {
+            let Some(area) =
+                IRect::intersect(&device.map_rect(inked).0.round_out(), &clip)
+            else {
+                return;
+            };
+            area
+        }
+        None => clip,
+    };
+    let Some(mut surface) =
+        started::raster(&format.image_info(area.size()), None, None)
+    else {
+        return;
+    };
+    let raster = surface.canvas();
+    raster.translate((-area.left as f32, -area.top as f32));
+    raster.concat(&device);
+    recorded.playback(raster);
+    canvas.save();
+    canvas.reset_matrix();
+    composite_onto(
+        canvas,
+        &surface.image_snapshot(),
+        IPoint::new(area.left, area.top),
+        through,
+    );
+    canvas.restore();
+}
+
+thread_local! {
+    /// How many layers this thread is playing entries inside, opened by
+    /// [`Group::playback_within`] -- see [`InLayer`].
+    static IN_LAYERS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Counts a layer [`Group::playback_within`] opens on a canvas around the
+/// entries it plays, for as long as it lives, so that an entry can tell
+/// whether the pixels under it are the canvas's own: `SkCanvas::readPixels`
+/// reads the canvas's root device, never an open layer.
+struct InLayer;
+
+impl InLayer {
+    fn enter() -> Self {
+        IN_LAYERS.set(IN_LAYERS.get() + 1);
+        InLayer
+    }
+
+    /// Whether entries are being played inside a layer on this thread.
+    fn open() -> bool {
+        IN_LAYERS.get() > 0
+    }
+}
+
+impl Drop for InLayer {
+    fn drop(&mut self) {
+        IN_LAYERS.set(IN_LAYERS.get().saturating_sub(1));
+    }
+}
+
+/// Draws `recorded` onto `canvas` as the CPU draws it, over the pixels
+/// `canvas` holds there: those pixels read back into a raster made on the
+/// CPU in `format`, `recorded` played onto them under the transform `canvas`
+/// carries, and the result written back as it is. The raster covers what
+/// `recorded` reaches within the clip, or the clip's bounds whole where
+/// `beyond` says its blend changes what lies beyond the draw. `false`,
+/// having drawn nothing, where the pixels cannot be read: inside a layer,
+/// under a perspective, or where Skia refuses the read.
+///
+/// The one route that reproduces a draw the CPU blends in floats and rounds
+/// once, after blending, as its `highp` pipeline does: compositing a raster
+/// of the draw made over transparent rounds the draw's colour first and the
+/// blend again, a level apart wherever the two roundings differ.
+fn drawn_on_its_backdrop(
+    canvas: &SkCanvas,
+    recorded: &Picture,
+    format: &Format,
+    beyond: bool,
+) -> bool {
+    drawn_on_their_backdrop(canvas, &[(recorded, beyond)], format)
+}
+
+/// [`drawn_on_its_backdrop`] for several draws one after another, read back
+/// once over all they reach and written back once: each is played onto the
+/// raster over what the one before it left there, as reading back between
+/// them would have found, so the bytes are the same. A read back from the
+/// GPU waits for it, and one each made 200 Oklab radials cost 23 times what
+/// Ganesh's own gradient did.
+fn drawn_on_their_backdrop(
+    canvas: &SkCanvas,
+    draws: &[(&Picture, bool)],
+    format: &Format,
+) -> bool {
+    if InLayer::open() {
+        return false;
+    }
+    let device = canvas.local_to_device_as_3x3();
+    if device.has_perspective() {
+        return false;
+    }
+    let Some(clip) = canvas.device_clip_bounds() else {
+        return true;
+    };
+    let area =
+        draws
+            .iter()
+            .fold(None, |area: Option<IRect>, (recorded, beyond)| {
+                let reach = match beyond {
+                    true => Some(clip),
+                    false => IRect::intersect(
+                        &device.map_rect(recorded.cull_rect()).0.round_out(),
+                        &clip,
+                    ),
+                };
+                match (area, reach) {
+                    (Some(area), Some(reach)) => Some(IRect::new(
+                        area.left.min(reach.left),
+                        area.top.min(reach.top),
+                        area.right.max(reach.right),
+                        area.bottom.max(reach.bottom),
+                    )),
+                    (area, reach) => area.or(reach),
+                }
+            });
+    let Some(area) = area else {
+        return true;
+    };
+    let info = format.image_info(area.size());
+    let row = info.min_row_bytes();
+    let mut backdrop = vec![0u8; info.compute_byte_size(row)];
+    if !canvas.read_pixels(&info, &mut backdrop, row, (area.left, area.top)) {
+        return false;
+    }
+    #[cfg(test)]
+    BACKDROPS_READ.set(BACKDROPS_READ.get() + 1);
+    // The raster reaches from the canvas's origin, so that the draws are
+    // made at the device coordinates the CPU canvas makes them at: offset to
+    // the area, the transform inverted with another translation moved a
+    // value on a half level to the next, 2 bytes in 40 Oklab radials.
+    let whole = format.image_info(ISize::new(area.right, area.bottom));
+    let Some(mut surface) = started::raster(&whole, None, None) else {
+        return false;
+    };
+    let raster = surface.canvas();
+    if !raster.write_pixels(&info, &backdrop, row, (area.left, area.top)) {
+        return false;
+    }
+    raster.clip_irect(area, ClipOp::Intersect);
+    raster.concat(&device);
+    for (recorded, _) in draws {
+        recorded.playback(raster);
+    }
+    let Some(drawn) = surface.image_snapshot_with_bounds(area) else {
+        return false;
+    };
+    canvas.save();
+    canvas.reset_matrix();
+    let mut src = Paint::default();
+    src.set_blend_mode(BlendMode::Src);
+    canvas.draw_image(drawn, (area.left as f32, area.top as f32), Some(&src));
+    canvas.restore();
+    true
+}
+
+/// A run of draws dyed by gradients, kept so that a GPU canvas draws them in
+/// the bytes the CPU draws them in (#667).
+///
+/// Ganesh draws a gradient through a layout and a colorizer that lose the
+/// precision the CPU's raster pipeline keeps -- see
+/// `exact_gradient` -- so that a hard stop moves by up to a tenth of a
+/// degree or half a pixel and a smooth ramp lands up to four levels away.
+/// Each draw is kept as recorded, which a CPU canvas and a document play as
+/// they always have; and a GPU canvas plays instead either the draw recorded
+/// with an image of the effect that computes the CPU's bytes -- see
+/// [`GradientSpec::sampled`](super::exact_gradient::GradientSpec::sampled)
+/// -- or, where the effect cannot, the draw made on the CPU and composited
+/// -- see [`rasterized_onto`].
+///
+/// Chosen where the page is played back, not where it is drawn, so that a
+/// canvas drawn on the CPU and switched to the GPU draws its gradients
+/// exactly as one drawn on the GPU throughout.
+#[derive(Clone, Debug)]
+pub struct GradientDraw {
+    pub draws: Vec<GradientPiece>,
+    /// The clip the run was drawn under, in device pixels of the recording,
+    /// where it is not a piece of a run that applies it -- see [`Clipped`].
+    pub clip: Option<Data>,
+}
+
+/// One draw of a [`GradientDraw`].
+#[derive(Clone, Debug)]
+pub struct GradientPiece {
+    /// The draw as the page's pixels recording records it: what a CPU
+    /// canvas plays.
+    pub pixels: GradientPixels,
+    /// The draw as a document records it, on a page that keeps a recording
+    /// for each kind of target -- see `page::Recorders`.
+    pub document: Option<Picture>,
+    /// How a GPU canvas draws it.
+    pub gpu: OnGpu,
+}
+
+impl GradientPiece {
+    /// The bytes the piece's recordings hold -- see [`Layer::recorded_bytes`]:
+    /// the pixels recording's, the document's and what a GPU canvas plays,
+    /// a path both keep counted once.
+    pub(crate) fn recorded_bytes(&self) -> usize {
+        let gpu = match (&self.pixels, &self.gpu) {
+            (GradientPixels::Path(pixels), OnGpu::Path(gpu))
+                if Arc::ptr_eq(pixels, gpu) =>
+            {
+                0
+            }
+            (_, gpu) => gpu.recorded_bytes(),
+        };
+        self.pixels.recorded_bytes()
+            + self
+                .document
+                .as_ref()
+                .map_or(0, Picture::approximate_bytes_used)
+            + gpu
+    }
+}
+
+/// A [`GradientPiece`] as a CPU canvas plays it: recorded, or, for a path,
+/// the path kept -- see [`GradientPath`] -- so that a page drawing many
+/// small gradient paths records no picture for each. A picture of one costs
+/// a recorder begun and finished and a bounding-box hierarchy built, which
+/// was about 30% of the drawing thread's time, 1.3 us a draw, for 2000
+/// small gradient fills.
+#[derive(Clone, Debug)]
+pub enum GradientPixels {
+    Recorded(Picture),
+    Path(Arc<GradientPath>),
+}
+
+impl GradientPixels {
+    /// Plays the draw onto `canvas`, as a picture of it would.
+    pub(crate) fn playback(&self, canvas: &SkCanvas) {
+        match self {
+            GradientPixels::Recorded(picture) => picture.playback(canvas),
+            GradientPixels::Path(draw) => {
+                canvas.save();
+                canvas.concat(&draw.matrix);
+                canvas.draw_path(&draw.path.lock(), &draw.pixels);
+                canvas.restore();
+            }
+        }
+    }
+
+    /// The bytes the recording, or the path, holds.
+    pub(crate) fn recorded_bytes(&self) -> usize {
+        match self {
+            GradientPixels::Recorded(picture) => {
+                picture.approximate_bytes_used()
+            }
+            GradientPixels::Path(draw) => {
+                draw.path.lock().approximate_bytes_used()
+            }
+        }
+    }
+
+    /// What the draw reaches, in the recording's device pixels.
+    pub(crate) fn cull_rect(&self) -> Rect {
+        match self {
+            GradientPixels::Recorded(picture) => picture.cull_rect(),
+            GradientPixels::Path(draw) => draw.bounds,
+        }
+    }
+
+    /// The draw as a picture, for a route that hands one to Skia: the
+    /// recording itself, or one made of the path now.
+    fn picture(&self) -> Option<Cow<'_, Picture>> {
+        match self {
+            GradientPixels::Recorded(picture) => Some(Cow::Borrowed(picture)),
+            GradientPixels::Path(draw) => {
+                let mut recorder = PictureRecorder::new();
+                let canvas = recorder.begin_recording(draw.bounds, false);
+                canvas.set_matrix(&draw.matrix.into());
+                canvas.draw_path(&draw.path.lock(), &draw.pixels);
+                recorder
+                    .finish_recording_as_picture(Some(&draw.bounds))
+                    .map(Cow::Owned)
+            }
+        }
+    }
+}
+
+/// How a GPU canvas draws a [`GradientPiece`].
+#[derive(Clone, Debug)]
+pub enum OnGpu {
+    /// The draw recorded with the effect that computes the CPU's bytes on
+    /// the GPU: itself, aliased, for a rectangle on whole device pixels --
+    /// see [`GradientDye`](super::GradientDye) -- and otherwise an image of
+    /// it -- see
+    /// [`GradientSpec::sampled`](super::exact_gradient::GradientSpec::sampled)
+    /// -- whose texels are the page's device pixels. Played under any
+    /// other mapping than onto whole pixels -- a canvas drawn into another
+    /// under a scale, say -- the image would be resampled, so the draw is
+    /// made on the CPU instead: over the GPU's pixels, `beyond` saying as
+    /// for [`OnGpu::Raster`] what it composites over, or, inside a layer,
+    /// whose pixels cannot be read, over transparent and composited through
+    /// `blend` -- `over`, the draw recorded with `SrcOver`, where `blend` is
+    /// another.
+    Effect {
+        picture: Picture,
+        over: Option<Picture>,
+        blend: BlendMode,
+        beyond: bool,
+    },
+    /// The draw made on the CPU, its layers -- its shadow, then itself --
+    /// each recorded composited with `SrcOver` and composited in turn onto
+    /// the GPU's pixels through `blend`: over what it inks, or over the
+    /// clip's bounds whole where `beyond` says the blend changes what lies
+    /// beyond the draw.
+    Raster {
+        layers: Vec<Picture>,
+        blend: BlendMode,
+        beyond: bool,
+    },
+    /// The draw made on the CPU and composited with `SrcOver` onto a layer
+    /// that holds nothing else where it draws -- a chain's input, played
+    /// into the chain's own layer, which starts transparent -- so that,
+    /// unlike [`OnGpu::Raster`], nothing is read back first: a read back
+    /// waits for the GPU, and one each made 200 blurred gradient fills take
+    /// three times what Ganesh's own gradient did.
+    Alone,
+    /// A path dyed by a gradient, kept as what it is made from so that the
+    /// effect is made for it where the page is played on the GPU, and a
+    /// canvas that never is pays nothing for it -- see [`GradientPath`].
+    Path(Arc<GradientPath>),
+    /// A draw dyed by no gradient, played as recorded: one asking a vector
+    /// backend for what the run asks, drawn straight after it, which the
+    /// page would have kept in the same isolated layer -- see
+    /// `PageRecorder::append_gradient`.
+    Native,
+}
+
+impl OnGpu {
+    /// The bytes the pictures, or the path, a GPU canvas plays hold -- see
+    /// [`Layer::recorded_bytes`].
+    pub(crate) fn recorded_bytes(&self) -> usize {
+        match self {
+            OnGpu::Effect { picture, over, .. } => {
+                picture.approximate_bytes_used()
+                    + over.as_ref().map_or(0, Picture::approximate_bytes_used)
+            }
+            OnGpu::Raster { layers, .. } => {
+                layers.iter().map(Picture::approximate_bytes_used).sum()
+            }
+            OnGpu::Path(draw) => draw.path.lock().approximate_bytes_used(),
+            OnGpu::Alone | OnGpu::Native => 0,
+        }
+    }
+}
+
+/// A path filled or stroked with a gradient, as a GPU canvas draws it in the
+/// CPU's bytes: `path` under `matrix`, through `paint` with the effect that
+/// computes them as its shader -- see
+/// [`GradientSpec::exact`](super::exact_gradient::GradientSpec::exact).
+#[derive(Debug)]
+pub struct GradientPath {
+    /// The path, behind a lock: a `Path` can be sent between threads but not
+    /// shared, and the page that holds this is shared.
+    pub path: Mutex<Path>,
+    /// What the draw reaches, in the recording's device pixels: the path's
+    /// bounds under `matrix`, widened as `context::drawn_bounds` widens them.
+    pub bounds: Rect,
+    /// The page's transform the path was drawn under.
+    pub matrix: Matrix,
+    /// The draw's paint with no shader and an alpha of 1, the effect
+    /// carrying the draw's alpha; aliased where `whole_pixels`.
+    pub paint: Paint,
+    /// The paint the page's pixels recording draws the path with, from
+    /// which a draw made on the CPU is recorded with `SrcOver`.
+    pub pixels: Paint,
+    pub(crate) spec: Arc<GradientSpec>,
+    /// The page's colour space, which the effect computes the bytes in.
+    pub page: ColorSpace,
+    /// The draw's alpha, its `globalAlpha` included.
+    pub alpha: f32,
+    /// The device pixels the draw reaches, which an image of the effect
+    /// covers.
+    pub area: IRect,
+    /// Whether the path is a rectangle on whole device pixels, which takes
+    /// the effect itself -- see [`GradientDye`](super::GradientDye).
+    pub whole_pixels: bool,
+    pub blend: BlendMode,
+    /// Whether `blend` changes what lies beyond the draw -- see
+    /// [`OnGpu::Raster`].
+    pub beyond: bool,
+}
+
+/// Where an image of a [`GradientPath`]'s effect lies in an atlas: `at`, in
+/// `image`, holds the device pixel one up and one left of the path's
+/// `area`, so that a pixel the path's edge reaches just outside `area`
+/// still finds the effect rather than another path's.
+#[derive(Clone)]
+struct Slot {
+    image: Image,
+    at: IPoint,
+}
+
+/// What a run's [`atlas`] found for a [`GradientPath`], asked once for the
+/// draw: the effect that draws it in the CPU's bytes, `None` where the
+/// effect cannot reproduce the CPU; and, for one off whole pixels that fits,
+/// where the atlas holds an image of it. Asking costs a hash and a compare
+/// of the gradient's every number: asked again as the draw is played, 2000
+/// small gradients alternating linear and conic spent 2.4 ms a frame on it.
+#[derive(Clone)]
+struct Found {
+    effect: Option<Shader>,
+    slot: Option<Slot>,
+}
+
+/// How far an atlas slot reaches past the path's area on every side.
+const SLOT_MARGIN_PX: i32 = 1;
+
+/// The widest an atlas is made, in pixels, below the GPU's own limit: a
+/// shelf this wide holds a run of small draws in a few rows.
+const ATLAS_WIDTH_PX: i32 = 2048;
+
+/// One image holding the effect of each of `draws` that needs one, drawn in
+/// one pass onto a surface made from `canvas`; and, by index, what was
+/// found for each path: its effect, and where its image is -- none for one
+/// that takes the effect itself, or that does not fit, which then makes an
+/// image of its own -- see [`GradientSpec::sampled`]. `None` for a draw
+/// that is no path. With an
+/// image of its own for each draw, 2000 small gradient fills cost about
+/// eight times what Ganesh's own gradient did.
+///
+/// [`GradientSpec::sampled`]: super::exact_gradient::GradientSpec::sampled
+fn atlas(
+    canvas: &SkCanvas,
+    draws: &[Option<&GradientPath>],
+) -> Vec<Option<Found>> {
+    // The effect for each path, made first: a draw it cannot be made for
+    // takes no slot, and is drawn on the CPU instead; one on whole pixels
+    // takes the effect itself and no slot either.
+    let effects: Vec<Option<Shader>> = draws
+        .iter()
+        .map(|draw| {
+            draw.and_then(|draw| draw.spec.exact(&draw.page, draw.alpha))
+        })
+        .collect();
+    let mut slots: Vec<Option<IPoint>> = vec![None; draws.len()];
+    let limit = max_texture_size(canvas);
+    let width_limit = ATLAS_WIDTH_PX.min(limit);
+    let (mut x, mut y, mut row, mut width) = (0, 0, 0, 0);
+    let mut page = None;
+    for (index, (draw, effect)) in draws.iter().zip(&effects).enumerate() {
+        let (Some(draw), Some(_)) = (draw, effect) else {
+            continue;
+        };
+        if draw.whole_pixels {
+            continue;
+        }
+        let (w, h) = (
+            draw.area.width() + 2 * SLOT_MARGIN_PX,
+            draw.area.height() + 2 * SLOT_MARGIN_PX,
+        );
+        if w > width_limit {
+            continue;
+        }
+        if x + w > width_limit {
+            (x, y, row) = (0, y + row, 0);
+        }
+        if y + h > limit {
+            continue;
+        }
+        slots[index] = Some(IPoint::new(x, y));
+        page.get_or_insert_with(|| draw.page.clone());
+        (x, row, width) = (x + w, row.max(h), width.max(x + w));
+    }
+    let height = y + row;
+    let made = page.and_then(|page| {
+        let info = ImageInfo::new(
+            (width, height),
+            canvas.image_info().color_type(),
+            AlphaType::Premul,
+            Some(page),
+        );
+        let mut surface = canvas.new_surface(&info, None)?;
+        let target = surface.canvas();
+        target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        for ((draw, effect), at) in draws.iter().zip(&effects).zip(&slots) {
+            let (Some(draw), Some(effect), Some(at)) = (draw, effect, at)
+            else {
+                continue;
+            };
+            let origin = (
+                draw.area.left - SLOT_MARGIN_PX,
+                draw.area.top - SLOT_MARGIN_PX,
+            );
+            let to_slot = Matrix::translate((
+                (at.x - origin.0) as f32,
+                (at.y - origin.1) as f32,
+            ));
+            let mut paint = Paint::default();
+            paint.set_shader(
+                effect
+                    .with_local_matrix(&Matrix::concat(&to_slot, &draw.matrix)),
+            );
+            target.draw_rect(
+                Rect::from_xywh(
+                    at.x as f32,
+                    at.y as f32,
+                    (draw.area.width() + 2 * SLOT_MARGIN_PX) as f32,
+                    (draw.area.height() + 2 * SLOT_MARGIN_PX) as f32,
+                ),
+                &paint,
+            );
+        }
+        Some(surface.image_snapshot())
+    });
+    draws
+        .iter()
+        .zip(effects)
+        .zip(slots)
+        .map(|((draw, effect), at)| {
+            draw.map(|_| Found {
+                effect,
+                slot: at.and_then(|at| {
+                    Some(Slot {
+                        image: made.clone()?,
+                        at,
+                    })
+                }),
+            })
+        })
+        .collect()
+}
+
+/// The widest and tallest texture the GPU `canvas` draws on takes.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+fn max_texture_size(canvas: &SkCanvas) -> i32 {
+    canvas
+        .recording_context()
+        .map_or(0, |context| context.max_texture_size())
+}
+
+/// None, in a build without a GPU backend.
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+fn max_texture_size(_canvas: &SkCanvas) -> i32 {
+    0
+}
+
+/// Draws `draw` with the effect onto `canvas`, which maps the recording's
+/// device pixels onto its own whole: the effect itself for a rectangle on
+/// whole pixels, and otherwise an image of it, in an atlas or one of its
+/// own, sampled nearest at each pixel's centre -- what the run's atlas
+/// `found` for the draw where it was made. `false`, having drawn nothing,
+/// where no effect can be made.
+fn drawn_with_effect(
+    canvas: &SkCanvas,
+    draw: &GradientPath,
+    found: Option<&Found>,
+) -> bool {
+    let outer = canvas.local_to_device_as_3x3();
+    let slot = found.and_then(|found| found.slot.as_ref());
+    let shader = match (draw.whole_pixels, found, slot) {
+        (_, Some(Found { effect: None, .. }), _) => None,
+        (true, Some(found), _) => found.effect.clone(),
+        (true, None, _) => draw.spec.exact(&draw.page, draw.alpha),
+        (false, _, Some(slot)) => {
+            let origin = (
+                draw.area.left - SLOT_MARGIN_PX,
+                draw.area.top - SLOT_MARGIN_PX,
+            );
+            let to_device = Matrix::translate((
+                (origin.0 - slot.at.x) as f32 + outer.translate_x(),
+                (origin.1 - slot.at.y) as f32 + outer.translate_y(),
+            ));
+            Matrix::concat(&outer, &draw.matrix)
+                .invert()
+                .and_then(|from| {
+                    slot.image.to_shader(
+                        (TileMode::Decal, TileMode::Decal),
+                        SamplingOptions::new(
+                            FilterMode::Nearest,
+                            MipmapMode::None,
+                        ),
+                        Some(&Matrix::concat(&from, &to_device)),
+                    )
+                })
+        }
+        (false, _, None) => {
+            draw.spec
+                .sampled(&draw.page, draw.alpha, &draw.matrix, draw.area)
+        }
+    };
+    let Some(shader) = shader else {
+        return false;
+    };
+    let mut paint = draw.paint.clone();
+    paint.set_shader(shader);
+    canvas.save();
+    canvas.concat(&draw.matrix);
+    canvas.draw_path(&draw.path.lock(), &paint);
+    canvas.restore();
+    true
+}
+
+/// Plays `pixels`, a draw dyed by a gradient as the page's pixels recording
+/// records it, onto `canvas`, a GPU canvas, as `gpu` says -- see [`OnGpu`]
+/// -- with what the run's atlas `found` for it. A draw made on the CPU, on
+/// a canvas whose pixels cannot be read, plays `pixels`.
+fn played_on_gpu(
+    canvas: &SkCanvas,
+    pixels: &GradientPixels,
+    gpu: &OnGpu,
+    found: Option<&Found>,
+) {
+    let whole = on_whole_pixels(canvas);
+    match gpu {
+        OnGpu::Path(draw)
+            if whole && drawn_with_effect(canvas, draw, found) =>
+        {
+            return;
+        }
+        OnGpu::Effect { picture, .. } if whole => {
+            picture.playback(canvas);
+            return;
+        }
+        OnGpu::Native => {
+            pixels.playback(canvas);
+            return;
+        }
+        _ => {}
+    }
+    // A route made on the CPU, from a picture of the draw.
+    let (Some(format), Some(recorded)) = (Format::of(canvas), pixels.picture())
+    else {
+        pixels.playback(canvas);
+        return;
+    };
+    let recorded: &Picture = &recorded;
+    match gpu {
+        OnGpu::Path(draw) => {
+            if drawn_on_its_backdrop(canvas, recorded, &format, draw.beyond) {
+                return;
+            }
+            let over = match draw.blend {
+                BlendMode::SrcOver => None,
+                _ => recorded_over(draw, recorded.cull_rect()),
+            };
+            let layer = over.as_ref().unwrap_or(recorded);
+            let mut through = Paint::default();
+            through.set_blend_mode(draw.blend);
+            rasterized_onto(
+                canvas,
+                layer,
+                (!draw.beyond).then(|| layer.cull_rect()),
+                &format,
+                &through,
+            );
+        }
+        OnGpu::Effect {
+            over,
+            blend,
+            beyond,
+            ..
+        } => {
+            if drawn_on_its_backdrop(canvas, recorded, &format, *beyond) {
+                return;
+            }
+            let layer = over.as_ref().unwrap_or(recorded);
+            let mut through = Paint::default();
+            through.set_blend_mode(*blend);
+            rasterized_onto(
+                canvas,
+                layer,
+                (!beyond).then(|| layer.cull_rect()),
+                &format,
+                &through,
+            );
+        }
+        OnGpu::Raster {
+            layers,
+            blend,
+            beyond,
+        } => {
+            if drawn_on_its_backdrop(canvas, recorded, &format, *beyond) {
+                return;
+            }
+            let mut through = Paint::default();
+            through.set_blend_mode(*blend);
+            for layer in layers {
+                rasterized_onto(
+                    canvas,
+                    layer,
+                    (!beyond).then(|| layer.cull_rect()),
+                    &format,
+                    &through,
+                );
+            }
+        }
+        OnGpu::Alone => rasterized_onto(
+            canvas,
+            recorded,
+            Some(recorded.cull_rect()),
+            &format,
+            &Paint::default(),
+        ),
+        OnGpu::Native => pixels.playback(canvas),
+    }
+}
+
+/// `draw` recorded as the page's pixels recording records it, but with
+/// `SrcOver`, over `cull`: what a layer, whose pixels cannot be read,
+/// composites through the draw's own blend.
+fn recorded_over(draw: &GradientPath, cull: Rect) -> Option<Picture> {
+    let mut recorder = PictureRecorder::new();
+    let canvas = recorder.begin_recording(cull, false);
+    canvas.set_matrix(&draw.matrix.into());
+    let mut over = draw.pixels.clone();
+    over.set_blend_mode(BlendMode::SrcOver);
+    canvas.draw_path(&draw.path.lock(), &over);
+    recorder.finish_recording_as_picture(None)
+}
+
+/// Whether `canvas` maps the recording's device pixels onto its own whole:
+/// by a translation of whole pixels, under which an image sampled at its
+/// texels' centres lands on the pixels it was made for.
+fn on_whole_pixels(canvas: &SkCanvas) -> bool {
+    let device = canvas.local_to_device_as_3x3();
+    device.is_translate()
+        && [device.translate_x(), device.translate_y()]
+            .iter()
+            .all(|t| t.fract() == 0.0)
+}
+
+impl GradientDraw {
+    fn playback(&self, canvas: &SkCanvas, target: Target) {
+        self.played(canvas, target, None);
+    }
+
+    /// The paths among `draws` whose effect a GPU canvas makes where the
+    /// page is played, by index -- see [`atlas`].
+    fn paths(&self) -> impl Iterator<Item = Option<&GradientPath>> {
+        self.draws.iter().map(|piece| match &piece.gpu {
+            OnGpu::Path(draw) => Some(draw.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// Plays the run onto `canvas`, taking its effects and their images
+    /// from what an atlas `found`, one for each draw, where one for more
+    /// than this run was made -- see [`play_entries`] -- and from one of its
+    /// own where not.
+    fn played(
+        &self,
+        canvas: &SkCanvas,
+        target: Target,
+        found: Option<&[Option<Found>]>,
+    ) {
+        canvas.save();
+        if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
+            canvas.clip_path(&clip, ClipOp::Intersect, true);
+        }
+        let gpu = target == Target::Pixels && blur_mask::on_gpu(canvas);
+        let own;
+        let found = match found {
+            Some(found) => found,
+            None if gpu && on_whole_pixels(canvas) => {
+                own = atlas(canvas, &self.paths().collect::<Vec<_>>());
+                &own
+            }
+            None => &[],
+        };
+        let found_for =
+            |index: usize| found.get(index).and_then(Option::as_ref);
+        let mut index = 0;
+        while index < self.draws.len() {
+            // Draws one after another that the CPU makes over the GPU's
+            // pixels share one read back -- see `drawn_on_their_backdrop`.
+            if target == Target::Pixels && gpu {
+                let span: Vec<(Cow<'_, Picture>, bool)> = self.draws[index..]
+                    .iter()
+                    .enumerate()
+                    .map_while(|(k, piece)| match &piece.gpu {
+                        OnGpu::Raster { beyond, .. } => {
+                            Some((piece.pixels.picture()?, *beyond))
+                        }
+                        // A path the effect cannot reproduce: as the atlas
+                        // found, or asked of the effect itself, which keeps
+                        // its answer, where no atlas was made.
+                        OnGpu::Path(draw)
+                            if found_for(index + k).map_or_else(
+                                || {
+                                    draw.spec
+                                        .exact(&draw.page, draw.alpha)
+                                        .is_none()
+                                },
+                                |found| found.effect.is_none(),
+                            ) =>
+                        {
+                            Some((piece.pixels.picture()?, draw.beyond))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let drawn: Vec<(&Picture, bool)> = span
+                    .iter()
+                    .map(|(recorded, beyond)| (&**recorded, *beyond))
+                    .collect();
+                if drawn.len() > 1
+                    && Format::of(canvas).is_some_and(|format| {
+                        drawn_on_their_backdrop(canvas, &drawn, &format)
+                    })
+                {
+                    index += span.len();
+                    continue;
+                }
+            }
+            let piece = &self.draws[index];
+            match (target, gpu) {
+                (Target::Document, _) => match &piece.document {
+                    Some(document) => document.playback(canvas),
+                    None => piece.pixels.playback(canvas),
+                },
+                (Target::Pixels, false) => piece.pixels.playback(canvas),
+                (Target::Pixels, true) => played_on_gpu(
+                    canvas,
+                    &piece.pixels,
+                    &piece.gpu,
+                    found_for(index),
+                ),
+            }
+            index += 1;
+        }
+        canvas.restore();
+    }
+
+    /// What the run reaches, under the transform it is played back under:
+    /// what its pixels recordings reach.
+    pub(crate) fn reach(&self) -> Rect {
+        self.draws
+            .iter()
+            .fold(Rect::new_empty(), |mut reach, piece| {
+                reach.join(piece.pixels.cull_rect());
+                reach
+            })
+    }
+
+    /// Whether this stands for a pair of recordings -- see [`holds_a_pair`].
+    pub(crate) fn is_pair(&self) -> bool {
+        self.draws.iter().any(|piece| piece.document.is_some())
     }
 }
 
@@ -3068,12 +3937,14 @@ impl Group {
                             rec = rec.bounds(reach);
                         }
                         canvas.save_layer(&rec);
+                        let in_layer = InLayer::enter();
                         play_entries(
                             &self.contents.layers,
                             &self.contents.features,
                             canvas,
                             target,
                         );
+                        drop(in_layer);
                         canvas.reset_matrix();
                         coverage.multiply(canvas);
                         canvas.restore();
@@ -3127,12 +3998,14 @@ impl Group {
                     self.confine(canvas, target, &to_device);
                 }
                 canvas.set_matrix(&entries.into());
+                let in_layer = InLayer::enter();
                 play_entries(
                     &self.contents.layers,
                     &self.contents.features,
                     canvas,
                     target,
                 );
+                drop(in_layer);
                 if let Some(crop) = crop {
                     canvas.reset_matrix();
                     crop.multiply(canvas);
@@ -3429,6 +4302,45 @@ pub(crate) fn play_entries(
         ) {
             at += played;
             continue;
+        }
+        // Consecutive gradient runs on the GPU take their effects' images
+        // from one atlas between them: draws asking a vector backend for
+        // different things are runs of their own, and a run each made an
+        // atlas each -- 2000 small gradients alternating linear and conic
+        // took 6.7 times what Ganesh's own gradient did.
+        if let Layer::Gradient(_) = &entries[at]
+            && target == Target::Pixels
+            && blur_mask::on_gpu(canvas)
+            && on_whole_pixels(canvas)
+        {
+            let ops: Vec<&GradientDraw> = entries[at..]
+                .iter()
+                .map_while(|entry| match entry {
+                    Layer::Gradient(op) => Some(&**op),
+                    _ => None,
+                })
+                .collect();
+            if ops.len() > 1 {
+                let paths: Vec<Option<&GradientPath>> =
+                    ops.iter().flat_map(|op| op.paths()).collect();
+                let found = atlas(canvas, &paths);
+                let mut from = 0;
+                for (k, op) in ops.iter().enumerate() {
+                    let to = from + op.draws.len();
+                    op.played(canvas, target, Some(&found[from..to]));
+                    from = to;
+                    if let Some(features) =
+                        features.get(at + k).filter(|_| paced)
+                    {
+                        pacing::played(
+                            canvas,
+                            offscreen_layers(&entries[at + k], *features),
+                        );
+                    }
+                }
+                at += ops.len();
+                continue;
+            }
         }
         let run = match &entries[at] {
             Layer::Clipped(piece) if shares_the_clip(piece) => piece.run,
@@ -3866,6 +4778,10 @@ pub struct CutOp {
     /// The clip as coverage, for a playback that applies it so: one for a
     /// run, shared by every cut draw in it.
     coverage: Arc<Coverage>,
+    /// How a GPU canvas draws each of `draws` dyed by a gradient, in the
+    /// bytes the CPU draws it in -- see [`OnGpu`]; `None` for one it plays
+    /// as recorded.
+    gpu: Vec<Option<OnGpu>>,
 }
 
 /// A clip filled, anti-aliased, as coverage a CPU raster playback is clipped
@@ -3997,7 +4913,8 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         | Layer::Targeted(_)
         | Layer::Pattern(_)
         | Layer::Deferred(_)
-        | Layer::ReplayedText(_) => false,
+        | Layer::ReplayedText(_)
+        | Layer::Gradient(_) => false,
     })
 }
 
@@ -4011,12 +4928,14 @@ pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
         Layer::Targeted(_) => true,
         Layer::Deferred(deferred) => deferred.is_pair(),
         Layer::ReplayedText(text) => text.is_pair(),
+        Layer::Gradient(op) => op.is_pair(),
         Layer::Cut(op) => op.documents.is_some(),
         Layer::Group(group) => holds_a_pair(&group.contents.layers),
         Layer::Clipped(piece) => match &piece.entry {
             Layer::Targeted(_) => true,
             Layer::Deferred(deferred) => deferred.is_pair(),
             Layer::ReplayedText(text) => text.is_pair(),
+            Layer::Gradient(op) => op.is_pair(),
             Layer::Cut(op) => op.documents.is_some(),
             _ => false,
         },
@@ -4026,13 +4945,15 @@ pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
 
 impl CutOp {
     /// The draw `drawn` holds, under `clip`, in device pixels of the
-    /// recording, played as pixels through `coverage`: a picture, or on a
-    /// page that keeps a recording for each kind of target a pair of them;
-    /// `None` for anything else.
+    /// recording, played as pixels through `coverage`, and on a GPU canvas
+    /// as `gpu` says where it is given: a picture, or on a page that keeps
+    /// a recording for each kind of target a pair of them; `None` for
+    /// anything else.
     pub fn new(
         clip: &ClipData,
         coverage: Arc<Coverage>,
         drawn: Layer,
+        gpu: Option<OnGpu>,
     ) -> Option<Self> {
         let (draws, documents) = match drawn {
             Layer::Picture(picture) => (vec![picture], None),
@@ -4046,17 +4967,19 @@ impl CutOp {
             documents,
             clip: clip.data.clone(),
             coverage,
+            gpu: vec![gpu],
         })
     }
 
     /// Adds the draw `drawn` holds to the run, under the op's clip, into each
-    /// recording the op keeps. A draw that holds other than the recordings
-    /// the op keeps is dropped, so that the two hold the same draws.
+    /// recording the op keeps, and how a GPU canvas draws it. A draw that
+    /// holds other than the recordings the op keeps is dropped, so that the
+    /// two hold the same draws.
     ///
     /// Returns the bytes the pictures it took hold -- see
     /// [`Layer::recorded_bytes`].
-    pub fn extend(&mut self, drawn: Layer) -> usize {
-        match (drawn, &mut self.documents) {
+    pub fn extend(&mut self, drawn: Layer, gpu: Option<OnGpu>) -> usize {
+        let bytes = match (drawn, &mut self.documents) {
             (Layer::Picture(picture), None) => {
                 let bytes = picture.approximate_bytes_used();
                 self.draws.push(picture);
@@ -4068,8 +4991,11 @@ impl CutOp {
                 pair.0.approximate_bytes_used()
                     + pair.1.approximate_bytes_used()
             }
-            _ => 0,
-        }
+            _ => return 0,
+        };
+        let bytes = bytes + gpu.as_ref().map_or(0, OnGpu::recorded_bytes);
+        self.gpu.push(gpu);
+        bytes
     }
 
     /// What the draws paint before the clip applies, in device pixels of
@@ -4110,8 +5036,44 @@ impl CutOp {
     /// already carries, for a run of pieces played under their clip once --
     /// see [`Clipped`].
     fn playback_unclipped(&self, canvas: &SkCanvas, target: Target) {
-        for draw in self.draws_for(target) {
-            canvas.draw_picture(draw, None, None);
+        self.play_draws(canvas, target);
+    }
+
+    /// Draws the draws for `target` onto `canvas`: on a GPU canvas, each
+    /// dyed by a gradient as its [`OnGpu`] says.
+    fn play_draws(&self, canvas: &SkCanvas, target: Target) {
+        let gpu = target == Target::Pixels && blur_mask::on_gpu(canvas);
+        let found = match gpu && on_whole_pixels(canvas) {
+            true => atlas(
+                canvas,
+                &self
+                    .gpu
+                    .iter()
+                    .map(|on_gpu| match on_gpu {
+                        Some(OnGpu::Path(draw)) => Some(draw.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            false => vec![],
+        };
+        let draws = self.draws_for(target).iter().zip(&self.gpu);
+        for (index, (draw, on_gpu)) in draws.enumerate() {
+            match on_gpu.as_ref().filter(|_| gpu) {
+                Some(on_gpu) => {
+                    canvas.save();
+                    played_on_gpu(
+                        canvas,
+                        &GradientPixels::Recorded(draw.clone()),
+                        on_gpu,
+                        found.get(index).and_then(Option::as_ref),
+                    );
+                    canvas.restore();
+                }
+                None => {
+                    canvas.draw_picture(draw, None, None);
+                }
+            }
         }
     }
 
@@ -4120,16 +5082,13 @@ impl CutOp {
     /// as coverage where [`clips_by_coverage`] says so and by the path
     /// elsewhere.
     pub fn playback(&self, canvas: &SkCanvas, target: Target) {
-        let draws = self.draws_for(target);
         canvas.save();
         if clips_by_coverage(canvas, target) {
             self.coverage.clip(canvas);
         } else if let Some(clip) = Path::deserialize(&self.clip) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
         }
-        for draw in draws {
-            canvas.draw_picture(draw, None, None);
-        }
+        self.play_draws(canvas, target);
         canvas.restore();
     }
 }

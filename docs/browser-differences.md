@@ -1544,6 +1544,54 @@ not closer to the exact composite in every case: it missed it in 600 of
 they keep the device pixel they were snapped to where the paragraph was
 drawn, where a canvas's own text is snapped again wherever it is played.
 
+**A gradient on a GPU canvas is drawn in the bytes the CPU canvas draws it
+in.** Ganesh's own gradient parts from the CPU's in three places: its sweep
+computes the angle and `t` in half precision (`SweepLayout`), a gradient of
+more than 128 colours keeps its stop offsets in half floats
+(`make_buffered_colorizer`), and a radial or a translucent linear ramp lands
+up to four levels away for a cause not isolated. A hard stop then moved by up
+to a tenth of a degree or half a pixel, and the conic of #667 put 8 pixels on
+the far side of a stop, 203 levels off. Here a draw dyed by a gradient is kept
+as a `GradientDraw` and chosen where the page is played: a CPU canvas and a
+document play Skia's own gradient, as before; a GPU canvas fills the draw with
+an effect doing the CPU's eight-bit arithmetic in floats -- the sweep's angle
+is Skia's own polynomial, which is itself up to 0.0095 degrees from the true
+angle -- itself for a rectangle on whole pixels, and otherwise through an
+image of it, one for the draws that follow one another, sampled nearest at
+each pixel's centre; or, for a draw the effect does not reproduce, has the CPU
+draw it over the GPU's pixels read back (`exact_gradient`,
+`layer::GradientDraw`). The effect fills the image as an aliased rectangle on
+whole pixels, the one geometry for which Ganesh hands a shader each pixel
+centre's coordinates exactly: drawn directly through a path, or as a rectangle
+whose edges fall inside pixels, it put 0.5% and 16% of its pixels a level off.
+Over 600 generated gradients drawn as a rectangle, a rectangle off whole
+pixels, a triangle and a polygon, the GPU canvas parted from the CPU on 582
+pixels, every one within float noise of a half level or a stop. What stays
+apart: those ties; a shape's anti-aliased edge, which is Ganesh's coverage as
+for a flat colour; a gradient the CPU draws in floats -- a translucent
+two-point conical one, one interpolated in a space other than the page's, one
+under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
+for -- inside a layer a group opens, where the pixels cannot be read back and
+the CPU's raster is composited instead, a level apart wherever its two
+roundings differ from the CPU's one (9,792 of 16,384 pixels on a translucent
+radial over a fill, measured by compositing at the page); a canvas drawn with
+`drawImage` into a GPU canvas, whose picture Ganesh rasterizes itself (2,064
+pixels, up to 203 levels, on the conic above), where `drawCanvas` keeps the
+choice (#703); a GPU canvas drawn with `drawCanvas` into another under a
+transform other than a whole pixel's translation, where the image would be
+resampled and the draw is made on the CPU at the destination's pixels instead,
+inside the layer the source is drawn through and composited through the draw's
+blend -- exact inside an opaque `source-over` sweep scaled by 2 or 0.5, moved
+part of a pixel or rotated; within a level through a blend the CPU makes in
+eight bits (`multiply` on 365 of 16,384 pixels at a scale of 2, where Ganesh's
+own gradient parted 5,301 by up to 35); and through `color-dodge`, which the
+CPU makes in floats from a gradient it never rounds, the composite's rounding
+of it multiplied by the dodge's division (7,091 pixels up to 29 levels at a
+scale of 2, where Ganesh's own gradient parted 5,766 by up to 66); and what a
+GPU canvas does with any colour -- `multiply` a level apart on 97 of 4,096
+pixels of the sweep, as for an image of the same pixels. Chrome's GPU canvas
+was not measured: headless Chrome drew it on SwiftShader.
+
 **On a CPU canvas a COLR colour glyph's image composites at full alpha as
 the exact source-over rounded to nearest, on every architecture; Chrome's
 CPU canvas may not on x86-64.** Skia's eight-bit source-over rounds to

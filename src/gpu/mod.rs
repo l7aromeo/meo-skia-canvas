@@ -11,6 +11,8 @@ use skia_safe::{
     AlphaType, Canvas, Color, Color4f, ColorSpace, ColorType, Image, ImageInfo,
     Matrix, Paint, Rect, Surface, gpu::DirectContext,
 };
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 /// Confirming the GPU ran a page's draws before they are read back.
@@ -99,6 +101,11 @@ impl Engine {
 
     pub fn supported() -> bool {
         false
+    }
+
+    /// Always: a build without a GPU backend has no GPU to probe for.
+    pub fn probed_without_gpu() -> bool {
+        true
     }
 
     pub fn status() -> Value {
@@ -280,6 +287,19 @@ impl RenderingEngine {
             true => engine,
             false => Self::CPU,
         }
+    }
+
+    /// Whether no page in this process can be played by Ganesh: in a build
+    /// without a GPU backend, or once the probe has found no device -- a
+    /// `OnceLock` written once, so a later canvas cannot find one. `false`
+    /// while the probe has not run, which asking here does not do: it makes
+    /// a GPU context, which a process that never asks for the GPU need not.
+    pub fn never_gpu() -> bool {
+        #[cfg(test)]
+        if let Some(never) = NEVER_GPU.get() {
+            return never;
+        }
+        Engine::probed_without_gpu()
     }
 
     pub fn selectable(&self) -> bool {
@@ -852,4 +872,12 @@ mod tests {
             assert_eq!(engine_of(layer.canvas()), engine, "a layer");
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What [`RenderingEngine::never_gpu`] answers on this thread, where a
+    /// test sets it: the probe's own answer is written once for the process.
+    pub(crate) static NEVER_GPU: Cell<Option<bool>> =
+        const { Cell::new(None) };
 }
