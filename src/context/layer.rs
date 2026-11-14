@@ -4606,9 +4606,10 @@ impl KeptRun<'_> {
 /// The run `entry` draws that [`replayed_on_their_backdrop`] draws on the
 /// CPU -- see [`KeptRun`] -- and the bounds of the clip path it applies
 /// itself, in the coordinates it is played back under, where it applies
-/// one: as a piece of a clip's run -- see [`Clipped`] -- or a pattern's
-/// draw under its own clip. Played onto the raster, it applies that clip
-/// there as the CPU page applies it. `None` for any other entry.
+/// one: as a piece of a clip's run -- see [`Clipped`] -- or under a clip
+/// of its own, where the page keeps no run of the clip. Played onto the
+/// raster, it applies that clip there as the CPU page applies it. `None`
+/// for any other entry.
 fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
     fn kept(entry: &Layer) -> Option<KeptRun<'_>> {
         match entry {
@@ -4621,19 +4622,18 @@ fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
             _ => None,
         }
     }
+    let bounds = |clip: &Option<Data>| {
+        clip.as_ref()
+            .and_then(Path::deserialize)
+            .map(|clip| *clip.bounds())
+    };
     match entry {
         Layer::Clipped(piece) => {
             Some((kept(piece.entry())?, Some(piece.bounds)))
         }
-        Layer::Pattern(draw) => {
-            let clip = draw
-                .clip
-                .as_ref()
-                .and_then(Path::deserialize)
-                .map(|clip| *clip.bounds());
-            Some((kept(entry)?, clip))
-        }
-        entry => Some((kept(entry)?, None)),
+        Layer::ReplayedText(text) => Some((kept(entry)?, bounds(&text.clip))),
+        Layer::Pattern(draw) => Some((kept(entry)?, bounds(&draw.clip))),
+        _ => None,
     }
 }
 

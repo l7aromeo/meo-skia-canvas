@@ -6496,21 +6496,25 @@ mod overlapping_glyph_tests {
     /// the CPU, over one read back: each run is a piece of the clip's run --
     /// see `layer::Clipped` -- played onto the raster under its clip, as the
     /// CPU page plays it. Under one clip for the page, a rectangle on half
-    /// pixels or a circle whose edge cuts the glyphs, and under a clip of
-    /// its own for each line.
+    /// pixels or a circle whose edge cuts the glyphs, under a clip of its own
+    /// for each line, and under the circle where each run holds its clip.
     #[test]
     fn a_clipped_page_of_runs_is_drawn_on_the_cpu_over_one_read_back() {
-        use crate::context::layer::BACKDROPS_READ;
+        use crate::context::{layer::BACKDROPS_READ, page::KEEPS_RUNS};
         if !RenderingEngine::GPU.selectable() {
             eprintln!("skipped: no GPU");
             return;
         }
         const LINES: usize = 8;
-        /// The clips the runs are drawn under.
-        const CLIPS: [&str; 3] = ["rectangle", "circle", "each line"];
+        /// The clips the runs are drawn under: the last on a page that keeps
+        /// no clip's run -- see `page::KEEPS_RUNS` -- so that each run holds
+        /// the clip itself.
+        const CLIPS: [&str; 4] =
+            ["rectangle", "circle", "each line", "circle, no run"];
         let page = |gpu: bool, blend: BlendMode, clip: &str| {
             register();
             forget_laid_out();
+            KEEPS_RUNS.set(clip != "circle, no run");
             let mut canvas = Canvas::new(W, H);
             canvas.set_gpu(gpu);
             let ctx = canvas.context();
@@ -6529,7 +6533,7 @@ mod overlapping_glyph_tests {
                     ctx.rect(20.5, 20.0, 200.0, 110.0);
                     ctx.clip(FillRule::NonZero);
                 }
-                "circle" => {
+                "circle" | "circle, no run" => {
                     ctx.begin_path();
                     ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
                         .expect("a positive radius");
@@ -6556,6 +6560,7 @@ mod overlapping_glyph_tests {
                 .expect("the canvas reads back")
                 .pixels()
                 .to_vec();
+            KEEPS_RUNS.set(true);
             let engine = canvas.engine_kind();
             assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
             (bytes, BACKDROPS_READ.get() - before)
@@ -6586,14 +6591,16 @@ mod overlapping_glyph_tests {
     /// drawn on the CPU, over one read back: each run is a pattern's draw --
     /// see `layer::PatternDraw` -- played onto the raster, which makes the
     /// tile on the CPU as the CPU page makes it, from a canvas drawn on the
-    /// CPU or on the GPU, under a clip, and at a scale that rasterizes the
-    /// tile at a density of 2. A pattern of an image is a
+    /// CPU or on the GPU, under a clip, as a piece of the clip's run or
+    /// holding the clip itself, and at a scale that rasterizes the tile at a
+    /// density of 2. A pattern of an image is a
     /// shader on the run's own paint, and is drawn the same way.
     #[test]
     fn a_page_of_runs_dyed_by_a_pattern_is_drawn_on_the_cpu_over_one_read_back()
     {
         use crate::{
-            context::layer::BACKDROPS_READ, image::Image,
+            context::{layer::BACKDROPS_READ, page::KEEPS_RUNS},
+            image::Image,
             pixels::PixelExportOptions,
         };
         if !RenderingEngine::GPU.selectable() {
@@ -6603,11 +6610,12 @@ mod overlapping_glyph_tests {
         const LINES: usize = 8;
         /// Where the pattern's tile comes from, and whether the runs are
         /// clipped.
-        const SOURCES: [&str; 5] = [
+        const SOURCES: [&str; 6] = [
             "CPU canvas",
             "GPU canvas",
             "image",
             "CPU canvas, clipped",
+            "CPU canvas, clipped, no run",
             "CPU canvas, scaled",
         ];
         /// The tile: two colours, a quarter of it the second, so that the
@@ -6622,6 +6630,7 @@ mod overlapping_glyph_tests {
         let page = |gpu: bool, blend: BlendMode, source: &str| {
             register();
             forget_laid_out();
+            KEEPS_RUNS.set(!source.ends_with("no run"));
             let mut canvas = Canvas::new(W, H);
             canvas.set_gpu(gpu);
             let mut tile = Canvas::new(TILE as f32, TILE as f32);
@@ -6661,7 +6670,7 @@ mod overlapping_glyph_tests {
             if source.ends_with("scaled") {
                 ctx.scale(1.25, 1.25);
             }
-            if source.ends_with("clipped") {
+            if source.contains("clipped") {
                 ctx.begin_path();
                 ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
                     .expect("a positive radius");
@@ -6677,6 +6686,7 @@ mod overlapping_glyph_tests {
                 .expect("the canvas reads back")
                 .pixels()
                 .to_vec();
+            KEEPS_RUNS.set(true);
             let engine = canvas.engine_kind();
             assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
             (bytes, BACKDROPS_READ.get() - before)
