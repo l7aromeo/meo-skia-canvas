@@ -598,6 +598,9 @@ thread_local! {
     pub(crate) static COVERAGE_ROUTE: Cell<bool> = const { Cell::new(true) };
     /// How many blurred draws played on this thread took the coverage route.
     pub(crate) static COVERAGE_RUNS: Cell<usize> = const { Cell::new(0) };
+    /// How many shadows played on this thread were cast from a run's opaque
+    /// copy -- see [`chain::Cast`].
+    pub(crate) static CAST_RUNS: Cell<usize> = const { Cell::new(0) };
 
     /// Whether the coverage route draws its plane through the chain's own
     /// paint, shader and all, so that a test can hold the plain paint it
@@ -3243,8 +3246,9 @@ pub enum Composite {
     /// reach bounds.
     ///
     /// `coverage` is the run again in its colour opaque, where the run is
-    /// one [`coverage_files`] passes, for a page the coverage route plays on
-    /// -- see [`CoverageRun`]. `None` for any other group.
+    /// one [`coverage_files`] passes, for a page on eight bits to blur it or
+    /// cast its shadow from -- see [`CoverageRun`]. `None` for any other
+    /// group.
     Chain {
         steps: Arc<[Step]>,
         rec: LayerRec,
@@ -3257,7 +3261,9 @@ pub enum Composite {
 /// colour opaque -- recorded a second time, or the picture of its pixels
 /// where that is the paint they are drawn in -- so that on a page the
 /// coverage route plays on its blur is made from its coverage alone -- see
-/// [`chain::coverage`].
+/// [`chain::coverage`]. A translucent run under a sole `drop-shadow()` is
+/// recorded so too, for its shadow to be cast from its coverage on an
+/// eight-bit page on the CPU -- see [`chain::Cast`].
 ///
 /// Opaque because Skia pre-blends a glyph's mask by the paint's colour and
 /// never by its alpha: `SkScalerContextRec::setLuminanceColor` keeps only
@@ -3279,7 +3285,8 @@ pub struct CoverageRun {
     pub alpha: f32,
     /// The kept run this draws and where, for the run's blur to be kept --
     /// see [`run_mask`]. `None` the first time a run is drawn, which is not
-    /// kept.
+    /// kept, and for a run whose shadow is cast from this copy, which takes
+    /// no blur from a kept run.
     pub kept: Option<Kept>,
 }
 
@@ -3877,13 +3884,45 @@ impl Group {
                 // chain's gain, so that the blur rounds
                 // its alpha once, as `BlurOp::result_chain` does a path's:
                 // drawn in its translucent colour, the layer rounded its
-                // alpha to a byte before the blur and again after.
+                // alpha to a byte before the blur and again after. A
+                // translucent run's `drop-shadow()` is cast from it drawn
+                // opaque for the same reason, the run itself still drawn
+                // translucent over it -- see `chain::Cast`.
                 let opaque = coverage
                     .as_deref()
                     .filter(|_| eight_bits_on_cpu(canvas))
                     .and_then(|run| Some((run.alpha, run.picture.picture()?)));
+                let opaquely = |picture: &Picture, layer: &SkCanvas| {
+                    self.draw_chained_as(layer, target, &back, |layer| {
+                        layer.draw_picture(picture, None, None);
+                    })
+                };
                 let outcome = match opaque {
-                    Some((alpha, picture)) => {
+                    Some((alpha, picture))
+                        if matches!(
+                            steps,
+                            [Step::Shadow {
+                                shadow_only: false,
+                                ..
+                            }]
+                        ) =>
+                    {
+                        #[cfg(test)]
+                        CAST_RUNS.with(|runs| runs.set(runs.get() + 1));
+                        chain::run_cast(
+                            canvas,
+                            steps,
+                            content,
+                            Depth::Floats,
+                            &paint,
+                            byte_alpha(alpha),
+                            |layer| self.draw_chained(layer, target, &back),
+                            |layer| opaquely(picture, layer),
+                        )
+                    }
+                    Some((alpha, picture))
+                        if matches!(steps, [Step::Blur(_)]) =>
+                    {
                         let mut gained = paint.clone();
                         gained.set_alpha_f(paint.alpha_f() * byte_alpha(alpha));
                         chain::run(
@@ -3892,19 +3931,10 @@ impl Group {
                             content,
                             Depth::Floats,
                             &gained,
-                            |layer| {
-                                self.draw_chained_as(
-                                    layer,
-                                    target,
-                                    &back,
-                                    |layer| {
-                                        layer.draw_picture(picture, None, None);
-                                    },
-                                )
-                            },
+                            |layer| opaquely(picture, layer),
                         )
                     }
-                    None => chain::run(
+                    _ => chain::run(
                         canvas,
                         steps,
                         content,
@@ -5445,18 +5475,30 @@ fn eight_bits_on_cpu(canvas: &SkCanvas) -> bool {
     ) && blur_mask::draws_on_cpu(canvas)
 }
 
-/// Whether a run of text filed under `steps`, in `exact` through a paint
-/// `dither`ed or not, is one [`coverage_plays`] could play: under a sole
-/// `blur()`, in a colour placed on the bytes an eight-bit page stores,
-/// undithered. Only such a run records the opaque copy the route draws --
-/// see [`CoverageRun`] -- so a run that could never take the route is
-/// recorded once.
+/// Whether a run of text filed under `steps`, in `exact` at `alpha`
+/// through a paint `dither`ed or not, records the opaque copy a page on
+/// eight bits draws it again in -- see [`CoverageRun`]: one
+/// [`coverage_plays`] could play, under a sole `blur()`, in a colour placed
+/// on the bytes an eight-bit page stores, undithered; and one under a sole
+/// `drop-shadow()`, translucent, whose shadow is cast from the copy -- see
+/// [`chain::Cast`] -- on a page compositing in eight bits. Dither leaves a
+/// pixel's alpha alone, which is all a shadow is cast from. A run that
+/// could never draw the copy is recorded once.
 pub(crate) fn coverage_files(
     steps: &[Step],
     exact: &ExactColour,
     dither: bool,
+    alpha: f32,
 ) -> bool {
-    matches!(steps, [Step::Blur(_)]) && exact.bytes && !dither
+    match steps {
+        [Step::Blur(_)] => exact.bytes && !dither,
+        [
+            Step::Shadow {
+                shadow_only: false, ..
+            },
+        ] => exact.bytes && byte_alpha(alpha) < 1.0,
+        _ => false,
+    }
 }
 
 /// The chain a [`BlurOp`] blurs its result through on pixels -- see
@@ -7567,6 +7609,343 @@ mod coverage_run_tests {
         ];
         for (case, expected, run) in cases {
             assert_eq!(played(&run, true).1, expected, "{case}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod shadow_run_tests {
+    //! A translucent run of text under `drop-shadow()` on an eight-bit
+    //! page on the CPU: the run as Skia draws it, over the exact blur of its
+    //! coverage times its alpha, tinted, composited and rounded once -- see
+    //! `chain::Cast`.
+
+    use std::ops::Range;
+
+    use super::CAST_RUNS;
+    use crate::{context::exact_blur, pixels::PixelDepth, prelude::*};
+
+    /// The family Oswald is registered under for these runs, so that it
+    /// cannot be found as a system font of the same name instead.
+    const OSWALD: &str = "ShadowRunOswald";
+
+    /// The page every run is played on: 60px Oswald "Hamburgefonstiv" at
+    /// [`AT`], its shadow moved by [`OFFSET`] and blurred by 8 pixels, lies
+    /// inside it with the blur's reach to spare, so that the page's edges
+    /// cut nothing the reference does not see -- which each run checks.
+    const PAGE: (usize, usize) = (520, 150);
+
+    /// Where each run's baseline starts.
+    const AT: (f32, f32) = (30.3, 85.6);
+
+    /// The shadow's offset, in whole pixels, so that it is moved
+    /// unresampled.
+    const OFFSET: (i32, i32) = (3, 2);
+
+    /// Further from a half-level than float noise moves a sum: a channel
+    /// nearer a tie than this may round to either side of it.
+    const TIE: f64 = 1e-3;
+
+    /// "Hamburgefonstiv" filled with `fill` through `filter` at `size`
+    /// pixels, on a CPU page of `depth`.
+    #[derive(Clone, Copy)]
+    struct Run<'a> {
+        fill: &'a str,
+        filter: &'a str,
+        size: u32,
+        depth: PixelDepth,
+        dither: bool,
+        gradient: bool,
+        /// A canvas shadow's blur, in place of a filter's.
+        shadow_blur: Option<f32>,
+    }
+
+    const TRANSLUCENT: Run = Run {
+        fill: "rgba(200, 80, 30, 0.6)",
+        filter: "drop-shadow(3px 2px 3px black)",
+        size: 32,
+        depth: PixelDepth::Uint8,
+        dither: false,
+        gradient: false,
+        shadow_blur: None,
+    };
+
+    /// `run` played, as premultiplied pixels, and how many shadows were cast
+    /// from its opaque copy.
+    fn played(run: &Run) -> (Vec<u8>, usize) {
+        FontLibrary::new()
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let mut canvas = Canvas::with_options(
+            PAGE.0 as f32,
+            PAGE.1 as f32,
+            CanvasOptions {
+                color_type: run.depth,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("{}px {OSWALD}", run.size)));
+        match run.gradient {
+            true => {
+                let stop = |position, css| GradientStop {
+                    position,
+                    color: RgbaLinear::from_css(css).expect("a colour"),
+                };
+                let shader = Shader::linear_gradient(
+                    Point { x: 10.0, y: 0.0 },
+                    Point { x: 400.0, y: 0.0 },
+                    &[
+                        stop(0.0, "rgba(255, 165, 0, 0.6)"),
+                        stop(1.0, "rgba(0, 0, 255, 0.6)"),
+                    ],
+                    GradientColorSpace::Srgb,
+                )
+                .expect("two stops describe a gradient");
+                ctx.set_fill_shader(&shader);
+            }
+            false => ctx.set_fill_style_css(run.fill).expect("a colour"),
+        }
+        ctx.set_dither(run.dither);
+        ctx.set_filter_css(run.filter).expect("a filter");
+        if let Some(blur) = run.shadow_blur {
+            ctx.set_shadow_color_css("black").expect("a colour");
+            ctx.set_shadow_blur(blur);
+            ctx.set_shadow_offset(OFFSET.0 as f32, OFFSET.1 as f32);
+        }
+        let before = CAST_RUNS.get();
+        ctx.fill_text("Hamburgefonstiv", AT.0, AT.1, None);
+        let pixels = canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    pixels: PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        (pixels, CAST_RUNS.get() - before)
+    }
+
+    /// How many pixels of `run`, whose shadow in `tint` -- unpremultiplied,
+    /// its colour in levels and its alpha a fraction -- is blurred by
+    /// `sigma`, part from the exact shadow in any of `channels`: the run as
+    /// Skia draws it unfiltered, over the exact blur of its coverage, the
+    /// alpha of `opaque`, times `gain` and the tint's alpha, tinted, in
+    /// floats, rounded once. A channel within [`TIE`] of a half-level may
+    /// land on either side, since through the FFT which side depends on the
+    /// machine.
+    fn off_the_exact_shadow(
+        run: &Run,
+        opaque: &Run,
+        sigma: f32,
+        tint: [f64; 4],
+        gain: f64,
+        channels: Range<usize>,
+    ) -> usize {
+        let (page, cast) = played(run);
+        assert_eq!(cast, 1, "{}: cast once", run.filter);
+        let border = (0..PAGE.0 * PAGE.1).filter(|i| {
+            let (x, y) = (i % PAGE.0, i / PAGE.0);
+            x == 0 || y == 0 || x == PAGE.0 - 1 || y == PAGE.1 - 1
+        });
+        assert!(
+            border.clone().all(|i| page[i * 4 + 3] == 0),
+            "{}px {}: the page cuts the shadow",
+            run.size,
+            run.filter
+        );
+        let (body, _) = played(&Run {
+            filter: "none",
+            ..*run
+        });
+        let (coverage, _) = played(&Run {
+            filter: "none",
+            ..*opaque
+        });
+        let blurred =
+            exact_blur::reference(&coverage, PAGE.0, PAGE.1, sigma, sigma);
+        let mut off = 0;
+        for y in 0..PAGE.1 as i32 {
+            for x in 0..PAGE.0 as i32 {
+                let (sx, sy) = (x - OFFSET.0, y - OFFSET.1);
+                let inside = (0..PAGE.0 as i32).contains(&sx)
+                    && (0..PAGE.1 as i32).contains(&sy);
+                let cast = match inside {
+                    true => {
+                        let at = sy as usize * PAGE.0 + sx as usize;
+                        blurred[at * 4 + 3] / 255.0
+                    }
+                    false => 0.0,
+                };
+                let alpha = cast * gain * tint[3];
+                let i = (y as usize * PAGE.0 + x as usize) * 4;
+                let under = 1.0 - f64::from(body[i + 3]) / 255.0;
+                let shadow = [
+                    tint[0] / 255.0 * alpha,
+                    tint[1] / 255.0 * alpha,
+                    tint[2] / 255.0 * alpha,
+                    alpha,
+                ];
+                let missed = channels.clone().any(|c| {
+                    let v = f64::from(body[i + c]) + 255.0 * shadow[c] * under;
+                    let got = f64::from(page[i + c]);
+                    let tie = (v - v.floor() - 0.5).abs() < TIE;
+                    got != v.round()
+                        && !(tie && (got == v.floor() || got == v.ceil()))
+                });
+                off += usize::from(missed);
+            }
+        }
+        off
+    }
+
+    #[test]
+    fn a_translucent_runs_shadow_rounds_its_alpha_once() {
+        // At sigmas summed tap by tap and through the FFT, in black and in a
+        // translucent colour, at sizes from a hinted 13px to 60px, at
+        // alphas on and off a byte's tie.
+        let mut apart = Vec::new();
+        for (rgb, given) in [
+            ("200, 80, 30", 0.6),
+            ("20, 60, 200", 0.3),
+            ("128, 128, 128", 0.55),
+        ] {
+            // The alpha the run is drawn at, on its byte.
+            let gain = (given * 255.0f64).round() / 255.0;
+            let fill = format!("rgba({rgb}, {given})");
+            let opaque = format!("rgb({rgb})");
+            for size in [13, 32, 60] {
+                for (filter, sigma, tint) in [
+                    (
+                        "drop-shadow(3px 2px 3px black)",
+                        3.0,
+                        [0.0, 0.0, 0.0, 1.0],
+                    ),
+                    (
+                        "drop-shadow(3px 2px 8px rgba(30, 120, 220, 0.75))",
+                        8.0,
+                        [30.0, 120.0, 220.0, 0.75],
+                    ),
+                ] {
+                    let run = Run {
+                        fill: &fill,
+                        filter,
+                        size,
+                        ..TRANSLUCENT
+                    };
+                    let opaque = Run {
+                        fill: &opaque,
+                        ..run
+                    };
+                    let off = off_the_exact_shadow(
+                        &run,
+                        &opaque,
+                        sigma,
+                        tint,
+                        gain,
+                        0..4,
+                    );
+                    if off > 0 {
+                        apart.push(format!("{fill} {size}px {filter}: {off}"));
+                    }
+                }
+            }
+        }
+        assert!(apart.is_empty(), "pixels off the exact shadow: {apart:#?}");
+    }
+
+    #[test]
+    fn a_dithered_runs_shadow_rounds_its_alpha_once() {
+        // Dither moves a pixel's colour and leaves its alpha, which is all a
+        // shadow is cast from. Its colour is dithered where the layer lies
+        // rather than where the page does, so only the alpha is held here.
+        let run = Run {
+            dither: true,
+            ..TRANSLUCENT
+        };
+        let opaque = Run {
+            fill: "rgb(200, 80, 30)",
+            ..run
+        };
+        let gain = (0.6f64 * 255.0).round() / 255.0;
+        let off = off_the_exact_shadow(
+            &run,
+            &opaque,
+            3.0,
+            [0.0, 0.0, 0.0, 1.0],
+            gain,
+            3..4,
+        );
+        assert_eq!(off, 0, "alphas off the exact shadow");
+    }
+
+    #[test]
+    fn only_a_translucent_runs_sole_drop_shadow_is_cast_from_its_copy() {
+        let cases = [
+            ("a translucent run", 1, TRANSLUCENT),
+            (
+                "an opaque run",
+                0,
+                Run {
+                    fill: "rgb(200, 80, 30)",
+                    ..TRANSLUCENT
+                },
+            ),
+            (
+                "a drop shadow then a blur",
+                0,
+                Run {
+                    filter: "drop-shadow(3px 2px 3px black) blur(1px)",
+                    ..TRANSLUCENT
+                },
+            ),
+            (
+                "a blur then a drop shadow",
+                0,
+                Run {
+                    filter: "blur(1px) drop-shadow(3px 2px 3px black)",
+                    ..TRANSLUCENT
+                },
+            ),
+            (
+                "a canvas shadow",
+                0,
+                Run {
+                    filter: "none",
+                    shadow_blur: Some(6.0),
+                    ..TRANSLUCENT
+                },
+            ),
+            (
+                "a gradient",
+                0,
+                Run {
+                    gradient: true,
+                    ..TRANSLUCENT
+                },
+            ),
+            (
+                "a half-float page",
+                0,
+                Run {
+                    depth: PixelDepth::F16,
+                    ..TRANSLUCENT
+                },
+            ),
+        ];
+        for (case, expected, run) in cases {
+            assert_eq!(played(&run).1, expected, "{case}");
         }
     }
 }

@@ -467,6 +467,54 @@ pub(crate) fn run(
     drawn.finish(&plan, steps, paint)
 }
 
+/// [`run`] for a chain whose one step casts a shadow from something other
+/// than what it draws: `draw` draws what the shadow lies under, and `cast`
+/// what the shadow is cast from, whose alpha the shadow takes at `alpha` --
+/// see [`Cast`]. Each is drawn into a layer of its own.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_cast(
+    canvas: &SkCanvas,
+    steps: &[Step],
+    content: Option<Rect>,
+    depth: Depth,
+    paint: &Paint,
+    alpha: f32,
+    draw: impl Fn(&SkCanvas),
+    cast: impl Fn(&SkCanvas),
+) -> Option<Outcome> {
+    let plan = plan(canvas, steps, content, depth)?;
+    let mut drawn =
+        Drawn::new(canvas, &[&plan], |_, offscreen| draw(offscreen))?;
+    let from = Drawn::new(canvas, &[&plan], |_, offscreen| cast(offscreen))?;
+    drawn.finish_cast(
+        &plan,
+        steps,
+        paint,
+        Some(Cast {
+            drawn: &from,
+            alpha,
+        }),
+    )
+}
+
+/// What a chain's shadow is cast from where that is not what the chain
+/// draws: `drawn`, a layer holding a run of text drawn opaque, the shadow
+/// taking its alpha at `alpha`, the alpha the run is drawn at -- see
+/// `layer::CoverageRun`.
+///
+/// The shadow of a run drawn translucent is the blur of the run's coverage
+/// times its alpha. Cast from the run as an eight-bit layer holds it, that
+/// product is rounded to a byte before the blur and again after; cast from
+/// the run drawn opaque, whose alpha is its coverage, and taken at the
+/// alpha in floats, it is rounded once. The run the shadow lies under is
+/// still the one drawn translucent, as Skia draws it: the shadow is not
+/// linear in the alpha, since the run is composited over it, so the alpha
+/// cannot be taken as one gain on the whole, as `blur()` takes it.
+pub(crate) struct Cast<'a> {
+    drawn: &'a Drawn,
+    alpha: f32,
+}
+
 /// Where a chain's layer lies, settled before anything is drawn into it.
 pub(crate) struct Plan {
     /// The scale from canvas pixels to the layer's -- see [`split`].
@@ -663,6 +711,19 @@ impl Drawn {
         steps: &[Step],
         paint: &Paint,
     ) -> Option<Outcome> {
+        self.finish_cast(plan, steps, paint, None)
+    }
+
+    /// [`Self::finish`], a shadow cast by the chain's first step cast from
+    /// `cast` where it is `Some` -- see [`Cast`] -- and from what the layer
+    /// holds otherwise.
+    pub(crate) fn finish_cast(
+        &mut self,
+        plan: &Plan,
+        steps: &[Step],
+        paint: &Paint,
+        cast: Option<Cast<'_>>,
+    ) -> Option<Outcome> {
         let Plan {
             layer,
             rest,
@@ -670,14 +731,15 @@ impl Drawn {
             worked,
             ..
         } = *plan;
+        let read = self.read(region);
         let context = &mut self.context;
-        let read = region.with_offset((-self.at.left, -self.at.top));
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
         // On the CPU a chain handed an input it has run on before takes the
         // result it left, once the input is that one to the byte -- see
         // `kept`. The input is judged by the region where it lies in the
         // layer, before it is copied out and padded, which a result found
-        // never needs.
+        // never needs; a shadow cast from another layer, by that layer's
+        // region as well.
         let input = match context.is_none() {
             true => ChainInput::of_region(
                 &self.snapshot,
@@ -687,19 +749,29 @@ impl Drawn {
                 steps,
                 Vector::new(scale.0, scale.1),
                 paint.alpha_f(),
-            ),
+            )
+            .and_then(|input| match &cast {
+                Some(cast) => input.cast_from(
+                    &cast.drawn.snapshot,
+                    cast.drawn.read(region),
+                    cast.alpha,
+                ),
+                None => Some(input),
+            }),
             false => None,
         };
         if let Some(kept) = input.as_ref().and_then(ChainInput::kept) {
             return Some(Outcome::whole(kept, worked, rest));
         }
-        let mut image = match read == IRect::from_size(self.at.size()) {
-            true => Some(self.snapshot.clone()),
-            false => subset(&self.snapshot, context.as_mut(), read),
-        }?;
-        if worked != region {
-            image = padded(context.as_mut(), &image, region, worked)?;
-        }
+        let mut image =
+            region_of(&self.snapshot, self.at, context.as_mut(), plan)?;
+        let cast = match cast {
+            Some(Cast { drawn, alpha }) => Some((
+                region_of(&drawn.snapshot, drawn.at, context.as_mut(), plan)?,
+                alpha,
+            )),
+            None => None,
+        };
 
         let last = steps.len().saturating_sub(1);
         for (i, step) in steps.iter().enumerate() {
@@ -727,6 +799,9 @@ impl Drawn {
                 } => shadowed(
                     context.as_mut(),
                     &image,
+                    cast.as_ref()
+                        .filter(|_| i == 0)
+                        .map(|(cast, alpha)| (cast, *alpha)),
                     Vector::new(offset.x * scale.0, offset.y * scale.1),
                     (sigma * scale.0, sigma * scale.1),
                     (*colour, space),
@@ -743,6 +818,31 @@ impl Drawn {
             input.keep(image.clone());
         }
         Some(Outcome::whole(image, worked, rest))
+    }
+
+    /// Where `region`, in the pixels a plan's regions are in, lies in the
+    /// layer.
+    fn read(&self, region: IRect) -> IRect {
+        region.with_offset((-self.at.left, -self.at.top))
+    }
+}
+
+/// What `layer`, a [`Drawn`]'s snapshot lying at `at`, holds of `plan`'s
+/// region, copied out and padded to the rectangle its chain works on.
+fn region_of(
+    layer: &Image,
+    at: IRect,
+    mut context: Option<&mut Gpu>,
+    plan: &Plan,
+) -> Option<Image> {
+    let read = plan.region.with_offset((-at.left, -at.top));
+    let image = match read == IRect::from_size(at.size()) {
+        true => Some(layer.clone()),
+        false => subset(layer, context.as_deref_mut(), read),
+    }?;
+    match plan.worked == plan.region {
+        true => Some(image),
+        false => padded(context, &image, plan.region, plan.worked),
     }
 }
 
@@ -1936,19 +2036,41 @@ fn filtered(
 /// The shadow is moved unresampled where the offset is whole pixels, and
 /// bilinearly otherwise.
 ///
+/// Where `cast` is `Some`, the shadow is cast from its image instead, at its
+/// alpha -- see [`Cast`] -- as a shadow in `colour` with that alpha as a
+/// factor of its own, which is the same product: the shadow is the tint's
+/// alpha times the blurred alpha it is cast from, and the run's alpha is a
+/// third factor of it.
+///
 /// On a GPU an eight-bit layer's blurred shadow is made there instead, by
 /// [`shadowed_on_gpu`], to the same bytes but on exact ties: made on the
 /// CPU it costs a read of the layer back from the GPU each draw, which
-/// waits for the GPU to finish everything before it.
+/// waits for the GPU to finish everything before it. A shadow cast from
+/// another image is made on the CPU.
+#[allow(clippy::too_many_arguments)]
 fn shadowed(
     mut context: Option<&mut Gpu>,
     image: &Image,
+    cast: Option<(&Image, f32)>,
     offset: Vector,
     sigma: (f32, f32),
     colour: (Color4f, &ColorSpace),
     gain: f32,
     shadow_only: bool,
 ) -> Option<Image> {
+    if let Some((from, alpha)) = cast {
+        let (tint, space) = colour;
+        let composed = shadow_composed(
+            context.as_deref(),
+            image,
+            Some(from),
+            offset,
+            sigma,
+            (Color4f::new(tint.r, tint.g, tint.b, tint.a * alpha), space),
+            shadow_only,
+        )?;
+        return rounded_once(&composed, image.image_info(), gain);
+    }
     if let Some(context) = context.as_deref_mut()
         && let Some(on_gpu) = shadowed_on_gpu(
             context,
@@ -1972,6 +2094,7 @@ fn shadowed(
     let composed = shadow_composed(
         context.as_deref(),
         image,
+        None,
         offset,
         sigma,
         colour,
@@ -2115,10 +2238,12 @@ fn shadowed_on_gpu(
 }
 
 /// [`shadowed`]'s image over its shadow, or the shadow by itself where
-/// `shadow_only`, in floats, before it is rounded.
+/// `shadow_only`, in floats, before it is rounded. The shadow is cast from
+/// `cast` where it is `Some` -- see [`Cast`] -- an image of the same size,
+/// type and space as `image`, and from `image` otherwise.
 ///
-/// On an eight-bit layer the shadow is the source's alpha alone, blurred
-/// in f32 and then tinted -- by [`tinted_alpha`] where [`tint_colour`]
+/// On an eight-bit layer the shadow is the alpha it is cast from alone,
+/// blurred in f32 and then tinted -- by [`tinted_alpha`] where [`tint_colour`]
 /// names the tint, and through Skia's blend otherwise. The tint is the
 /// colour scaled by the alpha, and a blur is linear, so the two orders
 /// agree but for float rounding, which the bytes the result is rounded to
@@ -2129,6 +2254,7 @@ fn shadowed_on_gpu(
 fn shadow_composed(
     context: Option<&Gpu>,
     image: &Image,
+    cast: Option<&Image>,
     offset: Vector,
     sigma: (f32, f32),
     (colour, space): (Color4f, &ColorSpace),
@@ -2142,17 +2268,23 @@ fn shadow_composed(
         draw(surface.canvas());
         Some(surface.image_snapshot())
     };
-    // The source in floats: the raster itself where it already is them,
+    // An image in floats: the raster itself where it already is them,
     // premultiplied, as an F32 page's layer is -- drawn onto a cleared
     // surface of its own kind it would come back as itself, each value
     // plus nothing -- and drawn into floats otherwise.
-    let source = match raster.color_type() == ColorType::RGBAF32
+    let in_floats = |raster: &Image| match raster.color_type()
+        == ColorType::RGBAF32
         && raster.alpha_type() == AlphaType::Premul
     {
-        true => raster.clone(),
+        true => Some(raster.clone()),
         false => on_floats(&|canvas| {
-            canvas.draw_image(&raster, (0, 0), None);
-        })?,
+            canvas.draw_image(raster, (0, 0), None);
+        }),
+    };
+    let source = in_floats(&raster)?;
+    let from = match cast {
+        Some(cast) => in_floats(&to_raster(context, cast)?)?,
+        None => source.clone(),
     };
     let named = tint_colour(colour, space, raster.image_info());
     let tint = || tint(named, colour, space);
@@ -2164,19 +2296,19 @@ fn shadow_composed(
     let shadow = match (blurred, bytes) {
         (true, true) => match named {
             Some((rgb, alpha)) => {
-                blurred_alpha(&source, sigma, |a| tinted_alpha(rgb, alpha, a))?
+                blurred_alpha(&from, sigma, |a| tinted_alpha(rgb, alpha, a))?
             }
             None => {
                 let alpha =
-                    blurred_alpha(&source, sigma, |a| [0.0, 0.0, 0.0, a])?;
+                    blurred_alpha(&from, sigma, |a| [0.0, 0.0, 0.0, a])?;
                 filtered(None, &alpha, &tint()?, 1.0)?
             }
         },
         (true, false) => {
-            let tinted = filtered(None, &source, &tint()?, 1.0)?;
+            let tinted = filtered(None, &from, &tint()?, 1.0)?;
             blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?
         }
-        (false, _) => filtered(None, &source, &tint()?, 1.0)?,
+        (false, _) => filtered(None, &from, &tint()?, 1.0)?,
     };
     let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0 {
         true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
@@ -2567,7 +2699,7 @@ mod tests {
     use super::{
         Depth, Outcome, REFUSE_PLACED, Step, TRIMMED, TRIMS_COMPOSITE, apply,
         blurred_alpha, blurred_on_cpu, exact_blur, filtered, offset_tint,
-        rounded_once, shadow_composed, shadowed, tint, tint_colour,
+        rounded_once, run_cast, shadow_composed, shadowed, tint, tint_colour,
         tinted_alpha, worked_on,
     };
     #[cfg(all(meo_graphite, feature = "metal"))]
@@ -2814,6 +2946,7 @@ mod tests {
         let shadowed = shadow_composed(
             None,
             &blurred,
+            None,
             Vector::new(2.0, 2.0),
             (1.0, 1.0),
             (Color4f::new(1.0, 0.0, 0.0, 1.0), &ColorSpace::new_srgb()),
@@ -3035,6 +3168,69 @@ mod tests {
         let mut pixels = vec![0u8; 120 * 120 * 4];
         assert!(surface.read_pixels(&info, &mut pixels, 120 * 4, (0, 0)));
         pixels.chunks(4).map(|p| p[3]).collect()
+    }
+
+    #[test]
+    fn a_shadow_cast_from_another_layer_takes_no_result_kept_for_another() {
+        // One translucent square, its shadow cast first from one opaque
+        // square and then from another, moved: the second is made, not
+        // taken from what the first left -- see `ChainInput::cast_from` --
+        // though the layer the chain draws is the same to the byte.
+        use crate::context::kept::{FOUND, KEPT};
+        let info = ImageInfo::new_n32_premul((120, 80), None);
+        let cast_at = |x: f32| {
+            let mut surface: Surface =
+                started::raster(&info, None, None).expect("a surface");
+            let canvas = surface.canvas();
+            let mut translucent = Paint::default();
+            translucent.set_color4f(Color4f::new(0.8, 0.3, 0.1, 0.6), None);
+            let mut opaque = Paint::default();
+            opaque.set_color4f(Color4f::new(0.8, 0.3, 0.1, 1.0), None);
+            let shadow = Step::Shadow {
+                offset: Vector::new(3.0, 2.0),
+                sigma: 2.0,
+                colour: Color4f::new(0.0, 0.0, 0.0, 1.0),
+                space: ColorSpace::new_srgb(),
+                shadow_only: false,
+            };
+            if let Some(outcome) = run_cast(
+                canvas,
+                &[shadow],
+                Some(Rect::from_xywh(10.0, 10.0, 80.0, 50.0)),
+                Depth::Floats,
+                &Paint::default(),
+                0.6,
+                |layer| {
+                    layer.draw_rect(
+                        Rect::from_xywh(20.0, 20.0, 30.0, 30.0),
+                        &translucent,
+                    );
+                },
+                |layer| {
+                    layer.draw_rect(
+                        Rect::from_xywh(x, 20.0, 30.0, 30.0),
+                        &opaque,
+                    );
+                },
+            ) {
+                outcome.composite(surface.canvas(), &Paint::default());
+            }
+            let mut pixels = vec![0u8; 120 * 80 * 4];
+            assert!(surface.read_pixels(&info, &mut pixels, 120 * 4, (0, 0)));
+            pixels
+        };
+        // Made first, with nothing taken: a result made later is filed
+        // under its key whether or not results are taken.
+        KEPT.set(false);
+        let made = cast_at(24.0);
+        KEPT.set(true);
+        let first = cast_at(20.0);
+        cast_at(20.0);
+        let taken = FOUND.get().taken;
+        assert_eq!(cast_at(20.0), first, "the result kept");
+        assert!(FOUND.get().taken > taken, "the control: nothing was kept");
+        assert_ne!(made, first, "the control: the casts made one shadow");
+        assert_eq!(cast_at(24.0), made, "taken from the other cast");
     }
 
     /// A layer Skia will not make from the origin is the region alone, and
@@ -3871,7 +4067,7 @@ mod tests {
         let mut differing = Vec::new();
         let runs = shadow_sweep(|name, image, offset, sigma, colour, gain| {
             let ours =
-                shadowed(None, image, offset, sigma, colour, gain, false)
+                shadowed(None, image, None, offset, sigma, colour, gain, false)
                     .expect("a shadow");
             let theirs = shadowed_as_drawn(image, offset, sigma, colour, gain)
                 .expect("a shadow");
@@ -3966,6 +4162,7 @@ mod tests {
                             let ours = shadow_composed(
                                 None,
                                 &image,
+                                None,
                                 offset,
                                 sigma,
                                 (colour, &srgb),
@@ -4215,6 +4412,7 @@ mod tests {
                             let composed = shadow_composed(
                                 None,
                                 &image,
+                                None,
                                 Vector::default(),
                                 sigma,
                                 (colour, &srgb),
@@ -4345,6 +4543,7 @@ mod tests {
                                 let composed = shadow_composed(
                                     None,
                                     &raster,
+                                    None,
                                     offset,
                                     sigma,
                                     (colour, &srgb),

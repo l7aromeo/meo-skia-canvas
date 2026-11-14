@@ -267,7 +267,8 @@ fn kind_of(info: &ImageInfo) -> (i32, i32, Option<(u32, u32)>) {
 
 /// What a chain's result on the CPU is filed under: the digest of its
 /// input's pixels, the input's size and kind, every step, the scale the
-/// layer was drawn at and the alpha the last step takes.
+/// layer was drawn at, the alpha the last step takes, and what a shadow is
+/// cast from where that is not the input.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ChainKey {
     input: u64,
@@ -279,6 +280,10 @@ pub(crate) struct ChainKey {
     steps: Arc<[StepKey]>,
     scale: [u32; 2],
     gain: u32,
+    /// The digest of what the chain's shadow is cast from, where that is
+    /// not its input, and the alpha the shadow takes it at -- see
+    /// [`ChainInput::cast_from`].
+    cast: Option<(u64, u32)>,
 }
 
 impl StoreKey for ChainKey {
@@ -292,13 +297,17 @@ impl StoreKey for ChainKey {
 #[derive(Clone)]
 pub(crate) struct KeptChain {
     input: Arc<[u8]>,
+    /// What its shadow was cast from, where that was not its input.
+    cast: Option<Arc<[u8]>>,
     output: Image,
 }
 
 impl Stored for KeptChain {
-    /// The input kept beside the result, and the result's pixels.
+    /// The inputs kept beside the result, and the result's pixels.
     fn bytes(&self) -> usize {
-        self.input.len() + self.output.image_info().compute_min_byte_size()
+        self.input.len()
+            + self.cast.as_ref().map_or(0, |cast| cast.len())
+            + self.output.image_info().compute_min_byte_size()
     }
 }
 
@@ -315,6 +324,8 @@ static SEEN_CHAINS: LazyLock<Mutex<Seen<ChainKey>>> =
 pub(crate) struct ChainInput {
     key: ChainKey,
     input: Pixels,
+    /// What the chain's shadow is cast from, where that is not `input`.
+    cast: Option<Pixels>,
 }
 
 impl ChainInput {
@@ -362,9 +373,32 @@ impl ChainInput {
                 steps,
                 scale: [scale.x, scale.y].map(f32::to_bits),
                 gain: gain.to_bits(),
+                cast: None,
             },
             input,
+            cast: None,
         })
+    }
+
+    /// This input, its chain's shadow cast from `read` of `image`, a raster
+    /// image, at `alpha` rather than from the input itself -- see
+    /// `chain::Cast`. `read` is the same size as the input's own rectangle
+    /// and holds the same chain's draw, so it is judged as the input is:
+    /// two such inputs alike in both rectangles are alike to the byte.
+    /// `None` where `image`'s pixels are not in main memory.
+    pub(crate) fn cast_from(
+        mut self,
+        image: &Image,
+        read: IRect,
+        alpha: f32,
+    ) -> Option<Self> {
+        let cast = Pixels {
+            image: image.clone(),
+            rect: read,
+        };
+        self.key.cast = Some((digest_rows(&cast)?, alpha.to_bits()));
+        self.cast = Some(cast);
+        Some(self)
     }
 
     /// The result kept for this input, where the input it was made from is
@@ -375,7 +409,14 @@ impl ChainInput {
             return None;
         }
         let kept = CHAINS.lock().get(&self.key);
-        let same = kept.as_ref().map(|kept| rows_are(&self.input, &kept.input));
+        let same = kept.as_ref().map(|kept| {
+            rows_are(&self.input, &kept.input)
+                && match (&self.cast, &kept.cast) {
+                    (Some(cast), Some(bytes)) => rows_are(cast, bytes),
+                    (None, None) => true,
+                    _ => false,
+                }
+        });
         let found = kept
             .zip(same)
             .filter(|(_, same)| *same)
@@ -394,7 +435,21 @@ impl ChainInput {
         let Some(input) = rows_copied(&self.input) else {
             return;
         };
-        CHAINS.lock().put(self.key, KeptChain { input, output });
+        let cast = match &self.cast {
+            Some(cast) => match rows_copied(cast) {
+                Some(bytes) => Some(bytes),
+                None => return,
+            },
+            None => None,
+        };
+        CHAINS.lock().put(
+            self.key,
+            KeptChain {
+                input,
+                cast,
+                output,
+            },
+        );
     }
 
     /// [`Self::keep`], as at the key's second sighting.
@@ -955,6 +1010,46 @@ mod tests {
             .reinterpret_color_space(ColorSpace::new_srgb_linear())
             .expect("an image");
         assert!(!found(&linear, filter(Color::RED)), "another space");
+    }
+
+    #[test]
+    fn a_shadow_cast_from_another_layer_misses_on_any_change_to_it() {
+        // A shadow cast from a layer of its own -- see `chain::Cast` -- is
+        // judged by that layer's region and the alpha it is taken at too,
+        // to the byte: inputs alike in their own pixels and digest are told
+        // apart by what their shadows are cast from.
+        let shadow = Step::Shadow {
+            offset: Vector::new(1.0, 2.0),
+            sigma: 2.0,
+            colour: Color4f::new(0.0, 0.0, 0.0, 1.0),
+            space: ColorSpace::new_srgb(),
+            shadow_only: false,
+        };
+        let steps = [shadow];
+        let scale = Vector::new(1.0, 1.0);
+        let whole = IRect::from_size(image(0).dimensions());
+        let input = |cast: Option<(u8, f32)>| {
+            let input =
+                ChainInput::of(&image(60), &steps, scale, 1.0).expect("a key");
+            match cast {
+                Some((fill, alpha)) => {
+                    input.cast_from(&image(fill), whole, alpha).expect("a key")
+                }
+                None => input,
+            }
+        };
+        input(Some((61, 0.6))).keep_seen(image(6));
+        let found = |cast| input(cast).kept().is_some();
+        assert!(found(Some((61, 0.6))), "its own key missed");
+        assert!(!found(Some((62, 0.6))), "another cast");
+        assert!(!found(Some((61, 0.5))), "another alpha");
+        assert!(!found(None), "no cast");
+        SHARED.set(true);
+        let (kept, other) = (input(Some((61, 0.6))), input(Some((63, 0.6))));
+        SHARED.set(false);
+        assert_eq!(kept.key, other.key, "the control");
+        kept.keep_seen(image(7));
+        assert!(other.kept().is_none(), "another cast, one digest");
     }
 
     #[test]
