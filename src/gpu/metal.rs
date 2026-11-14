@@ -83,6 +83,15 @@ impl MetalEngine {
         Self::probed().clone()
     }
 
+    /// Whether the probe has run and found no GPU context -- see
+    /// [`Self::probed`]: `false` where it has not run, since asking would run
+    /// it. Once it has, the answer holds for the process.
+    pub fn probed_without_gpu() -> bool {
+        MTL_STATUS
+            .get()
+            .is_some_and(|status| status["renderer"] != "GPU")
+    }
+
     /// The status, probed the first time it is asked for: whether a context
     /// can be made, and what it runs on. Set once and never written again
     /// -- `MTL_STATUS` is a `OnceLock` nothing else touches -- so what it says

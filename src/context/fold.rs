@@ -25,17 +25,12 @@ use skia_safe::{
     TileMode,
 };
 
-use crate::{pixels::PixelColorSpace, started};
+use crate::{cache_map::GOLDEN_RATIO_64, pixels::PixelColorSpace, started};
 
 /// How many folds a thread keeps: a slot each, the slot taken from a hash of
 /// the key. A power of two, so that the hash's top bits name a slot.
 const FOLDS_KEPT: usize = 4096;
 const _: () = assert!(FOLDS_KEPT.is_power_of_two());
-
-/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier
-/// for hashing by multiplication (TAOCP vol. 3, section 6.4), whose top bits
-/// spread keys that differ only in their low ones.
-const GOLDEN_RATIO_64: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// What a fold depends on: the page's space; the filter, by its identity
 /// (`PageFilter::identity`), which no other filter takes; the flat colour

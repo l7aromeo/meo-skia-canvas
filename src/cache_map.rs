@@ -44,6 +44,13 @@ pub(crate) type CacheMap<K, V> = HashMap<K, V, CacheHasher>;
 /// A `HashSet` for a cache of the crate's own lookups -- see [`CacheMap`].
 pub(crate) type CacheSet<T> = HashSet<T, CacheHasher>;
 
+/// 2^64 divided by the golden ratio, rounded to odd: Knuth's multiplier for
+/// hashing by multiplication (The Art of Computer Programming, vol. 3,
+/// section 6.4), whose product carries every bit of a key into its top
+/// bits -- the ones [`KeptSets`] and the context's direct-mapped tables
+/// take a slot from.
+pub(crate) const GOLDEN_RATIO_64: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// A fixed number of a lookup's answers, `SETS` sets of `WAYS`, each answer
 /// filed in the set its key's hash names: a set holds its last `WAYS`
 /// answers, the one last filed first, and an answer filed into a full set
@@ -85,11 +92,22 @@ impl<K, V, const SETS: usize, const WAYS: usize> KeptSets<K, V, SETS, WAYS> {
         K: Borrow<Q>,
         Q: PartialEq + ?Sized,
     {
+        self.find(hash, |kept| kept.borrow() == key)
+    }
+
+    /// The answer kept for the key `is_key` accepts, in the set `hash`
+    /// names: for a key compared with what it was made from rather than
+    /// with a key built for the lookup.
+    pub(crate) fn find(
+        &self,
+        hash: u64,
+        is_key: impl Fn(&K) -> bool,
+    ) -> Option<&V> {
         self.entries
             .get(Self::set(hash))?
             .iter()
             .flatten()
-            .find(|(kept, _)| kept.borrow() == key)
+            .find(|(kept, _)| is_key(kept))
             .map(|(_, value)| value)
     }
 

@@ -1,14 +1,14 @@
+use std::sync::Arc;
+
 use skia_safe::{
-    Color4f, Point as SkPoint, Shader as SkShader, TileMode,
-    gradient::{
-        Colors as GradientColors, Gradient as SkGradient, Interpolation,
-        interpolation, shaders as gradient_shaders,
-    },
+    Color4f, Point as SkPoint, Shader as SkShader,
+    gradient::{Interpolation, interpolation},
     shaders as noise_shaders,
 };
 
 use crate::{
     color::{RgbaLinear, linear_srgb_color_space},
+    context::exact_gradient::{Geometry, GradientSpec},
     error::Error,
     export::VectorFeatures,
     geometry::Point,
@@ -414,6 +414,10 @@ pub struct Shader {
     /// out. Linear, radial and two-point conical gradients are paint servers
     /// SVG names; a sweep gradient and either noise shader are not.
     pub(crate) features: VectorFeatures,
+    /// What a gradient is made from, so that a GPU canvas can draw it in the
+    /// CPU's bytes -- see [`GradientSpec::exact`]. `None` for the noise
+    /// shaders.
+    pub(crate) gradient: Option<Arc<GradientSpec>>,
 }
 
 impl std::fmt::Debug for Shader {
@@ -423,6 +427,23 @@ impl std::fmt::Debug for Shader {
 }
 
 impl Shader {
+    /// The shader `spec` describes, refused as a `what` gradient Skia could
+    /// not build.
+    fn gradient(
+        spec: GradientSpec,
+        what: &str,
+        features: VectorFeatures,
+    ) -> Result<Self, Error> {
+        let inner = spec.native().ok_or_else(|| Error::InvalidGradient {
+            reason: format!("skia could not build {what} gradient"),
+        })?;
+        Ok(Self {
+            inner,
+            features,
+            gradient: Some(Arc::new(spec)),
+        })
+    }
+
     /// Validates `stops` and produces the unpremultiplied `Color4f` list,
     /// position list, and interpolation config shared by every gradient
     /// factory.
@@ -528,28 +549,24 @@ impl Shader {
         let interpolation = interpolation.into();
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation)?;
-        // The stops are tagged linear sRGB: untagged, Skia reads them as
-        // already in the destination's space.
-        let stop_colors = GradientColors::new(
-            &colors,
-            Some(positions.as_slice()),
-            TileMode::Clamp,
-            Some(linear_srgb_color_space()),
-        );
-        let gradient = SkGradient::new(stop_colors, interp);
-        let shader = gradient_shaders::linear_gradient(
-            (SkPoint::new(start.x, start.y), SkPoint::new(end.x, end.y)),
-            &gradient,
-            None,
+        Self::gradient(
+            GradientSpec {
+                geometry: Geometry::Linear {
+                    start: SkPoint::new(start.x, start.y),
+                    end: SkPoint::new(end.x, end.y),
+                },
+                local: None,
+                colors,
+                positions,
+                // The stops are tagged linear sRGB: untagged, Skia reads them
+                // as already in the destination's space.
+                color_space: linear_srgb_color_space(),
+                space: interpolation.space,
+                interpolation: interp,
+            },
+            "linear",
+            interpolation.space.vector_features(),
         )
-        .ok_or_else(|| Error::InvalidGradient {
-            reason: "skia could not build linear gradient".to_string(),
-        })?;
-        let shader = interpolation.space.in_working_space(shader)?;
-        Ok(Self {
-            inner: shader,
-            features: interpolation.space.vector_features(),
-        })
     }
 
     /// Radial gradient centered at `center` with the given `radius`.
@@ -571,26 +588,24 @@ impl Shader {
         let interpolation = interpolation.into();
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation)?;
-        let stop_colors = GradientColors::new(
-            &colors,
-            Some(positions.as_slice()),
-            TileMode::Clamp,
-            Some(linear_srgb_color_space()),
-        );
-        let gradient = SkGradient::new(stop_colors, interp);
-        let shader = gradient_shaders::radial_gradient(
-            (SkPoint::new(center.x, center.y), radius),
-            &gradient,
-            None,
+        Self::gradient(
+            GradientSpec {
+                geometry: Geometry::Radial {
+                    center: SkPoint::new(center.x, center.y),
+                    radius,
+                },
+                local: None,
+                colors,
+                positions,
+                // The stops are tagged linear sRGB: untagged, Skia reads them
+                // as already in the destination's space.
+                color_space: linear_srgb_color_space(),
+                space: interpolation.space,
+                interpolation: interp,
+            },
+            "radial",
+            interpolation.space.vector_features(),
         )
-        .ok_or_else(|| Error::InvalidGradient {
-            reason: "skia could not build radial gradient".to_string(),
-        })?;
-        let shader = interpolation.space.in_working_space(shader)?;
-        Ok(Self {
-            inner: shader,
-            features: interpolation.space.vector_features(),
-        })
     }
 
     /// Sweep (angular / conic) gradient around `center`, sweeping from
@@ -614,27 +629,25 @@ impl Shader {
         let interpolation = interpolation.into();
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation)?;
-        let stop_colors = GradientColors::new(
-            &colors,
-            Some(positions.as_slice()),
-            TileMode::Clamp,
-            Some(linear_srgb_color_space()),
-        );
-        let gradient = SkGradient::new(stop_colors, interp);
-        let shader = gradient_shaders::sweep_gradient(
-            SkPoint::new(center.x, center.y),
-            (start_angle, end_angle),
-            &gradient,
-            None,
+        Self::gradient(
+            GradientSpec {
+                geometry: Geometry::Sweep {
+                    center: SkPoint::new(center.x, center.y),
+                    start: start_angle,
+                    end: end_angle,
+                },
+                local: None,
+                colors,
+                positions,
+                // The stops are tagged linear sRGB: untagged, Skia reads them
+                // as already in the destination's space.
+                color_space: linear_srgb_color_space(),
+                space: interpolation.space,
+                interpolation: interp,
+            },
+            "sweep",
+            VectorFeatures::EXOTIC_SHADER,
         )
-        .ok_or_else(|| Error::InvalidGradient {
-            reason: "skia could not build sweep gradient".to_string(),
-        })?;
-        let shader = interpolation.space.in_working_space(shader)?;
-        Ok(Self {
-            inner: shader,
-            features: VectorFeatures::EXOTIC_SHADER,
-        })
     }
 
     /// Two-point conical (two-circle) gradient between a start circle `(start,
@@ -662,28 +675,26 @@ impl Shader {
         let interpolation = interpolation.into();
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation)?;
-        let stop_colors = GradientColors::new(
-            &colors,
-            Some(positions.as_slice()),
-            TileMode::Clamp,
-            Some(linear_srgb_color_space()),
-        );
-        let gradient = SkGradient::new(stop_colors, interp);
-        let shader = gradient_shaders::two_point_conical_gradient(
-            (SkPoint::new(start.x, start.y), start_radius),
-            (SkPoint::new(end.x, end.y), end_radius),
-            &gradient,
-            None,
+        Self::gradient(
+            GradientSpec {
+                geometry: Geometry::Conical {
+                    start: SkPoint::new(start.x, start.y),
+                    start_radius,
+                    end: SkPoint::new(end.x, end.y),
+                    end_radius,
+                },
+                local: None,
+                colors,
+                positions,
+                // The stops are tagged linear sRGB: untagged, Skia reads them
+                // as already in the destination's space.
+                color_space: linear_srgb_color_space(),
+                space: interpolation.space,
+                interpolation: interp,
+            },
+            "two-point conical",
+            interpolation.space.vector_features(),
         )
-        .ok_or_else(|| Error::InvalidGradient {
-            reason: "skia could not build two-point conical gradient"
-                .to_string(),
-        })?;
-        let shader = interpolation.space.in_working_space(shader)?;
-        Ok(Self {
-            inner: shader,
-            features: interpolation.space.vector_features(),
-        })
     }
 
     /// Procedural fractal (Perlin) noise -- film grain, clouds, organic
@@ -715,6 +726,7 @@ impl Shader {
         Ok(Self {
             inner: shader,
             features: VectorFeatures::EXOTIC_SHADER,
+            gradient: None,
         })
     }
 
@@ -745,6 +757,7 @@ impl Shader {
         Ok(Self {
             inner: shader,
             features: VectorFeatures::EXOTIC_SHADER,
+            gradient: None,
         })
     }
 }
