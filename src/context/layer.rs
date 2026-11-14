@@ -46,7 +46,10 @@ use crate::{
     cache_map::{GOLDEN_RATIO_64, KeptSets},
     context::{
         blur_mask,
-        chain::{self, Depth, Step},
+        chain::{
+            self, Depth, Step,
+            pool::{self, LayerScope},
+        },
         chain_cache, coverage_of,
         exact_gradient::{Exact, GradientSpec},
         faint::{Faint, composited},
@@ -416,6 +419,13 @@ thread_local! {
     /// off, every run takes the GPU's own route, the reference the bytes a
     /// batch leaves beside its runs are held to.
     pub(crate) static BACKDROP_ROUTE: Cell<bool> = const { Cell::new(true) };
+    /// Whether [`played_on_a_root`] plays a layer's entries on a surface of
+    /// their own on this thread: off, every layer's entries play inside it,
+    /// where their runs are drawn by the GPU.
+    pub(crate) static OWN_ROOTS: Cell<bool> = const { Cell::new(true) };
+    /// How many layers' entries [`played_on_a_root`] has played on a
+    /// surface of their own on this thread.
+    pub(crate) static ROOTS_PLAYED: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How many of a [`DeferredPicture`]'s recordings were made: those played as
@@ -2211,7 +2221,9 @@ thread_local! {
 /// Counts a layer [`Group::playback_within`] opens on a canvas around the
 /// entries it plays, for as long as it lives, so that an entry can tell
 /// whether the pixels under it are the canvas's own: `SkCanvas::readPixels`
-/// reads the canvas's root device, never an open layer.
+/// reads the canvas's root device, never an open layer. A layer whose
+/// entries play on a surface of their own counts none -- see
+/// [`played_on_a_root`].
 struct InLayer;
 
 impl InLayer {
@@ -2229,6 +2241,25 @@ impl InLayer {
 impl Drop for InLayer {
     fn drop(&mut self) {
         IN_LAYERS.set(IN_LAYERS.get().saturating_sub(1));
+    }
+}
+
+/// Counts no layer open for as long as it lives, and the layers open before
+/// once it goes: entries played onto a surface of their own -- see
+/// [`played_on_a_root`] -- are on that surface's root device, which
+/// `readPixels` reads, whatever is open on the canvas the surface is copied
+/// onto.
+struct OwnRoot(u32);
+
+impl OwnRoot {
+    fn enter() -> Self {
+        OwnRoot(IN_LAYERS.replace(0))
+    }
+}
+
+impl Drop for OwnRoot {
+    fn drop(&mut self) {
+        IN_LAYERS.set(self.0);
     }
 }
 
@@ -4170,14 +4201,24 @@ impl Group {
                     self.confine(canvas, target, &to_device);
                 }
                 canvas.set_matrix(&entries.into());
-                let in_layer = InLayer::enter();
-                play_entries(
-                    &self.contents.layers,
-                    &self.contents.features,
-                    canvas,
-                    target,
-                );
-                drop(in_layer);
+                // A layer seeded from what lies beneath it, or filtered,
+                // holds more than its entries draw, which a root of their
+                // own would not.
+                let rooted = target == Target::Pixels
+                    && !filtered
+                    && rec.backdrop.is_none()
+                    && rec.pixels_backdrop.is_none()
+                    && played_on_a_root(canvas, &self.contents);
+                if !rooted {
+                    let in_layer = InLayer::enter();
+                    play_entries(
+                        &self.contents.layers,
+                        &self.contents.features,
+                        canvas,
+                        target,
+                    );
+                    drop(in_layer);
+                }
                 if let Some(crop) = crop {
                     canvas.reset_matrix();
                     crop.multiply(canvas);
@@ -4187,6 +4228,99 @@ impl Group {
         }
         canvas.restore();
     }
+}
+
+/// Plays `contents` into the layer open on `canvas` by way of a surface of
+/// their own, where they hold a run drawn on the CPU over the pixels it
+/// reads -- see [`replayed_on_their_backdrop`] -- which inside the layer
+/// could not read them: `SkCanvas::readPixels` reads the canvas's root
+/// device, never an open layer, and the run would be drawn by the GPU
+/// itself, its overlapping glyphs blended as one. Whether it played them;
+/// where it did not, nothing was drawn.
+///
+/// The surface covers the layer's bounds -- the canvas's device clip
+/// bounds while the layer is open -- in the canvas's colour type and space,
+/// made by the canvas's device at the page's sample count, and taken from
+/// and given back to the layers [`chain::pool`] keeps -- see
+/// [`chain::layer_surface`]. The entries are played on it under the
+/// canvas's transform, moved to the layer's origin, and see no layer open:
+/// on it they play as on a page, a canvas drawn into another or a layer
+/// within them taking a surface of its own in turn. Its pixels are then
+/// copied into the layer, which composites as it always does, so the
+/// layer's paint, its clip and its bounds stay Skia's. Skia clips nothing
+/// drawn inside a layer by the clip the layer opened under -- the new
+/// device's clip starts wide open, `SkCanvas::internalSaveLayer` -- and
+/// applies that clip where the layer is drawn back, so an outer clip, an
+/// anti-aliased path's included, shapes the copy as it shaped the entries.
+///
+/// What it costs past the layer: the surface, a copy of the layer's size,
+/// and the read backs its runs take, which a page drawn directly pays as
+/// well. Where the device makes no surface, the surface is memory, and the
+/// entries play there as on a CPU page, the copy then uploading it.
+///
+/// Only on the GPU, which alone draws such a run over a read back, and not
+/// under a perspective, where it is not read back either.
+fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
+    #[cfg(test)]
+    if !OWN_ROOTS.get() {
+        return false;
+    }
+    let device = canvas.local_to_device_as_3x3();
+    if !blur_mask::on_gpu(canvas)
+        || device.has_perspective()
+        || !reads_the_page(&contents.layers)
+    {
+        return false;
+    }
+    let Some(bounds) = canvas.device_clip_bounds() else {
+        return false;
+    };
+    let Some((mut surface, key)) =
+        chain::layer_surface(canvas, Depth::Bytes, bounds)
+    else {
+        return false;
+    };
+    let origin = Point::new(bounds.left as f32, bounds.top as f32);
+    {
+        let root = surface.canvas();
+        root.set_matrix(
+            &Matrix::concat(&Matrix::translate(-origin), &device).into(),
+        );
+        let _root = OwnRoot::enter();
+        // A chain on the surface keeps its layers as it would on the canvas.
+        let _scope = pool::samples(canvas)
+            .map(|samples| LayerScope::open(root, samples));
+        play_entries(
+            &contents.layers,
+            &contents.features,
+            root,
+            Target::Pixels,
+        );
+    }
+    #[cfg(test)]
+    ROOTS_PLAYED.set(ROOTS_PLAYED.get() + 1);
+    // Drawn source-over onto what the layer holds there, which is nothing,
+    // so the layer takes the surface's pixels as they are.
+    let played = surface.image_snapshot();
+    canvas.save();
+    canvas.reset_matrix();
+    canvas.draw_image(&played, origin, None);
+    canvas.restore();
+    drop(played);
+    if let Some(key) = key {
+        pool::keep(key, surface);
+    }
+    true
+}
+
+/// Whether `entries` hold a run drawn on the CPU over the pixels it reads --
+/// see [`read_on_the_cpu`] -- themselves or in a group they hold, whose layer
+/// [`played_on_a_root`] plays in turn.
+fn reads_the_page(entries: &[Layer]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Layer::Group(group) => reads_the_page(&group.contents.layers),
+        entry => read_on_the_cpu(entry).is_some(),
+    })
 }
 
 /// Part of a run: what was drawn under one frame of the page -- one clip

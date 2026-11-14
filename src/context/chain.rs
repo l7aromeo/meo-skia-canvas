@@ -1312,6 +1312,11 @@ thread_local! {
     /// by.
     pub(crate) static MADE_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
+    /// Whether the canvas's device makes no layer for [`layer_surface`] on
+    /// this thread, as where `SkCanvas::makeSurface` returns null, so that a
+    /// test can hold what is drawn on the memory it falls back to.
+    pub(crate) static NO_DEVICE_LAYERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// The most pixels a chain [`plan`] on this thread has worked on, which
     /// the tests of a chain's layer size count by.
     pub(crate) static LARGEST_REGION: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
@@ -1544,7 +1549,7 @@ fn draw_from_the_origin(
 /// kept: its chains take the CPU's route, whose steps read the layer where it
 /// lies. A layer the page made would be a Graphite texture, which nothing on
 /// that route reads.
-fn layer_surface(
+pub(crate) fn layer_surface(
     canvas: &SkCanvas,
     depth: Depth,
     drawn: IRect,
@@ -1556,6 +1561,10 @@ fn layer_surface(
                 .map(|raster| (raster, None));
         }
         RenderingEngine::GPU | RenderingEngine::CPU => {}
+    }
+    #[cfg(test)]
+    if NO_DEVICE_LAYERS.get() {
+        return started::raster(&info, None, None).map(|raster| (raster, None));
     }
     let key = pool::key(canvas, &info);
     if let Some(mut kept) = key.as_ref().and_then(pool::take) {

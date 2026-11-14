@@ -6699,6 +6699,691 @@ mod overlapping_glyph_tests {
         );
     }
 
+    /// What a page drawn into another holds besides its fills: runs of
+    /// overlapping glyphs under a blend read in the shader, each plain,
+    /// casting a shadow, dyed by a canvas pattern, or inside a layer of the
+    /// page's own that holds the fills as well, so that it is opaque: the
+    /// GPU composites a translucent layer a level from the CPU whatever it
+    /// holds.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Nested {
+        Plain,
+        Shadowed,
+        Patterned,
+        Layered,
+    }
+
+    /// How a page is drawn into another: at an offset and a scale, under a
+    /// clip, and at a `globalAlpha`, each where it is not `None`; and inside
+    /// a layer seeded from what lies beneath it through a blur, where
+    /// `backdrop` says, which the page then covers whole.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Into {
+        offset: Option<(f32, f32)>,
+        scale: Option<f32>,
+        clip: Option<(f32, f32, f32)>,
+        alpha: Option<f32>,
+        backdrop: bool,
+    }
+
+    /// A page of `nested` runs under `blend` over two fills, on the GPU
+    /// where `gpu` says, unread.
+    fn nested_page(blend: BlendMode, gpu: bool, nested: Nested) -> Canvas {
+        const LINES: usize = 4;
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(gpu);
+        let mut tile = Canvas::new(8.0, 8.0);
+        tile.set_gpu(false);
+        {
+            let ctx = tile.context();
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+            ctx.set_fill_style_css("rgba(160,40,90,0.7)")
+                .expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let ctx = canvas.context();
+        if nested == Nested::Layered {
+            ctx.save_layer();
+        }
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+        ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+        ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+        ctx.set_global_composite_operation(blend);
+        assert!(ctx.set_font_css("16px OverlapOswald"));
+        ctx.set_letter_spacing(-12.0);
+        match nested {
+            Nested::Patterned => {
+                let pattern = ctx.create_pattern_from_canvas(
+                    &mut tile,
+                    PatternRepeat::Repeat,
+                );
+                ctx.set_fill_pattern(&pattern);
+            }
+            _ => {
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+            }
+        }
+        if nested == Nested::Shadowed {
+            ctx.set_shadow_color_css("rgba(10,10,10,0.6)")
+                .expect("a colour");
+            ctx.set_shadow_blur(3.0);
+            ctx.set_shadow_offset(2.0, 3.0);
+        }
+        for line in 0..LINES {
+            let y = 16.0 + line as f32 * 18.0;
+            ctx.fill_text(OSWALD.1, 10.0, y, None);
+        }
+        if nested == Nested::Layered {
+            ctx.restore();
+        }
+        canvas
+    }
+
+    /// A CPU canvas holding `source`'s bytes as pixels: what a canvas drawn
+    /// in composites, where the composite's own rounding is not the CPU's.
+    fn copy_of(source: &mut Canvas) -> Canvas {
+        let data = source
+            .context()
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back");
+        let mut copy = Canvas::new(W, H);
+        copy.set_gpu(false);
+        copy.context()
+            .put_image_data(&data, 0.0, 0.0)
+            .expect("the bytes fit");
+        copy
+    }
+
+    /// `source` drawn into a fresh canvas `into` places it, on the GPU where
+    /// `gpu` says, read at `msaa`: its bytes, then how many layers the read
+    /// played on a root of their own and how many read backs it took.
+    fn drawn_into(
+        source: &mut Canvas,
+        gpu: bool,
+        into: Into,
+        msaa: Option<usize>,
+    ) -> (Vec<u8>, usize, usize) {
+        use crate::context::layer::{BACKDROPS_READ, ROOTS_PLAYED};
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(200,200,210)")
+            .expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W, H);
+        if let Some((x, y, radius)) = into.clip {
+            ctx.begin_path();
+            ctx.arc(x, y, radius, 0.0, TAU, false)
+                .expect("a positive radius");
+            ctx.clip(FillRule::NonZero);
+        }
+        if let Some((x, y)) = into.offset {
+            ctx.translate(x, y);
+        }
+        if let Some(scale) = into.scale {
+            ctx.scale(scale, scale);
+        }
+        if let Some(alpha) = into.alpha {
+            ctx.set_global_alpha(alpha);
+        }
+        if into.backdrop {
+            let blur = ImageFilter::blur(2.0, 2.0, None, None, None)
+                .expect("a filter");
+            ctx.save_layer_with(1.0, None, Some(&blur));
+        }
+        ctx.draw_canvas(source, 0.0, 0.0);
+        if into.backdrop {
+            ctx.restore();
+        }
+        let (roots, reads) = (ROOTS_PLAYED.get(), BACKDROPS_READ.get());
+        let export = ImageDataExport {
+            pixels: PixelExportOptions::default(),
+            msaa,
+            ..ImageDataExport::default()
+        };
+        let bytes = canvas
+            .to_image_data(None, &export)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        let engine = canvas.engine_kind();
+        assert_eq!(engine == EngineKind::Gpu, gpu, "drawn into {engine:?}");
+        (
+            bytes,
+            ROOTS_PLAYED.get() - roots,
+            BACKDROPS_READ.get() - reads,
+        )
+    }
+
+    /// A page of overlapping glyphs under a blend read in the shader, drawn
+    /// into a GPU canvas with `drawCanvas`, lands the bytes the same page
+    /// drawn into a CPU canvas does, under each of the 14 blends, from a CPU
+    /// page and a GPU page alike, at the origin, at an offset and at half
+    /// size, at every sample count: the group the source is filed as plays
+    /// its entries on a surface of their own -- see
+    /// `layer::played_on_a_root` -- where its runs are drawn on the CPU over
+    /// one read back, as on a page. Played inside the group's layer, which
+    /// cannot be read back, its runs are drawn by the GPU and land a level or
+    /// two off, which the scene is held to as well, so that it cannot pass
+    /// without the surface.
+    #[test]
+    fn a_page_drawn_into_a_gpu_canvas_lands_the_cpu_pages_bytes() {
+        use crate::context::layer::OWN_ROOTS;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let placements = [
+            Into::default(),
+            Into {
+                offset: Some((13.0, 7.0)),
+                ..Into::default()
+            },
+            Into {
+                scale: Some(0.5),
+                ..Into::default()
+            },
+        ];
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            register();
+            forget_laid_out();
+            for into in placements {
+                let (cpu, ..) = drawn_into(
+                    &mut nested_page(blend, false, Nested::Plain),
+                    false,
+                    into,
+                    None,
+                );
+                for (source_gpu, msaa) in [false, true]
+                    .into_iter()
+                    .flat_map(|gpu| [None, Some(1), Some(4)].map(|n| (gpu, n)))
+                {
+                    let case = format!(
+                        "{blend:?} {into:?} source on the GPU {source_gpu}, msaa {msaa:?}"
+                    );
+                    let (gpu, roots, reads) = drawn_into(
+                        &mut nested_page(blend, source_gpu, Nested::Plain),
+                        true,
+                        into,
+                        msaa,
+                    );
+                    if gpu != cpu {
+                        wrong.push(format!(
+                            "{case}: {} levels from the CPU",
+                            most_apart(&gpu, &cpu)
+                        ));
+                    }
+                    if (roots, reads) != (1, 1) {
+                        wrong.push(format!(
+                            "{case}: {roots} roots, {reads} read backs"
+                        ));
+                    }
+                }
+            }
+            OWN_ROOTS.set(false);
+            let (inside, roots, reads) = drawn_into(
+                &mut nested_page(blend, false, Nested::Plain),
+                true,
+                Into::default(),
+                None,
+            );
+            OWN_ROOTS.set(true);
+            let (cpu, ..) = drawn_into(
+                &mut nested_page(blend, false, Nested::Plain),
+                false,
+                Into::default(),
+                None,
+            );
+            if inside == cpu || (roots, reads) != (0, 0) {
+                wrong.push(format!(
+                    "{blend:?} inside the layer: {} levels from the CPU, \
+                     {roots} roots, {reads} read backs",
+                    most_apart(&inside, &cpu)
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page drawn into a GPU canvas lands the CPU's bytes where its runs
+    /// cast a shadow, are dyed by a canvas pattern or lie inside a layer of
+    /// the page's own, which then plays on a root of its own within the
+    /// group's; where the GPU's device makes no surface and the entries are
+    /// played on memory, as on a CPU page, with no read back; and inside a
+    /// layer with a backdrop, which plays inside it, around a root that
+    /// sees no layer open. Where the
+    /// canvas it is drawn into clips it by an anti-aliased circle over its
+    /// runs, or draws it through a `globalAlpha`, it lands the bytes of the
+    /// CPU page's pixels drawn into a GPU canvas the same way: the engines
+    /// cover a clip's edge differently and composite an alpha a level apart,
+    /// whatever is drawn. Skia clips nothing inside a layer by the clip it
+    /// opened under and applies that clip where the layer is drawn back, so
+    /// the clip shapes the surface's copy once, at its edge as inside it.
+    /// Played inside the layer instead, each case lands elsewhere, so that
+    /// none can pass without the surface.
+    #[test]
+    fn a_page_drawn_into_a_gpu_canvas_lands_the_cpu_pages_bytes_however_drawn()
+    {
+        use crate::context::{chain::NO_DEVICE_LAYERS, layer::OWN_ROOTS};
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        /// The circle the clipped case is drawn under, over the runs, its
+        /// centre and radius off the pixel grid.
+        const CIRCLE: (f32, f32, f32) = (40.3, 42.4, 30.6);
+        let clipped = Into {
+            clip: Some(CIRCLE),
+            ..Into::default()
+        };
+        let faint = Into {
+            alpha: Some(0.5),
+            ..Into::default()
+        };
+        let under = Into {
+            backdrop: true,
+            ..Into::default()
+        };
+        // Each case: what it draws, how, whether on memory, and the roots
+        // and read backs it takes -- two roots for runs in a layer of the
+        // page's own, one for the group and one for the layer within it.
+        let cases = [
+            ("shadowed", Nested::Shadowed, Into::default(), false, (1, 1)),
+            (
+                "patterned",
+                Nested::Patterned,
+                Into::default(),
+                false,
+                (1, 1),
+            ),
+            ("layered", Nested::Layered, Into::default(), false, (2, 1)),
+            ("on memory", Nested::Plain, Into::default(), true, (1, 0)),
+            ("under a backdrop", Nested::Plain, under, false, (1, 1)),
+            ("clipped", Nested::Plain, clipped, false, (1, 1)),
+            ("faint", Nested::Plain, faint, false, (1, 1)),
+        ];
+        let mut wrong = vec![];
+        for blend in [Multiply, Hue] {
+            register();
+            forget_laid_out();
+            for (name, nested, into, memory, counts) in cases {
+                // Where the GPU composites the group differently from the
+                // CPU whatever it holds -- through an alpha, and under an
+                // anti-aliased clip's edge -- the reference is the CPU page's
+                // pixels drawn into a GPU canvas the same way. Under the clip
+                // the copy carries a white fill under `multiply`, which leaves
+                // each pixel as it is and holds a blend, as the page does, so
+                // that `drawCanvas` files it through a layer of its own as it
+                // files the page and the clip's edge is covered where that
+                // layer is drawn back in both. A plain copy, drawn in without
+                // a layer, parts from the page on the edge by up to 46 levels.
+                let composited = matches!(name, "faint" | "clipped");
+                let mut reference = match composited {
+                    true => copy_of(&mut nested_page(blend, false, nested)),
+                    false => nested_page(blend, false, nested),
+                };
+                if name == "clipped" {
+                    let ctx = reference.context();
+                    ctx.set_global_composite_operation(Multiply);
+                    ctx.set_fill_style_css("white").expect("a colour");
+                    ctx.fill_rect(0.0, 0.0, W, H);
+                }
+                let (expected, ..) =
+                    drawn_into(&mut reference, composited, into, None);
+                let lands = |bytes: &[u8]| bytes == expected;
+                for roots in [true, false] {
+                    OWN_ROOTS.set(roots);
+                    NO_DEVICE_LAYERS.set(memory);
+                    let (gpu, played, reads) = drawn_into(
+                        &mut nested_page(blend, false, nested),
+                        true,
+                        into,
+                        None,
+                    );
+                    NO_DEVICE_LAYERS.set(false);
+                    OWN_ROOTS.set(true);
+                    match roots {
+                        true if !lands(&gpu) => wrong.push(format!(
+                            "{blend:?} {name}: {} levels off",
+                            most_apart(&gpu, &expected)
+                        )),
+                        true if (played, reads) != counts => {
+                            wrong.push(format!(
+                                "{blend:?} {name}: {played} roots, {reads} \
+                                 read backs, not {counts:?}"
+                            ))
+                        }
+                        false if lands(&gpu) => wrong.push(format!(
+                            "{blend:?} {name}: lands inside the layer too"
+                        )),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Runs inside a layer on a GPU page land the CPU page's bytes, under
+    /// each of the 14 blends: the layer's entries play on a root of their
+    /// own -- see `layer::played_on_a_root` -- as a page drawn in does.
+    /// Played inside the layer, the runs land elsewhere.
+    #[test]
+    fn runs_in_a_layer_on_a_gpu_page_land_the_cpu_pages_bytes() {
+        use crate::context::layer::{BACKDROPS_READ, OWN_ROOTS, ROOTS_PLAYED};
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            register();
+            forget_laid_out();
+            let read = |gpu: bool| {
+                let mut canvas = nested_page(blend, gpu, Nested::Layered);
+                let counted = (ROOTS_PLAYED.get(), BACKDROPS_READ.get());
+                let bytes = canvas
+                    .context()
+                    .get_image_data(0.0, 0.0, W, H)
+                    .expect("the canvas reads back")
+                    .pixels()
+                    .to_vec();
+                let engine = canvas.engine_kind();
+                assert_eq!(
+                    engine == EngineKind::Gpu,
+                    gpu,
+                    "read on {engine:?}"
+                );
+                let counts = (
+                    ROOTS_PLAYED.get() - counted.0,
+                    BACKDROPS_READ.get() - counted.1,
+                );
+                (bytes, counts)
+            };
+            let (cpu, _) = read(false);
+            let (gpu, counts) = read(true);
+            OWN_ROOTS.set(false);
+            let (inside, _) = read(true);
+            OWN_ROOTS.set(true);
+            if gpu != cpu {
+                wrong.push(format!(
+                    "{blend:?}: {} levels from the CPU",
+                    most_apart(&gpu, &cpu)
+                ));
+            }
+            if counts != (1, 1) {
+                wrong.push(format!(
+                    "{blend:?}: {counts:?} roots and read backs"
+                ));
+            }
+            if inside == cpu {
+                wrong.push(format!("{blend:?}: lands inside the layer too"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page drawn into a GPU canvas again and again makes no more layers
+    /// than the same page drawn on a GPU canvas directly, once the first
+    /// reads have made the surface its entries play on: that surface, and
+    /// the layers a chain takes on it, are kept as a page's own chains'
+    /// layers are -- see `chain::pool`. The page casts its runs' shadows,
+    /// which the CPU draws over the read back in layers of memory each read,
+    /// directly or not, and casts a fill's drop shadow on the GPU, whose
+    /// chain takes a GPU layer.
+    #[test]
+    fn a_page_drawn_into_a_gpu_canvas_keeps_its_layers() {
+        use crate::context::chain::MADE_LAYERS;
+        /// Reads that may make the layers before they are kept.
+        const WARM: usize = 2;
+        /// Reads that must make no more than the page directly.
+        const READS: usize = 3;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        register();
+        forget_laid_out();
+        let page = |gpu: bool| {
+            let mut canvas = nested_page(Multiply, gpu, Nested::Shadowed);
+            let ctx = canvas.context();
+            ctx.set_global_composite_operation(SourceOver);
+            ctx.set_shadow_color_css("transparent").expect("a colour");
+            ctx.set_filter_css("drop-shadow(2px 3px 3px black)")
+                .expect("a filter");
+            ctx.set_fill_style_css("rgb(160,40,90)").expect("a colour");
+            ctx.fill_rect(200.0, 40.0, 60.0, 40.0);
+            canvas
+        };
+        let made = |read: &mut dyn FnMut()| -> Vec<usize> {
+            (0..WARM + READS)
+                .map(|_| {
+                    let before = MADE_LAYERS.get();
+                    read();
+                    MADE_LAYERS.get() - before
+                })
+                .collect()
+        };
+        let nested = made(&mut || {
+            let (_, roots, _) =
+                drawn_into(&mut page(false), true, Into::default(), None);
+            assert_eq!(roots, 1, "a root a read");
+        });
+        let direct = made(&mut || {
+            let mut canvas = page(true);
+            canvas
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back");
+            assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a GPU page");
+        });
+        assert!(
+            zip(&nested, &direct).take(WARM).any(|(n, d)| n > d),
+            "nested {nested:?}, direct {direct:?}: the surface made"
+        );
+        assert_eq!(
+            nested[WARM..],
+            direct[WARM..],
+            "nested {nested:?}, direct {direct:?}"
+        );
+    }
+
+    /// A translucent gradient interpolated in Oklab, which the CPU draws in
+    /// floats, inside a layer on a GPU page that also holds a run drawn over
+    /// a read back, lands the CPU page's bytes: the layer's entries play on a
+    /// root of their own, where the gradient is drawn over a read back too,
+    /// as on the page. The same layer without the run plays inside the
+    /// layer, where the gradient is composited from a raster of its own a
+    /// level apart, as `docs/browser-differences.md` says; and played inside
+    /// the layer, the layer with the run lands apart as well.
+    #[test]
+    fn a_gradient_in_a_layer_holding_a_run_is_drawn_as_on_the_page() {
+        use crate::{
+            color::RgbaLinear,
+            context::layer::{BACKDROPS_READ, OWN_ROOTS, ROOTS_PLAYED},
+            geometry::Point,
+            shader::{GradientColorSpace, GradientInterpolation, GradientStop},
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        register();
+        forget_laid_out();
+        let page = |gpu: bool, run: bool| {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.save_layer();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            let stops = [
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::from_srgb8(200, 40, 90, 0.6),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::from_srgb8(30, 120, 200, 0.4),
+                },
+            ];
+            let gradient = Shader::radial_gradient(
+                Point::new(200.0, 80.0),
+                60.0,
+                &stops,
+                GradientInterpolation::new(GradientColorSpace::Oklab),
+            )
+            .expect("a gradient");
+            ctx.set_fill_shader(&gradient);
+            ctx.fill_rect(140.0, 20.0, 120.0, 120.0);
+            if run {
+                ctx.set_global_composite_operation(Multiply);
+                assert!(ctx.set_font_css("16px OverlapOswald"));
+                ctx.set_letter_spacing(-12.0);
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.fill_text(OSWALD.1, 10.0, 20.0, None);
+            }
+            ctx.restore();
+            let counted = (ROOTS_PLAYED.get(), BACKDROPS_READ.get());
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "read on {engine:?}");
+            let counts = (
+                ROOTS_PLAYED.get() - counted.0,
+                BACKDROPS_READ.get() - counted.1,
+            );
+            (bytes, counts)
+        };
+        // With the run: one root, read back for the gradient and the run.
+        let (cpu, _) = page(false, true);
+        let (gpu, counts) = page(true, true);
+        assert!(gpu == cpu, "{} levels from the CPU", most_apart(&gpu, &cpu));
+        assert_eq!(counts, (1, 2), "roots and read backs");
+        OWN_ROOTS.set(false);
+        let (inside, _) = page(true, true);
+        OWN_ROOTS.set(true);
+        assert!(
+            inside != cpu,
+            "inside the layer, the run's page lands apart"
+        );
+        // Without it: no root, and the gradient composited a level apart.
+        let (cpu, _) = page(false, false);
+        let (gpu, counts) = page(true, false);
+        assert_eq!(counts, (0, 0), "no root without a run");
+        assert!(gpu != cpu, "the gradient composited inside the layer");
+        assert!(most_apart(&gpu, &cpu) <= 1, "a level apart at most");
+    }
+
+    /// A page holding a blend but nothing drawn over a read back, a page
+    /// whose runs are drawn under a filter, which draws them whole, a page
+    /// drawn in through a filter, whose group runs a chain, a page drawn in
+    /// through an image filter, whose layer Skia may make in a space of the
+    /// filter's own, and runs in a layer with a backdrop, which seeds the
+    /// layer from what lies beneath it, play on no root of their own.
+    #[test]
+    fn a_page_drawn_into_a_gpu_canvas_takes_a_root_only_for_a_run_it_reads() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        register();
+        forget_laid_out();
+        let mut fills = Canvas::new(W, H);
+        fills.set_gpu(false);
+        {
+            let ctx = fills.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_rect(20.0, 20.0, 80.0, 40.0);
+        }
+        let (_, roots, reads) =
+            drawn_into(&mut fills, true, Into::default(), None);
+        assert_eq!((roots, reads), (0, 0), "a fill under a blend");
+        let mut filtered = Canvas::new(W, H);
+        filtered.set_gpu(false);
+        {
+            let ctx = filtered.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            ctx.set_filter_css("blur(1px)").expect("a filter");
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, 20.0, None);
+        }
+        let (_, roots, _) =
+            drawn_into(&mut filtered, true, Into::default(), None);
+        assert_eq!(roots, 0, "runs under a filter");
+        let mut source = nested_page(Multiply, false, Nested::Plain);
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        ctx.set_filter_css("blur(2px)").expect("a filter");
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+        let roots = crate::context::layer::ROOTS_PLAYED.get();
+        ctx.get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back");
+        assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a GPU canvas");
+        assert_eq!(
+            crate::context::layer::ROOTS_PLAYED.get() - roots,
+            0,
+            "drawn in through a filter"
+        );
+        let blur =
+            ImageFilter::blur(2.0, 2.0, None, None, None).expect("a filter");
+        let mut source = nested_page(Multiply, false, Nested::Plain);
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        ctx.set_image_filter(Some(&blur));
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+        let roots = crate::context::layer::ROOTS_PLAYED.get();
+        ctx.get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back");
+        assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a GPU canvas");
+        assert_eq!(
+            crate::context::layer::ROOTS_PLAYED.get() - roots,
+            0,
+            "drawn in through an image filter"
+        );
+        let backdrop = blur;
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W, H);
+        ctx.save_layer_with(1.0, None, Some(&backdrop));
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css("16px OverlapOswald"));
+        ctx.set_letter_spacing(-12.0);
+        ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+            .expect("a colour");
+        ctx.fill_text(OSWALD.1, 10.0, 20.0, None);
+        ctx.restore();
+        let roots = crate::context::layer::ROOTS_PLAYED.get();
+        ctx.get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back");
+        assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a GPU canvas");
+        assert_eq!(
+            crate::context::layer::ROOTS_PLAYED.get() - roots,
+            0,
+            "in a layer with a backdrop"
+        );
+    }
+
     /// A page recorded where the CPU plays it, and played on the GPU after
     /// its canvas is switched there, draws the bytes the CPU page draws.
     /// Its clips' runs were not bounded as they recorded -- see
