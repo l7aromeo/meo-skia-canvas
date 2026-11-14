@@ -10,7 +10,7 @@ use skia_safe::{
     AlphaType, Bitmap, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorSpace, ColorType, Data, Document, IRect, ISize, Image as SkImage,
     ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
-    PixelGeometry, Pixmap, Point, Rect, Size, Surface, SurfaceProps,
+    PixelGeometry, Pixmap, Point, Rect, RoundOut, Size, Surface, SurfaceProps,
     SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
@@ -420,19 +420,21 @@ pub struct PageRecorder {
     /// extends past an entry between them only where that entry's reach
     /// meets none of them -- see `layer::replayed_on_their_backdrop` -- so
     /// only here, and only where [`Self::plays_on_gpu`], does a clip's run
-    /// record with a bounding hierarchy -- see [`Run::bbh`] -- which trims
-    /// its picture to what it draws, and the one operation
-    /// [`Self::close_run`] files it as reaches no further. Played into the
-    /// page instead, each operation bounded on its own, the run's
-    /// operations are copied, then bounded again as the page is finished.
-    /// A run opened before the page held one is not bounded, which ends a
-    /// batch sooner and draws the same pixels.
+    /// record in its clip's bounds and close as a piece -- see [`Run::cull`]
+    /// -- whose reach is the clip, and what it draws within the clip is
+    /// found where a batch would end on the clip alone. Bounding every
+    /// run's operations as it closed cost a page of 500 clipped frames
+    /// after one kept run 10.8% of the main thread on the GPU, where that
+    /// page's one run needs no bound at all. A run opened before the page
+    /// held one is not bounded, which ends a batch sooner and draws the
+    /// same pixels.
     holds_reading_runs: bool,
     /// Whether the canvas the page belongs to plays it on the GPU, as its
     /// engine stands while it records -- see [`Self::set_plays_on_gpu`].
     /// Only a GPU playback reads what a clip's run reaches, to tell how far
-    /// a batch of runs drawn on the CPU extends, so a run is bounded only
-    /// here. A page recorded otherwise and played on the GPU later -- its
+    /// a batch of runs drawn on the CPU extends, so a run is bounded by its
+    /// clip and closes as a piece only here -- see [`Run::cull`]. A page
+    /// recorded otherwise and played on the GPU later -- its
     /// canvas switched to the GPU, or drawn into a GPU canvas -- ends its
     /// batches at its clipped draws, reading back more often for the same
     /// pixels.
@@ -900,23 +902,36 @@ struct Run {
     /// The clip as coverage, made once, where the run holds a cut draw.
     coverage: Option<Arc<Coverage>>,
     /// Whether the run's pixels record with a bounding hierarchy, which they
-    /// do inside an open `saveLayer` and on a page holding runs read in
-    /// the shader that plays on the GPU -- see
-    /// [`PageRecorder::holds_reading_runs`]. Without one its picture is
-    /// bounded by the page, and so by the clip's bounds where it is played
-    /// under the clip, rather than by what it draws, and finishing it skips
-    /// computing the bounds of every operation. Inside a layer those bounds
-    /// are what the layer is confined to -- see [`LayerRec::footprint`] --
-    /// and a layer the size of the clip around one small draw cost a page
-    /// of translucent layers under a large clip some fifteen times what it
-    /// did.
+    /// do inside an open `saveLayer`. Without one its picture is bounded by
+    /// what it is recorded in -- see [`Self::cull`] -- rather than by what
+    /// it draws, and finishing it skips computing the bounds of every
+    /// operation. Inside a layer those bounds are what the layer is
+    /// confined to -- see [`LayerRec::footprint`] -- and a layer the size
+    /// of the clip around one small draw cost a page of translucent layers
+    /// under a large clip some fifteen times what it did.
     bbh: bool,
+    /// The rectangle the run's pixels record in where it is not the page:
+    /// the clip's device bounds, on a page holding runs read in the shader
+    /// that plays on the GPU -- see [`PageRecorder::holds_reading_runs`].
+    /// Skia bounds every operation by the rectangle a recording is begun
+    /// in, so the run's picture reaches no further than its clip, at no
+    /// cost; nothing the run draws shows past the clip it is played under.
+    /// What it draws within the clip is found only where a batch of runs
+    /// drawn on the CPU needs it -- see [`Clipped::drawn`] -- which is why
+    /// such a run is filed as a piece when it closes.
+    cull: Option<Rect>,
 }
 
 impl Run {
     /// A run of the frame `frame`, recording into `spare`'s recorders --
     /// recording already, as a run closing hands them back.
-    fn open(frame: u64, clip: &Path, matrix: Matrix, spare: Spare) -> Self {
+    fn open(
+        frame: u64,
+        clip: &Path,
+        matrix: Matrix,
+        spare: Spare,
+        cull: Option<Rect>,
+    ) -> Self {
         let Spare {
             mut recorders,
             idle,
@@ -944,6 +959,7 @@ impl Run {
             shape: None,
             coverage: None,
             bbh,
+            cull,
         }
     }
 
@@ -958,7 +974,8 @@ impl Run {
             .recorders
             .finish(|recorder| recorder.finish_recording_as_picture(None));
         // Begun again at depth 1 -- see `Run::open`.
-        self.recorders.begin_with(bounds, self.bbh);
+        self.recorders
+            .begin_with(self.cull.unwrap_or(bounds), self.bbh);
         self.changed = false;
         entry
     }
@@ -1454,13 +1471,21 @@ impl PageRecorder {
         if let Some(clip) = self.clip.as_ref().filter(|_| self.framed_bare)
             && self.run.is_none()
         {
-            // Bounded op by op where a GPU playback reads what the run
-            // reaches -- see `Self::holds_reading_runs`.
-            let bbh = !self.open.is_empty()
-                || (self.holds_reading_runs && self.plays_on_gpu);
+            // Bounded op by op inside a layer, which is confined to what
+            // its contents draw -- see `Run::bbh` -- and by the clip where
+            // a GPU playback reads what the run reaches -- see `Run::cull`.
+            let bbh = !self.open.is_empty();
+            let cull = (!bbh && self.holds_reading_runs && self.plays_on_gpu)
+                .then(|| {
+                    let mut cull: Rect = clip.bounds().round_out();
+                    if !cull.intersect(self.bounds) {
+                        cull = Rect::new_empty();
+                    }
+                    cull
+                });
             let dual = self.dual;
             let bounds = self.bounds;
-            let spare = self
+            let mut spare = self
                 .spare
                 .take()
                 .filter(|spare| spare.bbh == bbh)
@@ -1469,7 +1494,12 @@ impl PageRecorder {
                     idle: 0,
                     bbh,
                 });
-            self.run = Some(Run::open(self.frame, clip, matrix, spare));
+            let wanted = cull.unwrap_or(bounds);
+            if spare.recorders.bounds != wanted {
+                spare.recorders.begin_with(wanted, bbh);
+                spare.idle = 0;
+            }
+            self.run = Some(Run::open(self.frame, clip, matrix, spare, cull));
         }
     }
 
@@ -1543,7 +1573,10 @@ impl PageRecorder {
 
     /// Ends the frame's run: drawn into the page's recording under its clip
     /// where nothing split it, as the page would have recorded it; filed as
-    /// its last piece where something did -- see [`Run`].
+    /// its last piece where something did -- see [`Run`] -- and where it
+    /// recorded in its clip's bounds, so that what it draws can still be
+    /// found -- see [`Run::cull`]: drawn into the page's recording, Skia
+    /// would bound it by its picture's cull, the clip, for good.
     fn close_run(&mut self) {
         let Some(mut run) = self.run.take() else {
             return;
@@ -1553,7 +1586,7 @@ impl PageRecorder {
             Some(_) => 0,
             None => run.idle + 1,
         };
-        let shape = run.split.then(|| run.shape());
+        let shape = (run.split || run.cull.is_some()).then(|| run.shape());
         let bbh = run.bbh;
         let mut recorders = run.recorders;
         let idle = match idle > Spare::IDLE_FRAMES {

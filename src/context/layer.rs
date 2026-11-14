@@ -168,6 +168,23 @@ impl Layer {
         }
     }
 
+    /// What the entry reaches as a batch of runs drawn on the CPU asks it
+    /// where its [`Self::reach`] meets a run -- see
+    /// [`replayed_on_their_backdrop`]: a piece of a clip's run, which reaches
+    /// its clip -- see `page::Run::cull` -- by what it draws within the clip,
+    /// found once -- see [`Clipped::drawn`]; anything else, and a cut draw,
+    /// which reaches what it paints before its clip, by its reach.
+    pub(crate) fn found_reach(&self) -> Option<Rect> {
+        match self {
+            Layer::Clipped(piece)
+                if !matches!(piece.entry(), Layer::Cut(_)) =>
+            {
+                piece.drawn()
+            }
+            entry => entry.reach(),
+        }
+    }
+
     /// What the pictures this entry keeps hold, as Skia estimates each --
     /// `SkPicture::approximateBytesUsed`, which a picture works out once,
     /// when it is finished, so this costs a call for each picture and walks
@@ -384,6 +401,13 @@ thread_local! {
     /// How many times [`drawn_on_their_backdrop`] has read a GPU canvas's
     /// pixels back on this thread.
     pub(crate) static BACKDROPS_READ: Cell<usize> = const { Cell::new(0) };
+    /// How many times [`Clipped::drawn`] has found what a piece draws on
+    /// this thread, each piece once.
+    pub(crate) static PIECES_FOUND: Cell<usize> = const { Cell::new(0) };
+    /// A mutant of [`replayed_on_their_backdrop`] set on this thread: an
+    /// entry whose reach meets a run ends the batch there, without asking
+    /// what a piece draws within its clip.
+    pub(crate) static REACH_UNFOUND: Cell<bool> = const { Cell::new(false) };
     /// A mutant of the batch [`play_entries`] makes of consecutive
     /// [`ReplayedText`] runs on a GPU canvas, set on this thread: each run
     /// read back on its own.
@@ -4234,12 +4258,15 @@ impl Clipped {
     /// What the piece draws, within the clip's bounds, as Skia bounds each
     /// draw -- its stroke, its join and caps, a shadow's offset and blur, a
     /// filter's reach. A run is recorded without a bounding hierarchy, so a
-    /// piece's picture culls to the page; its draws are replayed once into a
+    /// piece's picture culls to the page or its clip -- see
+    /// `page::Run::cull`; its draws are replayed once into a
     /// recording with one, which Skia trims to what they draw, and the
     /// rectangle kept. `None` where a draw has no rectangle to take -- see
     /// [`Layer::reach`].
     pub(crate) fn drawn(&self) -> Option<Rect> {
         *self.drawn.get_or_init(|| {
+            #[cfg(test)]
+            PIECES_FOUND.set(PIECES_FOUND.get() + 1);
             let mut within = match &self.entry {
                 Layer::Picture(picture) => drawn_by(picture),
                 Layer::Targeted(pictures) => drawn_by(&pictures.0),
@@ -4556,6 +4583,12 @@ fn replayed_on_their_backdrop(
     };
     let mut runs: Vec<CpuRun> = vec![];
     let mut between: Vec<IRect> = vec![];
+    // The batch ends at its last run, so nothing past the last on the page
+    // is asked what it reaches.
+    let last_run = (0..entries.len())
+        .rev()
+        .find(|&at| cpu_run_at(entries, at).is_some())
+        .unwrap_or_default();
     let mut at = 0;
     while at < entries.len() {
         match cpu_run_at(entries, at) {
@@ -4607,15 +4640,32 @@ fn replayed_on_their_backdrop(
                 });
                 at = last + 1;
             }
-            None if runs.is_empty() => break,
+            None if runs.is_empty() || at > last_run => break,
             None => {
+                let meets = |reach: Rect| {
+                    let drawn = device.map_rect(reach).0.round_out();
+                    let met = runs.iter().any(|run| {
+                        IRect::intersects(&in_pixels(&run.reach), &drawn)
+                    });
+                    (met, drawn)
+                };
                 let Some(reach) = entries[at].reach() else {
                     break;
                 };
-                let drawn = device.map_rect(reach).0.round_out();
-                if runs.iter().any(|run| {
-                    IRect::intersects(&in_pixels(&run.reach), &drawn)
-                }) {
+                let (mut met, mut drawn) = meets(reach);
+                // Asked again, as found, only where the reach alone would end
+                // the batch -- see `Layer::found_reach`.
+                #[cfg(test)]
+                let found = !REACH_UNFOUND.get();
+                #[cfg(not(test))]
+                let found = true;
+                if met
+                    && found
+                    && let Some(within) = entries[at].found_reach()
+                {
+                    (met, drawn) = meets(within);
+                }
+                if met {
                     break;
                 }
                 between.push(drawn);
@@ -6730,15 +6780,15 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// A draw between two kept runs is filed as an entry whose
-    /// [`Layer::reach`] is what it draws, not the page, in a blend by
-    /// coefficients or one read in the shader, under a clip or not: the
-    /// page's recording keeps a bounding hierarchy, and neither an isolated
-    /// layer -- see `page::PageRecorder::flush` -- nor a clip's run -- see
-    /// `page::PageRecorder::close_run` -- reaches it as one operation
-    /// bounded by the page. The read back that draws kept runs on the CPU
-    /// -- see [`super::replayed_on_their_backdrop`] -- can then tell a draw
-    /// beside the runs from one over them.
+    /// A draw between two kept runs is filed as an entry whose reach, as a
+    /// batch asks it -- see [`Layer::found_reach`] -- is what it draws, not
+    /// the page, in a blend by coefficients or one read in the shader, under
+    /// a clip or not: the page's recording keeps a bounding hierarchy, an
+    /// isolated layer -- see `page::PageRecorder::flush` -- does not reach
+    /// it as one operation bounded by the page, and a clip's run -- see
+    /// `page::Run::cull` -- is found within its clip. The read back that draws
+    /// kept runs on the CPU -- see [`super::replayed_on_their_backdrop`] --
+    /// can then tell a draw beside the runs from one over them.
     #[test]
     fn a_draw_between_kept_runs_reaches_only_what_it_draws() {
         use super::Layer;
@@ -6799,7 +6849,7 @@ mod tests {
                     .skip_while(|entry| !kept(entry))
                     .skip(1)
                     .take_while(|entry| !kept(entry))
-                    .map(Layer::reach)
+                    .map(Layer::found_reach)
                     .collect();
                 // Every entry between the runs within the rectangle, and the
                 // rectangle among them.
@@ -6826,9 +6876,10 @@ mod tests {
     }
 
     /// A clip's run between kept runs reaches every pixel its draws ink,
-    /// past the geometry they are given: a stroke's half width, a miter
-    /// join's point and a square cap -- each recorded into the run's
-    /// picture and bounded with its paint, as Skia bounds a draw -- see
+    /// past the geometry they are given, as a batch asks it -- see
+    /// [`Layer::found_reach`]: a stroke's half width, a miter join's point
+    /// and a square cap -- each recorded into the run's picture and bounded
+    /// with its paint, as Skia bounds a draw -- see
     /// `page::PageRecorder::holds_reading_runs`. A shadow, sharp or
     /// blurred, and a blur filter are filed as a [`BlurOp`], whose reach is
     /// not known, which ends a batch of runs drawn on the CPU there instead
@@ -6996,7 +7047,7 @@ mod tests {
                 .skip(1)
                 .take_while(|entry| !kept(entry))
                 .try_fold(Rect::new_empty(), |mut all, entry| {
-                    all.join(entry.reach()?);
+                    all.join(entry.found_reach()?);
                     Some(all)
                 });
             match (reach, known) {

@@ -6789,6 +6789,111 @@ mod overlapping_glyph_tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// A clip's run between two kept runs on a GPU page reaches its clip --
+    /// see `page::Run::cull` -- and where the clip meets a run's ink while
+    /// what it draws does not, the batch of runs drawn on the CPU asks what
+    /// the piece draws -- see `layer::Layer::found_reach` -- finding it once,
+    /// and draws both runs over one read back, in the CPU page's bytes,
+    /// under every blend read in the shader. Left
+    /// at its clip, the piece ends the batch and the page reads back twice,
+    /// which the scene is held to as well, so that it cannot pass without
+    /// the clip meeting a run. And a page whose clip's runs come only after
+    /// its last kept run asks none of them: a batch ends at its last run.
+    #[test]
+    fn a_clips_run_clear_of_the_runs_within_its_clip_keeps_their_batch() {
+        use crate::context::layer::{
+            BACKDROPS_READ, PIECES_FOUND, REACH_UNFOUND,
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let run = |ctx: &mut Context2D, y: f32, blend: BlendMode| {
+            ctx.set_global_composite_operation(blend);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, y, None);
+        };
+        // Under a clip of all but a margin of the page, which meets the
+        // runs' ink, a fill clear of it.
+        let clipped = |ctx: &mut Context2D| {
+            ctx.set_global_composite_operation(SourceOver);
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(2.5, 2.5, W - 5.0, H - 5.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.set_fill_style_css("rgba(160,40,90,0.5)")
+                .expect("a colour");
+            ctx.fill_rect(W - 60.0, H - 20.0, 30.0, 6.0);
+            ctx.restore();
+        };
+        // The page drawn on the GPU or the CPU, its clip's run between its
+        // runs or after both: its bytes, the read backs and the pieces
+        // found.
+        let page = |gpu: bool, between: bool, blend: BlendMode| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            run(ctx, 16.0, blend);
+            if between {
+                clipped(ctx);
+            }
+            run(ctx, 34.0, blend);
+            if !between {
+                clipped(ctx);
+            }
+            let (read, found) = (BACKDROPS_READ.get(), PIECES_FOUND.get());
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            assert_eq!(canvas.engine_kind() == EngineKind::Gpu, gpu);
+            (
+                bytes,
+                BACKDROPS_READ.get() - read,
+                PIECES_FOUND.get() - found,
+            )
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for between in [true, false] {
+                let (cpu, _, _) = page(false, between, blend);
+                let (gpu, reads, found) = page(true, between, blend);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} between {between}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                let expected = (1, usize::from(between));
+                if (reads, found) != expected {
+                    wrong.push(format!(
+                        "{blend:?} between {between}: {reads} read backs \
+                         and {found} pieces found, not {expected:?}"
+                    ));
+                }
+            }
+            // The control: the piece left at its clip ends the batch.
+            REACH_UNFOUND.set(true);
+            let (_, reads, found) = page(true, true, blend);
+            REACH_UNFOUND.set(false);
+            if (reads, found) != (2, 0) {
+                wrong.push(format!(
+                    "{blend:?} left at its clip: {reads} read backs and \
+                     {found} pieces found, not (2, 0)"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A page of runs dyed by a pattern under a blend read in the shader,
     /// every line its own run, drawn on the GPU reads the bytes it reads
     /// drawn on the CPU, over one read back: each run is a pattern's draw --
