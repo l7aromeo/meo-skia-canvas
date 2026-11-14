@@ -1140,15 +1140,14 @@ its alpha rounded once as the route's is and its colour from the layer's
 bytes. A run in a gradient or a pattern, one whose decoration names a colour
 of its own, and every run on the GPU engine or a float page are blurred from
 their pixels in the chain's layer. A translucent run's shadow under
-`drop-shadow()` on an 8-bit page on the CPU engine is cast from the run
+`drop-shadow()` on an 8-bit page, on either engine, is cast from the run
 drawn opaque, its alpha taken as a factor in floats, so that the shadow's
 alpha too is rounded once; the run is drawn over it as Skia draws it
 translucent, since it is composited over its shadow rather than scaled with
 it. Cast from the translucent run's own bytes, rounded before the blur and
-again after, runs of 13 to 60px moved by a level on 82 to 1,706 pixels. On
-the GPU engine a translucent run's shadow is still cast from its pixels in
-the chain's layer: the same runs come a level off on 7 to 265 pixels, where
-an opaque run's shadow is exact.
+again after, runs of 13 to 60px moved by a level on 82 to 1,706 pixels on
+the CPU engine and on 7 to 265 on the GPU engine; an opaque run's shadow
+is exact either way.
 
 **A blurred rectangle is its exact Gaussian blur, and Chrome's is not.**
 Filter Effects Module Level 1 defines `blur()` as a Gaussian blur whose
