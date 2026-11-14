@@ -4893,9 +4893,138 @@ mod recorded_count_tests {
     use crate::{
         canvas::EngineKind,
         context::{layer::ENTRIES_WALKED, page::COUNT_HELD_TO_WALK},
+        export::{EncodeOptions, ImageFormat},
         gpu::NEVER_GPU,
         shader::{GradientColorSpace, GradientInterpolation, GradientStop},
     };
+
+    /// Registers the faces the scenes of runs recorded later draw in, once
+    /// on each thread: a face another test thread registered is not found
+    /// on this one.
+    fn register() {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if REGISTERED.replace(true) {
+            return;
+        }
+        let fonts = crate::font::FontLibrary::new();
+        for (family, path) in [
+            (
+                "CountedOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            ),
+            (
+                "CountedPalettes",
+                "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
+            ),
+        ] {
+            fonts
+                .register_font_from_path(family, path)
+                .expect("a bundled face registers");
+        }
+    }
+
+    /// A CPU canvas of a run kept whole, whose pictures are recorded when a
+    /// target first plays it -- see `layer::ReplayedText`: a run of colour
+    /// glyphs, or, where `kept`, a run of overlapping glyphs under
+    /// `multiply`.
+    fn later_page(kept: bool) -> Canvas {
+        let mut canvas = Canvas::new(320.0, 160.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        match kept {
+            false => {
+                assert!(ctx.set_font_css("40px CountedPalettes"));
+                ctx.fill_text("Abcdef", 10.0, 60.0, None);
+            }
+            true => {
+                assert!(ctx.set_font_css("16px CountedOswald"));
+                ctx.set_letter_spacing(-12.0);
+                ctx.set_global_composite_operation(BlendMode::Multiply);
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.fill_text("Hello Wq", 10.0, 20.0, None);
+            }
+        }
+        canvas
+    }
+
+    /// A page holding a picture recorded when a target first plays it,
+    /// through a canvas drawn in once or twice, counts it once for each
+    /// time it holds it once it is recorded, as a walk of its entries does:
+    /// a run of colour glyphs, whose document picture a PDF of the page
+    /// records, and a kept run, whose pictures the PDF and the page drawn
+    /// into another record, after which the page drawn into holds its count
+    /// to its walk -- see `page::PageRecorder::recorded_bytes`. Counted for
+    /// the first page that filed it alone, the page drawn into fell short of
+    /// its walk.
+    #[test]
+    fn a_picture_recorded_later_counts_in_every_page_holding_it() {
+        register();
+        for (kept, times) in [false, true]
+            .into_iter()
+            .flat_map(|kept| [1, 2].map(|times| (kept, times)))
+        {
+            let mut inner = later_page(kept);
+            let mut middle = Canvas::new(320.0, 160.0);
+            middle.set_gpu(false);
+            for _ in 0..times {
+                middle.context().draw_canvas(&mut inner, 0.0, 0.0);
+            }
+            middle
+                .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+                .expect("a PDF");
+            let mut outer = Canvas::new(320.0, 160.0);
+            outer.set_gpu(false);
+            outer.context().draw_canvas(&mut middle, 0.0, 0.0);
+            let mut bytes = 0;
+            middle.context().inner.with_recorder(|recorder| {
+                bytes = recorder.recorded_bytes();
+            });
+            assert!(bytes > 0, "kept {kept}, drawn in {times}: counted");
+        }
+    }
+
+    /// A picture filed into pages that are then dropped holds counts only
+    /// for those alive, the next time a page files it: a canvas drawn into a
+    /// fresh canvas every frame holds two, its own and the frame's, however
+    /// many frames there were.
+    #[test]
+    fn a_picture_holds_counts_only_for_the_pages_alive() {
+        /// The frames, each a canvas drawn into and dropped.
+        const FRAMES: usize = 50;
+        register();
+        let mut inner = later_page(false);
+        let text = inner
+            .context()
+            .inner
+            .page()
+            .layers
+            .iter()
+            .find_map(|layer| match layer {
+                crate::context::layer::Layer::ReplayedText(text) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("a run of colour glyphs kept");
+        let frame = |inner: &mut Canvas| {
+            let mut canvas = Canvas::new(320.0, 160.0);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.draw_canvas(inner, 0.0, 0.0);
+            ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a read");
+            canvas
+        };
+        for _ in 0..FRAMES {
+            drop(frame(&mut inner));
+        }
+        let live = frame(&mut inner);
+        assert_eq!(text.recording.counts(), 2, "its own page and the live one");
+        drop(live);
+    }
 
     /// A draw the clip cuts and a pattern's tile, filed under a clip
     /// straight after a gradient fill the page isolates, are pieces of the
