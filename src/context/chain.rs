@@ -1217,13 +1217,13 @@ pub(crate) fn clear_unless_zeroed(surface: &mut Surface) {
 
 /// Draws again, in a layer in main memory starting at the device's origin,
 /// what `plans`' chains draw onto `offscreen`, one at `at` that starts
-/// before it, and copies each chain's region from the origin on from it over
-/// `offscreen`'s: so that a chain whose region crosses the page's top or left
-/// edge draws its input there as a chain inside the page does. Skia's
-/// anti-aliasing covers a curve by where on the raster it lies, whole pixels
-/// included -- see [`placed`] -- and Times New Roman's 96px "Ag", stroked 40
-/// wide, drew 25 levels apart in a layer starting 54 pixels before the
-/// origin. The layer's size does not decide it on the CPU: one from the
+/// before it, and copies the rows of each chain's region from the origin on
+/// from it over `offscreen`'s: so that a chain whose region crosses the page's
+/// top or left edge draws its input there as a chain inside the page does.
+/// Skia's anti-aliasing covers a curve by where on the raster it lies, whole
+/// pixels included -- see [`placed`] -- and Times New Roman's 96px "Ag",
+/// stroked 40 wide, drew 25 levels apart in a layer starting 54 pixels before
+/// the origin. The layer's size does not decide it on the CPU: one from the
 /// origin to the region's far corner draws as the page does. What lies before
 /// the origin has no page to match, and keeps `offscreen`'s pixels. Nothing
 /// is done for a layer starting at the origin or past it, or one the rest of
@@ -1263,20 +1263,24 @@ fn draw_from_the_origin(
         draw(i, layer.canvas());
         layer.canvas().restore();
     }
-    let image = layer.image_snapshot();
-    let mut copy = Paint::default();
-    copy.set_blend_mode(BlendMode::Src);
+    // The rows are copied as they lie: the two layers share a colour type
+    // and space, so a write is a copy of bytes. A draw in `Src` does the same
+    // through Skia's raster pipeline, and took most of this function's time.
+    let Some(drawn) = layer.peek_pixels() else {
+        return;
+    };
     for area in &inside {
-        offscreen.save();
-        offscreen.reset_matrix();
-        offscreen.draw_image_rect_with_sampling_options(
-            &image,
-            Some((&Rect::from(*area), SrcRectConstraint::Strict)),
-            Rect::from(area.with_offset((-at.left, -at.top))),
-            SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
-            &copy,
-        );
-        offscreen.restore();
+        let written = drawn.extract_subset(area).is_some_and(|rows| {
+            rows.bytes().is_some_and(|bytes| {
+                offscreen.write_pixels(
+                    rows.info(),
+                    bytes,
+                    rows.row_bytes(),
+                    (area.left - at.left, area.top - at.top),
+                )
+            })
+        });
+        debug_assert!(written, "a layer in main memory takes its own rows");
     }
 }
 
