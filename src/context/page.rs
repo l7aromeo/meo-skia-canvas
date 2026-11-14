@@ -2482,10 +2482,10 @@ impl PageRecorder {
     /// draw, so that a CPU canvas and a document play what they would have:
     ///
     /// - A draw asking a vector backend for nothing, or one inside an open
-    ///   `saveLayer`, is filed as colour text is by
-    ///   [`Self::append_colour_text`]: a piece of the frame's run where one is
-    ///   open, so that a document writes the run's clip once around it and the
-    ///   draws beside it.
+    ///   `saveLayer`, is filed as a run of colour glyphs is by
+    ///   [`Self::append_replayed_text`]: a piece of the frame's run where one
+    ///   is open, so that a document writes the run's clip once around it and
+    ///   the draws beside it.
     /// - A draw on the page asking for features is filed as
     ///   [`Self::append_isolated`] opens an isolated layer: after what the page
     ///   has recorded, holding the clip itself, so that a document writes the
