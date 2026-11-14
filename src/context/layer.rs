@@ -2214,6 +2214,7 @@ fn drawn_on_its_backdrop(
                 false => BackdropReach::Local(recorded.cull_rect()),
             },
             draw: &draw,
+            clip: None,
         }],
         format,
     )
@@ -2870,6 +2871,7 @@ impl GradientDraw {
                             false => BackdropReach::Local(recorded.cull_rect()),
                         },
                         draw: play,
+                        clip: None,
                     })
                     .collect();
                 if drawn.len() > 1
@@ -4257,11 +4259,13 @@ impl Clipped {
 }
 
 /// A draw [`drawn_on_their_backdrop`] makes: what it can change -- see
-/// [`BackdropReach`] -- and the draw itself, made onto a canvas under that
-/// canvas's transform.
+/// [`BackdropReach`] -- the draw itself, made onto a canvas under that
+/// canvas's transform, and the bounds of a clip path it applies itself, in
+/// the coordinates it is made in, where it applies one.
 pub(crate) struct BackdropDraw<'a> {
     pub(crate) reach: BackdropReach,
     pub(crate) draw: &'a dyn Fn(&SkCanvas),
+    pub(crate) clip: Option<Rect>,
 }
 
 /// What a [`BackdropDraw`] can change.
@@ -4282,7 +4286,8 @@ pub(crate) enum BackdropReach {
 /// `canvas` carries, over what the one before it left there, as reading back
 /// between them would have found, and the result written back once as it
 /// is. The raster covers what the draws reach within the clip, or the
-/// clip's bounds whole where one's blend changes what lies beyond it.
+/// clip's bounds whole where one's blend changes what lies beyond it, and
+/// reaches over the bounds of any clip path a draw applies itself.
 /// `false`, having drawn nothing, where the pixels cannot be read: inside a
 /// layer, under a perspective, or where Skia refuses the read or the write.
 ///
@@ -4340,7 +4345,25 @@ fn drawn_on_their_backdrop(
     // made at the device coordinates the CPU canvas makes them at: offset to
     // the area, the transform inverted with another translation moved a
     // value on a half level to the next, 2 bytes in 40 Oklab radials.
-    let whole = format.image_info(ISize::new(area.right, area.bottom));
+    //
+    // A draw applying a clip path of its own finds the raster's bounds
+    // where the page's lie, over the path, and no clip to the area: Skia
+    // rasterizes an anti-aliased clip's edge against the bounds that cut it
+    // as it does a path against a clip, other than over the path's own --
+    // 59 channels of a page of runs under a circle, the area cutting it.
+    let page = canvas.image_info().bounds();
+    let clipped = draws
+        .iter()
+        .filter_map(|draw| draw.clip)
+        .filter_map(|clip| {
+            IRect::intersect(&device.map_rect(clip).0.round_out(), &page)
+        })
+        .map(|clip| (clip.right, clip.bottom))
+        .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
+    let (right, bottom) = clipped.map_or((area.right, area.bottom), |at| {
+        (area.right.max(at.0), area.bottom.max(at.1))
+    });
+    let whole = format.image_info(ISize::new(right, bottom));
     // Under the canvas's own surface properties, so that text on the raster
     // takes the page's contrast and gamma rather than Skia's defaults, which
     // differ from the page's on Linux.
@@ -4353,7 +4376,9 @@ fn drawn_on_their_backdrop(
     if !raster.write_pixels(&info, &backdrop, row, (area.left, area.top)) {
         return false;
     }
-    raster.clip_irect(area, ClipOp::Intersect);
+    if clipped.is_none() {
+        raster.clip_irect(area, ClipOp::Intersect);
+    }
     raster.concat(&device);
     for draw in draws {
         raster.save();
@@ -4373,7 +4398,8 @@ fn drawn_on_their_backdrop(
 }
 
 /// Plays the runs of [`ReplayedText`] `entries` opens with, each under a
-/// blend read in the shader -- see [`ReplayedText::reads_the_page`] -- onto
+/// blend read in the shader -- see [`ReplayedText::reads_the_page`] -- and
+/// each alone or a piece of a clip's run -- see [`read_on_the_cpu`] -- onto
 /// a GPU canvas as the CPU draws them, over one read back of the pixels they
 /// ink -- see [`drawn_on_their_backdrop`]: on the CPU a run is drawn whole
 /// and composites each glyph over the last, where Ganesh, with no
@@ -4401,8 +4427,7 @@ fn replayed_on_their_backdrop(
     if !BACKDROP_ROUTE.get() {
         return 0;
     }
-    if !matches!(entries.first(), Some(Layer::ReplayedText(text)) if text.reads_the_page())
-    {
+    if entries.first().and_then(read_on_the_cpu).is_none() {
         return 0;
     }
     let device = canvas.local_to_device_as_3x3();
@@ -4414,33 +4439,54 @@ fn replayed_on_their_backdrop(
     if InLayer::open() || device.has_perspective() {
         return 0;
     }
-    // What each run inks, recorded under the transform it is played under;
-    // what it reaches where that cannot be had.
-    let reach_of_run = |text: &ReplayedText| match text.blend {
-        Some(_) => BackdropReach::Beyond,
-        None => text
-            .ink_under(&device, clip)
-            .map_or(BackdropReach::Local(text.reach()), BackdropReach::Device),
+    // What each run inks, recorded under the transform it is played under,
+    // within the bounds of the clip it is drawn under where it has one; what
+    // it reaches where that cannot be had.
+    let reach_of_run = |text: &ReplayedText, within: Option<Rect>| {
+        let reach = match text.blend {
+            Some(_) => return BackdropReach::Beyond,
+            None => text.ink_under(&device, clip).map_or(
+                BackdropReach::Local(text.reach()),
+                BackdropReach::Device,
+            ),
+        };
+        match (reach, within) {
+            (reach, None) => reach,
+            (BackdropReach::Device(inks), Some(within)) => {
+                let within = device.map_rect(within).0.round_out();
+                BackdropReach::Device(
+                    IRect::intersect(&inks, &within).unwrap_or_default(),
+                )
+            }
+            (BackdropReach::Local(reach), Some(within)) => {
+                let mut reach = reach;
+                if !reach.intersect(within) {
+                    reach = Rect::new_empty();
+                }
+                BackdropReach::Local(reach)
+            }
+            (BackdropReach::Beyond, Some(_)) => BackdropReach::Beyond,
+        }
     };
     let in_pixels = |reach: &BackdropReach| match reach {
         BackdropReach::Beyond => clip,
         BackdropReach::Device(reach) => *reach,
         BackdropReach::Local(reach) => device.map_rect(reach).0.round_out(),
     };
-    let mut runs: Vec<(usize, &ReplayedText, BackdropReach)> = vec![];
+    let mut runs: Vec<(usize, &Layer, BackdropReach)> = vec![];
     let mut between: Vec<IRect> = vec![];
     for (at, entry) in entries.iter().enumerate() {
-        match entry {
-            Layer::ReplayedText(text) if text.reads_the_page() => {
-                let reach = reach_of_run(text);
+        match read_on_the_cpu(entry) {
+            Some((text, within)) => {
+                let reach = reach_of_run(text, within);
                 let inks = in_pixels(&reach);
                 if between.iter().any(|drawn| IRect::intersects(drawn, &inks)) {
                     break;
                 }
-                runs.push((at, text, reach));
+                runs.push((at, entry, reach));
             }
-            _ if runs.is_empty() => break,
-            entry => {
+            None if runs.is_empty() => break,
+            None => {
                 let Some(reach) = entry.reach() else {
                     break;
                 };
@@ -4478,14 +4524,15 @@ fn replayed_on_their_backdrop(
     }
     let plays: Vec<_> = runs
         .iter()
-        .map(|&(_, text, _)| {
-            move |raster: &SkCanvas| text.playback(raster, Target::Pixels)
+        .map(|&(_, entry, _)| {
+            move |raster: &SkCanvas| entry.playback(raster, Target::Pixels)
         })
         .collect();
     let draws: Vec<BackdropDraw<'_>> = zip(&runs, &plays)
-        .map(|((_, _, reach), play)| BackdropDraw {
+        .map(|((_, entry, reach), play)| BackdropDraw {
             reach: reach.clone(),
             draw: play,
+            clip: read_on_the_cpu(entry).and_then(|(_, within)| within),
         })
         .collect();
     // Where the pixels cannot be read, the runs are drawn as they are
@@ -4496,8 +4543,8 @@ fn replayed_on_their_backdrop(
         if !between_played {
             return 0;
         }
-        for &(_, text, _) in &runs {
-            text.playback(canvas, Target::Pixels);
+        for &(_, entry, _) in &runs {
+            entry.playback(canvas, Target::Pixels);
         }
     }
     for &(at, ..) in &runs {
@@ -4506,6 +4553,27 @@ fn replayed_on_their_backdrop(
         }
     }
     last + 1
+}
+
+/// The kept run `entry` draws under a blend read in the shader -- see
+/// [`ReplayedText::reads_the_page`] -- which [`replayed_on_their_backdrop`]
+/// draws on the CPU, and the bounds of the clip it is drawn under, in the
+/// coordinates it is played back under, where it is a piece of a clip's run
+/// -- see [`Clipped`]: played onto the raster, the piece applies its clip
+/// there as the CPU page applies it. `None` for any other entry.
+fn read_on_the_cpu(entry: &Layer) -> Option<(&ReplayedText, Option<Rect>)> {
+    match entry {
+        Layer::ReplayedText(text) if text.reads_the_page() => {
+            Some((text, None))
+        }
+        Layer::Clipped(piece) => match piece.entry() {
+            Layer::ReplayedText(text) if text.reads_the_page() => {
+                Some((text, Some(piece.bounds)))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Plays `entries`, each asking for `features` at the same index, onto
@@ -4566,8 +4634,7 @@ pub(crate) fn play_entries(
         if paced {
             // A batch of colour runs still open draws when it closes: closed
             // first, so that the read back finds what it drew.
-            if matches!(entries[at], Layer::ReplayedText(ref text) if text.reads_the_page())
-            {
+            if read_on_the_cpu(&entries[at]).is_some() {
                 batch = None;
             }
             let played = replayed_on_their_backdrop(

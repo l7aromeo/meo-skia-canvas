@@ -6491,6 +6491,96 @@ mod overlapping_glyph_tests {
         assert_eq!(BACKDROPS_READ.get(), before, "read back on an F16 page");
     }
 
+    /// A page of runs under a blend read in the shader and a clip, every
+    /// line its own run, drawn on the GPU reads the bytes it reads drawn on
+    /// the CPU, over one read back: each run is a piece of the clip's run --
+    /// see `layer::Clipped` -- played onto the raster under its clip, as the
+    /// CPU page plays it. Under one clip for the page, a rectangle on half
+    /// pixels or a circle whose edge cuts the glyphs, and under a clip of
+    /// its own for each line.
+    #[test]
+    fn a_clipped_page_of_runs_is_drawn_on_the_cpu_over_one_read_back() {
+        use crate::context::layer::BACKDROPS_READ;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 8;
+        /// The clips the runs are drawn under.
+        const CLIPS: [&str; 3] = ["rectangle", "circle", "each line"];
+        let page = |gpu: bool, blend: BlendMode, clip: &str| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            match clip {
+                "rectangle" => {
+                    ctx.begin_path();
+                    ctx.rect(20.5, 20.0, 200.0, 110.0);
+                    ctx.clip(FillRule::NonZero);
+                }
+                "circle" => {
+                    ctx.begin_path();
+                    ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
+                        .expect("a positive radius");
+                    ctx.clip(FillRule::NonZero);
+                }
+                _ => {}
+            }
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                if clip == "each line" {
+                    ctx.save();
+                    ctx.begin_path();
+                    ctx.rect(12.5 + line as f32, y - 12.0, 50.0, 14.5);
+                    ctx.clip(FillRule::NonZero);
+                }
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+                if clip == "each line" {
+                    ctx.restore();
+                }
+            }
+            let before = BACKDROPS_READ.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for clip in CLIPS {
+                let (cpu, _) = page(false, blend, clip);
+                let (gpu, reads) = page(true, blend, clip);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} {clip}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                if reads != 1 {
+                    wrong.push(format!(
+                        "{blend:?} {clip}: {reads} read backs, not 1"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A page of runs under a blend read in the shader, every line its own
     /// run, drawn on the GPU reads the bytes it reads drawn on the CPU: the
     /// runs are played on the CPU over one read back of the GPU's pixels --
