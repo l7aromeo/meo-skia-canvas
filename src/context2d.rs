@@ -6599,6 +6599,73 @@ mod overlapping_glyph_tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// A kept run read on a raster on the CPU builds its blobs once, and
+    /// draws them for every page after that draws it -- see
+    /// `RunPaint::raster_blobs` -- while the same page drawn into a GPU
+    /// canvas builds them again for every read, as the GPU needs a blob of
+    /// its own each time it draws one. That page is played into the GPU
+    /// canvas's recording and drawn there by the GPU, so a cache that
+    /// reached past a raster would show here.
+    #[test]
+    fn only_a_raster_draws_a_runs_blobs_again() {
+        use crate::node::typography::BLOB_BUILDS;
+        const READS: usize = 3;
+        register();
+        forget_laid_out();
+        // A fresh page of the kept run on the CPU, unread.
+        let page = || {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, 20.0, None);
+            canvas
+        };
+        // Blobs built read by read, after two reads that may lay the run
+        // out, keep it and build the blobs it keeps.
+        let builds = |read: &mut dyn FnMut()| {
+            read();
+            read();
+            (0..READS)
+                .map(|_| {
+                    let before = BLOB_BUILDS.get();
+                    read();
+                    BLOB_BUILDS.get() - before
+                })
+                .collect::<Vec<_>>()
+        };
+        let on_the_cpu = builds(&mut || {
+            page()
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back");
+        });
+        assert_eq!(on_the_cpu, [0; READS], "fresh pages read on the CPU");
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped the GPU half: no GPU");
+            return;
+        }
+        let mut canvas = page();
+        let mut into = Canvas::new(W, H);
+        into.set_gpu(true);
+        let drawn_into = builds(&mut || {
+            let ctx = into.context();
+            ctx.draw_canvas(&mut canvas, 0.0, 0.0);
+            ctx.get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back");
+        });
+        assert_eq!(into.engine_kind(), EngineKind::Gpu, "drawn into the GPU");
+        assert!(
+            drawn_into.iter().all(|&built| built > 0),
+            "drawn into a GPU canvas, blobs built read by read: {drawn_into:?}"
+        );
+    }
+
     /// A page recorded where the CPU plays it, and played on the GPU after
     /// its canvas is switched there, draws the bytes the CPU page draws.
     /// Its clips' runs were not bounded as they recorded -- see

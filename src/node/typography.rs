@@ -58,7 +58,7 @@ use std::{
     iter::{successors, zip},
     ops::Range,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 thread_local! {
@@ -520,6 +520,12 @@ pub struct RunPaint {
     /// What the last draw onto a GPU canvas drew from a sheet, to draw again
     /// from where the next is drawn alike -- see [`draw_placed`].
     placed: Placed<DrawnAt>,
+    /// The blobs [`Self::built_plain_blobs`] builds, kept for draws onto a
+    /// raster on the CPU and made the first time one asks -- see
+    /// [`Self::paint`]. Shared by every draw of the run, on every page:
+    /// built for every playback instead, they were 7.4% of the samples of a
+    /// page of 40 runs drawn and read on the CPU, in a release build.
+    raster_blobs: OnceLock<Vec<Option<TextBlob>>>,
 }
 
 /// What a draw of a [`RunPaint`] depends on besides the canvas: the
@@ -586,6 +592,7 @@ impl LaidOut {
                 spans,
                 lines,
                 placed: Placed::default(),
+                raster_blobs: OnceLock::new(),
             }),
             blobs: RefCell::new(Vec::new()),
             bytes: laid_out_bytes(glyphs),
@@ -968,12 +975,17 @@ impl RunPaint {
     /// -- so that a wrapped line's underline lies over the line above's
     /// descenders, as in Chrome.
     ///
-    /// The blobs are built for this draw rather than kept from another:
-    /// Skia's GPU backend draws a blob again in another plain colour
-    /// unlike a fresh one -- see `LaidOut::blobs` -- for a cause not known.
-    /// A run drawn again through an image's shader, as a canvas's pattern
-    /// replays one, did not part that way in any of 49 pairs of patterns,
-    /// but nothing shows it cannot, so the blobs are not kept for it either.
+    /// The blobs are built for this draw rather than kept from another,
+    /// except onto a raster on the CPU: Skia's GPU backend draws a blob
+    /// again in another plain colour unlike a fresh one -- see
+    /// `LaidOut::blobs` -- for a cause not known. A run drawn again through
+    /// an image's shader, as a canvas's pattern replays one, did not part
+    /// that way in any of 49 pairs of patterns, but nothing shows it
+    /// cannot, so the blobs are not kept for it either. A raster draws a
+    /// blob into its pixels as it is drawn, and keeps nothing a GPU draws
+    /// again, so there the blobs are kept -- see [`Self::raster_blobs`].
+    /// A recording is not a raster: one played on the GPU later draws the
+    /// blobs it holds there.
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -989,6 +1001,19 @@ impl RunPaint {
             faint,
         };
         draw_placed(canvas, &self.placed, drawn, || {
+            if draws_on_cpu(canvas) {
+                let blobs =
+                    self.raster_blobs.get_or_init(|| self.built_plain_blobs());
+                self.paint_from(
+                    canvas,
+                    origin,
+                    paint,
+                    global_alpha,
+                    faint,
+                    blobs,
+                );
+                return;
+            }
             let blobs = self.built_plain_blobs();
             self.paint_from(canvas, origin, paint, global_alpha, faint, &blobs);
         });
