@@ -456,7 +456,7 @@ fn matrix_form(matrix: &Matrix) -> i32 {
 }
 
 /// The stage `appendMatrix` applies a matrix through, as the effect's
-/// `matrixForm` uniform names it.
+/// `matrixForm()` names it.
 struct MatrixForm;
 
 impl MatrixForm {
@@ -630,7 +630,7 @@ impl Layout {
     /// `alter_2pt_conical_unswap`.
     const UNSWAP: i32 = 16;
 
-    /// Whether `flag` is set, as the effect's uniform takes it.
+    /// Whether `flag` is set, as the effect's flags take it.
     fn flag(&self, flag: i32) -> [u8; 4] {
         i32::from(self.flags & flag != 0).to_ne_bytes()
     }
@@ -1538,7 +1538,7 @@ impl Css {
         matches!(self, Css::Lch | Css::OkLch | Css::Hsl | Css::Hwb)
     }
 
-    /// The uniform the effect selects its conversion back by.
+    /// The value the effect selects its conversion back by, its `css()`.
     fn index(self) -> i32 {
         self as i32
     }
@@ -1742,8 +1742,8 @@ const SIZES: [usize; 4] = [4, 16, 64, 256];
 
 thread_local! {
     /// The effect at each of [`SIZES`], compiled once per thread -- a
-    /// `RuntimeEffect` is neither `Send` nor `Sync` -- with where each of
-    /// its uniforms lies.
+    /// `RuntimeEffect` is neither `Send` nor `Sync` -- with where each
+    /// value it takes lies.
     static EFFECTS: Option<Vec<(usize, RuntimeEffect, Offsets)>> = SIZES
         .iter()
         .map(|&size| {
@@ -1754,8 +1754,9 @@ thread_local! {
         .collect();
 }
 
-/// Where each uniform of the effect lies in its uniform data, in bytes:
-/// found by name once, when it is compiled, rather than for every draw.
+/// Where each value the effect takes lies in its uniform data, in bytes:
+/// found by its uniform's name and its place in it once, when the effect
+/// is compiled, rather than for every draw.
 struct Offsets {
     size: usize,
     kind: usize,
@@ -1802,58 +1803,72 @@ struct Offsets {
 }
 
 impl Offsets {
-    /// `None` where the effect lacks a uniform the source declares.
+    /// `None` where the effect lacks a uniform the source declares, or
+    /// declares one too short for what is written to it.
     fn of(effect: &RuntimeEffect) -> Option<Self> {
-        let at = |name: &str| {
+        // The byte `within` bytes into the uniform `name`, which has to
+        // hold the `len` bytes written there: a field's place in the
+        // vector, matrix or array the effect packs it into.
+        let at = |name: &str, within: usize, len: usize| {
             effect
                 .uniforms()
                 .iter()
                 .find(|uniform| uniform.name() == name)
-                .map(|uniform| uniform.offset())
+                .filter(|uniform| within + len <= uniform.size_in_bytes())
+                .map(|uniform| uniform.offset() + within)
         };
+        let scalar = |name: &str, k: usize| at(name, 4 * k, 4);
+        // A `float3x3` keeps its columns 12 bytes apart and a `float4`
+        // array its elements 16.
+        let column = |name: &str, k: usize| at(name, 12 * k, 12);
+        let element = |name: &str, k: usize, len: usize| at(name, 16 * k, len);
         Some(Offsets {
             size: effect.uniform_size(),
-            kind: at("kind")?,
-            mask_degenerates: at("maskDegenerates")?,
-            negate: at("negate")?,
-            compensate: at("compensate")?,
-            unswap: at("unswap")?,
-            mode: at("mode")?,
-            count: at("count")?,
-            premul_after: at("premulAfter")?,
-            exact_scale: at("exactScale")?,
-            ties_even: at("tiesEven")?,
-            alpha8: at("alpha8")?,
-            t_scale: at("tScale")?,
-            t_bias: at("tBias")?,
-            p0: at("p0")?,
-            p1: at("p1")?,
-            linearize: at("linearize")?,
-            gamut_step: at("gamutStep")?,
-            encode: at("encode")?,
-            lin_a: at("linA")?,
-            lin_b: at("linB")?,
-            gam_r: at("gamR")?,
-            gam_g: at("gamG")?,
-            gam_b: at("gamB")?,
-            enc_a: at("encA")?,
-            enc_b: at("encB")?,
-            css: at("css")?,
-            lab_a: at("labA")?,
-            lab_b: at("labB")?,
-            ok_in: [at("okIn0")?, at("okIn1")?, at("okIn2")?],
-            ok_out: [at("okOut0")?, at("okOut1")?, at("okOut2")?],
-            matrix_form: at("matrixForm")?,
-            m_row0: at("mRow0")?,
-            m_row1: at("mRow1")?,
-            m_row2: at("mRow2")?,
-            offset: at("offset")?,
-            polar: at("polar")?,
-            sinq: at("sinq")?,
-            hsl_k: at("hslK")?,
-            ts: at("ts")?,
-            factors: at("factors")?,
-            biases: at("biases")?,
+            kind: scalar("shapeFlags", 0)?,
+            mask_degenerates: scalar("shapeFlags", 1)?,
+            negate: scalar("shapeFlags", 2)?,
+            compensate: scalar("shapeFlags", 3)?,
+            unswap: scalar("rampFlags", 0)?,
+            mode: scalar("rampFlags", 1)?,
+            count: scalar("rampFlags", 2)?,
+            matrix_form: scalar("rampFlags", 3)?,
+            premul_after: scalar("storeFlags", 0)?,
+            exact_scale: scalar("storeFlags", 1)?,
+            ties_even: scalar("storeFlags", 2)?,
+            css: scalar("storeFlags", 3)?,
+            linearize: scalar("xformFlags", 0)?,
+            gamut_step: scalar("xformFlags", 1)?,
+            encode: scalar("xformFlags", 2)?,
+            t_scale: scalar("tParams", 0)?,
+            t_bias: scalar("tParams", 1)?,
+            p0: scalar("tParams", 2)?,
+            p1: scalar("tParams", 3)?,
+            offset: at("place", 0, 8)?,
+            alpha8: scalar("place", 2)?,
+            lin_a: element("curves", 0, 16)?,
+            lin_b: element("curves", 1, 12)?,
+            enc_a: element("curves", 2, 16)?,
+            enc_b: element("curves", 3, 12)?,
+            gam_r: column("gamut", 0)?,
+            gam_g: column("gamut", 1)?,
+            gam_b: column("gamut", 2)?,
+            lab_a: element("labK", 0, 16)?,
+            lab_b: element("labK", 1, 16)?,
+            ok_in: [column("okIn", 0)?, column("okIn", 1)?, column("okIn", 2)?],
+            ok_out: [
+                column("okOut", 0)?,
+                column("okOut", 1)?,
+                column("okOut", 2)?,
+            ],
+            m_row0: column("toUnit", 0)?,
+            m_row1: column("toUnit", 1)?,
+            m_row2: column("toUnit", 2)?,
+            polar: element("hue", 0, 8)?,
+            sinq: element("hue", 1, 12)?,
+            hsl_k: element("hue", 2, 16)?,
+            ts: at("ts", 0, 4)?,
+            factors: at("factors", 0, 4)?,
+            biases: at("biases", 0, 4)?,
         })
     }
 }
@@ -1862,51 +1877,64 @@ impl Offsets {
 fn sksl(size: usize) -> String {
     format!(
         r#"
-uniform int kind;
-uniform int maskDegenerates;
-uniform int negate;
-uniform int compensate;
-uniform int unswap;
-uniform int mode;
-uniform int count;
-uniform int premulAfter;
-uniform int exactScale;
-uniform int tiesEven;
-uniform float alpha8;
-uniform float tScale;
-uniform float tBias;
-uniform float p0;
-uniform float p1;
-uniform int linearize;
-uniform int gamutStep;
-uniform int encode;
-uniform float4 linA;
-uniform float3 linB;
-uniform float3 gamR;
-uniform float3 gamG;
-uniform float3 gamB;
-uniform float4 encA;
-uniform float3 encB;
-uniform int css;
-uniform float4 labA;
-uniform float4 labB;
-uniform float3 okIn0;
-uniform float3 okIn1;
-uniform float3 okIn2;
-uniform float3 okOut0;
-uniform float3 okOut1;
-uniform float3 okOut2;
-uniform int matrixForm;
-uniform float3 mRow0;
-uniform float3 mRow1;
-uniform float3 mRow2;
-uniform float2 offset;
-uniform float2 polar;
-uniform float3 sinq;
-uniform float4 hslK;
+// Ganesh keys a runtime effect's program and uploads its uniforms one
+// uniform at a time on every draw, so the flags and scalars go four to a
+// vector and each matrix whole: the effect's cost per draw follows how
+// many uniforms it declares, not how many bytes.
+//
+// The CPU's matrix from the page to the gradient's space, a row in each
+// column, and the whole-pixel offset to the page, `alpha8`, and none.
+// They come first, as what differs most from one draw to the next: Ganesh
+// compares a draw's uniforms with each recent draw's, bytes in order, to
+// merge them, and two draws of the same gradient part only here.
+uniform float3x3 toUnit;
+uniform float4 place;
+// `kind`, `maskDegenerates`, `negate`, `compensate`.
+uniform int4 shapeFlags;
+// `unswap`, `mode`, `count`, `matrixForm`.
+uniform int4 rampFlags;
+// `premulAfter`, `exactScale`, `tiesEven`, `css`.
+uniform int4 storeFlags;
+// `linearize`, `gamutStep`, `encode`, and none.
+uniform int4 xformFlags;
+// `tScale`, `tBias`, `p0`, `p1`.
+uniform float4 tParams;
+// The curve undone, `g, a, b, c` then `d, e, f`, and the curve applied.
+uniform float4 curves[4];
+// The gamut matrix, a row in each column.
+uniform float3x3 gamut;
+// `css_lab_to_xyz`'s constants.
+uniform float4 labK[2];
+// `css_oklab_to_linear_srgb`'s matrices, a row in each column.
+uniform float3x3 okIn;
+uniform float3x3 okOut;
+// The hue's turn and radians, `sin5q_`'s coefficients, and the HSL
+// constants.
+uniform float4 hue[3];
 uniform float ts[{size}];
 uniform float4 factors[{size}];
 uniform float4 biases[{size}];
+
+int kind() {{ return shapeFlags.x; }}
+int maskDegenerates() {{ return shapeFlags.y; }}
+int negate() {{ return shapeFlags.z; }}
+int compensate() {{ return shapeFlags.w; }}
+int unswap() {{ return rampFlags.x; }}
+int mode() {{ return rampFlags.y; }}
+int count() {{ return rampFlags.z; }}
+int matrixForm() {{ return rampFlags.w; }}
+int premulAfter() {{ return storeFlags.x; }}
+int exactScale() {{ return storeFlags.y; }}
+int tiesEven() {{ return storeFlags.z; }}
+int css() {{ return storeFlags.w; }}
+int linearize() {{ return xformFlags.x; }}
+int gamutStep() {{ return xformFlags.y; }}
+int encode() {{ return xformFlags.z; }}
+float tScale() {{ return tParams.x; }}
+float tBias() {{ return tParams.y; }}
+float p0() {{ return tParams.z; }}
+float p1() {{ return tParams.w; }}
+float alpha8() {{ return place.z; }}
 
 // `div255_accurate`, and NEON's `div255`: the nearest whole level.
 float4 nearest255(float4 v) {{
@@ -1980,15 +2008,15 @@ float curve(float x, float4 gabc, float3 def) {{
 // back to the space the stops were converted from, in Skia's order of
 // operations, its constants handed in as the f32 it computes them as.
 float3 lab_to_xyz(float3 c) {{
-    float f1 = (c.r + 16.0) * labA.x;
-    float f0 = (c.g * labA.y) + f1;
-    float f2 = f1 - (c.b * labA.z);
+    float f1 = (c.r + 16.0) * labK[0].x;
+    float f0 = (c.g * labK[0].y) + f1;
+    float f2 = f1 - (c.b * labK[0].z);
     float3 f = float3(f0, f1, f2);
     float3 cubed = f * f * f;
-    float x = cubed.x > labB.x ? cubed.x : (116.0 * f0 - 16.0) * labA.w;
-    float y = c.r > labB.y ? cubed.y : c.r * labA.w;
-    float z = cubed.z > labB.x ? cubed.z : (116.0 * f2 - 16.0) * labA.w;
-    return float3(x * labB.z, y, z * labB.w);
+    float x = cubed.x > labK[1].x ? cubed.x : (116.0 * f0 - 16.0) * labK[0].w;
+    float y = c.r > labK[1].y ? cubed.y : c.r * labK[0].w;
+    float z = cubed.z > labK[1].x ? cubed.z : (116.0 * f2 - 16.0) * labK[0].w;
+    return float3(x * labK[1].z, y, z * labK[1].w);
 }}
 
 float row(float3 m, float3 v) {{
@@ -1996,24 +2024,24 @@ float row(float3 m, float3 v) {{
 }}
 
 float3 oklab_to_linear_srgb(float3 c) {{
-    float3 lms = float3(row(okIn0, c), row(okIn1, c), row(okIn2, c));
+    float3 lms = float3(row(okIn[0], c), row(okIn[1], c), row(okIn[2], c));
     lms = lms * lms * lms;
-    return float3(row(okOut0, lms), row(okOut1, lms), row(okOut2, lms));
+    return float3(row(okOut[0], lms), row(okOut[1], lms), row(okOut[2], lms));
 }}
 
 // `sin5q_`, Skia's polynomial for `sin(x * 2 * pi)` on a quarter turn.
 float sin5q(float x) {{
     float x2 = x * x;
-    return x * ((x2 * sinq.z + sinq.y) * x2 + sinq.x);
+    return x * ((x2 * hue[1].z + hue[1].y) * x2 + hue[1].x);
 }}
 
 // `css_hcl_to_lab`, through Skia's `cos_` and `sin_`: hue, chroma and
 // lightness to Lab or Oklab.
 float3 hcl_to_lab(float3 c) {{
-    float h = c.r * polar.x;
-    float k = h * polar.y;
+    float h = c.r * hue[0].x;
+    float k = h * hue[0].y;
     k = 0.25 - abs(k - floor(k + 0.5));
-    float s = h * -polar.y + 0.25;
+    float s = h * -hue[0].y + 0.25;
     s = 0.25 - abs(s - floor(s + 0.5));
     return float3(c.b, c.g * sin5q(k), c.g * sin5q(s));
 }}
@@ -2025,20 +2053,20 @@ float modOf(float x, float y, float inverse) {{
 
 // `css_hsl_to_srgb_`.
 float3 hsl_to_srgb(float h, float s, float l) {{
-    h = modOf(h, 360.0, hslK.z);
-    s *= hslK.x;
-    l *= hslK.x;
-    float3 k = float3(modOf(0.0 + h * hslK.y, 12.0, hslK.w),
-                      modOf(8.0 + h * hslK.y, 12.0, hslK.w),
-                      modOf(4.0 + h * hslK.y, 12.0, hslK.w));
+    h = modOf(h, 360.0, hue[2].z);
+    s *= hue[2].x;
+    l *= hue[2].x;
+    float3 k = float3(modOf(0.0 + h * hue[2].y, 12.0, hue[2].w),
+                      modOf(8.0 + h * hue[2].y, 12.0, hue[2].w),
+                      modOf(4.0 + h * hue[2].y, 12.0, hue[2].w));
     float a = s * min(l, 1.0 - l);
     return l - a * max(float3(-1.0), min(min(k - 3.0, 9.0 - k), float3(1.0)));
 }}
 
 // `css_hwb_to_srgb`.
 float3 hwb_to_srgb(float3 c) {{
-    float w = c.g * hslK.x;
-    float b = c.b * hslK.x;
+    float w = c.g * hue[2].x;
+    float b = c.b * hue[2].x;
     float gray = w / (w + b);
     float3 rgb = hsl_to_srgb(c.r, 100.0, 50.0);
     rgb = rgb * (1.0 - w - b) + w;
@@ -2048,30 +2076,30 @@ float3 hwb_to_srgb(float3 c) {{
 half4 main(float2 q) {{
     // The pixel's centre on the page, as `seed_shader` makes it, mapped by
     // the CPU's matrix as `appendMatrix`'s stage for it maps it.
-    float2 p = (floor(q) + 0.5) + offset;
+    float2 p = (floor(q) + 0.5) + place.xy;
     float x = p.x;
     float y = p.y;
-    if (matrixForm == 1) {{
-        x = p.x + mRow0.z;
-        y = p.y + mRow1.z;
-    }} else if (matrixForm == 2) {{
-        x = p.x * mRow0.x + mRow0.z;
-        y = p.y * mRow1.y + mRow1.z;
-    }} else if (matrixForm == 3) {{
-        x = p.x * mRow0.x + (p.y * mRow0.y + mRow0.z);
-        y = p.x * mRow1.x + (p.y * mRow1.y + mRow1.z);
-    }} else if (matrixForm == 4) {{
-        float r = 1.0 / (p.x * mRow2.x + (p.y * mRow2.y + mRow2.z));
-        x = (p.x * mRow0.x + (p.y * mRow0.y + mRow0.z)) * r;
-        y = (p.x * mRow1.x + (p.y * mRow1.y + mRow1.z)) * r;
+    if (matrixForm() == 1) {{
+        x = p.x + toUnit[0].z;
+        y = p.y + toUnit[1].z;
+    }} else if (matrixForm() == 2) {{
+        x = p.x * toUnit[0].x + toUnit[0].z;
+        y = p.y * toUnit[1].y + toUnit[1].z;
+    }} else if (matrixForm() == 3) {{
+        x = p.x * toUnit[0].x + (p.y * toUnit[0].y + toUnit[0].z);
+        y = p.x * toUnit[1].x + (p.y * toUnit[1].y + toUnit[1].z);
+    }} else if (matrixForm() == 4) {{
+        float r = 1.0 / (p.x * toUnit[2].x + (p.y * toUnit[2].y + toUnit[2].z));
+        x = (p.x * toUnit[0].x + (p.y * toUnit[0].y + toUnit[0].z)) * r;
+        y = (p.x * toUnit[1].x + (p.y * toUnit[1].y + toUnit[1].z)) * r;
     }}
     float t;
     bool masked = false;
-    if (kind == 0) {{
+    if (kind() == 0) {{
         t = x;
-    }} else if (kind == 1) {{
+    }} else if (kind() == 1) {{
         t = sqrt(x * x + y * y);
-    }} else if (kind == 2) {{
+    }} else if (kind() == 2) {{
         float xa = abs(x);
         float ya = abs(y);
         float big = max(xa, ya);
@@ -2086,44 +2114,44 @@ half4 main(float2 q) {{
         if (y < 0.0) {{ phi = 1.0 - phi; }}
         if (big == 0.0) {{ phi = 0.0; }}
         t = phi;
-    }} else if (kind == 3) {{
-        float q = p0 - y * y;
+    }} else if (kind() == 3) {{
+        float q = p0() - y * y;
         masked = q < 0.0;
         t = x + sqrt(max(q, 0.0));
-    }} else if (kind == 4) {{
+    }} else if (kind() == 4) {{
         masked = x == 0.0;
         t = x + y * y / x;
-    }} else if (kind == 5) {{
-        t = sqrt(x * x + y * y) - x * p0;
+    }} else if (kind() == 5) {{
+        t = sqrt(x * x + y * y) - x * p0();
     }} else {{
         float q = x * x - y * y;
         masked = q < 0.0;
         float root = sqrt(max(q, 0.0));
-        t = (kind == 6 ? root : -root) - x * p0;
+        t = (kind() == 6 ? root : -root) - x * p0();
     }}
-    if (maskDegenerates != 0 && t <= 0.0) {{
+    if (maskDegenerates() != 0 && t <= 0.0) {{
         masked = true;
     }}
     if (masked) {{
         return half4(0);
     }}
-    if (negate != 0) {{ t = -t; }}
-    if (compensate != 0) {{ t = t + p1; }}
-    if (unswap != 0) {{ t = 1.0 - t; }}
-    t = t * tScale + tBias;
+    if (negate() != 0) {{ t = -t; }}
+    if (compensate() != 0) {{ t = t + p1(); }}
+    if (unswap() != 0) {{ t = 1.0 - t; }}
+    t = t * tScale() + tBias();
 
     float4 f = factors[0];
     float4 b = biases[0];
-    if (mode == 0) {{
+    if (mode() == 0) {{
         for (int i = 1; i < {size}; i++) {{
-            if (i >= count || t < ts[i]) {{ break; }}
+            if (i >= count() || t < ts[i]) {{ break; }}
             f = factors[i];
             b = biases[i];
         }}
     }} else {{
         t = clamp(t, 0.0, 1.0);
-        if (mode == 1) {{
-            int index = int(t * float(count - 1));
+        if (mode() == 1) {{
+            int index = int(t * float(count() - 1));
             for (int i = 1; i < {size}; i++) {{
                 if (i > index) {{ break; }}
                 f = factors[i];
@@ -2132,45 +2160,50 @@ half4 main(float2 q) {{
         }}
     }}
     float4 c = t * f + b;
-    if (css == 1) {{
+    if (css() == 1) {{
         c.rgb = lab_to_xyz(c.rgb);
-    }} else if (css == 2) {{
+    }} else if (css() == 2) {{
         c.rgb = oklab_to_linear_srgb(c.rgb);
-    }} else if (css == 3) {{
+    }} else if (css() == 3) {{
         c.rgb = lab_to_xyz(hcl_to_lab(c.rgb));
-    }} else if (css == 4) {{
+    }} else if (css() == 4) {{
         c.rgb = oklab_to_linear_srgb(hcl_to_lab(c.rgb));
-    }} else if (css == 5) {{
+    }} else if (css() == 5) {{
         c.rgb = hsl_to_srgb(c.r, c.g, c.b);
-    }} else if (css == 6) {{
+    }} else if (css() == 6) {{
         c.rgb = hwb_to_srgb(c.rgb);
     }}
     // `SkColorSpaceXformSteps`, from the space interpolated in to the page.
-    if (linearize != 0) {{
-        c.rgb = float3(curve(c.r, linA, linB), curve(c.g, linA, linB),
-                       curve(c.b, linA, linB));
+    if (linearize() != 0) {{
+        float4 gabc = curves[0];
+        float3 def = curves[1].xyz;
+        c.rgb = float3(curve(c.r, gabc, def), curve(c.g, gabc, def),
+                       curve(c.b, gabc, def));
     }}
-    if (gamutStep != 0) {{
-        c.rgb = float3(c.r * gamR.x + (c.g * gamR.y + c.b * gamR.z),
-                       c.r * gamG.x + (c.g * gamG.y + c.b * gamG.z),
-                       c.r * gamB.x + (c.g * gamB.y + c.b * gamB.z));
+    if (gamutStep() != 0) {{
+        c.rgb = float3(c.r * gamut[0].x + (c.g * gamut[0].y + c.b * gamut[0].z),
+                       c.r * gamut[1].x + (c.g * gamut[1].y + c.b * gamut[1].z),
+                       c.r * gamut[2].x + (c.g * gamut[2].y + c.b * gamut[2].z));
     }}
-    if (encode != 0) {{
-        c.rgb = float3(curve(c.r, encA, encB), curve(c.g, encA, encB),
-                       curve(c.b, encA, encB));
+    if (encode() != 0) {{
+        float4 gabc = curves[2];
+        float3 def = curves[3].xyz;
+        c.rgb = float3(curve(c.r, gabc, def), curve(c.g, gabc, def),
+                       curve(c.b, gabc, def));
     }}
     c.rgb = clamp(c.rgb, 0.0, 1.0);
     float4 s = c * 255.0;
     float4 l = floor(s + 0.5);
-    if (tiesEven != 0) {{
+    if (tiesEven() != 0) {{
         // `l - s` is at most a half, and a half only on a tie.
         l -= step(0.5, l - s) * (l - 2.0 * floor(l * 0.5));
     }}
-    if (premulAfter != 0) {{
+    if (premulAfter() != 0) {{
         l.rgb = nearest255(float4(l.rgb * l.a, 0)).rgb;
     }}
-    if (alpha8 < 255.0) {{
-        l = exactScale != 0 ? nearest255(l * alpha8) : above255(l * alpha8);
+    if (alpha8() < 255.0) {{
+        l = exactScale() != 0 ? nearest255(l * alpha8())
+                              : above255(l * alpha8());
     }}
     return half4(l / 255.0);
 }}
