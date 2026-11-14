@@ -23,37 +23,60 @@
 //! which the half-precision fragment output carries to an eight-bit target
 //! unchanged.
 //!
-//! The effect computes them from the coordinates Ganesh hands it, which are
-//! each pixel centre's only for an aliased rectangle on whole pixels; so a
-//! draw fills its shape with an image of the effect over the pixels it
-//! reaches, sampled nearest -- see [`GradientSpec::sampled`].
+//! The effect is drawn at its target's identity and takes the coordinate
+//! Ganesh hands it to that pixel's centre, which it then maps to the
+//! gradient's space as the CPU does, by the one matrix the CPU composes --
+//! see [`Exact::placed`]. That coordinate is a pixel's own only where the
+//! effect fills an aliased rectangle on whole pixels, so a draw fills its
+//! shape with an image of the effect over the pixels it reaches, sampled
+//! nearest -- see [`GradientSpec::sampled`].
 //!
-//! What is left is float noise: Skia composes the gradient's matrix with the
-//! device's into one before applying it, and the effect applies the two in
-//! turn, so `t` can part from the CPU's in its last bits, and a pixel whose
-//! value lies within that of a half level can round the other way.
+//! What is left is float noise: a GPU may fuse a product into the sum that
+//! follows it where the CPU rounds the two apart, in the matrix and in the
+//! formula for `t`, so `t` can part from the CPU's in its last bits, and a
+//! pixel whose value lies within that of a half level, or whose `t` lies
+//! within that of a stop, can round the other way.
+//!
+//! A gradient interpolated in a space other than the page's -- linear sRGB,
+//! sRGB, Display P3, A98 RGB or ProPhoto RGB -- is taken to the page as the
+//! CPU's `SkColorSpaceXformSteps` takes it: its transfer function undone, the
+//! gamut matrix, the page's transfer function applied, each curve through
+//! Skia's own `approx_powf` rebuilt in arithmetic -- see `Toward`. One in
+//! Oklab, Lab, LCH, OkLCH, HSL or HWB is first converted back to the space
+//! its stops were converted from, as the CPU's own stages do -- see `Css`;
+//! the polar four with their stops split and their hues walked on the host
+//! as `SkColor4fXformer` does both -- see `split_powerless` and
+//! `walk_hues`. That runs on the float pipeline, so it is taken only where
+//! that pipeline rounds nothing before the store.
 //!
 //! [`GradientSpec::exact`] answers `None` where the effect cannot reproduce
-//! the CPU: an interpolation space whose conversion to the page runs through
-//! skcms's approximate transfer functions, a two-point conical gradient
-//! whose stops are translucent or that is drawn at an alpha (the CPU's
-//! `highp` pipeline rounds once, after blending), more stops than the
-//! largest effect holds, and Skia's degenerate shapes.
+//! the CPU: an interpolation space it does not convert from (a working
+//! space wrapped around the shader, a PQ or HLG curve); a
+//! gradient on the float pipeline -- a
+//! two-point conical, or one converted to the page -- whose stops are
+//! translucent or that is drawn at an alpha (that pipeline rounds once,
+//! after blending); more stops than the largest effect holds; and Skia's
+//! degenerate shapes.
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::Arc};
 
 use skia_safe::{
-    AlphaType, Color4f, ColorSpace, ColorType, Data, FilterMode, IRect,
-    ImageInfo, Matrix, MipmapMode, Paint, PictureRecorder, Pixmap, Point, Rect,
-    RuntimeEffect, SamplingOptions, Shader, TileMode,
+    AlphaType, Color4f, ColorSpace, ColorSpacePrimaries, ColorSpaceTransferFn,
+    ColorType, Data, FilterMode, IPoint, IRect, ImageInfo, Matrix, MipmapMode,
+    Paint, PictureRecorder, Pixmap, Point, Rect, RuntimeEffect,
+    SamplingOptions, Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
-        interpolation::{ColorSpace as InterpolationSpace, InPremul},
+        interpolation::{
+            ColorSpace as InterpolationSpace, HueMethod, InPremul,
+        },
         shaders as gradient_shaders,
     },
     images,
+    matrix::TypeMask,
+    named_primaries, named_transfer_fn,
 };
 
 use crate::{
@@ -158,9 +181,10 @@ impl GradientSpec {
     /// at each pixel's centre. `None` where the effect cannot reproduce the
     /// CPU, or `matrix` cannot be inverted.
     ///
-    /// The effect computes the CPU's bytes from the local coordinates
-    /// Ganesh hands it, which it derives exactly for an aliased rectangle
-    /// on whole pixels and only nearly elsewhere: through a path renderer,
+    /// The effect computes the CPU's bytes from the coordinates Ganesh
+    /// hands it, taken to their pixel's centre -- see [`Exact::placed`] --
+    /// which are that pixel's for an aliased rectangle on whole pixels and
+    /// not always elsewhere: through a path renderer,
     /// or an anti-aliased rectangle whose edges fall inside pixels, it
     /// extrapolates them from geometry outset past the shape, and a
     /// page-covering triangle drew 0.5% of its pixels a level off, a
@@ -181,11 +205,10 @@ impl GradientSpec {
         matrix: &Matrix,
         area: IRect,
     ) -> Option<Shader> {
-        let to_area = Matrix::translate((-area.left as f32, -area.top as f32));
         let from_device = matrix.invert()?;
         let effect = self
             .exact(page, alpha)?
-            .with_local_matrix(&Matrix::concat(&to_area, matrix));
+            .placed(matrix, IPoint::new(area.left, area.top))?;
         let size = Rect::from_wh(area.width() as f32, area.height() as f32);
         let mut recorder = PictureRecorder::new();
         let mut paint = Paint::default();
@@ -212,12 +235,13 @@ impl GradientSpec {
         )
     }
 
-    /// The shader that draws this on the GPU in the bytes the CPU stores,
+    /// The effect that draws this on the GPU in the bytes the CPU stores,
     /// on an eight-bit page in `page`, at `alpha` -- the paint's, which the
-    /// shader takes and the paint drawing it then leaves at 1. `None` where
-    /// the effect cannot reproduce the CPU -- see the module's notes. Exact
-    /// only where Ganesh draws it as an aliased rectangle on whole pixels --
-    /// see [`Self::sampled`].
+    /// shader takes and the paint drawing it then leaves at 1 -- to be
+    /// placed where a draw puts it: see [`Exact::placed`]. `None` where the
+    /// effect cannot reproduce the CPU -- see the module's notes. Exact only
+    /// where Ganesh draws it as an aliased rectangle on whole pixels -- see
+    /// [`Self::sampled`].
     ///
     /// The answer is the one this thread last made for a gradient whose
     /// every number is the same to the bit, on the same page at the same
@@ -225,7 +249,7 @@ impl GradientSpec {
     /// makes each of its gradients afresh, as a Canvas API caller makes a
     /// new `CanvasGradient` for every draw, and making one reads its stops
     /// through a colour conversion and uploads its uniforms.
-    pub fn exact(&self, page: &ColorSpace, alpha: f32) -> Option<Shader> {
+    pub fn exact(&self, page: &ColorSpace, alpha: f32) -> Option<Exact> {
         #[cfg(test)]
         EXACTS_ASKED.set(EXACTS_ASKED.get() + 1);
         let alpha = alpha.to_bits();
@@ -252,7 +276,7 @@ impl GradientSpec {
     }
 
     /// [`Self::exact`], made afresh.
-    fn made(&self, page: &ColorSpace, alpha: f32) -> Option<Shader> {
+    fn made(&self, page: &ColorSpace, alpha: f32) -> Option<Exact> {
         #[cfg(test)]
         EXACTS_MADE.set(EXACTS_MADE.get() + 1);
         let layout = Layout::of(self)?;
@@ -260,24 +284,33 @@ impl GradientSpec {
         // The `highp` pipeline premultiplies, scales and blends in floats
         // and rounds once, at the store; the effect hands the GPU whole
         // levels, which match it only where none of those happen.
-        let highp = layout.highp;
+        // A conversion to the page runs on the float pipeline too, as
+        // does Lab's or Oklab's back to the space it was converted from.
+        let highp =
+            layout.highp || !ramp.toward.is_identity() || ramp.css != Css::None;
         if highp && (!ramp.opaque || alpha < 1.0) {
             return None;
         }
-        let local = match &self.local {
-            Some(local) => Matrix::concat(local, &layout.from_unit),
-            None => layout.from_unit,
-        };
+        let converts = !ramp.toward.is_identity() || ramp.css != Css::None;
         EFFECTS.with(|effects| {
-            let (size, effect, offsets) = effects
-                .as_ref()?
-                .iter()
-                .find(|(size, ..)| ramp.ts.len() <= *size)?;
-            effect.make_shader(
-                uniforms(offsets, *size, &layout, &ramp, alpha, highp),
-                &[],
-                Some(&local),
-            )
+            let compiled = effects.as_ref()?.iter().find(|compiled| {
+                compiled.converts == converts && ramp.ts.len() <= compiled.size
+            })?;
+            Some(Exact {
+                size: compiled.size,
+                converts,
+                uniforms: uniforms(
+                    &compiled.offsets,
+                    compiled.size,
+                    &layout,
+                    &ramp,
+                    alpha,
+                    highp,
+                )
+                .into(),
+                to_unit: layout.to_unit,
+                local: self.local,
+            })
         })
     }
 
@@ -338,6 +371,145 @@ impl GradientSpec {
     }
 }
 
+/// The effect for a gradient on a page at an alpha, made and kept but not
+/// yet placed on the page: [`Exact::placed`] gives the shader that draws it
+/// where a draw puts it.
+#[derive(Clone)]
+pub(crate) struct Exact {
+    /// The length of the effect's arrays, which with [`Self::converts`]
+    /// picks it from [`EFFECTS`].
+    size: usize,
+    /// Whether the effect takes the stages that convert a colour, which a
+    /// gradient interpolated in the page's own space needs none of.
+    converts: bool,
+    /// Its uniforms but the placement's.
+    uniforms: Arc<[u8]>,
+    /// The gradient's own matrix -- see [`Layout::to_unit`].
+    to_unit: Matrix,
+    /// The shader's local matrix -- see [`GradientSpec::local`].
+    local: Option<Matrix>,
+}
+
+impl Exact {
+    /// The shader that draws the gradient onto a target whose device pixel
+    /// `(x, y)` is the page's `(x + offset.x, y + offset.y)`, as the page
+    /// draws it under `matrix`, drawn at the target's identity: `None`
+    /// where the CPU's matrix has no inverse.
+    ///
+    /// The effect takes the coordinate it is handed to its pixel's centre,
+    /// `floor(p) + 0.5`, which is the target's pixel centre wherever the
+    /// coordinate is off it by under half a pixel: an NVIDIA GPU hands a
+    /// runtime effect an `x` a little below each centre, and a pixel whose
+    /// `t` the CPU finds exactly on a stop then took the colour before it.
+    /// It adds `offset`, which is the page's pixel centre exactly, as
+    /// `seed_shader` makes it, and maps it to the gradient's space by the
+    /// one matrix the CPU maps it by, `SkShaders::MatrixRec::apply`'s
+    /// `Concat(fPtsToUnit, inverse(Concat(CTM, localMatrix)))`, made here
+    /// with Skia's own `SkMatrix::Concat` and `invert`, in the form
+    /// `appendMatrix` picks for it: a translation, a scale and a
+    /// translation, a 2x3, or a perspective, each in its stage's order of
+    /// operations. `matrix_perspective` multiplies by `rcp_precise` of the
+    /// third coordinate, a hardware estimate refined -- twice on NEON, once
+    /// on SSE -- which the effect cannot reproduce to the bit and takes as
+    /// the quotient: a perspective's `t` parts from the CPU's in its last
+    /// bits there too.
+    pub fn placed(&self, matrix: &Matrix, offset: IPoint) -> Option<Shader> {
+        let to_unit = self.unit_matrix(matrix)?;
+        #[cfg(test)]
+        if to_unit.has_perspective() {
+            PLACED_IN_PERSPECTIVE.set(PLACED_IN_PERSPECTIVE.get() + 1);
+        }
+        EFFECTS.with(|effects| {
+            let compiled = effects.as_ref()?.iter().find(|compiled| {
+                compiled.size == self.size && compiled.converts == self.converts
+            })?;
+            let mut data = self.uniforms.to_vec();
+            placement(&mut data, &compiled.offsets, &to_unit, offset);
+            compiled
+                .effect
+                .make_shader(Data::new_copy(&data), &[], None)
+        })
+    }
+}
+
+impl Exact {
+    /// Whether the effect can be placed under `matrix` -- see
+    /// [`Self::placed`].
+    pub fn places(&self, matrix: &Matrix) -> bool {
+        self.unit_matrix(matrix).is_some()
+    }
+
+    /// The CPU's matrix from the page's pixels to the gradient's space,
+    /// for a draw under `matrix` -- see [`Self::placed`].
+    fn unit_matrix(&self, matrix: &Matrix) -> Option<Matrix> {
+        let total = match &self.local {
+            Some(local) => Matrix::concat(matrix, local),
+            None => *matrix,
+        };
+        Some(Matrix::concat(&self.to_unit, &total.invert()?))
+    }
+}
+
+/// `matrix`'s form, as `appendMatrix` picks the stage that applies it.
+fn matrix_form(matrix: &Matrix) -> i32 {
+    let kind = matrix.get_type();
+    if matrix.has_perspective() {
+        MatrixForm::PERSPECTIVE
+    } else if kind.is_empty() {
+        MatrixForm::IDENTITY
+    } else if kind == TypeMask::TRANSLATE {
+        MatrixForm::TRANSLATE
+    } else if (kind - (TypeMask::SCALE | TypeMask::TRANSLATE)).is_empty() {
+        MatrixForm::SCALE_TRANSLATE
+    } else {
+        MatrixForm::AFFINE
+    }
+}
+
+/// The stage `appendMatrix` applies a matrix through, as the effect's
+/// `matrixForm()` names it.
+struct MatrixForm;
+
+impl MatrixForm {
+    /// `matrix_2x3`.
+    const AFFINE: i32 = 3;
+    /// None: the identity is left out.
+    const IDENTITY: i32 = 0;
+    /// `matrix_perspective`.
+    const PERSPECTIVE: i32 = 4;
+    /// `matrix_scale_translate`.
+    const SCALE_TRANSLATE: i32 = 2;
+    /// `matrix_translate`.
+    const TRANSLATE: i32 = 1;
+}
+
+/// `data`, an effect's uniforms, placed by `to_unit` and `offset` -- see
+/// [`Exact::placed`].
+fn placement(
+    data: &mut [u8],
+    offsets: &Offsets,
+    to_unit: &Matrix,
+    offset: IPoint,
+) {
+    put(
+        data,
+        offsets.matrix_form,
+        matrix_form(to_unit).to_ne_bytes(),
+    );
+    // `get9`'s order: `scaleX, skewX, transX`, then `skewY, scaleY,
+    // transY`, then the perspective's three, a row each.
+    let mut nine = [0.0; 9];
+    to_unit.get_9(&mut nine);
+    for (at, row) in [
+        (offsets.m_row0, &nine[..3]),
+        (offsets.m_row1, &nine[3..6]),
+        (offsets.m_row2, &nine[6..]),
+    ] {
+        floats(data, at, row);
+    }
+    floats(data, offsets.offset, &[offset.x as f32, offset.y as f32]);
+}
+
 /// How many sets of shaders [`GradientSpec::exact`] keeps on a thread, and
 /// how many a set holds: 256 shaders, chosen for a page of a few dozen
 /// distinct gradients redrawn every frame -- 50 in the scene it was sized
@@ -388,7 +560,7 @@ fn exact_hash(spec: &GradientSpec, page: &ColorSpace, alpha: u32) -> u64 {
 
 /// The shaders [`GradientSpec::exact`] has made, each `None` where it could
 /// make none, filed by [`exact_hash`].
-type Exacts = KeptSets<ExactKey, Option<Shader>, EXACT_SETS, EXACT_WAYS>;
+type Exacts = KeptSets<ExactKey, Option<Exact>, EXACT_SETS, EXACT_WAYS>;
 
 thread_local! {
     /// The shaders [`GradientSpec::exact`] has made on this thread.
@@ -403,6 +575,10 @@ thread_local! {
     /// How many times [`GradientSpec::exact`] has been asked on this thread,
     /// made or found.
     pub(crate) static EXACTS_ASKED: Cell<usize> = const { Cell::new(0) };
+    /// How many shaders [`Exact::placed`] has given under a perspective on
+    /// this thread.
+    pub(crate) static PLACED_IN_PERSPECTIVE: Cell<usize> =
+        const { Cell::new(0) };
     /// Whether [`GradientSpec::exact`] takes a shader kept: off, every
     /// shader is made afresh, the reference the kept ones are held to.
     pub(crate) static KEEPS_EXACTS: Cell<bool> = const { Cell::new(true) };
@@ -412,9 +588,9 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq)]
 struct Layout {
     kind: Kind,
-    /// The inverse of the gradient's own matrix, which maps the space `kind`
-    /// computes `t` in to the shader's.
-    from_unit: Matrix,
+    /// The gradient's own matrix, `fPtsToUnit`, which maps the shader's
+    /// space to the one `kind` computes `t` in.
+    to_unit: Matrix,
     /// A matrix applied to `t` after `kind` -- a partial sweep's range, a
     /// concentric conical gradient's start radius -- as `t * scale + bias`.
     t_scale: f32,
@@ -463,15 +639,18 @@ impl Layout {
     /// `alter_2pt_conical_unswap`.
     const UNSWAP: i32 = 16;
 
-    /// Whether `flag` is set, as the effect's uniform takes it.
+    /// Whether `flag` is set, as the effect's flags take it.
     fn flag(&self, flag: i32) -> [u8; 4] {
         i32::from(self.flags & flag != 0).to_ne_bytes()
     }
 
+    /// `None` where `to_unit` has no inverse, which Skia's factories refuse
+    /// as degenerate.
     fn plain(kind: Kind, to_unit: Matrix) -> Option<Layout> {
+        to_unit.invert()?;
         Some(Layout {
             kind,
-            from_unit: to_unit.invert()?,
+            to_unit,
             t_scale: 1.0,
             t_bias: 0.0,
             p0: 0.0,
@@ -708,6 +887,11 @@ struct Ramp {
     opaque: bool,
     /// Whether the colours are premultiplied after the interpolation.
     premul_after: bool,
+    /// What converts an interpolated colour back to the space it was
+    /// converted from before interpolating -- see [`Css`].
+    css: Css,
+    /// What converts an interpolated colour to the page -- see [`Toward`].
+    toward: Toward,
 }
 
 impl Ramp {
@@ -719,17 +903,52 @@ impl Ramp {
     const TWO: i32 = 2;
 
     fn of(spec: &GradientSpec, page: &ColorSpace) -> Option<Ramp> {
-        let (colors, positions, opaque) = stops(spec)?;
+        let Stops {
+            colors,
+            positions,
+            opaque,
+            first_implicit,
+            last_implicit,
+        } = stops(spec)?;
         let intermediate = intermediate_space(spec, page)?;
-        let mut colors = convert(&colors, &spec.color_space, &intermediate)?;
+        let toward = Toward::of(&intermediate, page)?;
+        let css = Css::of(spec.interpolation.color_space);
+        let converted: Vec<([f32; 4], bool)> =
+            convert(&colors, &spec.color_space, &intermediate)?
+                .into_iter()
+                .map(|c| css.converted(c))
+                .collect();
+        let (mut colors, positions) =
+            match converted.iter().any(|&(_, powerless)| powerless) {
+                true => {
+                    let split =
+                        split_powerless(&converted, positions.as_deref());
+                    (split.0, Some(split.1))
+                }
+                false => {
+                    (converted.into_iter().map(|(c, _)| c).collect(), positions)
+                }
+            };
+        if css.is_polar() {
+            walk_hues(
+                &mut colors,
+                spec.interpolation.hue_method,
+                first_implicit,
+                last_implicit,
+            );
+        }
         let premul = spec.interpolation.in_premul == InPremul::Yes;
         if premul {
+            // `premul_polar` leaves the hue alone; `premul_rgb` scales all
+            // three.
+            let from = usize::from(css.is_polar());
             for c in &mut colors {
-                *c = [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
+                let a = c[3];
+                c[from..3].iter_mut().for_each(|v| *v *= a);
             }
         }
         let premul_after = !premul && !opaque;
-        Some(match positions {
+        let mut ramp = match positions {
             None if colors.len() == 2 => Ramp {
                 mode: Ramp::TWO,
                 ts: vec![0.0],
@@ -739,12 +958,17 @@ impl Ramp {
                 biases: vec![colors[0]],
                 opaque,
                 premul_after,
+                css: Css::None,
+                toward: Toward::default(),
             },
             None => evenly(&colors, opaque, premul_after),
             Some(positions) => {
                 general(&colors, &positions, opaque, premul_after)
             }
-        })
+        };
+        ramp.css = css;
+        ramp.toward = toward;
+        Some(ramp)
     }
 }
 
@@ -758,6 +982,8 @@ fn evenly(colors: &[[f32; 4]], opaque: bool, premul_after: bool) -> Ramp {
         biases: Vec::with_capacity(colors.len()),
         opaque,
         premul_after,
+        css: Css::None,
+        toward: Toward::default(),
     };
     for (i, pair) in colors.windows(2).enumerate() {
         let (left, right) = (pair[0], pair[1]);
@@ -794,6 +1020,8 @@ fn general(
         biases: vec![colors[0]],
         opaque,
         premul_after,
+        css: Css::None,
+        toward: Toward::default(),
     };
     let mut t_l = positions[0];
     let mut c_l = colors[0];
@@ -819,13 +1047,26 @@ fn general(
     ramp
 }
 
+/// The stops as `SkGradientBaseShader`'s constructor leaves them -- see
+/// [`stops`].
+struct Stops {
+    colors: Vec<Color4f>,
+    /// `None` where the constructor finds the positions evenly spaced.
+    positions: Option<Vec<f32>>,
+    /// Whether every colour is opaque.
+    opaque: bool,
+    /// Whether the first stop is the copy added at 0, and the last the copy
+    /// added at 1: the longer hue method walks neither pair of hues the
+    /// long way -- see [`walk_hues`].
+    first_implicit: bool,
+    last_implicit: bool,
+}
+
 /// The stops as `SkGradientBaseShader`'s constructor leaves them: bracketed
 /// by stops at 0 and 1, pinned to rise, `None` for positions it finds
 /// evenly spaced, and runs of three or more stops at one offset cut to the
-/// first and last. With whether every colour is opaque.
-fn stops(
-    spec: &GradientSpec,
-) -> Option<(Vec<Color4f>, Option<Vec<f32>>, bool)> {
+/// first and last.
+fn stops(spec: &GradientSpec) -> Option<Stops> {
     let (given, pos) = (&spec.colors, &spec.positions);
     if given.len() < 2 || pos.len() != given.len() {
         return None;
@@ -862,7 +1103,13 @@ fn stops(
         positions.push(curr);
     }
     if uniform {
-        return Some((colors, None, opaque));
+        return Some(Stops {
+            colors,
+            positions: None,
+            opaque,
+            first_implicit,
+            last_implicit,
+        });
     }
     // Of three or more stops at one offset, under clamp, the leftmost and
     // the rightmost.
@@ -880,22 +1127,114 @@ fn stops(
             i = j;
         }
     }
-    Some((kept_colors, Some(kept_positions), opaque))
+    Some(Stops {
+        colors: kept_colors,
+        positions: Some(kept_positions),
+        opaque,
+        first_implicit,
+        last_implicit,
+    })
 }
 
-/// The space the CPU interpolates in, where it is the page's own so that
-/// nothing converts the result: `None` elsewhere -- the CPU's conversion
-/// back runs through skcms's approximate transfer functions, which the
-/// effect does not reproduce -- and wherever a working space is wrapped
-/// around the shader.
+/// The stops with each whose hue is powerless split in two at its
+/// position, as `SkColor4fXformer` splits them: one taking the hue of the
+/// stop before it, one the hue of the stop after, the first stop keeping
+/// only the second and the last only the first. The positions are always
+/// returned, as Skia then hands the gradient stage positions even where
+/// the stops were evenly spaced.
 ///
-/// A space named rather than taken from the destination is the page's own
-/// where it equals the page's: sRGB on an sRGB page, Display P3 on a
-/// Display P3 one. Skia builds its Display P3 from the sRGB transfer
-/// function and `SkNamedGamut::kDisplayP3` (`intermediate_color_space` in
-/// `SkGradientBaseShader.cpp`), the gamut its CICP table gives the code
-/// point a page's Display P3 is built from (`SkColorSpace.cpp`), so the two
-/// compare equal and the CPU converts nothing.
+/// A neighbour's hue may itself be powerless; Skia copies it all the same,
+/// and so does this.
+fn split_powerless(
+    stops: &[([f32; 4], bool)],
+    positions: Option<&[f32]>,
+) -> (Vec<[f32; 4]>, Vec<f32>) {
+    let n = stops.len();
+    // `getPos`: evenly spaced stops are at `i / (n - 1)`, in f32.
+    let at = |i: usize| match positions {
+        Some(positions) => positions[i],
+        None => i as f32 / (n - 1) as f32,
+    };
+    let with_hue_of = |c: [f32; 4], from: [f32; 4]| [from[0], c[1], c[2], c[3]];
+    let mut colors = Vec::with_capacity(2 * n);
+    let mut kept = Vec::with_capacity(2 * n);
+    for (i, &(c, powerless)) in stops.iter().enumerate() {
+        if !powerless {
+            colors.push(c);
+            kept.push(at(i));
+            continue;
+        }
+        if i != 0 {
+            colors.push(with_hue_of(c, stops[i - 1].0));
+            kept.push(at(i));
+        }
+        if i != n - 1 {
+            colors.push(with_hue_of(c, stops[i + 1].0));
+            kept.push(at(i));
+        }
+    }
+    (colors, kept)
+}
+
+/// The hues of `colors` adjusted for `method`, as `SkColor4fXformer` does:
+/// a pair's second hue moved by a whole turn where the method takes the
+/// other way round, and each later hue by the turns before it, so that the
+/// interpolation needs no adjustment per pixel. The longer method leaves the
+/// pair an implicit first or last stop makes as it is (skbug.com/40044215).
+///
+/// `first_implicit` and `last_implicit` are tested against the first and
+/// last pair of `colors` after [`split_powerless`], which is where Skia
+/// tests them.
+fn walk_hues(
+    colors: &mut [[f32; 4]],
+    method: HueMethod,
+    first_implicit: bool,
+    last_implicit: bool,
+) {
+    let n = colors.len();
+    let mut delta = 0.0_f32;
+    for i in 0..n - 1 {
+        let h1 = colors[i][0];
+        let mut h2 = colors[i + 1][0] + delta;
+        let d = h2 - h1;
+        let turn = match method {
+            HueMethod::Shorter if d > HALF_TURN => -TURN,
+            HueMethod::Shorter if d < -HALF_TURN => TURN,
+            HueMethod::Longer
+                if (i == 0 && first_implicit)
+                    || (i == n - 2 && last_implicit) =>
+            {
+                0.0
+            }
+            HueMethod::Longer if 0.0 < d && d < HALF_TURN => -TURN,
+            HueMethod::Longer if -HALF_TURN < d && d <= 0.0 => TURN,
+            HueMethod::Increasing if h2 < h1 => TURN,
+            HueMethod::Decreasing if h1 < h2 => -TURN,
+            _ => 0.0,
+        };
+        h2 += turn;
+        delta += turn;
+        colors[i + 1][0] = h2;
+    }
+}
+
+/// A whole turn of hue, in the degrees the polar spaces keep it in.
+const TURN: f32 = 360.0;
+
+/// Half a turn: two hues further apart than this are nearer the other way.
+const HALF_TURN: f32 = 180.0;
+
+/// The space the CPU interpolates in, as `intermediate_color_space` in
+/// `SkGradientBaseShader.cpp` picks it for the interpolation space `spec`
+/// names: the page's own for the destination, and otherwise the space named,
+/// built as Skia builds it -- see [`skia_space`]. The CPU converts an
+/// interpolated colour from it to the page -- see [`Toward`].
+///
+/// Lab's and LCH's is XYZ D50 made linear, Oklab's and OkLCH's linear sRGB,
+/// and HSL's and HWB's sRGB, the spaces the stops are converted into and
+/// out of -- see [`Css`]. ProPhoto RGB's gamut is derived from its
+/// primaries, as Skia derives it -- see [`primaries_to_xyzd50`]. `None`
+/// where a working space is wrapped around the shader.
 fn intermediate_space(
     spec: &GradientSpec,
     page: &ColorSpace,
@@ -903,16 +1242,468 @@ fn intermediate_space(
     if spec.space.working_space().is_some() {
         return None;
     }
-    let intermediate = match spec.interpolation.color_space {
-        InterpolationSpace::Destination => page.clone(),
-        InterpolationSpace::SRGB => ColorSpace::new_srgb(),
+    match spec.interpolation.color_space {
+        InterpolationSpace::Destination => Some(page.clone()),
+        InterpolationSpace::SRGB => Some(ColorSpace::new_srgb()),
+        InterpolationSpace::SRGBLinear => Some(ColorSpace::new_srgb_linear()),
         InterpolationSpace::DisplayP3 => {
-            PixelColorSpace::DisplayP3.to_skia_color_space().ok()?
+            PixelColorSpace::DisplayP3.to_skia_color_space().ok()
         }
-        _ => return None,
-    };
-    (intermediate == *page).then_some(intermediate)
+        InterpolationSpace::A98RGB => skia_space(
+            &transfer_floats(&named_transfer_fn::A98_RGB),
+            &from_fixed(&ADOBE_RGB_GAMUT),
+        ),
+        InterpolationSpace::ProphotoRGB => skia_space(
+            &transfer_floats(&named_transfer_fn::PRO_PHOTO_RGB),
+            &primaries_to_xyzd50(&named_primaries::PRO_PHOTO_RGB)?,
+        ),
+        InterpolationSpace::Lab | InterpolationSpace::LCH => {
+            skia_space(&LINEAR_TF, &from_fixed(&XYZ_GAMUT))
+        }
+        InterpolationSpace::OKLab | InterpolationSpace::OKLCH => {
+            Some(ColorSpace::new_srgb_linear())
+        }
+        InterpolationSpace::HSL | InterpolationSpace::HWB => {
+            Some(ColorSpace::new_srgb())
+        }
+        _ => None,
+    }
 }
+
+/// `SkNamedGamut::kAdobeRGB` in `SkColorSpace.h`: the gamut's matrix to XYZ
+/// D50 in ICC 16.16 fixed point, row by row, which Skia turns into floats
+/// with `SkFixedToFloat`.
+const ADOBE_RGB_GAMUT: [[i32; 3]; 3] = [
+    [0x9c18, 0x348d, 0x2631],
+    [0x4fa5, 0xa02c, 0x102f],
+    [0x04fc, 0x0f95, 0xbe9c],
+];
+
+/// The version `SkColorSpace::Deserialize` reads (`k1_Version` in
+/// `SkColorSpace.cpp`): a four-byte header, then the transfer function's
+/// seven floats and the matrix's nine.
+const SERIALIZED_VERSION: u8 = 1;
+
+/// The space Skia's `SkColorSpace::MakeRGB` makes from the transfer function
+/// `tf`, as `g, a, b, c, d, e, f`, and the matrix to XYZ D50 `gamut`: built
+/// through `SkColorSpace::Deserialize`, which takes the same sixteen floats
+/// and calls `MakeRGB` with them, so that it compares equal to the one
+/// Skia's gradient builds -- skia-safe does not bind `MakeRGB` itself.
+fn skia_space(tf: &[f32; 7], gamut: &Matrix3) -> Option<ColorSpace> {
+    let mut bytes = vec![SERIALIZED_VERSION, 0, 0, 0];
+    bytes.extend(tf.iter().flat_map(|v| v.to_ne_bytes()));
+    bytes.extend(gamut.iter().flatten().flat_map(|v| v.to_ne_bytes()));
+    Some(ColorSpace::deserialize(Data::new_copy(&bytes)))
+}
+
+/// `tf` as `g, a, b, c, d, e, f`.
+fn transfer_floats(tf: &ColorSpaceTransferFn) -> [f32; 7] {
+    [tf.g, tf.a, tf.b, tf.c, tf.d, tf.e, tf.f]
+}
+
+/// A gamut Skia writes in ICC 16.16 fixed point, as `SkFixedToFloat` turns
+/// it into floats: each value times 2^-16.
+fn from_fixed(gamut: &[[i32; 3]; 3]) -> Matrix3 {
+    gamut.map(|row| row.map(|v| v as f32 * (1.0 / (1u32 << 16) as f32)))
+}
+
+/// A 3x3 matrix as skcms keeps one, row by row.
+type Matrix3 = [[f32; 3]; 3];
+
+/// The D50 white skcms adapts to, `wXYZD50` in `skcms_AdaptToXYZD50`.
+const D50_XYZ: [f32; 3] = [0.96422, 1.0, 0.82521];
+
+/// Bradford's cone response matrix, `xyz_to_lms` in `skcms_AdaptToXYZD50`.
+const BRADFORD: Matrix3 = [
+    [0.8951, 0.2664, -0.1614],
+    [-0.7502, 1.7135, 0.0367],
+    [0.0389, -0.0685, 1.0296],
+];
+
+/// Its inverse as skcms writes it, `lms_to_xyz`: to seven figures, not the
+/// inverse of [`BRADFORD`] in f32.
+#[allow(clippy::excessive_precision)]
+const BRADFORD_INVERSE: Matrix3 = [
+    [0.9869929, -0.1470543, 0.1599627],
+    [0.4323053, 0.5183603, 0.0492912],
+    [-0.0085287, 0.0400428, 0.9684867],
+];
+
+/// `mv_mul` in `skcms.cc`: `m` times `v`.
+fn mv_mul(m: &Matrix3, v: &[f32; 3]) -> [f32; 3] {
+    m.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2])
+}
+
+/// `skcms_Matrix3x3_concat`: `a` times `b`.
+fn concat(a: &Matrix3, b: &Matrix3) -> Matrix3 {
+    std::array::from_fn(|r| {
+        std::array::from_fn(|c| {
+            a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c]
+        })
+    })
+}
+
+/// `skcms_Matrix3x3_invert`: by cofactors in f64, each entry rounded to f32
+/// at the end, the names its own -- `a01` is row 1, column 0. `None` where
+/// skcms refuses: a singular matrix, or an inverse f32 cannot hold.
+fn invert(m: &Matrix3) -> Option<Matrix3> {
+    let a = |r: usize, c: usize| f64::from(m[r][c]);
+    let (a00, a01, a02) = (a(0, 0), a(1, 0), a(2, 0));
+    let (a10, a11, a12) = (a(0, 1), a(1, 1), a(2, 1));
+    let (a20, a21, a22) = (a(0, 2), a(1, 2), a(2, 2));
+    let b = [
+        a00 * a11 - a01 * a10,
+        a00 * a12 - a02 * a10,
+        a01 * a12 - a02 * a11,
+        a20,
+        a21,
+        a22,
+    ];
+    let determinant = b[0] * b[5] - b[1] * b[4] + b[2] * b[3];
+    if determinant == 0.0 {
+        return None;
+    }
+    let invdet = 1.0 / determinant;
+    let limit = f64::from(f32::MAX);
+    if invdet > limit || invdet < -limit || !(invdet as f32).is_finite() {
+        return None;
+    }
+    let [b0, b1, b2, b3, b4, b5] = b.map(|v| v * invdet);
+    let inverse = [
+        [
+            a11 * b5 - a12 * b4,
+            a12 * b3 - a10 * b5,
+            a10 * b4 - a11 * b3,
+        ],
+        [
+            a02 * b4 - a01 * b5,
+            a00 * b5 - a02 * b3,
+            a01 * b3 - a00 * b4,
+        ],
+        [b2, -b1, b0],
+    ]
+    .map(|row| row.map(|v| v as f32));
+    inverse
+        .iter()
+        .flatten()
+        .all(|v| v.is_finite())
+        .then_some(inverse)
+}
+
+/// `skcms_AdaptToXYZD50`: Bradford's adaptation from the white `wx, wy` to
+/// D50.
+fn adapt_to_d50(wx: f32, wy: f32) -> Matrix3 {
+    let white = [wx / wy, 1.0, (1.0 - wx - wy) / wy];
+    let from = mv_mul(&BRADFORD, &white);
+    let to = mv_mul(&BRADFORD, &D50_XYZ);
+    let scale = [
+        [to[0] / from[0], 0.0, 0.0],
+        [0.0, to[1] / from[1], 0.0],
+        [0.0, 0.0, to[2] / from[2]],
+    ];
+    concat(&BRADFORD_INVERSE, &concat(&scale, &BRADFORD))
+}
+
+/// `skcms_PrimariesToXYZD50`, which `SkColorSpacePrimaries::toXYZD50` calls:
+/// the matrix from linear RGB on `p`'s primaries to XYZ D50, in skcms's f32
+/// order of operations, which Skia builds with `-ffp-contract=off` outside
+/// Windows. Skia derives ProPhoto RGB's gamut this way when a gradient is
+/// interpolated in it, rather than from a table.
+fn primaries_to_xyzd50(p: &ColorSpacePrimaries) -> Option<Matrix3> {
+    let in_unit = |v: f32| (0.0..=1.0).contains(&v);
+    if ![p.rx, p.ry, p.gx, p.gy, p.bx, p.by, p.wx, p.wy]
+        .into_iter()
+        .all(in_unit)
+    {
+        return None;
+    }
+    let xy = [
+        [p.rx, p.gx, p.bx],
+        [p.ry, p.gy, p.by],
+        [1.0 - p.rx - p.ry, 1.0 - p.gx - p.gy, 1.0 - p.bx - p.by],
+    ];
+    let white = [p.wx / p.wy, 1.0, (1.0 - p.wx - p.wy) / p.wy];
+    let xyz = mv_mul(&invert(&xy)?, &white);
+    let scale = [[xyz[0], 0.0, 0.0], [0.0, xyz[1], 0.0], [0.0, 0.0, xyz[2]]];
+    Some(concat(&adapt_to_d50(p.wx, p.wy), &concat(&xy, &scale)))
+}
+
+/// What the CPU converts an interpolated colour through to reach the page,
+/// as `SkColorSpaceXformSteps` decides it between the space interpolated in
+/// and the page's: decode the source's transfer function, change gamut, and
+/// encode the page's, each only where it does something. Every step runs on
+/// the float pipeline, through Skia's `approx_powf` for a curve --
+/// `parametric` and `gamma_` in `SkRasterPipeline_opts.h`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Toward {
+    /// The source's transfer function, as `g, a, b, c, d, e, f`.
+    linearize: Option<[f32; 7]>,
+    /// The gamut change, as `matrix_3x3` takes it: column by column.
+    gamut: Option<[f32; 9]>,
+    /// The inverse of the page's transfer function.
+    encode: Option<[f32; 7]>,
+}
+
+impl Toward {
+    /// The steps from `from` to `to`; `None` for a curve Skia converts
+    /// through other stages than `parametric` and `gamma_` -- PQ and HLG.
+    fn of(from: &ColorSpace, to: &ColorSpace) -> Option<Toward> {
+        if from.hash() == to.hash() {
+            return Some(Toward::default());
+        }
+        let (source, page) = (
+            transfer_floats(&from.transfer_fn()),
+            transfer_floats(&to.transfer_fn()),
+        );
+        // `skcms_TransferFunction_getType` tells PQ and HLG by a negative
+        // `g`.
+        if source[0] < 0.0 || page[0] < 0.0 {
+            return None;
+        }
+        let linear =
+            |f: &[f32; 7]| f.map(f32::to_bits) == LINEAR_TF.map(f32::to_bits);
+        let mut toward = Toward {
+            linearize: (!linear(&source)).then_some(source),
+            gamut: None,
+            encode: (!linear(&page))
+                .then(|| transfer_floats(&to.inv_transfer_fn())),
+        };
+        if from.to_xyzd50_hash() != to.to_xyzd50_hash() {
+            // The matrix's columns are what it makes of each primary,
+            // converted between the two spaces made linear: one channel
+            // times a column entry plus zeros, so each comes out as the
+            // entry itself.
+            let (from, to) = (from.with_linear_gamma(), to.with_linear_gamma());
+            let basis = [
+                Color4f::new(1.0, 0.0, 0.0, 1.0),
+                Color4f::new(0.0, 1.0, 0.0, 1.0),
+                Color4f::new(0.0, 0.0, 1.0, 1.0),
+            ];
+            let columns = convert(&basis, &from, &to)?;
+            toward.gamut = Some(std::array::from_fn(|i| columns[i / 3][i % 3]));
+        } else if from.transfer_fn_hash() == to.transfer_fn_hash() {
+            toward.linearize = None;
+            toward.encode = None;
+        }
+        Some(toward)
+    }
+
+    /// Whether this converts nothing.
+    fn is_identity(&self) -> bool {
+        *self == Toward::default()
+    }
+}
+
+/// `SkNamedTransferFn::kLinear`, as `g, a, b, c, d, e, f`.
+const LINEAR_TF: [f32; 7] = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+/// `SkNamedGamut::kXYZ`, the identity, in the 16.16 fixed point
+/// [`skia_space`] takes: Lab's intermediate space is XYZ D50 itself.
+const XYZ_GAMUT: [[i32; 3]; 3] =
+    [[1 << 16, 0, 0], [0, 1 << 16, 0], [0, 0, 1 << 16]];
+
+/// A space the CPU interpolates in through code of its own: the stops are
+/// converted into it from the intermediate space once, on the host --
+/// `xyzd50_to_lab`, `xyzd50_to_hcl`, `lin_srgb_to_oklab`,
+/// `lin_srgb_to_okhcl`, `srgb_to_hsl` and `srgb_to_hwb` in
+/// `SkGradientBaseShader.cpp` -- and each interpolated colour back --
+/// `css_lab_to_xyz`, `css_oklab_to_linear_srgb`, `css_hcl_to_lab` before
+/// either, `css_hsl_to_srgb` and `css_hwb_to_srgb` in
+/// `SkRasterPipeline_opts.h`. Skia builds both with `-ffp-contract=off`
+/// outside Windows, so each operation here is the one it makes, rounded
+/// where it rounds; the host's `atan2f` and `cbrtf` are the platform's, as
+/// Rust's are.
+///
+/// The polar spaces keep their hue first, as Skia does: LCH and OkLCH are
+/// held as hue, chroma, lightness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Css {
+    #[default]
+    None,
+    Lab,
+    OkLab,
+    Lch,
+    OkLch,
+    Hsl,
+    Hwb,
+}
+
+impl Css {
+    fn of(space: InterpolationSpace) -> Css {
+        match space {
+            InterpolationSpace::Lab => Css::Lab,
+            InterpolationSpace::OKLab => Css::OkLab,
+            InterpolationSpace::LCH => Css::Lch,
+            InterpolationSpace::OKLCH => Css::OkLch,
+            InterpolationSpace::HSL => Css::Hsl,
+            InterpolationSpace::HWB => Css::Hwb,
+            _ => Css::None,
+        }
+    }
+
+    /// Whether this keeps a hue, which `color_space_is_polar` in
+    /// `SkGradientBaseShader.cpp` asks.
+    fn is_polar(self) -> bool {
+        matches!(self, Css::Lch | Css::OkLch | Css::Hsl | Css::Hwb)
+    }
+
+    /// The value the effect selects its conversion back by, its `css()`.
+    fn index(self) -> i32 {
+        self as i32
+    }
+
+    /// `c`, unpremultiplied in the intermediate space, in this space, with
+    /// whether its hue is powerless. Ottosson's constants are written as
+    /// `lin_srgb_to_oklab` writes them, so that each rounds to the f32
+    /// Skia's does and can be checked against it.
+    fn converted(self, c: [f32; 4]) -> ([f32; 4], bool) {
+        match self {
+            Css::None => (c, false),
+            Css::Lab => (lab(c), false),
+            Css::OkLab => (oklab(c), false),
+            Css::Lch => hcl(lab(c), LCH_POWERLESS),
+            Css::OkLch => hcl(oklab(c), OKLCH_POWERLESS),
+            Css::Hsl => hsl(c),
+            Css::Hwb => {
+                let (hsl, powerless) = hsl(c);
+                let white = c[0].min(c[1]).min(c[2]);
+                let black = 1.0 - c[0].max(c[1]).max(c[2]);
+                ([hsl[0], white * 100.0, black * 100.0, c[3]], powerless)
+            }
+        }
+    }
+}
+
+/// `xyzd50_to_lab`.
+fn lab(c: [f32; 4]) -> [f32; 4] {
+    let f: [f32; 3] = std::array::from_fn(|i| {
+        let v = c[i] / LAB_D50[i];
+        match v > LAB_E {
+            true => v.cbrt(),
+            false => (LAB_K * v + 16.0) / 116.0,
+        }
+    });
+    [
+        (116.0 * f[1]) - 16.0,
+        500.0 * (f[0] - f[1]),
+        200.0 * (f[1] - f[2]),
+        c[3],
+    ]
+}
+
+/// `lin_srgb_to_oklab`.
+#[allow(clippy::excessive_precision)]
+fn oklab(c: [f32; 4]) -> [f32; 4] {
+    let [r, g, b] = [c[0], c[1], c[2]];
+    let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+    let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+    let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+    [
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+        c[3],
+    ]
+}
+
+/// `xyzd50_to_hcl` and `lin_srgb_to_okhcl` after the conversion to Lab or
+/// Oklab: the hue in degrees, from 0 to under 360, the chroma and the
+/// lightness, the hue powerless at a chroma of `powerless` or less.
+fn hcl(lab: [f32; 4], powerless: f32) -> ([f32; 4], bool) {
+    let hue = lab[2].atan2(lab[1]) * DEGREES_PER_RADIAN;
+    let chroma = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+    let hue = match hue >= 0.0 {
+        true => hue,
+        false => hue + TURN,
+    };
+    ([hue, chroma, lab[0], lab[3]], chroma <= powerless)
+}
+
+/// `srgb_to_hsl`: the hue in degrees, the saturation and the lightness in
+/// percent, the hue powerless where the saturation is 0.
+fn hsl(c: [f32; 4]) -> ([f32; 4], bool) {
+    let [r, g, b] = [c[0], c[1], c[2]];
+    let mx = r.max(g).max(b);
+    let mn = r.min(g).min(b);
+    let light = (mn + mx) / 2.0;
+    let d = mx - mn;
+    let (mut hue, mut sat) = (0.0_f32, 0.0_f32);
+    if d != 0.0 {
+        sat = match light == 0.0 || light == 1.0 {
+            true => 0.0,
+            false => (mx - light) / light.min(1.0 - light),
+        };
+        hue = if mx == r {
+            (g - b) / d + if g < b { 6.0 } else { 0.0 }
+        } else if mx == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+        hue *= 60.0;
+    }
+    ([hue, sat * 100.0, light * 100.0, c[3]], sat == 0.0)
+}
+
+/// `sk_float_radians_to_degrees`'s factor, `180 / SK_FloatPI` in f32.
+const DEGREES_PER_RADIAN: f32 = 180.0 / std::f32::consts::PI;
+
+/// `sk_float_degrees_to_radians`'s factor, `SK_FloatPI / 180` in f32, which
+/// `css_hcl_to_lab` turns a hue into radians by.
+const RADIANS_PER_DEGREE: f32 = std::f32::consts::PI / 180.0;
+
+/// `1 / (2 * SK_FloatPI)`, in f32, which `sin_` and `cos_` take an angle to
+/// turns by.
+const TURNS_PER_RADIAN: f32 = 1.0 / (2.0 * std::f32::consts::PI);
+
+/// `sin5q_`'s coefficients, `A`, `B` and `C`: its polynomial for
+/// `sin(x * 2 * pi)` on a quarter turn, from SwiftShader's
+/// Sin-Cos-Optimization note, exact at 0, 1/12, 1/6 and 1/4.
+#[allow(clippy::excessive_precision)]
+const SIN5Q: [f32; 3] = [6.28230858, -41.1693687, 74.4388885];
+
+/// `0.01f`, which `css_hsl_to_srgb_` and `css_hwb_to_srgb` take a percent
+/// to a fraction by.
+const HSL_PERCENT: f32 = 0.01;
+
+/// The chroma at or below which `xyzd50_to_hcl` calls a hue powerless:
+/// LCH's arithmetic leaves an achromatic colour a small chroma.
+const LCH_POWERLESS: f32 = 1e-2;
+
+/// The same for `lin_srgb_to_okhcl`, whose arithmetic leaves less.
+const OKLCH_POWERLESS: f32 = 1e-6;
+
+/// The D50 white `xyzd50_to_lab` and `css_lab_to_xyz` divide and multiply
+/// by: CSS Color 4's `0.3457 / 0.3585`, 1, `(1 - 0.3457 - 0.3585) /
+/// 0.3585`, each worked out in f32 as Skia's `constexpr float` is.
+const LAB_D50: [f32; 3] =
+    [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+
+/// CIE's epsilon, `216 / 24389`, below which Lab's curve is linear.
+const LAB_E: f32 = 216.0 / 24389.0;
+
+/// CIE's kappa, `24389 / 27`, the linear segment's slope.
+const LAB_K: f32 = 24389.0 / 27.0;
+
+/// `css_oklab_to_linear_srgb`'s first step, Oklab to cone responses
+/// (`l_ = r + 0.3963377774f * g + 0.2158037573f * b` and its rows), one row
+/// a response: the literals as Skia writes them, so that each is the f32 it
+/// computes with.
+#[allow(clippy::excessive_precision)]
+const OKLAB_IN: [[f32; 3]; 3] = [
+    [1.0, 0.3963377774, 0.2158037573],
+    [1.0, -0.1055613458, -0.0638541728],
+    [1.0, -0.0894841775, -1.2914855480],
+];
+
+/// Its last step, the cubed cone responses to linear sRGB, one row a
+/// channel.
+#[allow(clippy::excessive_precision)]
+const OKLAB_OUT: [[f32; 3]; 3] = [
+    [4.0767416621, -3.3077115913, 0.2309699292],
+    [-1.2684380046, 2.6097574011, -0.3413193965],
+    [-0.0041960863, -0.7034186147, 1.7076147010],
+];
 
 /// `colors` converted from `from` to `to` by `SkConvertPixels`, as
 /// `SkColor4fXformer` converts them: unpremultiplied floats both sides.
@@ -958,22 +1749,40 @@ fn convert(
 /// upload the uniforms of a hundred.
 const SIZES: [usize; 4] = [4, 16, 64, 256];
 
+/// The effect compiled at one of [`SIZES`], with or without the stages
+/// that convert a colour -- see [`sksl`].
+struct Compiled {
+    size: usize,
+    converts: bool,
+    effect: RuntimeEffect,
+    offsets: Offsets,
+}
+
 thread_local! {
-    /// The effect at each of [`SIZES`], compiled once per thread -- a
-    /// `RuntimeEffect` is neither `Send` nor `Sync` -- with where each of
-    /// its uniforms lies.
-    static EFFECTS: Option<Vec<(usize, RuntimeEffect, Offsets)>> = SIZES
+    /// The effect at each of [`SIZES`], with and without the conversions,
+    /// compiled once per thread -- a `RuntimeEffect` is neither `Send` nor
+    /// `Sync` -- with where each value it takes lies.
+    static EFFECTS: Option<Vec<Compiled>> = SIZES
         .iter()
-        .map(|&size| {
-            let effect = RuntimeEffect::make_for_shader(sksl(size), None).ok()?;
-            let offsets = Offsets::of(&effect)?;
-            Some((size, effect, offsets))
+        .flat_map(|&size| [false, true].map(|converts| (size, converts)))
+        .map(|(size, converts)| {
+            let effect =
+                RuntimeEffect::make_for_shader(sksl(size, converts), None)
+                    .ok()?;
+            let offsets = Offsets::of(&effect, converts)?;
+            Some(Compiled {
+                size,
+                converts,
+                effect,
+                offsets,
+            })
         })
         .collect();
 }
 
-/// Where each uniform of the effect lies in its uniform data, in bytes:
-/// found by name once, when it is compiled, rather than for every draw.
+/// Where each value the effect takes lies in its uniform data, in bytes:
+/// found by its uniform's name and its place in it once, when the effect
+/// is compiled, rather than for every draw.
 struct Offsets {
     size: usize,
     kind: usize,
@@ -991,67 +1800,363 @@ struct Offsets {
     t_bias: usize,
     p0: usize,
     p1: usize,
+    css: usize,
+    matrix_form: usize,
+    m_row0: usize,
+    m_row1: usize,
+    m_row2: usize,
+    offset: usize,
     ts: usize,
     factors: usize,
     biases: usize,
+    /// `None` in an effect without the conversions.
+    conversions: Option<ConversionOffsets>,
+}
+
+/// Where the values of an effect's conversions lie -- see [`Offsets`].
+struct ConversionOffsets {
+    linearize: usize,
+    gamut_step: usize,
+    encode: usize,
+    lin_a: usize,
+    lin_b: usize,
+    gam_r: usize,
+    gam_g: usize,
+    gam_b: usize,
+    enc_a: usize,
+    enc_b: usize,
+    lab_a: usize,
+    lab_b: usize,
+    ok_in: [usize; 3],
+    ok_out: [usize; 3],
+    polar: usize,
+    sinq: usize,
+    hsl_k: usize,
 }
 
 impl Offsets {
-    /// `None` where the effect lacks a uniform the source declares.
-    fn of(effect: &RuntimeEffect) -> Option<Self> {
-        let at = |name: &str| {
+    /// `None` where the effect lacks a uniform the source declares, or
+    /// declares one too short for what is written to it: those of the
+    /// conversions where `converts`.
+    fn of(effect: &RuntimeEffect, converts: bool) -> Option<Self> {
+        // The byte `within` bytes into the uniform `name`, which has to
+        // hold the `len` bytes written there: a field's place in the
+        // vector, matrix or array the effect packs it into.
+        let at = |name: &str, within: usize, len: usize| {
             effect
                 .uniforms()
                 .iter()
                 .find(|uniform| uniform.name() == name)
-                .map(|uniform| uniform.offset())
+                .filter(|uniform| within + len <= uniform.size_in_bytes())
+                .map(|uniform| uniform.offset() + within)
         };
+        let scalar = |name: &str, k: usize| at(name, 4 * k, 4);
+        // A `float3x3` keeps its columns 12 bytes apart and a `float4`
+        // array its elements 16.
+        let column = |name: &str, k: usize| at(name, 12 * k, 12);
+        let element = |name: &str, k: usize, len: usize| at(name, 16 * k, len);
         Some(Offsets {
             size: effect.uniform_size(),
-            kind: at("kind")?,
-            mask_degenerates: at("maskDegenerates")?,
-            negate: at("negate")?,
-            compensate: at("compensate")?,
-            unswap: at("unswap")?,
-            mode: at("mode")?,
-            count: at("count")?,
-            premul_after: at("premulAfter")?,
-            exact_scale: at("exactScale")?,
-            ties_even: at("tiesEven")?,
-            alpha8: at("alpha8")?,
-            t_scale: at("tScale")?,
-            t_bias: at("tBias")?,
-            p0: at("p0")?,
-            p1: at("p1")?,
-            ts: at("ts")?,
-            factors: at("factors")?,
-            biases: at("biases")?,
+            kind: scalar("shapeFlags", 0)?,
+            mask_degenerates: scalar("shapeFlags", 1)?,
+            negate: scalar("shapeFlags", 2)?,
+            compensate: scalar("shapeFlags", 3)?,
+            unswap: scalar("rampFlags", 0)?,
+            mode: scalar("rampFlags", 1)?,
+            count: scalar("rampFlags", 2)?,
+            matrix_form: scalar("rampFlags", 3)?,
+            premul_after: scalar("storeFlags", 0)?,
+            exact_scale: scalar("storeFlags", 1)?,
+            ties_even: scalar("storeFlags", 2)?,
+            css: scalar("storeFlags", 3)?,
+            t_scale: scalar("tParams", 0)?,
+            t_bias: scalar("tParams", 1)?,
+            p0: scalar("tParams", 2)?,
+            p1: scalar("tParams", 3)?,
+            offset: at("place", 0, 8)?,
+            alpha8: scalar("place", 2)?,
+            m_row0: column("toUnit", 0)?,
+            m_row1: column("toUnit", 1)?,
+            m_row2: column("toUnit", 2)?,
+            ts: at("ts", 0, 4)?,
+            factors: at("factors", 0, 4)?,
+            biases: at("biases", 0, 4)?,
+            conversions: if converts {
+                Some(ConversionOffsets {
+                    linearize: scalar("xformFlags", 0)?,
+                    gamut_step: scalar("xformFlags", 1)?,
+                    encode: scalar("xformFlags", 2)?,
+                    lin_a: element("curves", 0, 16)?,
+                    lin_b: element("curves", 1, 12)?,
+                    enc_a: element("curves", 2, 16)?,
+                    enc_b: element("curves", 3, 12)?,
+                    gam_r: column("gamut", 0)?,
+                    gam_g: column("gamut", 1)?,
+                    gam_b: column("gamut", 2)?,
+                    lab_a: element("labK", 0, 16)?,
+                    lab_b: element("labK", 1, 16)?,
+                    ok_in: [
+                        column("okIn", 0)?,
+                        column("okIn", 1)?,
+                        column("okIn", 2)?,
+                    ],
+                    ok_out: [
+                        column("okOut", 0)?,
+                        column("okOut", 1)?,
+                        column("okOut", 2)?,
+                    ],
+                    polar: element("hue", 0, 8)?,
+                    sinq: element("hue", 1, 12)?,
+                    hsl_k: element("hue", 2, 16)?,
+                })
+            } else {
+                None
+            },
         })
     }
 }
 
-/// The effect, its arrays `size` long.
-fn sksl(size: usize) -> String {
+/// The uniforms only an effect that converts its colours declares: the
+/// curves, gamut and Lab, Oklab and hue constants of [`Toward`] and
+/// [`Css`], each a uniform Ganesh keys and uploads on every draw -- see
+/// [`sksl`].
+const CONVERSION_UNIFORMS: &str = r#"// `linearize`, `gamutStep`, `encode`, and none.
+uniform int4 xformFlags;
+// The curve undone, `g, a, b, c` then `d, e, f`, and the curve applied.
+uniform float4 curves[4];
+// The gamut matrix, a row in each column.
+uniform float3x3 gamut;
+// `css_lab_to_xyz`'s constants.
+uniform float4 labK[2];
+// `css_oklab_to_linear_srgb`'s matrices, a row in each column.
+uniform float3x3 okIn;
+uniform float3x3 okOut;
+// The hue's turn and radians, `sin5q_`'s coefficients, and the HSL
+// constants.
+uniform float4 hue[3];
+"#;
+
+/// Which of [`Toward`]'s steps the effect takes.
+const CONVERSION_ACCESSORS: &str = r#"int linearize() { return xformFlags.x; }
+int gamutStep() { return xformFlags.y; }
+int encode() { return xformFlags.z; }
+"#;
+
+/// The functions the conversions call.
+const CONVERSION_FUNCTIONS: &str = r#"// The biased exponent and the mantissa of `x > 0`, as whole floats: what
+// `approx_log2` reads from the float's bits, which a public effect cannot
+// cast, worked out from exact powers of two instead.
+float2 bitsOf(float x) {
+    if (x < 1.17549435e-38) {
+        return float2(0.0, (x * 8.507059173e37) * 8388608.0);
+    }
+    float k = floor(log2(x));
+    if (exp2(k) > x) { k -= 1.0; } else if (exp2(k + 1.0) <= x) { k += 1.0; }
+    float q = k > 126.0 ? (x * 0.5) * exp2(-126.0) : x * exp2(-k);
+    return float2(k + 127.0, (q - 1.0) * 8388608.0);
+}
+
+// `approx_log2` in `SkRasterPipeline_opts.h`.
+float approxLog2(float x) {
+    float2 b = bitsOf(x);
+    float e = (b.x * 8388608.0 + b.y) * (1.0 / 8388608.0);
+    float m = 0.5 + b.y * (1.0 / 16777216.0);
+    float n = (e - 124.225514990) - m * 1.498030302;
+    return n - 1.725879990 / (0.3520887068 + m);
+}
+
+// `approx_pow2`: the float whose bits are the rounded value, built from its
+// exponent and mantissa.
+float approxPow2(float x) {
+    float f = x - floor(x);
+    float a = (x + 121.274057500) - f * 1.490129070;
+    a = (a + 27.728023300 / (4.84252568 - f)) * 8388608.0;
+    a = min(max(a, 0.0), 2139095040.0);
+    float lo = floor(a);
+    float d = a - lo;
+    float n = d > 0.5 ? lo + 1.0
+            : (d < 0.5 ? lo : (mod(lo, 2.0) == 0.0 ? lo : lo + 1.0));
+    float e = floor(n * (1.0 / 8388608.0));
+    float m = n - e * 8388608.0;
+    if (e == 0.0) { return (m * 1.17549435e-38) * (1.0 / 8388608.0); }
+    return exp2(e - 127.0) * (1.0 + m * (1.0 / 8388608.0));
+}
+
+float approxPowf(float x, float y) {
+    return (x == 0.0 || x == 1.0) ? x : approxPow2(approxLog2(x) * y);
+}
+
+// `parametric` and `gamma_`: the curve `g, a, b, c` and `d, e, f` of
+// `|x|`, the sign put back.
+float curve(float x, float4 gabc, float3 def) {
+    float v = abs(x);
+    float r;
+    if (gabc.y == 1.0 && gabc.z == 0.0 && gabc.w == 0.0
+            && def.x == 0.0 && def.y == 0.0 && def.z == 0.0) {
+        r = approxPowf(v, gabc.x);
+    } else {
+        r = v <= def.x ? gabc.w * v + def.z
+                       : approxPowf(gabc.y * v + gabc.z, gabc.x) + def.y;
+    }
+    return x < 0.0 ? -r : r;
+}
+
+// `css_lab_to_xyz` and `css_oklab_to_linear_srgb`: an interpolated colour
+// back to the space the stops were converted from, in Skia's order of
+// operations, its constants handed in as the f32 it computes them as.
+float3 lab_to_xyz(float3 c) {
+    float f1 = (c.r + 16.0) * labK[0].x;
+    float f0 = (c.g * labK[0].y) + f1;
+    float f2 = f1 - (c.b * labK[0].z);
+    float3 f = float3(f0, f1, f2);
+    float3 cubed = f * f * f;
+    float x = cubed.x > labK[1].x ? cubed.x : (116.0 * f0 - 16.0) * labK[0].w;
+    float y = c.r > labK[1].y ? cubed.y : c.r * labK[0].w;
+    float z = cubed.z > labK[1].x ? cubed.z : (116.0 * f2 - 16.0) * labK[0].w;
+    return float3(x * labK[1].z, y, z * labK[1].w);
+}
+
+float row(float3 m, float3 v) {
+    return (m.x * v.x + m.y * v.y) + m.z * v.z;
+}
+
+float3 oklab_to_linear_srgb(float3 c) {
+    float3 lms = float3(row(okIn[0], c), row(okIn[1], c), row(okIn[2], c));
+    lms = lms * lms * lms;
+    return float3(row(okOut[0], lms), row(okOut[1], lms), row(okOut[2], lms));
+}
+
+// `sin5q_`, Skia's polynomial for `sin(x * 2 * pi)` on a quarter turn.
+float sin5q(float x) {
+    float x2 = x * x;
+    return x * ((x2 * hue[1].z + hue[1].y) * x2 + hue[1].x);
+}
+
+// `css_hcl_to_lab`, through Skia's `cos_` and `sin_`: hue, chroma and
+// lightness to Lab or Oklab.
+float3 hcl_to_lab(float3 c) {
+    float h = c.r * hue[0].x;
+    float k = h * hue[0].y;
+    k = 0.25 - abs(k - floor(k + 0.5));
+    float s = h * -hue[0].y + 0.25;
+    s = 0.25 - abs(s - floor(s + 0.5));
+    return float3(c.b, c.g * sin5q(k), c.g * sin5q(s));
+}
+
+// `mod_`: `x - y * floor(x * (1 / y))`, the reciprocal handed in.
+float modOf(float x, float y, float inverse) {
+    return x - y * floor(x * inverse);
+}
+
+// `css_hsl_to_srgb_`.
+float3 hsl_to_srgb(float h, float s, float l) {
+    h = modOf(h, 360.0, hue[2].z);
+    s *= hue[2].x;
+    l *= hue[2].x;
+    float3 k = float3(modOf(0.0 + h * hue[2].y, 12.0, hue[2].w),
+                      modOf(8.0 + h * hue[2].y, 12.0, hue[2].w),
+                      modOf(4.0 + h * hue[2].y, 12.0, hue[2].w));
+    float a = s * min(l, 1.0 - l);
+    return l - a * max(float3(-1.0), min(min(k - 3.0, 9.0 - k), float3(1.0)));
+}
+
+// `css_hwb_to_srgb`.
+float3 hwb_to_srgb(float3 c) {
+    float w = c.g * hue[2].x;
+    float b = c.b * hue[2].x;
+    float gray = w / (w + b);
+    float3 rgb = hsl_to_srgb(c.r, 100.0, 50.0);
+    rgb = rgb * (1.0 - w - b) + w;
+    return (w + b) >= 1.0 ? float3(gray) : rgb;
+}
+
+"#;
+
+/// A colour's conversion back from the space it was interpolated in,
+/// then [`Toward`]'s steps to the page.
+const CONVERSION_STAGES: &str = r#"    if (css() == 1) {
+        c.rgb = lab_to_xyz(c.rgb);
+    } else if (css() == 2) {
+        c.rgb = oklab_to_linear_srgb(c.rgb);
+    } else if (css() == 3) {
+        c.rgb = lab_to_xyz(hcl_to_lab(c.rgb));
+    } else if (css() == 4) {
+        c.rgb = oklab_to_linear_srgb(hcl_to_lab(c.rgb));
+    } else if (css() == 5) {
+        c.rgb = hsl_to_srgb(c.r, c.g, c.b);
+    } else if (css() == 6) {
+        c.rgb = hwb_to_srgb(c.rgb);
+    }
+    // `SkColorSpaceXformSteps`, from the space interpolated in to the page.
+    if (linearize() != 0) {
+        float4 gabc = curves[0];
+        float3 def = curves[1].xyz;
+        c.rgb = float3(curve(c.r, gabc, def), curve(c.g, gabc, def),
+                       curve(c.b, gabc, def));
+    }
+    if (gamutStep() != 0) {
+        c.rgb = float3(c.r * gamut[0].x + (c.g * gamut[0].y + c.b * gamut[0].z),
+                       c.r * gamut[1].x + (c.g * gamut[1].y + c.b * gamut[1].z),
+                       c.r * gamut[2].x + (c.g * gamut[2].y + c.b * gamut[2].z));
+    }
+    if (encode() != 0) {
+        float4 gabc = curves[2];
+        float3 def = curves[3].xyz;
+        c.rgb = float3(curve(c.r, gabc, def), curve(c.g, gabc, def),
+                       curve(c.b, gabc, def));
+    }
+"#;
+
+/// The effect, its arrays `size` long, with the stages that convert a
+/// colour where `converts`. A gradient that needs none of them takes the
+/// effect without: every uniform an effect declares costs every draw of it
+/// a key bit and an upload, and its bytes a copy and a comparison with the
+/// draws before -- the conversions' constants more than double them.
+fn sksl(size: usize, converts: bool) -> String {
+    let pick = |piece| if converts { piece } else { "" };
     format!(
         r#"
-uniform int kind;
-uniform int maskDegenerates;
-uniform int negate;
-uniform int compensate;
-uniform int unswap;
-uniform int mode;
-uniform int count;
-uniform int premulAfter;
-uniform int exactScale;
-uniform int tiesEven;
-uniform float alpha8;
-uniform float tScale;
-uniform float tBias;
-uniform float p0;
-uniform float p1;
-uniform float ts[{size}];
+// Ganesh keys a runtime effect's program and uploads its uniforms one
+// uniform at a time on every draw, so the flags and scalars go four to a
+// vector and each matrix whole: the effect's cost per draw follows how
+// many uniforms it declares, not how many bytes.
+//
+// The CPU's matrix from the page to the gradient's space, a row in each
+// column, and the whole-pixel offset to the page, `alpha8`, and none.
+// They come first, as what differs most from one draw to the next: Ganesh
+// compares a draw's uniforms with each recent draw's, bytes in order, to
+// merge them, and two draws of the same gradient part only here.
+uniform float3x3 toUnit;
+uniform float4 place;
+// `kind`, `maskDegenerates`, `negate`, `compensate`.
+uniform int4 shapeFlags;
+// `unswap`, `mode`, `count`, `matrixForm`.
+uniform int4 rampFlags;
+// `premulAfter`, `exactScale`, `tiesEven`, `css`.
+uniform int4 storeFlags;
+// `tScale`, `tBias`, `p0`, `p1`.
+uniform float4 tParams;
+{conversion_uniforms}uniform float ts[{size}];
 uniform float4 factors[{size}];
 uniform float4 biases[{size}];
+
+int kind() {{ return shapeFlags.x; }}
+int maskDegenerates() {{ return shapeFlags.y; }}
+int negate() {{ return shapeFlags.z; }}
+int compensate() {{ return shapeFlags.w; }}
+int unswap() {{ return rampFlags.x; }}
+int mode() {{ return rampFlags.y; }}
+int count() {{ return rampFlags.z; }}
+int matrixForm() {{ return rampFlags.w; }}
+int premulAfter() {{ return storeFlags.x; }}
+int exactScale() {{ return storeFlags.y; }}
+int tiesEven() {{ return storeFlags.z; }}
+int css() {{ return storeFlags.w; }}
+{conversion_accessors}float tScale() {{ return tParams.x; }}
+float tBias() {{ return tParams.y; }}
+float p0() {{ return tParams.z; }}
+float p1() {{ return tParams.w; }}
+float alpha8() {{ return place.z; }}
 
 // `div255_accurate`, and NEON's `div255`: the nearest whole level.
 float4 nearest255(float4 v) {{
@@ -1063,16 +2168,33 @@ float4 above255(float4 v) {{
     return floor((v + 255.0) / 256.0);
 }}
 
-half4 main(float2 p) {{
+{conversion_functions}half4 main(float2 q) {{
+    // The pixel's centre on the page, as `seed_shader` makes it, mapped by
+    // the CPU's matrix as `appendMatrix`'s stage for it maps it.
+    float2 p = (floor(q) + 0.5) + place.xy;
     float x = p.x;
     float y = p.y;
+    if (matrixForm() == 1) {{
+        x = p.x + toUnit[0].z;
+        y = p.y + toUnit[1].z;
+    }} else if (matrixForm() == 2) {{
+        x = p.x * toUnit[0].x + toUnit[0].z;
+        y = p.y * toUnit[1].y + toUnit[1].z;
+    }} else if (matrixForm() == 3) {{
+        x = p.x * toUnit[0].x + (p.y * toUnit[0].y + toUnit[0].z);
+        y = p.x * toUnit[1].x + (p.y * toUnit[1].y + toUnit[1].z);
+    }} else if (matrixForm() == 4) {{
+        float r = 1.0 / (p.x * toUnit[2].x + (p.y * toUnit[2].y + toUnit[2].z));
+        x = (p.x * toUnit[0].x + (p.y * toUnit[0].y + toUnit[0].z)) * r;
+        y = (p.x * toUnit[1].x + (p.y * toUnit[1].y + toUnit[1].z)) * r;
+    }}
     float t;
     bool masked = false;
-    if (kind == 0) {{
+    if (kind() == 0) {{
         t = x;
-    }} else if (kind == 1) {{
+    }} else if (kind() == 1) {{
         t = sqrt(x * x + y * y);
-    }} else if (kind == 2) {{
+    }} else if (kind() == 2) {{
         float xa = abs(x);
         float ya = abs(y);
         float big = max(xa, ya);
@@ -1087,44 +2209,44 @@ half4 main(float2 p) {{
         if (y < 0.0) {{ phi = 1.0 - phi; }}
         if (big == 0.0) {{ phi = 0.0; }}
         t = phi;
-    }} else if (kind == 3) {{
-        float q = p0 - y * y;
+    }} else if (kind() == 3) {{
+        float q = p0() - y * y;
         masked = q < 0.0;
         t = x + sqrt(max(q, 0.0));
-    }} else if (kind == 4) {{
+    }} else if (kind() == 4) {{
         masked = x == 0.0;
         t = x + y * y / x;
-    }} else if (kind == 5) {{
-        t = sqrt(x * x + y * y) - x * p0;
+    }} else if (kind() == 5) {{
+        t = sqrt(x * x + y * y) - x * p0();
     }} else {{
         float q = x * x - y * y;
         masked = q < 0.0;
         float root = sqrt(max(q, 0.0));
-        t = (kind == 6 ? root : -root) - x * p0;
+        t = (kind() == 6 ? root : -root) - x * p0();
     }}
-    if (maskDegenerates != 0 && t <= 0.0) {{
+    if (maskDegenerates() != 0 && t <= 0.0) {{
         masked = true;
     }}
     if (masked) {{
         return half4(0);
     }}
-    if (negate != 0) {{ t = -t; }}
-    if (compensate != 0) {{ t = t + p1; }}
-    if (unswap != 0) {{ t = 1.0 - t; }}
-    t = t * tScale + tBias;
+    if (negate() != 0) {{ t = -t; }}
+    if (compensate() != 0) {{ t = t + p1(); }}
+    if (unswap() != 0) {{ t = 1.0 - t; }}
+    t = t * tScale() + tBias();
 
     float4 f = factors[0];
     float4 b = biases[0];
-    if (mode == 0) {{
+    if (mode() == 0) {{
         for (int i = 1; i < {size}; i++) {{
-            if (i >= count || t < ts[i]) {{ break; }}
+            if (i >= count() || t < ts[i]) {{ break; }}
             f = factors[i];
             b = biases[i];
         }}
     }} else {{
         t = clamp(t, 0.0, 1.0);
-        if (mode == 1) {{
-            int index = int(t * float(count - 1));
+        if (mode() == 1) {{
+            int index = int(t * float(count() - 1));
             for (int i = 1; i < {size}; i++) {{
                 if (i > index) {{ break; }}
                 f = factors[i];
@@ -1133,22 +2255,27 @@ half4 main(float2 p) {{
         }}
     }}
     float4 c = t * f + b;
-    c.rgb = clamp(c.rgb, 0.0, 1.0);
+{conversion_stages}    c.rgb = clamp(c.rgb, 0.0, 1.0);
     float4 s = c * 255.0;
     float4 l = floor(s + 0.5);
-    if (tiesEven != 0) {{
+    if (tiesEven() != 0) {{
         // `l - s` is at most a half, and a half only on a tie.
         l -= step(0.5, l - s) * (l - 2.0 * floor(l * 0.5));
     }}
-    if (premulAfter != 0) {{
+    if (premulAfter() != 0) {{
         l.rgb = nearest255(float4(l.rgb * l.a, 0)).rgb;
     }}
-    if (alpha8 < 255.0) {{
-        l = exactScale != 0 ? nearest255(l * alpha8) : above255(l * alpha8);
+    if (alpha8() < 255.0) {{
+        l = exactScale() != 0 ? nearest255(l * alpha8())
+                              : above255(l * alpha8());
     }}
     return half4(l / 255.0);
 }}
-"#
+"#,
+        conversion_uniforms = pick(CONVERSION_UNIFORMS),
+        conversion_accessors = pick(CONVERSION_ACCESSORS),
+        conversion_functions = pick(CONVERSION_FUNCTIONS),
+        conversion_stages = pick(CONVERSION_STAGES),
     )
 }
 
@@ -1160,51 +2287,139 @@ fn uniforms(
     ramp: &Ramp,
     alpha: f32,
     highp: bool,
-) -> Data {
+) -> Vec<u8> {
     // `from_float`: the paint's alpha as the level the pipeline scales by.
     let alpha8 = (alpha * 255.0 + 0.5).trunc();
     let mut data = vec![0u8; offsets.size];
-    let mut put = |at: usize, bytes: [u8; 4]| {
-        data[at..at + 4].copy_from_slice(&bytes);
-    };
-    put(offsets.kind, (layout.kind as i32).to_ne_bytes());
+    let data = &mut data[..];
+    put(data, offsets.kind, (layout.kind as i32).to_ne_bytes());
     put(
+        data,
         offsets.mask_degenerates,
         layout.flag(Layout::MASK_DEGENERATES),
     );
-    put(offsets.negate, layout.flag(Layout::NEGATE));
-    put(offsets.compensate, layout.flag(Layout::COMPENSATE));
-    put(offsets.unswap, layout.flag(Layout::UNSWAP));
-    put(offsets.mode, ramp.mode.to_ne_bytes());
-    put(offsets.count, (ramp.ts.len() as i32).to_ne_bytes());
+    put(data, offsets.negate, layout.flag(Layout::NEGATE));
+    put(data, offsets.compensate, layout.flag(Layout::COMPENSATE));
+    put(data, offsets.unswap, layout.flag(Layout::UNSWAP));
+    put(data, offsets.mode, ramp.mode.to_ne_bytes());
+    put(data, offsets.count, (ramp.ts.len() as i32).to_ne_bytes());
     put(
+        data,
         offsets.premul_after,
         i32::from(ramp.premul_after).to_ne_bytes(),
     );
-    put(offsets.exact_scale, i32::from(EXACT_SCALE).to_ne_bytes());
     put(
+        data,
+        offsets.exact_scale,
+        i32::from(EXACT_SCALE).to_ne_bytes(),
+    );
+    put(
+        data,
         offsets.ties_even,
         i32::from(highp && HIGHP_TIES_TO_EVEN).to_ne_bytes(),
     );
-    put(offsets.alpha8, alpha8.to_ne_bytes());
-    put(offsets.t_scale, layout.t_scale.to_ne_bytes());
-    put(offsets.t_bias, layout.t_bias.to_ne_bytes());
-    put(offsets.p0, layout.p0.to_ne_bytes());
-    put(offsets.p1, layout.p1.to_ne_bytes());
+    put(data, offsets.alpha8, alpha8.to_ne_bytes());
+    put(data, offsets.t_scale, layout.t_scale.to_ne_bytes());
+    put(data, offsets.t_bias, layout.t_bias.to_ne_bytes());
+    put(data, offsets.p0, layout.p0.to_ne_bytes());
+    put(data, offsets.p1, layout.p1.to_ne_bytes());
+    put(data, offsets.css, ramp.css.index().to_ne_bytes());
+    if let Some(conversions) = &offsets.conversions {
+        conversion_uniforms(data, conversions, &ramp.toward);
+    }
     for (i, t) in ramp.ts.iter().take(size).enumerate() {
-        put(offsets.ts + 4 * i, t.to_ne_bytes());
+        put(data, offsets.ts + 4 * i, t.to_ne_bytes());
     }
     for (at, rows) in [
         (offsets.factors, &ramp.factors),
         (offsets.biases, &ramp.biases),
     ] {
         for (i, row) in rows.iter().take(size).enumerate() {
-            for (k, v) in row.iter().enumerate() {
-                put(at + 16 * i + 4 * k, v.to_ne_bytes());
-            }
+            floats(data, at + 16 * i, row);
         }
     }
-    Data::new_copy(&data)
+    data.to_vec()
+}
+
+/// The values of an effect's conversions in `data`, at `conversions`:
+/// [`Toward`]'s steps to the page, and the constants of [`Css`]'s
+/// conversions back.
+fn conversion_uniforms(
+    data: &mut [u8],
+    conversions: &ConversionOffsets,
+    toward: &Toward,
+) {
+    put(
+        data,
+        conversions.linearize,
+        i32::from(toward.linearize.is_some()).to_ne_bytes(),
+    );
+    put(
+        data,
+        conversions.gamut_step,
+        i32::from(toward.gamut.is_some()).to_ne_bytes(),
+    );
+    put(
+        data,
+        conversions.encode,
+        i32::from(toward.encode.is_some()).to_ne_bytes(),
+    );
+    let curve = toward.linearize.unwrap_or(LINEAR_TF);
+    floats(data, conversions.lin_a, &curve[..4]);
+    floats(data, conversions.lin_b, &curve[4..]);
+    let curve = toward.encode.unwrap_or(LINEAR_TF);
+    floats(data, conversions.enc_a, &curve[..4]);
+    floats(data, conversions.enc_b, &curve[4..]);
+    floats(
+        data,
+        conversions.lab_a,
+        &[1.0 / 116.0, 1.0 / 500.0, 1.0 / 200.0, 1.0 / LAB_K],
+    );
+    floats(
+        data,
+        conversions.lab_b,
+        &[LAB_E, LAB_K * LAB_E, LAB_D50[0], LAB_D50[2]],
+    );
+    for (ats, rows) in [
+        (conversions.ok_in, &OKLAB_IN),
+        (conversions.ok_out, &OKLAB_OUT),
+    ] {
+        for (at, row) in ats.iter().zip(rows) {
+            floats(data, *at, row);
+        }
+    }
+    floats(
+        data,
+        conversions.polar,
+        &[RADIANS_PER_DEGREE, TURNS_PER_RADIAN],
+    );
+    floats(data, conversions.sinq, &SIN5Q);
+    // `css_hsl_to_srgb_`'s `1 / 30.0f`, a hue in hours of a twelve-hour
+    // wheel, and `mod_`'s `1 / y` for its 360 and its 12, each divided in
+    // f32 as the CPU divides it.
+    floats(
+        data,
+        conversions.hsl_k,
+        &[HSL_PERCENT, 1.0 / 30.0, 1.0 / TURN, 1.0 / 12.0],
+    );
+    // `matrix_3x3`'s `m` is column by column; the effect takes a row of
+    // the matrix each.
+    let m = toward.gamut.unwrap_or([0.0; 9]);
+    floats(data, conversions.gam_r, &[m[0], m[3], m[6]]);
+    floats(data, conversions.gam_g, &[m[1], m[4], m[7]]);
+    floats(data, conversions.gam_b, &[m[2], m[5], m[8]]);
+}
+
+/// `bytes` into `data` at `at`.
+fn put(data: &mut [u8], at: usize, bytes: [u8; 4]) {
+    data[at..at + 4].copy_from_slice(&bytes);
+}
+
+/// `values` into `data` from `at`, four bytes each.
+fn floats(data: &mut [u8], at: usize, values: &[f32]) {
+    for (k, v) in values.iter().enumerate() {
+        put(data, at + 4 * k, v.to_ne_bytes());
+    }
 }
 
 /// Whether the CPU's `div255` rounds to the nearest level, as NEON
