@@ -33,21 +33,31 @@
 //! turn, so `t` can part from the CPU's in its last bits, and a pixel whose
 //! value lies within that of a half level can round the other way.
 //!
+//! A gradient interpolated in a space other than the page's -- linear sRGB,
+//! sRGB, Display P3 or A98 RGB -- is taken to the page as the CPU's
+//! `SkColorSpaceXformSteps` takes it: its transfer function undone, the
+//! gamut matrix, the page's transfer function applied, each curve through
+//! Skia's own `approx_powf` rebuilt in arithmetic -- see `Toward`. That
+//! runs on the float pipeline, so it is taken only where that pipeline
+//! rounds nothing before the store.
+//!
 //! [`GradientSpec::exact`] answers `None` where the effect cannot reproduce
-//! the CPU: an interpolation space whose conversion to the page runs through
-//! skcms's approximate transfer functions, a two-point conical gradient
-//! whose stops are translucent or that is drawn at an alpha (the CPU's
-//! `highp` pipeline rounds once, after blending), more stops than the
-//! largest effect holds, and Skia's degenerate shapes.
+//! the CPU: an interpolation space it does not convert from (Lab, LCH,
+//! Oklab, OKLCH, HSL, HWB, ProPhoto RGB, a working space wrapped around the
+//! shader, a PQ or HLG curve); a gradient on the float pipeline -- a
+//! two-point conical, or one converted to the page -- whose stops are
+//! translucent or that is drawn at an alpha (that pipeline rounds once,
+//! after blending); more stops than the largest effect holds; and Skia's
+//! degenerate shapes.
 
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
 
 use skia_safe::{
-    AlphaType, Color4f, ColorSpace, ColorType, Data, FilterMode, IRect,
-    ImageInfo, Matrix, MipmapMode, Paint, PictureRecorder, Pixmap, Point, Rect,
-    RuntimeEffect, SamplingOptions, Shader, TileMode,
+    AlphaType, Color4f, ColorSpace, ColorSpaceTransferFn, ColorType, Data,
+    FilterMode, IRect, ImageInfo, Matrix, MipmapMode, Paint, PictureRecorder,
+    Pixmap, Point, Rect, RuntimeEffect, SamplingOptions, Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
         interpolation::{ColorSpace as InterpolationSpace, InPremul},
@@ -260,7 +270,8 @@ impl GradientSpec {
         // The `highp` pipeline premultiplies, scales and blends in floats
         // and rounds once, at the store; the effect hands the GPU whole
         // levels, which match it only where none of those happen.
-        let highp = layout.highp;
+        // A conversion to the page runs on the float pipeline too.
+        let highp = layout.highp || !ramp.toward.is_identity();
         if highp && (!ramp.opaque || alpha < 1.0) {
             return None;
         }
@@ -708,6 +719,8 @@ struct Ramp {
     opaque: bool,
     /// Whether the colours are premultiplied after the interpolation.
     premul_after: bool,
+    /// What converts an interpolated colour to the page -- see [`Toward`].
+    toward: Toward,
 }
 
 impl Ramp {
@@ -721,6 +734,7 @@ impl Ramp {
     fn of(spec: &GradientSpec, page: &ColorSpace) -> Option<Ramp> {
         let (colors, positions, opaque) = stops(spec)?;
         let intermediate = intermediate_space(spec, page)?;
+        let toward = Toward::of(&intermediate, page)?;
         let mut colors = convert(&colors, &spec.color_space, &intermediate)?;
         let premul = spec.interpolation.in_premul == InPremul::Yes;
         if premul {
@@ -729,7 +743,7 @@ impl Ramp {
             }
         }
         let premul_after = !premul && !opaque;
-        Some(match positions {
+        let mut ramp = match positions {
             None if colors.len() == 2 => Ramp {
                 mode: Ramp::TWO,
                 ts: vec![0.0],
@@ -739,12 +753,15 @@ impl Ramp {
                 biases: vec![colors[0]],
                 opaque,
                 premul_after,
+                toward: Toward::default(),
             },
             None => evenly(&colors, opaque, premul_after),
             Some(positions) => {
                 general(&colors, &positions, opaque, premul_after)
             }
-        })
+        };
+        ramp.toward = toward;
+        Some(ramp)
     }
 }
 
@@ -758,6 +775,7 @@ fn evenly(colors: &[[f32; 4]], opaque: bool, premul_after: bool) -> Ramp {
         biases: Vec::with_capacity(colors.len()),
         opaque,
         premul_after,
+        toward: Toward::default(),
     };
     for (i, pair) in colors.windows(2).enumerate() {
         let (left, right) = (pair[0], pair[1]);
@@ -794,6 +812,7 @@ fn general(
         biases: vec![colors[0]],
         opaque,
         premul_after,
+        toward: Toward::default(),
     };
     let mut t_l = positions[0];
     let mut c_l = colors[0];
@@ -883,19 +902,16 @@ fn stops(
     Some((kept_colors, Some(kept_positions), opaque))
 }
 
-/// The space the CPU interpolates in, where it is the page's own so that
-/// nothing converts the result: `None` elsewhere -- the CPU's conversion
-/// back runs through skcms's approximate transfer functions, which the
-/// effect does not reproduce -- and wherever a working space is wrapped
-/// around the shader.
+/// The space the CPU interpolates in, as `intermediate_color_space` in
+/// `SkGradientBaseShader.cpp` picks it for the interpolation space `spec`
+/// names: the page's own for the destination, and otherwise the space named,
+/// built as Skia builds it -- see [`skia_space`]. The CPU converts an
+/// interpolated colour from it to the page -- see [`Toward`].
 ///
-/// A space named rather than taken from the destination is the page's own
-/// where it equals the page's: sRGB on an sRGB page, Display P3 on a
-/// Display P3 one. Skia builds its Display P3 from the sRGB transfer
-/// function and `SkNamedGamut::kDisplayP3` (`intermediate_color_space` in
-/// `SkGradientBaseShader.cpp`), the gamut its CICP table gives the code
-/// point a page's Display P3 is built from (`SkColorSpace.cpp`), so the two
-/// compare equal and the CPU converts nothing.
+/// `None` where a working space is wrapped around the shader, and for the
+/// spaces the CPU converts through code of its own after interpolating --
+/// Lab, LCH, Oklab, OkLCH, HSL and HWB -- and ProPhoto RGB, whose gamut
+/// Skia derives from its primaries at run time.
 fn intermediate_space(
     spec: &GradientSpec,
     page: &ColorSpace,
@@ -903,16 +919,116 @@ fn intermediate_space(
     if spec.space.working_space().is_some() {
         return None;
     }
-    let intermediate = match spec.interpolation.color_space {
-        InterpolationSpace::Destination => page.clone(),
-        InterpolationSpace::SRGB => ColorSpace::new_srgb(),
+    match spec.interpolation.color_space {
+        InterpolationSpace::Destination => Some(page.clone()),
+        InterpolationSpace::SRGB => Some(ColorSpace::new_srgb()),
+        InterpolationSpace::SRGBLinear => Some(ColorSpace::new_srgb_linear()),
         InterpolationSpace::DisplayP3 => {
-            PixelColorSpace::DisplayP3.to_skia_color_space().ok()?
+            PixelColorSpace::DisplayP3.to_skia_color_space().ok()
         }
-        _ => return None,
-    };
-    (intermediate == *page).then_some(intermediate)
+        InterpolationSpace::A98RGB => skia_space(&A98_TF, &ADOBE_RGB_GAMUT),
+        _ => None,
+    }
 }
+
+/// The 2.2 power curve Skia names `k2Dot2` and builds A98 RGB with
+/// (`SkNamedTransferFn::kA98RGB` in `SkColorSpace.h`), as `g, a, b, c, d,
+/// e, f`.
+const A98_TF: [f32; 7] = [2.2, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+/// `SkNamedGamut::kAdobeRGB` in `SkColorSpace.h`: the gamut's matrix to XYZ
+/// D50 in ICC 16.16 fixed point, row by row, which Skia turns into floats
+/// with `SkFixedToFloat`.
+const ADOBE_RGB_GAMUT: [[i32; 3]; 3] = [
+    [0x9c18, 0x348d, 0x2631],
+    [0x4fa5, 0xa02c, 0x102f],
+    [0x04fc, 0x0f95, 0xbe9c],
+];
+
+/// The version `SkColorSpace::Deserialize` reads (`k1_Version` in
+/// `SkColorSpace.cpp`): a four-byte header, then the transfer function's
+/// seven floats and the matrix's nine.
+const SERIALIZED_VERSION: u8 = 1;
+
+/// The space Skia's `SkColorSpace::MakeRGB` makes from the transfer function
+/// `tf` and the 16.16 fixed-point matrix to XYZ D50 `gamut`: built through
+/// `SkColorSpace::Deserialize`, which takes the same sixteen floats and
+/// calls `MakeRGB` with them, so that it compares equal to the one Skia's
+/// gradient builds -- skia-safe does not bind `MakeRGB` itself.
+fn skia_space(tf: &[f32; 7], gamut: &[[i32; 3]; 3]) -> Option<ColorSpace> {
+    // `SkFixedToFloat`: a 16.16 fixed-point value times 2^-16.
+    let fixed = |v: i32| v as f32 * (1.0 / (1u32 << 16) as f32);
+    let mut bytes = vec![SERIALIZED_VERSION, 0, 0, 0];
+    bytes.extend(tf.iter().flat_map(|v| v.to_ne_bytes()));
+    bytes.extend(gamut.iter().flatten().flat_map(|&v| fixed(v).to_ne_bytes()));
+    Some(ColorSpace::deserialize(Data::new_copy(&bytes)))
+}
+
+/// What the CPU converts an interpolated colour through to reach the page,
+/// as `SkColorSpaceXformSteps` decides it between the space interpolated in
+/// and the page's: decode the source's transfer function, change gamut, and
+/// encode the page's, each only where it does something. Every step runs on
+/// the float pipeline, through Skia's `approx_powf` for a curve --
+/// `parametric` and `gamma_` in `SkRasterPipeline_opts.h`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Toward {
+    /// The source's transfer function, as `g, a, b, c, d, e, f`.
+    linearize: Option<[f32; 7]>,
+    /// The gamut change, as `matrix_3x3` takes it: column by column.
+    gamut: Option<[f32; 9]>,
+    /// The inverse of the page's transfer function.
+    encode: Option<[f32; 7]>,
+}
+
+impl Toward {
+    /// The steps from `from` to `to`; `None` for a curve Skia converts
+    /// through other stages than `parametric` and `gamma_` -- PQ and HLG.
+    fn of(from: &ColorSpace, to: &ColorSpace) -> Option<Toward> {
+        if from.hash() == to.hash() {
+            return Some(Toward::default());
+        }
+        let tf = |f: ColorSpaceTransferFn| [f.g, f.a, f.b, f.c, f.d, f.e, f.f];
+        let (source, page) = (tf(from.transfer_fn()), tf(to.transfer_fn()));
+        // `skcms_TransferFunction_getType` tells PQ and HLG by a negative
+        // `g`.
+        if source[0] < 0.0 || page[0] < 0.0 {
+            return None;
+        }
+        let linear =
+            |f: &[f32; 7]| f.map(f32::to_bits) == LINEAR_TF.map(f32::to_bits);
+        let mut toward = Toward {
+            linearize: (!linear(&source)).then_some(source),
+            gamut: None,
+            encode: (!linear(&page)).then(|| tf(to.inv_transfer_fn())),
+        };
+        if from.to_xyzd50_hash() != to.to_xyzd50_hash() {
+            // The matrix's columns are what it makes of each primary,
+            // converted between the two spaces made linear: one channel
+            // times a column entry plus zeros, so each comes out as the
+            // entry itself.
+            let (from, to) = (from.with_linear_gamma(), to.with_linear_gamma());
+            let basis = [
+                Color4f::new(1.0, 0.0, 0.0, 1.0),
+                Color4f::new(0.0, 1.0, 0.0, 1.0),
+                Color4f::new(0.0, 0.0, 1.0, 1.0),
+            ];
+            let columns = convert(&basis, &from, &to)?;
+            toward.gamut = Some(std::array::from_fn(|i| columns[i / 3][i % 3]));
+        } else if from.transfer_fn_hash() == to.transfer_fn_hash() {
+            toward.linearize = None;
+            toward.encode = None;
+        }
+        Some(toward)
+    }
+
+    /// Whether this converts nothing.
+    fn is_identity(&self) -> bool {
+        *self == Toward::default()
+    }
+}
+
+/// `SkNamedTransferFn::kLinear`, as `g, a, b, c, d, e, f`.
+const LINEAR_TF: [f32; 7] = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
 /// `colors` converted from `from` to `to` by `SkConvertPixels`, as
 /// `SkColor4fXformer` converts them: unpremultiplied floats both sides.
@@ -991,6 +1107,16 @@ struct Offsets {
     t_bias: usize,
     p0: usize,
     p1: usize,
+    linearize: usize,
+    gamut_step: usize,
+    encode: usize,
+    lin_a: usize,
+    lin_b: usize,
+    gam_r: usize,
+    gam_g: usize,
+    gam_b: usize,
+    enc_a: usize,
+    enc_b: usize,
     ts: usize,
     factors: usize,
     biases: usize,
@@ -1023,6 +1149,16 @@ impl Offsets {
             t_bias: at("tBias")?,
             p0: at("p0")?,
             p1: at("p1")?,
+            linearize: at("linearize")?,
+            gamut_step: at("gamutStep")?,
+            encode: at("encode")?,
+            lin_a: at("linA")?,
+            lin_b: at("linB")?,
+            gam_r: at("gamR")?,
+            gam_g: at("gamG")?,
+            gam_b: at("gamB")?,
+            enc_a: at("encA")?,
+            enc_b: at("encB")?,
             ts: at("ts")?,
             factors: at("factors")?,
             biases: at("biases")?,
@@ -1049,6 +1185,16 @@ uniform float tScale;
 uniform float tBias;
 uniform float p0;
 uniform float p1;
+uniform int linearize;
+uniform int gamutStep;
+uniform int encode;
+uniform float4 linA;
+uniform float3 linB;
+uniform float3 gamR;
+uniform float3 gamG;
+uniform float3 gamB;
+uniform float4 encA;
+uniform float3 encB;
 uniform float ts[{size}];
 uniform float4 factors[{size}];
 uniform float4 biases[{size}];
@@ -1061,6 +1207,64 @@ float4 nearest255(float4 v) {{
 // `div255` off NEON: `(v + 255) >> 8`.
 float4 above255(float4 v) {{
     return floor((v + 255.0) / 256.0);
+}}
+
+// The biased exponent and the mantissa of `x > 0`, as whole floats: what
+// `approx_log2` reads from the float's bits, which a public effect cannot
+// cast, worked out from exact powers of two instead.
+float2 bitsOf(float x) {{
+    if (x < 1.17549435e-38) {{
+        return float2(0.0, (x * 8.507059173e37) * 8388608.0);
+    }}
+    float k = floor(log2(x));
+    if (exp2(k) > x) {{ k -= 1.0; }} else if (exp2(k + 1.0) <= x) {{ k += 1.0; }}
+    float q = k > 126.0 ? (x * 0.5) * exp2(-126.0) : x * exp2(-k);
+    return float2(k + 127.0, (q - 1.0) * 8388608.0);
+}}
+
+// `approx_log2` in `SkRasterPipeline_opts.h`.
+float approxLog2(float x) {{
+    float2 b = bitsOf(x);
+    float e = (b.x * 8388608.0 + b.y) * (1.0 / 8388608.0);
+    float m = 0.5 + b.y * (1.0 / 16777216.0);
+    float n = (e - 124.225514990) - m * 1.498030302;
+    return n - 1.725879990 / (0.3520887068 + m);
+}}
+
+// `approx_pow2`: the float whose bits are the rounded value, built from its
+// exponent and mantissa.
+float approxPow2(float x) {{
+    float f = x - floor(x);
+    float a = (x + 121.274057500) - f * 1.490129070;
+    a = (a + 27.728023300 / (4.84252568 - f)) * 8388608.0;
+    a = min(max(a, 0.0), 2139095040.0);
+    float lo = floor(a);
+    float d = a - lo;
+    float n = d > 0.5 ? lo + 1.0
+            : (d < 0.5 ? lo : (mod(lo, 2.0) == 0.0 ? lo : lo + 1.0));
+    float e = floor(n * (1.0 / 8388608.0));
+    float m = n - e * 8388608.0;
+    if (e == 0.0) {{ return (m * 1.17549435e-38) * (1.0 / 8388608.0); }}
+    return exp2(e - 127.0) * (1.0 + m * (1.0 / 8388608.0));
+}}
+
+float approxPowf(float x, float y) {{
+    return (x == 0.0 || x == 1.0) ? x : approxPow2(approxLog2(x) * y);
+}}
+
+// `parametric` and `gamma_`: the curve `g, a, b, c` and `d, e, f` of
+// `|x|`, the sign put back.
+float curve(float x, float4 gabc, float3 def) {{
+    float v = abs(x);
+    float r;
+    if (gabc.y == 1.0 && gabc.z == 0.0 && gabc.w == 0.0
+            && def.x == 0.0 && def.y == 0.0 && def.z == 0.0) {{
+        r = approxPowf(v, gabc.x);
+    }} else {{
+        r = v <= def.x ? gabc.w * v + def.z
+                       : approxPowf(gabc.y * v + gabc.z, gabc.x) + def.y;
+    }}
+    return x < 0.0 ? -r : r;
 }}
 
 half4 main(float2 p) {{
@@ -1133,6 +1337,20 @@ half4 main(float2 p) {{
         }}
     }}
     float4 c = t * f + b;
+    // `SkColorSpaceXformSteps`, from the space interpolated in to the page.
+    if (linearize != 0) {{
+        c.rgb = float3(curve(c.r, linA, linB), curve(c.g, linA, linB),
+                       curve(c.b, linA, linB));
+    }}
+    if (gamutStep != 0) {{
+        c.rgb = float3(c.r * gamR.x + (c.g * gamR.y + c.b * gamR.z),
+                       c.r * gamG.x + (c.g * gamG.y + c.b * gamG.z),
+                       c.r * gamB.x + (c.g * gamB.y + c.b * gamB.z));
+    }}
+    if (encode != 0) {{
+        c.rgb = float3(curve(c.r, encA, encB), curve(c.g, encA, encB),
+                       curve(c.b, encA, encB));
+    }}
     c.rgb = clamp(c.rgb, 0.0, 1.0);
     float4 s = c * 255.0;
     float4 l = floor(s + 0.5);
@@ -1191,6 +1409,36 @@ fn uniforms(
     put(offsets.t_bias, layout.t_bias.to_ne_bytes());
     put(offsets.p0, layout.p0.to_ne_bytes());
     put(offsets.p1, layout.p1.to_ne_bytes());
+    let toward = &ramp.toward;
+    put(
+        offsets.linearize,
+        i32::from(toward.linearize.is_some()).to_ne_bytes(),
+    );
+    put(
+        offsets.gamut_step,
+        i32::from(toward.gamut.is_some()).to_ne_bytes(),
+    );
+    put(
+        offsets.encode,
+        i32::from(toward.encode.is_some()).to_ne_bytes(),
+    );
+    let mut floats = |at: usize, values: &[f32]| {
+        for (k, v) in values.iter().enumerate() {
+            put(at + 4 * k, v.to_ne_bytes());
+        }
+    };
+    let curve = toward.linearize.unwrap_or(LINEAR_TF);
+    floats(offsets.lin_a, &curve[..4]);
+    floats(offsets.lin_b, &curve[4..]);
+    let curve = toward.encode.unwrap_or(LINEAR_TF);
+    floats(offsets.enc_a, &curve[..4]);
+    floats(offsets.enc_b, &curve[4..]);
+    // `matrix_3x3`'s `m` is column by column; the effect takes a row of
+    // the matrix each.
+    let m = toward.gamut.unwrap_or([0.0; 9]);
+    floats(offsets.gam_r, &[m[0], m[3], m[6]]);
+    floats(offsets.gam_g, &[m[1], m[4], m[7]]);
+    floats(offsets.gam_b, &[m[2], m[5], m[8]]);
     for (i, t) in ramp.ts.iter().take(size).enumerate() {
         put(offsets.ts + 4 * i, t.to_ne_bytes());
     }

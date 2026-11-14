@@ -401,7 +401,8 @@ fn margins_on(
     channel: usize,
 ) -> Option<(f64, f64)> {
     let (dx, dy) = ((index % side) as f64 + 0.5, (index / side) as f64 + 0.5);
-    let (to_half, to_stop) = margins_at(spec, page, dx, dy, channel)?;
+    let (to_half, to_stop, converting) =
+        margins_at(spec, page, dx, dy, channel)?;
     // The noise `t` can carry there: the point's, through `t`'s rate of
     // change across the page, and the formula's own.
     let step = 1e-3;
@@ -409,9 +410,110 @@ fn margins_on(
     let gradient = ((t(dx + step, dy)? - t(dx - step, dy)?)
         .hypot(t(dx, dy + step)? - t(dx, dy - step)?))
         / (2.0 * step);
+    // A neighbour where `t` is undefined puts the point at the edge of a
+    // two-point conical's cone, where `t`'s rate of change has no bound.
+    let gradient = match gradient.is_nan() {
+        true => f64::INFINITY,
+        false => gradient,
+    };
     let noise = gradient * POINT_NOISE_PX
         + FORMULA_ULPS * F32_EPSILON * formula_size(spec, dx, dy)?;
-    Some((to_half / noise, to_stop / noise))
+    Some((to_half / (noise + converting), to_stop / noise))
+}
+
+/// How many units in the last place of its result the conversion to the
+/// page may lose on the GPU against the CPU: the effect's `approx_pow2`
+/// and `approx_log2` each divide once, and a GPU's fast-math quotient lands
+/// a unit off, which `approx_pow2`'s scale by 2^23 makes up to 256 of its
+/// result's, as Metal's `approx_powf` against the CPU's measured over an
+/// input in every binade -- with the matrix's contractions besides.
+const CONVERSION_ULPS: f64 = 512.0;
+
+/// The CPU's `approx_log2`, in f32 as it computes it. The constants are
+/// Skia's literals as `SkRasterPipeline_opts.h` writes them, which f32
+/// rounds as the CPU's build does; kept as written so that they can be
+/// checked against it.
+#[allow(clippy::excessive_precision)]
+fn approx_log2(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let e = (bits as f32) * (1.0 / (1u32 << 23) as f32);
+    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f00_0000);
+    let n = (e - 124.225_514_990) - m * 1.498_030_302;
+    n - 1.725_879_990 / (0.352_088_706_8 + m)
+}
+
+/// The CPU's `approx_pow2`, its constants kept as [`approx_log2`]'s are.
+#[allow(clippy::excessive_precision)]
+fn approx_pow2(x: f32) -> f32 {
+    let f = x - x.floor();
+    let mut a = (x + 121.274_057_500) - f * 1.490_129_070;
+    a += 27.728_023_300 / (4.842_525_68 - f);
+    a *= (1u32 << 23) as f32;
+    a = a.clamp(0.0, f32::from_bits(0x4eff_0000));
+    f32::from_bits(a.round_ties_even() as u32)
+}
+
+/// The CPU's `parametric` and `gamma_` for one channel.
+fn curve(x: f32, tf: &[f32; 7]) -> f32 {
+    let [g, a, b, c, d, e, f] = *tf;
+    let powf = |x: f32, y: f32| match x == 0.0 || x == 1.0 {
+        true => x,
+        false => approx_pow2(approx_log2(x) * y),
+    };
+    let v = x.abs();
+    let r = match a == 1.0 && [b, c, d, e, f] == [0.0; 5] {
+        true => powf(v, g),
+        false if v <= d => c * v + f,
+        false => powf(a * v + b, g) + e,
+    };
+    r.copysign(x)
+}
+
+/// The same curve in f64, with a true power, for its slope.
+fn curve_f64(x: f64, tf: &[f32; 7]) -> f64 {
+    let [g, a, b, c, d, e, f] = tf.map(f64::from);
+    let v = x.abs();
+    let r = match v <= d {
+        true => c * v + f,
+        false => (a * v + b).powf(g) + e,
+    };
+    r.copysign(x)
+}
+
+/// `rgb` taken to the page as the CPU's `SkColorSpaceXformSteps` takes it,
+/// in f32.
+fn toward_page(toward: &Toward, rgb: [f32; 3]) -> [f32; 3] {
+    let mut v = rgb;
+    if let Some(tf) = &toward.linearize {
+        v = v.map(|c| curve(c, tf));
+    }
+    if let Some(m) = &toward.gamut {
+        v = std::array::from_fn(|k| {
+            v[0] * m[k] + (v[1] * m[3 + k] + v[2] * m[6 + k])
+        });
+    }
+    if let Some(tf) = &toward.encode {
+        v = v.map(|c| curve(c, tf));
+    }
+    v
+}
+
+/// [`toward_page`] in f64, with true powers.
+fn toward_page_f64(toward: &Toward, rgb: [f64; 3]) -> [f64; 3] {
+    let mut v = rgb;
+    if let Some(tf) = &toward.linearize {
+        v = v.map(|c| curve_f64(c, tf));
+    }
+    if let Some(m) = &toward.gamut {
+        let m = m.map(f64::from);
+        v = std::array::from_fn(|k| {
+            v[0] * m[k] + v[1] * m[3 + k] + v[2] * m[6 + k]
+        });
+    }
+    if let Some(tf) = &toward.encode {
+        v = v.map(|c| curve_f64(c, tf));
+    }
+    v
 }
 
 /// The size of the largest term `t`'s formula adds or subtracts at the
@@ -510,14 +612,15 @@ fn unit_t(layout: &Layout, x: f64, y: f64) -> f64 {
     t * f64::from(layout.t_scale) + f64::from(layout.t_bias)
 }
 
-/// [`margins`] in `t`.
+/// [`margins`] in `t`, with the noise in `t` the conversion to the page
+/// adds -- see [`CONVERSION_ULPS`] -- zero where it converts nothing.
 fn margins_at(
     spec: &GradientSpec,
     page: &ColorSpace,
     dx: f64,
     dy: f64,
     channel: usize,
-) -> Option<(f64, f64)> {
+) -> Option<(f64, f64, f64)> {
     let ramp = Ramp::of(spec, page)?;
     let mut t = t_at(spec, dx, dy)?;
     let to_stop = ramp.ts[1..]
@@ -539,16 +642,84 @@ fn margins_at(
         }
     };
     let (f, b) = (ramp.factors[interval], ramp.biases[interval]);
-    let level = (t * f64::from(f[channel]) + f64::from(b[channel]))
-        .clamp(0.0, 1.0)
-        * 255.0;
-    let slope = f64::from(f[channel]).abs() * 255.0;
-    let to_half = match slope > 0.0 {
-        true => (level - level.floor() - 0.5).abs() / slope,
-        false => f64::INFINITY,
+    if channel == 3 || ramp.toward.is_identity() {
+        let level = (t * f64::from(f[channel]) + f64::from(b[channel]))
+            .clamp(0.0, 1.0)
+            * 255.0;
+        let slope = f64::from(f[channel]).abs() * 255.0;
+        let to_half = match slope > 0.0 {
+            true => (level - level.floor() - 0.5).abs() / slope,
+            false => f64::INFINITY,
+        };
+        return Some((to_half, to_stop, 0.0));
+    }
+    // Converted: the level is the CPU's own arithmetic in f32, and its rate
+    // of change in `t` the same conversion's in f64.
+    let t32 = t as f32;
+    let rgb: [f32; 3] = std::array::from_fn(|k| t32 * f[k] + b[k]);
+    let value = toward_page(&ramp.toward, rgb)[channel];
+    let level = f64::from(value.clamp(0.0, 1.0)) * 255.0;
+    let at = |t: f64| {
+        let rgb =
+            std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
+        toward_page_f64(&ramp.toward, rgb)[channel].clamp(0.0, 1.0) * 255.0
     };
-    Some((to_half, to_stop))
+    let step = 1e-5;
+    let slope = ((at(t + step) - at(t - step)) / (2.0 * step)).abs();
+    if slope == 0.0 {
+        return Some((f64::INFINITY, to_stop, 0.0));
+    }
+    let to_half = (level - level.floor() - 0.5).abs() / slope;
+    // The noise the conversion adds, in levels: the linearizing curve's and
+    // the matrix's, relative to the sizes of the terms the matrix sums --
+    // which cancel where a wide gamut's colour lands near an edge of a
+    // narrow one -- carried through the encode's slope there; and the
+    // encoding curve's own, relative to the value.
+    let rgb: [f64; 3] =
+        std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
+    let linear = match &ramp.toward.linearize {
+        Some(tf) => rgb.map(|c| curve_f64(c, tf)),
+        None => rgb,
+    };
+    // The sum of the terms' sizes bounds both what the matrix loses and
+    // what the curve before it lost, carried through it.
+    let (terms, mixed) = match &ramp.toward.gamut {
+        Some(m) => {
+            let m = m.map(f64::from);
+            let terms = (0..3)
+                .map(|j| (linear[j] * m[3 * j + channel]).abs())
+                .sum::<f64>();
+            let mixed =
+                (0..3).map(|j| linear[j] * m[3 * j + channel]).sum::<f64>();
+            (terms, mixed)
+        }
+        None => (linear[channel].abs(), linear[channel]),
+    };
+    let encode_slope = match &ramp.toward.encode {
+        Some(tf) => {
+            let h = 1e-6_f64.max(mixed.abs() * 1e-4);
+            ((curve_f64(mixed + h, tf) - curve_f64(mixed - h, tf)) / (2.0 * h))
+                .abs()
+        }
+        None => 1.0,
+    };
+    let ulps = |step: bool, ulps: f64| if step { ulps } else { 0.0 };
+    let toward = &ramp.toward;
+    let before = ulps(toward.linearize.is_some(), CONVERSION_ULPS)
+        + ulps(toward.gamut.is_some(), MATRIX_ULPS);
+    let after = ulps(toward.encode.is_some(), CONVERSION_ULPS);
+    let converting = (before * terms * encode_slope
+        + after * f64::from(value.abs()))
+        * F32_EPSILON
+        * 255.0
+        / slope;
+    Some((to_half, to_stop, converting))
 }
+
+/// How many units in the last place of the sum of its terms' sizes the
+/// gamut matrix's sum may lose: three products and two sums in f32, which a
+/// GPU may fuse where the CPU does not.
+const MATRIX_ULPS: f64 = 4.0;
 
 /// Over a corpus of every kind of gradient, the effect on the GPU stores the
 /// bytes the CPU stores for Skia's own gradient, except on ties: where the
@@ -653,6 +824,126 @@ fn the_effect_stores_the_cpus_bytes_but_on_ties() {
     );
 }
 
+/// The spaces Skia interpolates in apart from the page and converts from
+/// afterwards on the float pipeline -- linear sRGB, Display P3, sRGB and A98
+/// RGB -- on an sRGB and a Display P3 page: over the corpus's gradients,
+/// made opaque and drawn at full alpha, the effect stores the CPU's bytes
+/// but on ties, the conversion's noise counted in -- see
+/// [`CONVERSION_ULPS`]. Skia's own GPU gradient is judged beside it.
+#[test]
+fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
+    let spaces = [
+        (
+            InterpolationSpace::SRGBLinear,
+            GradientColorSpace::SrgbLinear,
+        ),
+        (InterpolationSpace::DisplayP3, GradientColorSpace::DisplayP3),
+        (InterpolationSpace::SRGB, GradientColorSpace::Srgb),
+        (InterpolationSpace::A98RGB, GradientColorSpace::A98Rgb),
+    ];
+    let (mut drawn_cases, mut parted, mut ganesh, mut ganesh_off) =
+        (0, 0, 0, 0);
+    let mut largest: f64 = 0.0;
+    let mut worst: Vec<String> = vec![];
+    for page in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        let space = page.to_skia_color_space().expect("the page's space");
+        for (named, ours) in spaces {
+            for seed in 0..150 {
+                let (mut spec, _, _) = case(seed);
+                for color in &mut spec.colors {
+                    color.a = 1.0;
+                }
+                spec.interpolation.color_space = named;
+                spec.space = ours;
+                let Some(native) = spec.native() else {
+                    continue;
+                };
+                let Some(cpu) = drawn(false, page, &native, 1.0) else {
+                    continue;
+                };
+                let effect = spec.exact(&space, 1.0);
+                assert!(
+                    effect.is_some() || Layout::of(&spec).is_none(),
+                    "seed {seed} {named:?} on {page:?}: refused"
+                );
+                if effect.is_none() {
+                    continue;
+                }
+                let Some(gpu) = drawn_as(
+                    true,
+                    page,
+                    &native,
+                    1.0,
+                    Shape::of(seed),
+                    Some(&spec),
+                ) else {
+                    return;
+                };
+                drawn_cases += 1;
+                let judge = |a: &[u8], b: &[u8], index: usize| {
+                    (0..3).filter(|&k| a[k] != b[k]).all(|k| {
+                        margins(&spec, &space, index, k).is_some_and(
+                            |(to_half, to_stop)| to_half.min(to_stop) <= 1.0,
+                        )
+                    })
+                };
+                if ganesh_off < CONTROL_ENOUGH
+                    && let Some(theirs) = drawn(true, page, &native, 1.0)
+                {
+                    for (index, (a, b)) in
+                        cpu.chunks(4).zip(theirs.chunks(4)).enumerate()
+                    {
+                        if a != b {
+                            ganesh += 1;
+                            if !judge(a, b, index) {
+                                ganesh_off += 1;
+                            }
+                        }
+                    }
+                }
+                for (index, (a, b)) in
+                    cpu.chunks(4).zip(gpu.chunks(4)).enumerate()
+                {
+                    if a == b {
+                        continue;
+                    }
+                    parted += 1;
+                    let nearest = (0..3)
+                        .filter(|&k| a[k] != b[k])
+                        .filter_map(|k| margins(&spec, &space, index, k))
+                        .map(|(to_half, to_stop)| to_half.min(to_stop))
+                        .fold(0.0, f64::max);
+                    largest = largest.max(nearest);
+                    if !judge(a, b, index) {
+                        worst.push(format!(
+                            "seed {seed} {named:?} on {page:?} pixel {index}: cpu {a:?} gpu {b:?}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{drawn_cases} cases drawn; {parted} pixels parted, all ties but {}, the furthest {largest:.2} of its noise from its tie; Skia's GPU gradient parted {ganesh}, {ganesh_off} off their ties",
+        worst.len()
+    );
+    assert!(drawn_cases > 0, "no case was drawn through the effect");
+    assert!(
+        ganesh_off > 0,
+        "the judge found no fault in Skia's gradient"
+    );
+    assert!(
+        worst.is_empty(),
+        "{}",
+        worst
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 /// Every size of the effect compiles; a refusal here would leave every
 /// gradient to the CPU route in silence.
 #[test]
@@ -682,7 +973,9 @@ fn a_plain_gradient_is_covered() {
 /// A gradient interpolated in Display P3 by name, on a Display P3 page,
 /// takes the effect: the CPU draws it as it draws one interpolated in the
 /// page's space, byte for byte, and the effect made for it draws as the one
-/// made for that. On an sRGB page, where the CPU converts back, it does not.
+/// made for that. On an sRGB page, where the CPU converts back on its float
+/// pipeline, it takes the effect only where that pipeline rounds nothing
+/// before the store: every stop opaque, at alpha 1.
 #[test]
 fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
     let p3 = PixelColorSpace::DisplayP3;
@@ -716,9 +1009,12 @@ fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
             drawn(false, p3, &effect, 1.0),
             "seed {seed}: the effect for it is the page's"
         );
-        assert!(
-            named.exact(&ColorSpace::new_srgb(), alpha).is_none(),
-            "seed {seed}: refused on an sRGB page"
+        let srgb = ColorSpace::new_srgb();
+        let opaque = Ramp::of(&named, &srgb).expect("a ramp").opaque;
+        assert_eq!(
+            named.exact(&srgb, alpha).is_some(),
+            opaque && alpha == 1.0,
+            "seed {seed}: on an sRGB page, taken only opaque at alpha 1"
         );
         checked += 1;
     }
