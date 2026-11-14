@@ -47,7 +47,7 @@ use crate::{
         blur_mask,
         chain::{self, Depth, Step},
         chain_cache, coverage_of,
-        exact_gradient::GradientSpec,
+        exact_gradient::{Exact, GradientSpec},
         faint::{Faint, composited},
         kept::CoverageInput,
         page::{ExportOptions, Page},
@@ -2468,7 +2468,7 @@ struct Slot {
 /// small gradients alternating linear and conic spent 2.4 ms a frame on it.
 #[derive(Clone)]
 struct Found {
-    effect: Option<Shader>,
+    effect: Option<Exact>,
     slot: Option<Slot>,
 }
 
@@ -2496,10 +2496,14 @@ fn atlas(
     // The effect for each path, made first: a draw it cannot be made for
     // takes no slot, and is drawn on the CPU instead; one on whole pixels
     // takes the effect itself and no slot either.
-    let effects: Vec<Option<Shader>> = draws
+    let effects: Vec<Option<Exact>> = draws
         .iter()
         .map(|draw| {
-            draw.and_then(|draw| draw.spec.exact(&draw.page, draw.alpha))
+            draw.and_then(|draw| {
+                draw.spec
+                    .exact(&draw.page, draw.alpha)
+                    .filter(|effect| effect.places(&draw.matrix))
+            })
         })
         .collect();
     let mut slots: Vec<Option<IPoint>> = vec![None; draws.len()];
@@ -2551,15 +2555,12 @@ fn atlas(
                 draw.area.left - SLOT_MARGIN_PX,
                 draw.area.top - SLOT_MARGIN_PX,
             );
-            let to_slot = Matrix::translate((
-                (at.x - origin.0) as f32,
-                (at.y - origin.1) as f32,
-            ));
+            // The slot's pixel `at` is the page's `origin`.
             let mut paint = Paint::default();
-            paint.set_shader(
-                effect
-                    .with_local_matrix(&Matrix::concat(&to_slot, &draw.matrix)),
-            );
+            paint.set_shader(effect.placed(
+                &draw.matrix,
+                IPoint::new(origin.0 - at.x, origin.1 - at.y),
+            ));
             target.draw_rect(
                 Rect::from_xywh(
                     at.x as f32,
@@ -2617,10 +2618,28 @@ fn drawn_with_effect(
 ) -> bool {
     let outer = canvas.local_to_device_as_3x3();
     let slot = found.and_then(|found| found.slot.as_ref());
+    // Drawn onto `canvas`'s pixels, a whole-pixel translation of the
+    // page's, at the canvas's identity: its local matrix undoes the
+    // canvas's, so that the effect is handed each device pixel.
+    let on_page = || {
+        let device = Matrix::concat(&outer, &draw.matrix).invert()?;
+        let effect = match found {
+            Some(found) => found.effect.clone()?,
+            None => draw.spec.exact(&draw.page, draw.alpha)?,
+        };
+        let offset = IPoint::new(
+            -outer.translate_x() as i32,
+            -outer.translate_y() as i32,
+        );
+        Some(
+            effect
+                .placed(&draw.matrix, offset)?
+                .with_local_matrix(&device),
+        )
+    };
     let shader = match (draw.whole_pixels, found, slot) {
         (_, Some(Found { effect: None, .. }), _) => None,
-        (true, Some(found), _) => found.effect.clone(),
-        (true, None, _) => draw.spec.exact(&draw.page, draw.alpha),
+        (true, ..) => on_page(),
         (false, _, Some(slot)) => {
             let origin = (
                 draw.area.left - SLOT_MARGIN_PX,

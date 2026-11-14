@@ -21,11 +21,12 @@ use crate::{
 /// The side of the canvas each case is drawn on.
 const SIDE: usize = 96;
 
-/// How far, in device pixels, f32 arithmetic may misplace the point a pixel
-/// samples: it is mapped through f32 matrices whose translations reach a
-/// hundred or so, whose last bit is eight millionths of a pixel there, and
-/// the effect maps it through two matrices where the CPU composes one.
-const POINT_NOISE_PX: f64 = 1e-4;
+/// How many units in the last place of the sizes of a row's terms the
+/// effect's mapping of a pixel's centre to the gradient's space may lose
+/// against the CPU's: it applies the CPU's own matrix to the same exact
+/// centre in the same order, and a GPU may fuse each of a row's two
+/// products into the sum that follows it, which the CPU rounds apart.
+const MATRIX_ULPS_POINT: f64 = 2.0;
 
 /// How many units in the last place of its largest term the formula for `t`
 /// may lose: a handful of operations, and a two-point conical gradient's
@@ -81,6 +82,17 @@ impl Shape {
 /// How far past each edge of the page [`Shape::OffPixels`] reaches: a part
 /// of a pixel, so that Ganesh draws its edges anti-aliased.
 const OFF_PIXELS_PX: f32 = 0.37;
+
+/// The effect for `spec` on `page` at `alpha`, placed for a draw at the
+/// identity onto the page itself, as [`drawn`] fills it.
+fn effect(
+    spec: &GradientSpec,
+    page: &ColorSpace,
+    alpha: f32,
+) -> Option<Shader> {
+    spec.exact(page, alpha)?
+        .placed(&Matrix::new_identity(), IPoint::new(0, 0))
+}
 
 fn drawn(
     gpu: bool,
@@ -369,7 +381,7 @@ fn a_half_level_is_rounded_as_the_cpu_rounds_it() {
             [level, 0, 255, 255],
             "highp {highp}: the CPU's pixel"
         );
-        let effect = spec.exact(&space, 1.0).expect("the effect");
+        let effect = effect(&spec, &space, 1.0).expect("the effect");
         let Some(gpu) = drawn(true, page, &effect, 1.0) else {
             return;
         };
@@ -401,17 +413,426 @@ fn margins_on(
     channel: usize,
 ) -> Option<(f64, f64)> {
     let (dx, dy) = ((index % side) as f64 + 0.5, (index / side) as f64 + 0.5);
-    let (to_half, to_stop) = margins_at(spec, page, dx, dy, channel)?;
-    // The noise `t` can carry there: the point's, through `t`'s rate of
-    // change across the page, and the formula's own.
-    let step = 1e-3;
-    let t = |x: f64, y: f64| t_at(spec, x, y);
-    let gradient = ((t(dx + step, dy)? - t(dx - step, dy)?)
-        .hypot(t(dx, dy + step)? - t(dx, dy - step)?))
-        / (2.0 * step);
-    let noise = gradient * POINT_NOISE_PX
+    let (to_half, to_stop, converting) =
+        margins_at(spec, page, dx, dy, channel)?;
+    // The noise `t` can carry there: the matrix's, through `t`'s rate of
+    // change in the gradient's space, and the formula's own.
+    let noise = point_noise(spec, dx, dy)?
         + FORMULA_ULPS * F32_EPSILON * formula_size(spec, dx, dy)?;
-    Some((to_half / noise, to_stop / noise))
+    Some((to_half / (noise + converting), to_stop / noise))
+}
+
+/// The noise in `t` at the device point `(dx, dy)` from mapping it to the
+/// gradient's space -- see [`MATRIX_ULPS_POINT`]: each coordinate's, the
+/// sum of the sizes of its row's terms, carried through `t`'s rate of
+/// change along it. Unbounded where that rate is undefined, at the edge of
+/// a two-point conical's cone.
+fn point_noise(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
+    let layout = Layout::of(spec)?;
+    let Mapped {
+        x,
+        y,
+        z,
+        sizes,
+        perspective,
+    } = mapped(spec, &layout, dx, dy)?;
+    // A coordinate's noise: its row's, then, under a perspective, the
+    // third row's and the reciprocal's, relative to it.
+    let relative = match perspective {
+        true => MATRIX_ULPS_POINT * sizes[2] / z.abs() + RECIPROCAL_ULPS,
+        false => 0.0,
+    };
+    let noise_x = MATRIX_ULPS_POINT * sizes[0] / z.abs() + x.abs() * relative;
+    let noise_y = MATRIX_ULPS_POINT * sizes[1] / z.abs() + y.abs() * relative;
+    let h = 1e-6 * (1.0 + x.abs().max(y.abs()));
+    let along_x =
+        (unit_t(&layout, x + h, y) - unit_t(&layout, x - h, y)) / (2.0 * h);
+    let along_y =
+        (unit_t(&layout, x, y + h) - unit_t(&layout, x, y - h)) / (2.0 * h);
+    let noise =
+        F32_EPSILON * (along_x.abs() * noise_x + along_y.abs() * noise_y);
+    Some(match noise.is_nan() {
+        true => f64::INFINITY,
+        false => noise,
+    })
+}
+
+/// How many units in the last place a perspective's division may part by:
+/// the CPU multiplies by `rcp_precise`, an estimate refined to within a
+/// unit or two of the reciprocal, and the effect divides, which a GPU's
+/// fast math lands a unit or two off the quotient.
+const RECIPROCAL_ULPS: f64 = 4.0;
+
+/// The device point `(dx, dy)` in the gradient's space, in f64, by the
+/// CPU's matrix for `spec` in f32 -- see `Exact::placed` -- and the sizes
+/// of each row's terms.
+struct Mapped {
+    x: f64,
+    y: f64,
+    /// The third row's value, 1 without a perspective.
+    z: f64,
+    sizes: [f64; 3],
+    perspective: bool,
+}
+
+fn mapped(
+    spec: &GradientSpec,
+    layout: &Layout,
+    dx: f64,
+    dy: f64,
+) -> Option<Mapped> {
+    let to = match &spec.local {
+        Some(local) => Matrix::concat(&layout.to_unit, &local.invert()?),
+        None => layout.to_unit,
+    };
+    let mut m = [0.0; 9];
+    to.get_9(&mut m);
+    let m = m.map(f64::from);
+    let row = |k: usize| m[3 * k] * dx + m[3 * k + 1] * dy + m[3 * k + 2];
+    let size = |k: usize| {
+        (m[3 * k] * dx).abs() + (m[3 * k + 1] * dy).abs() + m[3 * k + 2].abs()
+    };
+    let perspective = to.has_perspective();
+    let z = match perspective {
+        true => row(2),
+        false => 1.0,
+    };
+    Some(Mapped {
+        x: row(0) / z,
+        y: row(1) / z,
+        z,
+        sizes: [size(0), size(1), size(2)],
+        perspective,
+    })
+}
+
+/// How many units in the last place of its result the conversion to the
+/// page may lose on the GPU against the CPU: the effect's `approx_pow2`
+/// and `approx_log2` each divide once, and a GPU's fast-math quotient lands
+/// a unit off, which `approx_pow2`'s scale by 2^23 makes up to 256 of its
+/// result's, as Metal's `approx_powf` against the CPU's measured over an
+/// input in every binade -- with the matrix's contractions besides.
+const CONVERSION_ULPS: f64 = 512.0;
+
+/// The scale a dark case's stops take: sRGB 0.03 and under is Lab L under
+/// 3, inside the linear segment `css_lab_to_xyz` takes below L 8.
+const DARK: f32 = 0.03;
+
+/// How many units in the last place of the sizes it sums a conversion back
+/// from one of the spaces [`Css`] names may lose on the GPU against the
+/// CPU: two sums and three products a step, which a GPU may fuse where the
+/// CPU does not, and HWB's one quotient, which Metal's fast math lands a
+/// unit or two off.
+const CSS_ULPS: f64 = 8.0;
+
+/// `css_lab_to_xyz`, `css_oklab_to_linear_srgb`, `css_hcl_to_lab`,
+/// `css_hsl_to_srgb` and `css_hwb_to_srgb`, in f32 as the CPU computes
+/// them.
+fn css_back(css: Css, c: [f32; 3]) -> [f32; 3] {
+    match css {
+        Css::None => c,
+        Css::Lab => lab_back(c),
+        Css::OkLab => oklab_back(c),
+        Css::Lch => lab_back(hcl_back(c)),
+        Css::OkLch => oklab_back(hcl_back(c)),
+        Css::Hsl => hsl_back(c[0], c[1], c[2]),
+        Css::Hwb => {
+            let (w, b) = (c[1] * HSL_PERCENT, c[2] * HSL_PERCENT);
+            if w + b >= 1.0 {
+                return [w / (w + b); 3];
+            }
+            hsl_back(c[0], 100.0, 50.0).map(|v| v * (1.0 - w - b) + w)
+        }
+    }
+}
+
+fn lab_back(c: [f32; 3]) -> [f32; 3] {
+    let f1 = (c[0] + 16.0) * (1.0 / 116.0);
+    let f0 = (c[1] * (1.0 / 500.0)) + f1;
+    let f2 = f1 - (c[2] * (1.0 / 200.0));
+    let cube = |v: f32| v * v * v;
+    let x = match cube(f0) > LAB_E {
+        true => cube(f0),
+        false => (116.0 * f0 - 16.0) * (1.0 / LAB_K),
+    };
+    let y = match c[0] > LAB_K * LAB_E {
+        true => cube(f1),
+        false => c[0] * (1.0 / LAB_K),
+    };
+    let z = match cube(f2) > LAB_E {
+        true => cube(f2),
+        false => (116.0 * f2 - 16.0) * (1.0 / LAB_K),
+    };
+    [x * LAB_D50[0], y * LAB_D50[1], z * LAB_D50[2]]
+}
+
+fn oklab_back(c: [f32; 3]) -> [f32; 3] {
+    let row =
+        |m: [f32; 3], v: [f32; 3]| (m[0] * v[0] + m[1] * v[1]) + m[2] * v[2];
+    let lms = OKLAB_IN.map(|m| {
+        let v = row(m, c);
+        v * v * v
+    });
+    OKLAB_OUT.map(|m| row(m, lms))
+}
+
+/// `sin5q_`, in f32.
+fn sin5q(x: f32) -> f32 {
+    let x2 = x * x;
+    x * ((x2 * SIN5Q[2] + SIN5Q[1]) * x2 + SIN5Q[0])
+}
+
+/// `css_hcl_to_lab`, through `cos_` and `sin_`, in f32.
+fn hcl_back(c: [f32; 3]) -> [f32; 3] {
+    let h = c[0] * RADIANS_PER_DEGREE;
+    let quarter = |x: f32| 0.25 - (x - (x + 0.5).floor()).abs();
+    let cos = sin5q(quarter(h * TURNS_PER_RADIAN));
+    let sin = sin5q(quarter(h * -TURNS_PER_RADIAN + 0.25));
+    [c[2], c[1] * cos, c[1] * sin]
+}
+
+/// `css_hsl_to_srgb_`, in f32.
+fn hsl_back(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let modulo = |x: f32, y: f32| x - y * (x * (1.0 / y)).floor();
+    let h = modulo(h, TURN);
+    let (s, l) = (s * HSL_PERCENT, l * HSL_PERCENT);
+    let a = s * l.min(1.0 - l);
+    [0.0, 8.0, 4.0].map(|n: f32| {
+        let k = modulo(n + h * (1.0 / 30.0), 12.0);
+        l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    })
+}
+
+/// [`css_back`] in f64, with, for each channel, the size of what it sums
+/// along the way: the bound on what rounding there can move it by. `sizes`
+/// are the inputs' own: the sizes of the terms `t * factor + bias` sums.
+fn css_back_f64(
+    css: Css,
+    c: [f64; 3],
+    sizes: [f64; 3],
+) -> ([f64; 3], [f64; 3]) {
+    match css {
+        // Nothing converted, nothing summed: the interpolation's own
+        // noise is `t`'s, which the judge counts apart.
+        Css::None => (c, [0.0; 3]),
+        Css::Lab => lab_back_f64(c, sizes),
+        Css::OkLab => oklab_back_f64(c, sizes),
+        Css::Lch => {
+            let (lab, lab_sizes) = hcl_back_f64(c, sizes);
+            lab_back_f64(lab, lab_sizes)
+        }
+        Css::OkLch => {
+            let (lab, lab_sizes) = hcl_back_f64(c, sizes);
+            oklab_back_f64(lab, lab_sizes)
+        }
+        Css::Hsl => hsl_back_f64(c, sizes),
+        Css::Hwb => {
+            let (w, b) = (c[1] / 100.0, c[2] / 100.0);
+            let (sw, sb) = (sizes[1] / 100.0, sizes[2] / 100.0);
+            if w + b >= 1.0 {
+                // A quotient, and its divisor's sum.
+                let gray = w / (w + b);
+                return (
+                    [gray; 3],
+                    [4.0 * gray.abs() + (sw + sb) / (w + b); 3],
+                );
+            }
+            let (rgb, rgb_sizes) =
+                hsl_back_f64([c[0], 100.0, 50.0], [sizes[0], 100.0, 50.0]);
+            let scale = 1.0 - w - b;
+            let out = rgb.map(|v| v * scale + w);
+            let out_sizes: [f64; 3] = std::array::from_fn(|k| {
+                rgb_sizes[k] * scale.abs()
+                    + rgb[k].abs() * (1.0 + sw + sb)
+                    + sw
+                    + 1.0
+            });
+            (out, out_sizes)
+        }
+    }
+}
+
+fn lab_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let d50 = LAB_D50.map(f64::from);
+    let (e, k) = (f64::from(LAB_E), f64::from(LAB_K));
+    let f1 = (c[0] + 16.0) / 116.0;
+    let f = [c[1] / 500.0 + f1, f1, f1 - c[2] / 200.0];
+    // A cube's error is three times its root's, relative: the root sums
+    // `c / 500` or `c / 200` with `f1`.
+    let f1_size = (sizes[0] + 16.0) / 116.0;
+    let root_sizes = [
+        sizes[1] / 500.0 + f1_size,
+        f1_size,
+        f1_size + sizes[2] / 200.0,
+    ];
+    let mut out = [0.0; 3];
+    let mut out_sizes = [0.0; 3];
+    for i in 0..3 {
+        let cubed = f[i] * f[i] * f[i];
+        let curved = match i {
+            1 => c[0] > k * e,
+            _ => cubed > e,
+        };
+        let (v, size) = match curved {
+            true => (cubed, 3.0 * f[i] * f[i] * root_sizes[i] + cubed.abs()),
+            false => {
+                let v = match i {
+                    1 => c[0] / k,
+                    _ => (116.0 * f[i] - 16.0) / k,
+                };
+                (v, (116.0 * root_sizes[i] + 16.0) / k)
+            }
+        };
+        out[i] = v * d50[i];
+        out_sizes[i] = size * d50[i];
+    }
+    (out, out_sizes)
+}
+
+fn oklab_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let row = |m: [f32; 3], v: [f64; 3]| {
+        (0..3).map(|j| f64::from(m[j]) * v[j]).sum::<f64>()
+    };
+    let size = |m: [f32; 3], v: [f64; 3]| {
+        (0..3).map(|j| (f64::from(m[j]) * v[j]).abs()).sum::<f64>()
+    };
+    let root = OKLAB_IN.map(|m| row(m, c));
+    let root_sizes = OKLAB_IN.map(|m| size(m, sizes));
+    let lms = root.map(|v| v * v * v);
+    let lms_sizes: [f64; 3] = std::array::from_fn(|j| {
+        3.0 * root[j] * root[j] * root_sizes[j] + lms[j].abs()
+    });
+    let out = OKLAB_OUT.map(|m| row(m, lms));
+    let out_sizes = OKLAB_OUT.map(|m| size(m, lms) + size(m, lms_sizes));
+    (out, out_sizes)
+}
+
+/// [`hcl_back`] in f64, through the same polynomial. The angle, in turns,
+/// carries the noise of the hue it is made from and of the two products
+/// that make it; each of Lab's two axes that, times the chroma, through a
+/// slope of at most a whole turn's.
+fn hcl_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let sin5q = |x: f64| {
+        let [a, b, cc] = SIN5Q.map(f64::from);
+        let x2 = x * x;
+        x * ((x2 * cc + b) * x2 + a)
+    };
+    let turns = c[0] / f64::from(TURN);
+    let quarter = |x: f64| 0.25 - (x - (x + 0.5).floor()).abs();
+    let cos = sin5q(quarter(turns));
+    let sin = sin5q(quarter(0.25 - turns));
+    let angle_size = 4.0 * sizes[0] / f64::from(TURN) + 1.0;
+    let axis_size =
+        sizes[1] + c[1].abs() * (4.0 + std::f64::consts::TAU * angle_size);
+    (
+        [c[2], c[1] * cos, c[1] * sin],
+        [sizes[2], axis_size, axis_size],
+    )
+}
+
+/// [`hsl_back`] in f64. Each channel is `l` less `a` times a clamped
+/// distance along the wheel, the wheel's position a hue scaled down to a
+/// twelfth of a turn's thirtieth and reduced twice.
+fn hsl_back_f64(c: [f64; 3], sizes: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let h = c[0].rem_euclid(360.0);
+    let (s, l) = (c[1] / 100.0, c[2] / 100.0);
+    let (ss, sl) = (sizes[1] / 100.0, sizes[2] / 100.0);
+    let a = s * l.min(1.0 - l);
+    let a_size = ss * l.min(1.0 - l).abs() + s.abs() * (sl + 1.0);
+    let k_size = sizes[0] / 30.0 + 2.0 * 12.0;
+    let out = [0.0, 8.0, 4.0].map(|n| {
+        let k = (n + h / 30.0).rem_euclid(12.0);
+        l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    });
+    let size = sl + a_size + a.abs() * (k_size + 12.0);
+    (out, [size; 3])
+}
+
+/// The CPU's `approx_log2`, in f32 as it computes it. The constants are
+/// Skia's literals as `SkRasterPipeline_opts.h` writes them, which f32
+/// rounds as the CPU's build does; kept as written so that they can be
+/// checked against it.
+#[allow(clippy::excessive_precision)]
+fn approx_log2(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let e = (bits as f32) * (1.0 / (1u32 << 23) as f32);
+    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f00_0000);
+    let n = (e - 124.225_514_990) - m * 1.498_030_302;
+    n - 1.725_879_990 / (0.352_088_706_8 + m)
+}
+
+/// The CPU's `approx_pow2`, its constants kept as [`approx_log2`]'s are.
+#[allow(clippy::excessive_precision)]
+fn approx_pow2(x: f32) -> f32 {
+    let f = x - x.floor();
+    let mut a = (x + 121.274_057_500) - f * 1.490_129_070;
+    a += 27.728_023_300 / (4.842_525_68 - f);
+    a *= (1u32 << 23) as f32;
+    a = a.clamp(0.0, f32::from_bits(0x4eff_0000));
+    f32::from_bits(a.round_ties_even() as u32)
+}
+
+/// The CPU's `parametric` and `gamma_` for one channel.
+fn curve(x: f32, tf: &[f32; 7]) -> f32 {
+    let [g, a, b, c, d, e, f] = *tf;
+    let powf = |x: f32, y: f32| match x == 0.0 || x == 1.0 {
+        true => x,
+        false => approx_pow2(approx_log2(x) * y),
+    };
+    let v = x.abs();
+    let r = match a == 1.0 && [b, c, d, e, f] == [0.0; 5] {
+        true => powf(v, g),
+        false if v <= d => c * v + f,
+        false => powf(a * v + b, g) + e,
+    };
+    r.copysign(x)
+}
+
+/// The same curve in f64, with a true power, for its slope.
+fn curve_f64(x: f64, tf: &[f32; 7]) -> f64 {
+    let [g, a, b, c, d, e, f] = tf.map(f64::from);
+    let v = x.abs();
+    let r = match v <= d {
+        true => c * v + f,
+        false => (a * v + b).powf(g) + e,
+    };
+    r.copysign(x)
+}
+
+/// `rgb` taken to the page as the CPU's `SkColorSpaceXformSteps` takes it,
+/// in f32.
+fn toward_page(toward: &Toward, rgb: [f32; 3]) -> [f32; 3] {
+    let mut v = rgb;
+    if let Some(tf) = &toward.linearize {
+        v = v.map(|c| curve(c, tf));
+    }
+    if let Some(m) = &toward.gamut {
+        v = std::array::from_fn(|k| {
+            v[0] * m[k] + (v[1] * m[3 + k] + v[2] * m[6 + k])
+        });
+    }
+    if let Some(tf) = &toward.encode {
+        v = v.map(|c| curve(c, tf));
+    }
+    v
+}
+
+/// [`toward_page`] in f64, with true powers.
+fn toward_page_f64(toward: &Toward, rgb: [f64; 3]) -> [f64; 3] {
+    let mut v = rgb;
+    if let Some(tf) = &toward.linearize {
+        v = v.map(|c| curve_f64(c, tf));
+    }
+    if let Some(m) = &toward.gamut {
+        let m = m.map(f64::from);
+        v = std::array::from_fn(|k| {
+            v[0] * m[k] + v[1] * m[3 + k] + v[2] * m[6 + k]
+        });
+    }
+    if let Some(tf) = &toward.encode {
+        v = v.map(|c| curve_f64(c, tf));
+    }
+    v
 }
 
 /// The size of the largest term `t`'s formula adds or subtracts at the
@@ -419,17 +840,7 @@ fn margins_on(
 /// rounding error.
 fn formula_size(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
     let layout = Layout::of(spec)?;
-    let local = match &spec.local {
-        Some(local) => Matrix::concat(local, &layout.from_unit),
-        None => layout.from_unit,
-    };
-    let to = local.invert()?;
-    let x = f64::from(to.scale_x()) * dx
-        + f64::from(to.skew_x()) * dy
-        + f64::from(to.translate_x());
-    let y = f64::from(to.skew_y()) * dx
-        + f64::from(to.scale_y()) * dy
-        + f64::from(to.translate_y());
+    let Mapped { x, y, .. } = mapped(spec, &layout, dx, dy)?;
     let p0 = f64::from(layout.p0);
     let size = match layout.kind {
         Kind::Linear => x.abs(),
@@ -452,17 +863,7 @@ fn formula_size(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
 /// `t` at the device point `(dx, dy)`, in f64.
 fn t_at(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
     let layout = Layout::of(spec)?;
-    let local = match &spec.local {
-        Some(local) => Matrix::concat(local, &layout.from_unit),
-        None => layout.from_unit,
-    };
-    let to = local.invert()?;
-    let x = f64::from(to.scale_x()) * dx
-        + f64::from(to.skew_x()) * dy
-        + f64::from(to.translate_x());
-    let y = f64::from(to.skew_y()) * dx
-        + f64::from(to.scale_y()) * dy
-        + f64::from(to.translate_y());
+    let Mapped { x, y, .. } = mapped(spec, &layout, dx, dy)?;
     Some(unit_t(&layout, x, y))
 }
 
@@ -510,14 +911,15 @@ fn unit_t(layout: &Layout, x: f64, y: f64) -> f64 {
     t * f64::from(layout.t_scale) + f64::from(layout.t_bias)
 }
 
-/// [`margins`] in `t`.
+/// [`margins`] in `t`, with the noise in `t` the conversion to the page
+/// adds -- see [`CONVERSION_ULPS`] -- zero where it converts nothing.
 fn margins_at(
     spec: &GradientSpec,
     page: &ColorSpace,
     dx: f64,
     dy: f64,
     channel: usize,
-) -> Option<(f64, f64)> {
+) -> Option<(f64, f64, f64)> {
     let ramp = Ramp::of(spec, page)?;
     let mut t = t_at(spec, dx, dy)?;
     let to_stop = ramp.ts[1..]
@@ -539,16 +941,94 @@ fn margins_at(
         }
     };
     let (f, b) = (ramp.factors[interval], ramp.biases[interval]);
-    let level = (t * f64::from(f[channel]) + f64::from(b[channel]))
-        .clamp(0.0, 1.0)
-        * 255.0;
-    let slope = f64::from(f[channel]).abs() * 255.0;
-    let to_half = match slope > 0.0 {
-        true => (level - level.floor() - 0.5).abs() / slope,
-        false => f64::INFINITY,
+    if channel == 3 || (ramp.toward.is_identity() && ramp.css == Css::None) {
+        let level = (t * f64::from(f[channel]) + f64::from(b[channel]))
+            .clamp(0.0, 1.0)
+            * 255.0;
+        let slope = f64::from(f[channel]).abs() * 255.0;
+        let to_half = match slope > 0.0 {
+            true => (level - level.floor() - 0.5).abs() / slope,
+            false => f64::INFINITY,
+        };
+        return Some((to_half, to_stop, 0.0));
+    }
+    // Converted: the level is the CPU's own arithmetic in f32, and its rate
+    // of change in `t` the same conversion's in f64.
+    let t32 = t as f32;
+    let rgb: [f32; 3] = std::array::from_fn(|k| t32 * f[k] + b[k]);
+    let value = toward_page(&ramp.toward, css_back(ramp.css, rgb))[channel];
+    let level = f64::from(value.clamp(0.0, 1.0)) * 255.0;
+    let sizes: [f64; 3] = std::array::from_fn(|k| {
+        (t * f64::from(f[k])).abs() + f64::from(b[k]).abs()
+    });
+    let at = |t: f64| {
+        let rgb =
+            std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
+        toward_page_f64(&ramp.toward, css_back_f64(ramp.css, rgb, sizes).0)
+            [channel]
+            .clamp(0.0, 1.0)
+            * 255.0
     };
-    Some((to_half, to_stop))
+    let step = 1e-5;
+    let slope = ((at(t + step) - at(t - step)) / (2.0 * step)).abs();
+    if slope == 0.0 {
+        return Some((f64::INFINITY, to_stop, 0.0));
+    }
+    let to_half = (level - level.floor() - 0.5).abs() / slope;
+    // The noise the conversion adds, in levels: the linearizing curve's and
+    // the matrix's, relative to the sizes of the terms the matrix sums --
+    // which cancel where a wide gamut's colour lands near an edge of a
+    // narrow one -- carried through the encode's slope there; and the
+    // encoding curve's own, relative to the value.
+    let rgb: [f64; 3] =
+        std::array::from_fn(|k| t * f64::from(f[k]) + f64::from(b[k]));
+    let (rgb, css_sizes) = css_back_f64(ramp.css, rgb, sizes);
+    let linear = match &ramp.toward.linearize {
+        Some(tf) => rgb.map(|c| curve_f64(c, tf)),
+        None => rgb,
+    };
+    // The sum of the terms' sizes bounds both what the matrix loses and
+    // what the curve before it lost, carried through it.
+    let (terms, mixed, css_carried) = match &ramp.toward.gamut {
+        Some(m) => {
+            let m = m.map(f64::from);
+            let terms = (0..3)
+                .map(|j| (linear[j] * m[3 * j + channel]).abs())
+                .sum::<f64>();
+            let mixed =
+                (0..3).map(|j| linear[j] * m[3 * j + channel]).sum::<f64>();
+            let carried = (0..3)
+                .map(|j| (m[3 * j + channel] * css_sizes[j]).abs())
+                .sum::<f64>();
+            (terms, mixed, carried)
+        }
+        None => (linear[channel].abs(), linear[channel], css_sizes[channel]),
+    };
+    let encode_slope = match &ramp.toward.encode {
+        Some(tf) => {
+            let h = 1e-6_f64.max(mixed.abs() * 1e-4);
+            ((curve_f64(mixed + h, tf) - curve_f64(mixed - h, tf)) / (2.0 * h))
+                .abs()
+        }
+        None => 1.0,
+    };
+    let ulps = |step: bool, ulps: f64| if step { ulps } else { 0.0 };
+    let toward = &ramp.toward;
+    let before = ulps(toward.linearize.is_some(), CONVERSION_ULPS)
+        + ulps(toward.gamut.is_some(), MATRIX_ULPS);
+    let after = ulps(toward.encode.is_some(), CONVERSION_ULPS);
+    let converting = ((before * terms + CSS_ULPS * css_carried) * encode_slope
+        + after * f64::from(value.abs()))
+        * F32_EPSILON
+        * 255.0
+        / slope;
+    Some((to_half, to_stop, converting))
 }
+
+/// How many units in the last place of the sum of its terms' sizes the
+/// gamut matrix's sum may lose: three products and two sums in f32, which a
+/// GPU may fuse where the CPU does not.
+const MATRIX_ULPS: f64 = 4.0;
 
 /// Over a corpus of every kind of gradient, the effect on the GPU stores the
 /// bytes the CPU stores for Skia's own gradient, except on ties: where the
@@ -653,14 +1133,309 @@ fn the_effect_stores_the_cpus_bytes_but_on_ties() {
     );
 }
 
+/// The spaces Skia interpolates in apart from the page and converts from
+/// afterwards on the float pipeline -- linear sRGB, Display P3, sRGB, A98
+/// RGB, Oklab, Lab, LCH, OkLCH, HSL, HWB and ProPhoto RGB -- on an sRGB and
+/// a Display P3 page: over the corpus's gradients, made opaque and drawn at
+/// full alpha, the effect stores the CPU's bytes but on ties, the
+/// conversion's noise counted in -- see [`CONVERSION_ULPS`] and
+/// [`CSS_ULPS`]. Every fourth case is drawn near black, every third greys a
+/// stop in three, whose hue is then powerless, and the hue methods take
+/// turns. Skia's own GPU gradient is judged beside it.
+#[test]
+fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
+    let spaces = [
+        (
+            InterpolationSpace::SRGBLinear,
+            GradientColorSpace::SrgbLinear,
+        ),
+        (InterpolationSpace::DisplayP3, GradientColorSpace::DisplayP3),
+        (InterpolationSpace::SRGB, GradientColorSpace::Srgb),
+        (InterpolationSpace::A98RGB, GradientColorSpace::A98Rgb),
+        (InterpolationSpace::OKLab, GradientColorSpace::Oklab),
+        (InterpolationSpace::Lab, GradientColorSpace::Lab),
+        (InterpolationSpace::LCH, GradientColorSpace::Lch),
+        (InterpolationSpace::OKLCH, GradientColorSpace::Oklch),
+        (InterpolationSpace::HSL, GradientColorSpace::Hsl),
+        (InterpolationSpace::HWB, GradientColorSpace::Hwb),
+        (
+            InterpolationSpace::ProphotoRGB,
+            GradientColorSpace::ProphotoRgb,
+        ),
+    ];
+    let methods = [
+        HueMethod::Shorter,
+        HueMethod::Longer,
+        HueMethod::Increasing,
+        HueMethod::Decreasing,
+    ];
+    // How many drawn cases of each polar space had a stop whose hue is
+    // powerless, which splits it.
+    let mut powerless = [0; 4];
+    let (mut drawn_cases, mut parted, mut ganesh, mut ganesh_off) =
+        (0, 0, 0, 0);
+    let mut largest: f64 = 0.0;
+    let mut worst: Vec<String> = vec![];
+    for page in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        let space = page.to_skia_color_space().expect("the page's space");
+        for (named, ours) in spaces {
+            for seed in 0..150 {
+                let (mut spec, _, _) = case(seed);
+                for color in &mut spec.colors {
+                    color.a = 1.0;
+                    // Every fourth case near black, where Lab's curves
+                    // take their linear segments: L under 8.
+                    if seed % 4 == 0 {
+                        color.r *= DARK;
+                        color.g *= DARK;
+                        color.b *= DARK;
+                    }
+                }
+                // Every third case greys every third stop, whose hue is
+                // then powerless in a polar space.
+                if seed % 3 == 0 {
+                    for color in spec.colors.iter_mut().step_by(3) {
+                        color.g = color.r;
+                        color.b = color.r;
+                    }
+                }
+                spec.interpolation.color_space = named;
+                spec.interpolation.hue_method =
+                    methods[(seed / 4) as usize % 4];
+                spec.space = ours;
+                let Some(native) = spec.native() else {
+                    continue;
+                };
+                let Some(cpu) = drawn(false, page, &native, 1.0) else {
+                    continue;
+                };
+                let effect = spec.exact(&space, 1.0);
+                assert!(
+                    effect.is_some() || Layout::of(&spec).is_none(),
+                    "seed {seed} {named:?} on {page:?}: refused"
+                );
+                if effect.is_none() {
+                    continue;
+                }
+                let css = Css::of(named);
+                if css.is_polar() && has_powerless(&spec, &space) {
+                    powerless[css as usize - Css::Lch as usize] += 1;
+                }
+                let Some(gpu) = drawn_as(
+                    true,
+                    page,
+                    &native,
+                    1.0,
+                    Shape::of(seed),
+                    Some(&spec),
+                ) else {
+                    return;
+                };
+                drawn_cases += 1;
+                let judge = |a: &[u8], b: &[u8], index: usize| {
+                    (0..3).filter(|&k| a[k] != b[k]).all(|k| {
+                        margins(&spec, &space, index, k).is_some_and(
+                            |(to_half, to_stop)| to_half.min(to_stop) <= 1.0,
+                        )
+                    })
+                };
+                if ganesh_off < CONTROL_ENOUGH
+                    && let Some(theirs) = drawn(true, page, &native, 1.0)
+                {
+                    for (index, (a, b)) in
+                        cpu.chunks(4).zip(theirs.chunks(4)).enumerate()
+                    {
+                        if a != b {
+                            ganesh += 1;
+                            if !judge(a, b, index) {
+                                ganesh_off += 1;
+                            }
+                        }
+                    }
+                }
+                for (index, (a, b)) in
+                    cpu.chunks(4).zip(gpu.chunks(4)).enumerate()
+                {
+                    if a == b {
+                        continue;
+                    }
+                    parted += 1;
+                    let nearest = (0..3)
+                        .filter(|&k| a[k] != b[k])
+                        .filter_map(|k| margins(&spec, &space, index, k))
+                        .map(|(to_half, to_stop)| to_half.min(to_stop))
+                        .fold(0.0, f64::max);
+                    largest = largest.max(nearest);
+                    if !judge(a, b, index) {
+                        // A case is judged up to its first byte off a tie:
+                        // a broken conversion parts most of the page, and
+                        // judging each pixel costs a ramp's worth of work.
+                        worst.push(format!(
+                            "seed {seed} {named:?} on {page:?} pixel {index}: cpu {a:?} gpu {b:?}"
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{drawn_cases} cases drawn; {parted} pixels parted, all ties but in {} cases, the furthest {largest:.2} of its noise from its tie; Skia's GPU gradient parted {ganesh}, {ganesh_off} off their ties; cases with a powerless hue in LCH, OkLCH, HSL, HWB: {powerless:?}",
+        worst.len()
+    );
+    assert!(drawn_cases > 0, "no case was drawn through the effect");
+    assert!(
+        powerless.iter().all(|&n| n > 0),
+        "a polar space drew no stop whose hue is powerless: {powerless:?}"
+    );
+    assert!(
+        ganesh_off > 0,
+        "the judge found no fault in Skia's gradient"
+    );
+    assert!(
+        worst.is_empty(),
+        "{}",
+        worst
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// [`primaries_to_xyzd50`] makes, to the bit, the gamut Skia's own
+/// `SkColorSpacePrimaries::toXYZD50` makes: `SkColorSpace::MakeCICP` builds
+/// every space H.273 names from its primaries through it, but for Rec. 709,
+/// Rec. 2020 and Display P3, which it takes from tables. ProPhoto RGB is
+/// not among them, so its gamut is held to Skia's by the arithmetic these
+/// share.
+#[test]
+fn primaries_make_skias_gamut_to_the_bit() {
+    use skia_safe::named_primaries::{self as p, CicpId};
+    let derived = [
+        (CicpId::Rec470SystemM, p::REC470_SYSTEM_M),
+        (CicpId::Rec470SystemBG, p::REC470_SYSTEM_BG),
+        (CicpId::Rec601, p::REC601),
+        (CicpId::SMPTE_ST_240, p::SMPTE_ST_240),
+        (CicpId::GenericFilm, p::GENERIC_FILM),
+        (CicpId::SMPTE_ST_428_1, p::SMPTE_ST_428_1),
+        (CicpId::SMPTE_RP_431_2, p::SMPTE_RP_431_2),
+        (CicpId::ITU_T_H273_Value22, p::ITU_T_H273_VALUE22),
+    ];
+    for (id, primaries) in derived {
+        let skia = ColorSpace::new_cicp(id, named_transfer_fn::CicpId::Linear)
+            .expect("a space H.273 names");
+        // `SkColorSpace::serialize`: a four-byte header, the transfer
+        // function's seven floats, then the matrix's nine.
+        let floats: Vec<u32> = skia
+            .serialize()
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .skip(1 + 7)
+            .map(|bytes| u32::from_ne_bytes(*bytes))
+            .collect();
+        let ours = primaries_to_xyzd50(&primaries).expect("a gamut");
+        let ours: Vec<u32> =
+            ours.iter().flatten().map(|v| v.to_bits()).collect();
+        assert_eq!(ours, floats, "{id:?}");
+        let built = skia_space(
+            &LINEAR_TF,
+            &primaries_to_xyzd50(&primaries).expect("a gamut"),
+        )
+        .expect("a space");
+        assert_eq!(built.to_xyzd50_hash(), skia.to_xyzd50_hash(), "{id:?}");
+    }
+}
+
+/// `SK_FloatPI`, `3.14159265f` in `SkFloatingPoint.h`, is the f32 Rust's
+/// `PI` is, which `RADIANS_PER_DEGREE`, `DEGREES_PER_RADIAN` and
+/// `TURNS_PER_RADIAN` are worked out from as Skia works its out.
+#[test]
+// The literal as Skia writes it, more figures than an f32 holds.
+#[allow(clippy::approx_constant, clippy::excessive_precision)]
+fn skias_pi_is_rusts() {
+    assert_eq!(3.141_592_65_f32.to_bits(), std::f32::consts::PI.to_bits());
+}
+
+/// Whether a stop of `spec` has a powerless hue in the space it is
+/// interpolated in, drawn on `page`.
+fn has_powerless(spec: &GradientSpec, page: &ColorSpace) -> bool {
+    let css = Css::of(spec.interpolation.color_space);
+    stops(spec)
+        .zip(intermediate_space(spec, page))
+        .and_then(|(stops, space)| {
+            convert(&stops.colors, &spec.color_space, &space)
+        })
+        .is_some_and(|colors| colors.into_iter().any(|c| css.converted(c).1))
+}
+
 /// Every size of the effect compiles; a refusal here would leave every
 /// gradient to the CPU route in silence.
 #[test]
 fn the_effect_compiles_at_every_size() {
     for size in SIZES {
-        if let Err(error) = RuntimeEffect::make_for_shader(sksl(size), None) {
-            panic!("size {size}: {error}");
+        for converts in [false, true] {
+            if let Err(error) =
+                RuntimeEffect::make_for_shader(sksl(size, converts), None)
+            {
+                panic!("size {size}, converts {converts}: {error}");
+            }
         }
+    }
+}
+
+/// A gradient interpolated in the page's own space takes the effect
+/// without the conversions, and one in any other space the effect with
+/// them, which a gradient on a Display P3 page interpolated in sRGB needs
+/// to reach the page.
+#[test]
+fn only_a_gradient_that_converts_takes_the_conversions() {
+    let (mut spec, _, _) = case(1);
+    spec.color_space = ColorSpace::new_srgb();
+    let srgb = ColorSpace::new_srgb();
+    let p3 = PixelColorSpace::DisplayP3
+        .to_skia_color_space()
+        .expect("Display P3");
+    let cases = [
+        (
+            InterpolationSpace::Destination,
+            GradientColorSpace::Destination,
+            &srgb,
+            false,
+        ),
+        (
+            InterpolationSpace::SRGB,
+            GradientColorSpace::Srgb,
+            &srgb,
+            false,
+        ),
+        (
+            InterpolationSpace::SRGB,
+            GradientColorSpace::Srgb,
+            &p3,
+            true,
+        ),
+        (
+            InterpolationSpace::OKLab,
+            GradientColorSpace::Oklab,
+            &srgb,
+            true,
+        ),
+        (
+            InterpolationSpace::HSL,
+            GradientColorSpace::Hsl,
+            &srgb,
+            true,
+        ),
+    ];
+    for (named, ours, page, converts) in cases {
+        spec.interpolation.color_space = named;
+        spec.space = ours;
+        let exact = spec.exact(page, 1.0).expect("an effect");
+        assert_eq!(exact.converts, converts, "{named:?} on {page:?}");
     }
 }
 
@@ -682,7 +1457,9 @@ fn a_plain_gradient_is_covered() {
 /// A gradient interpolated in Display P3 by name, on a Display P3 page,
 /// takes the effect: the CPU draws it as it draws one interpolated in the
 /// page's space, byte for byte, and the effect made for it draws as the one
-/// made for that. On an sRGB page, where the CPU converts back, it does not.
+/// made for that. On an sRGB page, where the CPU converts back on its float
+/// pipeline, it takes the effect only where that pipeline rounds nothing
+/// before the store: every stop opaque, at alpha 1.
 #[test]
 fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
     let p3 = PixelColorSpace::DisplayP3;
@@ -696,7 +1473,7 @@ fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
         let Some(native) = spec.native() else {
             continue;
         };
-        let Some(effect) = spec.exact(&p3_space, alpha) else {
+        let Some(page_effect) = effect(&spec, &p3_space, alpha) else {
             continue;
         };
         let mut named = spec.clone();
@@ -708,17 +1485,19 @@ fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
             drawn(false, p3, &native, alpha),
             "seed {seed}: the CPU draws Display P3 by name as the page's"
         );
-        let named_effect = named
-            .exact(&p3_space, alpha)
+        let named_effect = effect(&named, &p3_space, alpha)
             .unwrap_or_else(|| panic!("seed {seed}: refused on a P3 page"));
         assert_eq!(
             drawn(false, p3, &named_effect, 1.0),
-            drawn(false, p3, &effect, 1.0),
+            drawn(false, p3, &page_effect, 1.0),
             "seed {seed}: the effect for it is the page's"
         );
-        assert!(
-            named.exact(&ColorSpace::new_srgb(), alpha).is_none(),
-            "seed {seed}: refused on an sRGB page"
+        let srgb = ColorSpace::new_srgb();
+        let opaque = Ramp::of(&named, &srgb).expect("a ramp").opaque;
+        assert_eq!(
+            named.exact(&srgb, alpha).is_some(),
+            opaque && alpha == 1.0,
+            "seed {seed}: on an sRGB page, taken only opaque at alpha 1"
         );
         checked += 1;
     }
@@ -748,7 +1527,7 @@ fn kept_drawn(
     let space = page.to_skia_color_space().expect("the page's space");
     let before = EXACTS_MADE.get();
     KEEPS_EXACTS.set(keeps);
-    let shader = spec.exact(&space, alpha);
+    let shader = effect(spec, &space, alpha);
     KEEPS_EXACTS.set(true);
     let shader = shader.expect("an effect");
     let made = EXACTS_MADE.get() > before;
@@ -869,9 +1648,11 @@ fn a_pixel_on_a_stop_takes_the_colour_added_last() {
     );
     let side = SIDE as f32;
     // Pixel 31's centre is at 31.5, a stop at 31.5 / side of the way along
-    // a gradient the canvas's width; pixel 10 of row 48 lies at 180 degrees
-    // from a centre on that row's centre line, a sweep's half turn; and
-    // pixel 31 of row 0 lies 31.5 from a radial gradient's centre.
+    // a gradient the canvas's width, and halfway along one a pixel wide,
+    // where `t` moves as fast as the point does; pixel 10 of row 48 lies at
+    // 180 degrees from a centre on that row's centre line, a sweep's half
+    // turn; and pixel 31 of row 0 lies 31.5 from a radial gradient's
+    // centre.
     let on = 31.5 / side;
     let cases = [
         (
@@ -880,6 +1661,14 @@ fn a_pixel_on_a_stop_takes_the_colour_added_last() {
                 end: Point::new(side, 0.0),
             },
             on,
+            31,
+        ),
+        (
+            Geometry::Linear {
+                start: Point::new(31.0, 0.0),
+                end: Point::new(32.0, 0.0),
+            },
+            0.5,
             31,
         ),
         (
@@ -919,9 +1708,12 @@ fn a_pixel_on_a_stop_takes_the_colour_added_last() {
             vec![0, 0, 255, 255],
             "{geometry:?}: the CPU takes the colour added last"
         );
-        let exact = spec
-            .exact(&page.to_skia_color_space().expect("the page's space"), 1.0)
-            .expect("an effect");
+        let exact = effect(
+            &spec,
+            &page.to_skia_color_space().expect("the page's space"),
+            1.0,
+        )
+        .expect("an effect");
         let Some(gpu) = drawn(true, page, &exact, 1.0) else {
             return;
         };
@@ -1472,16 +2264,20 @@ fn consecutive_gradient_draws_share_an_entry() {
     assert_eq!(runs, vec![3, 1]);
 }
 
-/// A run of gradient draws the effect refuses -- opaque, interpolated in
-/// Oklab -- is made on the CPU over one read back of the GPU's pixels, not
-/// one for each draw, and stores what a CPU canvas stores.
+/// A run of gradient draws the effect refuses -- opaque, mixed in Rec. 2020,
+/// which a working space wrapped around the shader makes -- is made on the
+/// CPU over one read back of the GPU's pixels, not one for each draw, and
+/// stores what a CPU canvas stores.
 #[test]
 fn a_run_the_effect_refuses_reads_the_gpu_back_once() {
     let mut spec = kept_case();
-    spec.space = GradientColorSpace::Oklab;
-    spec.interpolation.color_space = InterpolationSpace::OKLab;
+    spec.space = GradientColorSpace::Rec2020;
+    spec.interpolation.color_space = InterpolationSpace::Destination;
     let page = ColorSpace::new_srgb();
-    assert!(spec.exact(&page, 1.0).is_none(), "the effect refuses Oklab");
+    assert!(
+        spec.exact(&page, 1.0).is_none(),
+        "the effect refuses Rec. 2020"
+    );
     assert!(spec.colors.iter().all(|c| c.a == 1.0), "opaque stops");
     let shader = CanvasShader {
         inner: spec.native().expect("native"),
@@ -1524,8 +2320,8 @@ fn a_gpu_canvas_asks_for_each_draws_effect_once() {
     };
     let spec = kept_case();
     let mut refused = spec.clone();
-    refused.space = GradientColorSpace::Oklab;
-    refused.interpolation.color_space = InterpolationSpace::OKLab;
+    refused.space = GradientColorSpace::Rec2020;
+    refused.interpolation.color_space = InterpolationSpace::Destination;
     assert!(refused.exact(&ColorSpace::new_srgb(), 1.0).is_none());
     let (taken, refused) = (shader_of(spec), shader_of(refused));
     let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
@@ -1777,8 +2573,10 @@ fn assert_parts_only_on_ties(
 }
 
 /// A GPU canvas drawn with `drawCanvas` into another under a transform
-/// other than a whole pixel's translation parts from the CPU only on ties:
-/// the bound `tests/gpu_gradient.rs` allows there, proven.
+/// parts from the CPU only on ties: the bound `tests/gpu_gradient.rs`
+/// allows there, proven. A whole pixel's translation draws the effect
+/// itself onto the canvas, its pixels the page's moved -- see
+/// `layer::drawn_with_effect` -- and the others take the CPU's route.
 #[test]
 fn a_canvas_drawn_under_a_transform_parts_only_on_ties() {
     const SIDE_PX: usize = 128;
@@ -1788,7 +2586,12 @@ fn a_canvas_drawn_under_a_transform_parts_only_on_ties() {
     let spec = swept.gradient.as_deref().expect("a description").clone();
     // Each applied through the context, and as the matrix it makes.
     type Transform<'a> = (&'a str, Matrix, &'a dyn Fn(&mut Context2D));
-    let transforms: [Transform; 4] = [
+    let transforms: [Transform; 5] = [
+        (
+            "moved by whole pixels",
+            Matrix::translate((7.0, 5.0)),
+            &|ctx| ctx.translate(7.0, 5.0),
+        ),
         ("scaled by 2", Matrix::scale((2.0, 2.0)), &|ctx| {
             ctx.scale(2.0, 2.0)
         }),
@@ -1844,6 +2647,99 @@ fn a_canvas_drawn_under_a_transform_parts_only_on_ties() {
         );
     }
     eprintln!("{judged} channels apart under the transforms, each a tie");
+}
+
+/// A gradient filled under a perspective -- `Context2D::set_projection` --
+/// takes the effect, placed under the CPU's perspective matrix, and parts
+/// from the CPU only on ties, the division's noise counted in -- see
+/// [`RECIPROCAL_ULPS`]. A sweep and a linear gradient, since a sweep's
+/// angle is the same whatever the point is divided by.
+#[test]
+fn a_gradient_under_a_perspective_parts_only_on_ties() {
+    let page = PixelColorSpace::Srgb.to_skia_color_space().expect("sRGB");
+    let side = SIDE as f32;
+    let stop = |position: f32, (r, g, b): (u8, u8, u8)| GradientStop {
+        position,
+        color: RgbaLinear::from_srgb8(r, g, b, 1.0),
+    };
+    let stops: Vec<GradientStop> = (0..8)
+        .flat_map(|k| {
+            let k = k as f32;
+            [
+                stop(k / 8.0, (250, 200, 0)),
+                stop((k + 0.5) / 8.0, (0, 60, 200)),
+            ]
+        })
+        .chain([stop(1.0, (250, 200, 0))])
+        .collect();
+    let linear = CanvasShader::linear_gradient(
+        CanvasPoint { x: 3.25, y: 7.5 },
+        CanvasPoint {
+            x: side - 5.75,
+            y: side - 11.0,
+        },
+        &stops,
+        GradientColorSpace::Destination,
+    )
+    .expect("a gradient");
+    let shaders = [
+        (
+            "a sweep",
+            sweep_turned(CanvasPoint { x: 48.25, y: 40.75 }, 10.0),
+        ),
+        ("a linear gradient", linear),
+    ];
+    let corner = |x: f32, y: f32| CanvasPoint { x, y };
+    let quad = [
+        corner(6.0, 10.0),
+        corner(side - 4.0, 2.0),
+        corner(side - 12.0, side - 6.0),
+        corner(14.0, side - 18.0),
+    ];
+    for (name, shader) in shaders {
+        let spec = shader.gradient.as_deref().expect("a description").clone();
+        let mut projection = None;
+        let mut drawn = |gpu: bool| {
+            let mut canvas = Canvas::new(side, side);
+            canvas.set_gpu(gpu);
+            if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                return None;
+            }
+            let ctx = canvas.context();
+            let made = ctx.create_projection(quad, None).expect("a projection");
+            ctx.set_projection(&made);
+            projection = Some(made);
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, side, side);
+            Some(pixels(&mut canvas))
+        };
+        let cpu = drawn(false).expect("a CPU canvas");
+        let before = PLACED_IN_PERSPECTIVE.get();
+        let Some(gpu) = drawn(true) else {
+            return;
+        };
+        assert!(
+            PLACED_IN_PERSPECTIVE.get() > before,
+            "{name}: the effect was not placed under the perspective"
+        );
+        let v: [f32; 9] = projection.expect("a projection").values;
+        let matrix = Matrix::new_all(
+            v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8],
+        );
+        assert!(matrix.has_perspective(), "the projection has a perspective");
+        let moved = under(&spec, &matrix);
+        let judged = assert_parts_only_on_ties(
+            name,
+            &cpu,
+            &gpu,
+            SIDE,
+            &page,
+            &|_, _| moved.clone(),
+        );
+        eprintln!(
+            "{name}: {judged} channels apart under a perspective, each a tie"
+        );
+    }
 }
 
 /// A run of many gradient draws, which takes the effect's images from one
