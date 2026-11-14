@@ -5797,6 +5797,50 @@ mod recording_tests {
     /// The side of the square canvas every case draws on.
     const SIDE: f32 = 16.0;
 
+    /// A canvas drawn into another is captured as its page's picture, and a
+    /// recording the page wrapped goes into that picture as the one op that
+    /// holds it -- see `UNWRAPPED_OPS` in `context::page` -- so the picture
+    /// is the same size whatever the source drew. A recording filed bare
+    /// copies its every op in, and a clipped draw of the source then pays
+    /// for all of them. Counted, not timed: a timing of the same draw passed
+    /// with the recordings bare inside the full JavaScript suite, where the
+    /// files running beside it slowed the light side sixfold.
+    #[test]
+    fn a_nested_source_holds_its_recordings_whole() {
+        let ops_of = |fills: usize| {
+            let mut inner = Canvas::new(1400.0, 1400.0);
+            {
+                let ic = inner.context();
+                for i in 0..fills {
+                    ic.set_fill_style_css(&format!(
+                        "hsl({} 70% 50%)",
+                        (i * 9) % 360
+                    ))
+                    .expect("a colour");
+                    ic.fill_rect(
+                        ((i * 31) % 1400) as f32,
+                        ((i * 17) % 1400) as f32,
+                        260.0,
+                        140.0,
+                    );
+                }
+            }
+            let mut source = Canvas::new(1400.0, 1400.0);
+            source.context().draw_canvas(&mut inner, 0.0, 0.0);
+            source
+                .context()
+                .inner
+                .picture()
+                .expect("a picture")
+                .approximate_op_count()
+        };
+        let (light, heavy) = (ops_of(200), ops_of(20_000));
+        assert_eq!(
+            heavy, light,
+            "a source of 20000 fills captured in {heavy} ops, one of 200 in {light}"
+        );
+    }
+
     fn canvas(space: PixelColorSpace, depth: PixelDepth) -> Canvas {
         Canvas::with_options(
             SIDE,
