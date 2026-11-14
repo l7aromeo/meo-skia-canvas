@@ -113,7 +113,7 @@ float4 snap(float4 x) {
     return sign(x) * floor(a / ulp + 0.5) * ulp;
 }
 float4 at(float2 q) {
-    if (q.x < boxL || q.y < boxT || q.x >= boxR || q.y >= boxB) {
+    if (BOXED && (q.x < boxL || q.y < boxT || q.x >= boxR || q.y >= boxB)) {
         return float4(0);
     }
     q += float2(inX, inY);
@@ -182,18 +182,23 @@ const HALF_MIN_NORMAL: f64 = 1.0 / (1u32 << (HALF_EXPONENT_BIAS - 1)) as f64;
 const HALF_MANTISSA_BITS: u32 = 10;
 
 /// [`PASS`] behind the constants it names.
-fn source() -> String {
+fn source(boxed: bool) -> String {
     format!(
         "const int MAX_TAPS = {MAX_TAPS};\n\
          const float HALF_MIN_NORMAL = {HALF_MIN_NORMAL:?};\n\
          const float HALF_MANTISSA_BITS = {HALF_MANTISSA_BITS}.0;\n\
+         const bool BOXED = {boxed};\n\
          {PASS}"
     )
 }
 
 thread_local! {
-    /// [`PASS`], compiled once per thread.
-    static EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(source(), None).ok();
+    /// [`PASS`], compiled once per thread, holding each lane to its box.
+    static EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(source(true), None).ok();
+    /// [`PASS`] for a pass of one lane reading all of its input, which the
+    /// input's own edge holds it to: the box's test, made on every tap, is
+    /// left out of the shader rather than made and passed.
+    static WHOLE_EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(source(false), None).ok();
 }
 
 /// What a pass's children hold, as [`PASS`]'s `source` uniform reads it.
@@ -279,6 +284,7 @@ pub(crate) fn blur(
         return None;
     }
     let effect = EFFECT.with(Clone::clone)?;
+    let whole = WHOLE_EFFECT.with(Clone::clone)?;
     let space = image
         .color_space()
         .or_else(|| Some(ColorSpace::new_srgb()))?;
@@ -296,6 +302,7 @@ pub(crate) fn blur(
     let mut gpu = Gpu {
         context,
         effect,
+        whole,
         space,
         zero: zero.clone(),
         packed: false,
@@ -502,6 +509,7 @@ pub(crate) fn shadows(
         return None;
     }
     let effect = EFFECT.with(Clone::clone)?;
+    let whole = WHOLE_EFFECT.with(Clone::clone)?;
     let compose = SHADOW_EFFECT.with(Clone::clone)?;
     let space = source
         .color_space()
@@ -513,6 +521,7 @@ pub(crate) fn shadows(
     let mut gpu = Gpu {
         context,
         effect,
+        whole,
         space,
         zero: zero.clone(),
         packed: true,
@@ -659,6 +668,9 @@ fn zero(context: &mut RecordingContext) -> Option<Image> {
 struct Gpu<'a> {
     context: &'a mut RecordingContext,
     effect: RuntimeEffect,
+    /// [`WHOLE_EFFECT`]: `effect` for a pass of one lane reading all of its
+    /// input.
+    whole: RuntimeEffect,
     space: ColorSpace,
     /// A 1x1 transparent image, the second child of a pass whose input has
     /// no remainder of its own.
@@ -783,6 +795,18 @@ impl Gpu<'_> {
                 .map(ChildPtr::from)
         };
         let (hi, lo) = (child(children.0)?, child(children.1)?);
+        // One lane reading all of its input is held to its box by the
+        // input's edge, which reads zero past it as the box does.
+        let effect = match lanes {
+            [lane]
+                if lane.from == (0, 0)
+                    && lane.reads
+                        == IRect::from_size(children.0.dimensions()) =>
+            {
+                &self.whole
+            }
+            _ => &self.effect,
+        };
         for (lane, &(x, y)) in lanes.iter().zip(&places) {
             let uniforms: Vec<u8> = [
                 dir[0],
@@ -807,7 +831,7 @@ impl Gpu<'_> {
             .iter()
             .flat_map(|v| v.to_ne_bytes())
             .collect();
-            let shader = self.effect.make_shader(
+            let shader = effect.make_shader(
                 Data::new_copy(&uniforms),
                 &[hi.clone(), lo.clone()],
                 None,
@@ -1074,11 +1098,13 @@ mod tests {
     fn the_pass_compiles() {
         // A compile error otherwise reads as no blur at all: `blur` returns
         // `None`, which a caller takes for "no GPU".
-        assert!(
-            EFFECT.with(Option::is_some),
-            "{:?}",
-            RuntimeEffect::make_for_shader(source(), None).err()
-        );
+        for (effect, boxed) in [(&EFFECT, true), (&WHOLE_EFFECT, false)] {
+            assert!(
+                effect.with(Option::is_some),
+                "boxed {boxed}: {:?}",
+                RuntimeEffect::make_for_shader(source(boxed), None).err()
+            );
+        }
     }
 
     /// `src`, premultiplied RGBA bytes, blurred on the GPU and read back.
