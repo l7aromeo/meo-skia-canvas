@@ -3560,20 +3560,17 @@ impl Group {
     /// it composites through, where it may share its layer with the chains
     /// beside it -- see [`chain::Plan::joins`], which decides whether it
     /// does. Only a chain on the GPU, run in the canvas's pixels, under no
-    /// clip path and no destination of its own and bounded by what its
-    /// entries reach: a text run's reach, a clip and a destination each bound
-    /// a layer in ways no test of sharing covers yet, so those chains run
-    /// alone.
+    /// clip path and no destination of its own: a clip and a destination
+    /// each bound a layer in ways no test of sharing covers yet, so those
+    /// chains run alone. A run of text shares, bounded by what it can ink --
+    /// its `reach`, widened by [`HINTED_INK_DRIFT`] -- as it is alone.
     fn shared_chain(
         &self,
         canvas: &SkCanvas,
         target: Target,
     ) -> Option<SharedChain> {
         let Composite::Chain {
-            steps,
-            rec,
-            reach: None,
-            ..
+            steps, rec, reach, ..
         } = &self.composite
         else {
             return None;
@@ -3588,6 +3585,7 @@ impl Group {
             false => Some(SharedChain {
                 steps: Step::for_pixels(steps).unwrap_or_else(|| steps.clone()),
                 paint: chain_paint(rec),
+                reach: *reach,
             }),
         }
     }
@@ -4038,6 +4036,11 @@ thread_local! {
     /// thread, rather than sharing one where [`play_shared_chains`] lets it:
     /// the reference a shared layer is held to.
     pub(crate) static ALONE_CHAINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// The most pixels a side a run's shadow atlas may take, where set, so
+    /// that a test can hold a run whose shadows one atlas cannot hold to
+    /// what it lands -- see [`chain::ShadowAtlas::plan`].
+    pub(crate) static ATLAS_SIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     /// Whether a run's pieces played into a recording bound for pixels have
     /// their clip bounded by what they draw on this thread: off, the clip
     /// covers its own bounds, the reference a bounded clip is held to.
@@ -4541,7 +4544,8 @@ pub(crate) fn play_entries(
 /// entries that is. `None` where they run fewer than two chains, which then
 /// play as they do alone. Only on Metal do any share, as
 /// [`chain::shares_layers`] says why; elsewhere each takes a layer of its
-/// own, as it would alone.
+/// own, as it would alone. Their shadows share passes either way -- see
+/// [`chain::ShadowAtlas`].
 ///
 /// Each chain is planned as it would be alone, with the content and the
 /// depth it would have, and its layer holds its own draw where it reads, so
@@ -4671,12 +4675,17 @@ fn draws_plainly(entry: &Layer) -> bool {
     )
 }
 
-/// The most layers a [`Run`] keeps open at once. Chosen, not measured: two
-/// takes in a row of chains each meeting the next and the one before, as
-/// blurred shapes along a line do, and each layer open is a snapshot the size
-/// of the page held until every chain in the run is composited, so more would
-/// hold more of them without a scene here that needs it.
-pub(crate) const MAX_RUN_LAYERS: usize = 2;
+/// The most layers a [`Run`] places its chains in. A run draws each layer,
+/// finishes its chains and lets it go once the next is drawn -- see
+/// [`Run::play`] -- so it holds two layers at most whatever this is, but
+/// every chain's result until it composites them all: at most this many
+/// times [`chain::MAX_SHARED`] results, each the size of its chain's worked
+/// rectangle, in the run's atlas or an image of its own. Chosen from what
+/// scenes need: lines of text 21 pixels apart under a `shadowBlur` of 6 each
+/// meet the two either side and take three, and 60 scattered rounded rectangles
+/// under a `shadowBlur` of 12, turned 0.15 radians, took 20 layers at four, 13
+/// at eight and 12 at sixteen or more.
+pub(crate) const MAX_RUN_LAYERS: usize = 8;
 
 /// Chains of consecutive entries, each placed in the first open layer whose
 /// chains it can share with -- see [`chain::Plan::joins`] -- or in a new one,
@@ -4718,39 +4727,96 @@ impl<'a> Run<'a> {
         self.chains.push(chained);
     }
 
-    /// Draws each layer, then finishes and composites every chain onto
-    /// `canvas` in the order they were placed -- or in a layer of its own
-    /// where Skia refuses its shared one, which then falls back as a chain
-    /// alone does.
+    /// Draws each layer and finishes its chains -- those casting a blurred
+    /// shadow together, in passes the whole run shares, see
+    /// [`chain::ShadowAtlas`] -- letting each layer go once the next is
+    /// drawn, then composites every chain onto `canvas` in the order they
+    /// were placed. Where Skia refuses a shared layer, or a run's shared
+    /// passes cannot be made, each of the chains involved is drawn and
+    /// finished in a layer of its own, as a chain alone is.
     fn play(self, canvas: &SkCanvas, target: Target) {
         let Run { chains, layers } = self;
-        let mut drawn: Vec<Option<chain::Drawn>> = layers
-            .iter()
-            .map(|layer| {
-                let plans: Vec<&chain::Plan> =
-                    layer.iter().map(|&i| &chains[i].plan).collect();
+        // Each chain's result where it was made.
+        let mut outcomes: Vec<Option<Option<chain::Outcome>>> =
+            (0..chains.len()).map(|_| None).collect();
+        // The chains drawn and finished alone after all.
+        let mut alone = vec![false; chains.len()];
+        #[cfg(any(feature = "metal", feature = "vulkan"))]
+        let mut atlas = {
+            let planned: Vec<(&chain::Plan, &[Step])> = chains
+                .iter()
+                .map(|chained| (&chained.plan, chained.member.steps))
+                .collect();
+            canvas.recording_context().and_then(|context| {
+                let max = context.max_render_target_size().max(1) as usize;
+                #[cfg(test)]
+                let max = ATLAS_SIDE.get().map_or(max, |side| side.min(max));
+                chain::ShadowAtlas::plan(&planned, max)
+            })
+        };
+        // The layer drawn last, held until the next is drawn: let go first,
+        // the next takes its surface back from the pool and draws into it
+        // while the GPU still reads it for the chains before.
+        let mut held: Option<chain::Drawn> = None;
+        for layer in &layers {
+            let plans: Vec<&chain::Plan> =
+                layer.iter().map(|&i| &chains[i].plan).collect();
+            let Some(mut drawn) =
                 chain::Drawn::new(canvas, &plans, |k, offscreen| {
                     chains[layer[k]].member.draw.draw(offscreen, target);
                 })
-            })
-            .collect();
-        let mut layer_of = vec![0; chains.len()];
-        for (l, layer) in layers.iter().enumerate() {
+            else {
+                if layer.len() > 1 {
+                    layer.iter().for_each(|&i| alone[i] = true);
+                }
+                continue;
+            };
             for &i in layer {
-                layer_of[i] = l;
+                let Chained { member, plan } = &chains[i];
+                let finishing = (plan, member.steps, member.paint);
+                #[cfg(any(feature = "metal", feature = "vulkan"))]
+                if let Some(atlas) = atlas.as_mut()
+                    && drawn.stage(atlas, i, finishing)
+                {
+                    continue;
+                }
+                outcomes[i] =
+                    Some(drawn.finish(finishing.0, finishing.1, finishing.2));
             }
+            held = Some(drawn);
         }
-        for (chained, l) in chains.iter().zip(layer_of) {
-            match drawn[l].as_mut() {
-                Some(drawn) => chained.finish(drawn, canvas),
-                None if layers[l].len() > 1 => {
+        drop(held);
+        #[cfg(any(feature = "metal", feature = "vulkan"))]
+        if let Some(atlas) = atlas {
+            let (done, failed) =
+                atlas.finish(canvas.recording_context().as_mut());
+            for (i, outcome) in done {
+                outcomes[i] = Some(Some(outcome));
+            }
+            failed.into_iter().for_each(|i| alone[i] = true);
+        }
+        for ((chained, outcome), alone) in
+            chains.iter().zip(outcomes).zip(alone)
+        {
+            match outcome {
+                Some(Some(outcome)) => {
+                    #[cfg(test)]
+                    pacing::tests::chain_finished();
+                    outcome.composite(canvas, chained.member.paint);
+                }
+                // A chain whose result is nothing composites nothing.
+                Some(None) => {
+                    #[cfg(test)]
+                    pacing::tests::chain_finished();
+                }
+                None if alone => {
                     let plans = [&chained.plan];
-                    let alone =
+                    let layer =
                         chain::Drawn::new(canvas, &plans, |_, layer| {
                             chained.member.draw.draw(layer, target);
                         });
-                    if let Some(mut alone) = alone {
-                        chained.finish(&mut alone, canvas);
+                    if let Some(mut layer) = layer {
+                        chained.finish(&mut layer, canvas);
                     }
                 }
                 None => {}
@@ -4766,6 +4832,9 @@ impl<'a> Run<'a> {
 struct SharedChain {
     steps: Arc<[Step]>,
     paint: Paint,
+    /// What a run of text the group holds can ink -- see
+    /// [`Composite::Chain`].
+    reach: Option<Rect>,
 }
 
 /// An entry [`play_shared_chains`] plays: a group through a chain, or a
@@ -4790,9 +4859,17 @@ impl Leading<'_> {
     /// that maps the entry's coordinates to the device by `to_device`.
     fn members(&self, to_device: &Matrix) -> Vec<Member<'_>> {
         match self {
-            Leading::Group(group, SharedChain { steps, paint }, then) => {
+            Leading::Group(
+                group,
+                SharedChain {
+                    steps,
+                    paint,
+                    reach,
+                },
+                then,
+            ) => {
                 let content = group.chain_content(
-                    None,
+                    *reach,
                     &Matrix::new_identity(),
                     to_device,
                 );
@@ -6816,6 +6893,408 @@ mod verdict_tests {
             bucket(&paint),
             "a pair that moves"
         );
+    }
+}
+
+/// Shadows a page's runs make in passes they share -- see
+/// [`chain::ShadowAtlas`] -- held to the bytes and the passes each makes
+/// alone.
+#[cfg(test)]
+mod shared_shadow_tests {
+    use super::{ALONE_CHAINS, ATLAS_SIDE};
+    use crate::{
+        context::chain::{
+            OFFSCREEN, REFUSE_PLACED, SHARED_LAYERS, UNSHARED_LAYERS,
+        },
+        prelude::*,
+    };
+
+    /// The page every scene is drawn on.
+    const PAGE: (f32, f32) = (720.0, 480.0);
+
+    /// Whether chains share layers here: on Metal alone -- see
+    /// `chain::shares_layers`.
+    const SHARES: bool = cfg!(feature = "metal");
+
+    /// A scene: `n` rounded rectangles in rows of six, `gap` apart, each
+    /// casting a shadow -- a `shadowBlur` of `blur` and of `second` in turn,
+    /// `period` rectangles at a time, or with `css`, the same
+    /// shadow as a `drop-shadow()` filter, the draw over it -- in a fill at
+    /// `alpha`, the page turned `turn` radians about its centre. With `text`,
+    /// each is a line of text instead, the lines [`LINE`] apart, so that each
+    /// line's shadow reaches the lines either side.
+    #[derive(Clone, Copy)]
+    struct Scene {
+        n: usize,
+        gap: f32,
+        blur: f32,
+        second: f32,
+        alpha: f32,
+        turn: f32,
+        css: bool,
+        text: bool,
+        period: usize,
+    }
+
+    /// How far apart lines of text are drawn, in pixels: closer than a line's
+    /// shadow reaches at a `shadowBlur` of 6, so that a line shares a layer
+    /// only with lines further off.
+    const LINE: f32 = 21.0;
+
+    const PLAIN: Scene = Scene {
+        n: 24,
+        gap: 30.0,
+        blur: 12.0,
+        second: 12.0,
+        alpha: 1.0,
+        turn: 0.0,
+        css: false,
+        text: false,
+        period: 1,
+    };
+
+    /// [`PLAIN`]'s shadows cast by lines of text.
+    const LINES: Scene = Scene {
+        n: 20,
+        blur: 6.0,
+        second: 6.0,
+        text: true,
+        ..PLAIN
+    };
+
+    /// What a page read back: its bytes, how many GPU targets its chains
+    /// opened after their layers, and how many layers they were drawn in.
+    struct Read {
+        bytes: Vec<u8>,
+        opened: usize,
+        layers: usize,
+    }
+
+    /// `scene` read back on a GPU page, its chains sharing layers or
+    /// `alone`, and with the shared layer refused where `refuse` -- see
+    /// `chain::REFUSE_PLACED`. `None` without a GPU.
+    fn page(scene: Scene, alone: bool, refuse: bool) -> Option<Read> {
+        let mut canvas = Canvas::new(PAGE.0, PAGE.1);
+        canvas.set_gpu(true);
+        if canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let ctx = canvas.context();
+        ctx.translate(PAGE.0 / 2.0, PAGE.1 / 2.0);
+        ctx.rotate(scene.turn);
+        ctx.translate(-PAGE.0 / 2.0, -PAGE.1 / 2.0);
+        let (w, h) = (90.0, 60.0);
+        for i in 0..scene.n {
+            let blur = match (i / scene.period) % 2 {
+                0 => scene.blur,
+                _ => scene.second,
+            };
+            match scene.css {
+                true => ctx
+                    .set_filter_css(&format!(
+                        "drop-shadow(3px 2px {}px rgb(0 0 0 / 0.5))",
+                        blur / 2.0
+                    ))
+                    .expect("a filter"),
+                false => {
+                    ctx.set_shadow_color_css("rgb(0 0 0 / 0.5)")
+                        .expect("a colour");
+                    ctx.set_shadow_blur(blur);
+                    ctx.set_shadow_offset(3.0, 2.0);
+                }
+            }
+            ctx.set_fill_style_css(&format!(
+                "hsl({} 60% 55% / {})",
+                (i * 37) % 360,
+                scene.alpha
+            ))
+            .expect("a colour");
+            if scene.text {
+                ctx.set_font_css("600 28px sans-serif");
+                let y = 30.25 + i as f32 * LINE;
+                ctx.fill_text(&format!("Throughput sample {i}"), 40.5, y, None);
+                continue;
+            }
+            ctx.begin_path();
+            let (x, y) = (
+                12.5 + (i % 6) as f32 * (w + scene.gap),
+                12.25 + (i / 6) as f32 * (h + scene.gap),
+            );
+            ctx.round_rect(x, y, w, h, [10.0; 4]).expect("a rectangle");
+            ctx.fill(FillRule::NonZero);
+        }
+        ALONE_CHAINS.with(|flag| flag.set(alone));
+        REFUSE_PLACED.with(|flag| flag.set(refuse));
+        let count = || {
+            (
+                OFFSCREEN.with(std::cell::Cell::get),
+                SHARED_LAYERS.with(std::cell::Cell::get),
+            )
+        };
+        let before = count();
+        let data = ctx.get_image_data(0.0, 0.0, PAGE.0, PAGE.1);
+        let after = count();
+        ALONE_CHAINS.with(|flag| flag.set(false));
+        REFUSE_PLACED.with(|flag| flag.set(false));
+        Some(Read {
+            bytes: data.expect("pixels").pixels().to_vec(),
+            opened: after.0 - before.0,
+            layers: after.1 - before.1,
+        })
+    }
+
+    /// Shadows sharing a layer share its passes: each pass is one target
+    /// holding every chain's output, so the shadows drawn in a layer open no
+    /// more targets between them than one shadow alone does -- the region
+    /// copied out, padded, the passes of each axis, composed -- where alone
+    /// each opens its own. Lines of text share too, each bounded by what it
+    /// can ink.
+    #[test]
+    fn shadows_sharing_a_layer_share_their_passes() {
+        for scene in [PLAIN, LINES] {
+            let (Some(one), Some(shared), Some(alone)) = (
+                page(Scene { n: 1, ..scene }, true, false),
+                page(scene, false, false),
+                page(scene, true, false),
+            ) else {
+                return;
+            };
+            let what = if scene.text { "lines" } else { "shapes" };
+            assert_eq!(
+                alone.opened,
+                scene.n * one.opened,
+                "{what} alone, a shadow's own"
+            );
+            // Where no layer is shared, each chain takes its own, and the
+            // passes are still shared -- see the test after this one.
+            let layers_shared = !SHARES || shared.layers < scene.n;
+            assert!(
+                layers_shared && shared.opened <= shared.layers * one.opened,
+                "{} {what} in {} layers opened {} targets, one alone {}",
+                scene.n,
+                shared.layers,
+                shared.opened,
+                one.opened
+            );
+        }
+    }
+
+    /// Shadows that share passes land the bytes they do alone: each reads
+    /// only its own region of the shared layer, though its blur reaches past
+    /// it, onto a page turned or not, at any alpha, from a `shadowBlur` and
+    /// from a `drop-shadow()`, and where the shadows of a layer are blurred
+    /// by two sigmas, each with its own. The gaps run from within a region's
+    /// reach -- six sigmas and the offset -- where neighbours never share a
+    /// layer, to just past it, at 45 pixels, where they do and a chain
+    /// whose passes read past its region takes in its neighbour's ink; at
+    /// 75 the rows run past the page's edge.
+    #[test]
+    fn shadows_sharing_passes_land_the_bytes_they_do_alone() {
+        let mut apart = vec![];
+        let scenes = [1.0, 6.0, 12.0, 30.0, 45.0, 60.0, 75.0]
+            .map(|gap| Scene { gap, ..PLAIN })
+            .into_iter()
+            .chain([
+                Scene {
+                    turn: 0.15,
+                    ..PLAIN
+                },
+                Scene {
+                    alpha: 0.55,
+                    ..PLAIN
+                },
+                Scene {
+                    second: 6.0,
+                    ..PLAIN
+                },
+                Scene {
+                    gap: 45.0,
+                    second: 6.0,
+                    ..PLAIN
+                },
+                // Every other rectangle shares a layer, and the sigma turns
+                // every two, so each layer holds both and each sigma's
+                // shadows are made from both layers.
+                Scene {
+                    gap: 6.0,
+                    second: 6.0,
+                    period: 2,
+                    ..PLAIN
+                },
+                Scene { css: true, ..PLAIN },
+                Scene {
+                    css: true,
+                    gap: 6.0,
+                    turn: 0.15,
+                    ..PLAIN
+                },
+                LINES,
+                Scene { css: true, ..LINES },
+                Scene {
+                    alpha: 0.55,
+                    turn: 0.15,
+                    ..LINES
+                },
+            ]);
+        for scene in scenes {
+            let (Some(shared), Some(alone)) =
+                (page(scene, false, false), page(scene, true, false))
+            else {
+                return;
+            };
+            let differ = shared
+                .bytes
+                .iter()
+                .zip(&alone.bytes)
+                .filter(|(a, b)| a != b)
+                .count();
+            if differ > 0 {
+                apart.push(format!(
+                    "gap {}, turn {}, alpha {}, css {}, text {}: {differ} bytes",
+                    scene.gap, scene.turn, scene.alpha, scene.css, scene.text
+                ));
+            }
+        }
+        assert!(apart.is_empty(), "apart from alone: {apart:#?}");
+    }
+
+    /// Where chains share no layer -- as on Vulkan, where none do; see
+    /// `chain::shares_layers` -- their shadows still share passes: each
+    /// chain's region is copied out of its own layer into the run's atlas,
+    /// so a page of them opens a few targets a run where alone each opens
+    /// its own, and lands the same bytes.
+    #[test]
+    fn shadows_in_layers_of_their_own_share_their_passes() {
+        for scene in [PLAIN, LINES, Scene { gap: 6.0, ..PLAIN }] {
+            UNSHARED_LAYERS.with(|flag| flag.set(true));
+            let unshared = page(scene, false, false);
+            UNSHARED_LAYERS.with(|flag| flag.set(false));
+            let (Some(unshared), Some(alone)) =
+                (unshared, page(scene, true, false))
+            else {
+                return;
+            };
+            let differ = unshared
+                .bytes
+                .iter()
+                .zip(&alone.bytes)
+                .filter(|(a, b)| a != b)
+                .count();
+            let what = format!("text {}, gap {}", scene.text, scene.gap);
+            assert_eq!(differ, 0, "{what}: unshared, apart from alone");
+            assert_eq!(unshared.layers, scene.n, "{what}: a layer each");
+            assert!(
+                unshared.opened * 4 < alone.opened,
+                "{what}: unshared opened {} targets, alone {}",
+                unshared.opened,
+                alone.opened
+            );
+        }
+    }
+
+    /// A run whose shadows one atlas cannot hold puts as many in it as fit,
+    /// in order, and finishes the rest alone, and one whose atlas would hold
+    /// fewer than two finishes them all alone: the bytes are the same either
+    /// way, and the targets opened lie between the shared passes' and each
+    /// shadow's own. Both where chains share layers and, through
+    /// [`UNSHARED_LAYERS`], where each takes its own, as on Vulkan: there a
+    /// run is [`MAX_RUN_LAYERS`](super::MAX_RUN_LAYERS) chains rather than
+    /// all of [`PLAIN`]'s.
+    ///
+    /// [`PART_SIDE`] holds part of a run in either: [`PLAIN`]'s 24 shadows
+    /// make one run in four shared layers and three runs of 8 in layers of
+    /// their own, and a side of 512 holds all of a run of 8, so that with
+    /// layers of their own part of the atlas opened what all of it did.
+    #[test]
+    fn shadows_past_one_atlas_finish_alone() {
+        /// An atlas side that holds two lanes of [`PLAIN`]'s or more, and
+        /// fewer than a run of 8 of them.
+        const PART_SIDE: usize = 400;
+        /// An atlas side that holds no two lanes of [`PLAIN`]'s.
+        const NONE_SIDE: usize = 100;
+        for (shape, unshared) in [("shared", false), ("their own", true)] {
+            let sides = [None, Some(PART_SIDE), Some(NONE_SIDE)];
+            let read = sides.map(|side| {
+                UNSHARED_LAYERS.with(|flag| flag.set(unshared));
+                ATLAS_SIDE.with(|cap| cap.set(side));
+                let read = page(PLAIN, false, false);
+                ATLAS_SIDE.with(|cap| cap.set(None));
+                UNSHARED_LAYERS.with(|flag| flag.set(false));
+                read
+            });
+            let ([Some(whole), Some(part), Some(none)], Some(alone)) =
+                (read, page(PLAIN, true, false))
+            else {
+                return;
+            };
+            if unshared {
+                assert_eq!(
+                    whole.layers, PLAIN.n,
+                    "layers {shape}: not one each"
+                );
+            }
+            for (what, read) in [("part", &part), ("none", &none)] {
+                let differ = read
+                    .bytes
+                    .iter()
+                    .zip(&alone.bytes)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    differ, 0,
+                    "layers {shape}: {what} of the shadows in the atlas, apart"
+                );
+            }
+            assert!(
+                whole.opened < part.opened && part.opened < none.opened,
+                "layers {shape}: opened {} with the atlas whole, {} with part \
+                 of it, {} with none",
+                whole.opened,
+                part.opened,
+                none.opened
+            );
+            assert!(
+                none.opened <= alone.opened,
+                "layers {shape}: none, more than alone"
+            );
+        }
+    }
+
+    /// Where Skia refuses the layer the chains would share, each is drawn
+    /// and finished in a layer of its own the size of its region, as it is
+    /// alone: the same bytes, and no pass shared -- each shadow opens the
+    /// same targets, but for the copy a region-sized layer does not need.
+    ///
+    /// Only where chains share layers: elsewhere no shared layer is asked
+    /// for, and a chain's own layer refused falls back to its region alone,
+    /// whose shadow the run's atlas still takes.
+    #[test]
+    fn shadows_whose_shared_layer_is_refused_fall_back_to_their_own() {
+        if !SHARES {
+            eprintln!("skipped: chains share a layer on Metal alone");
+            return;
+        }
+        let (Some(refused), Some(shared), Some(alone)) = (
+            page(PLAIN, false, true),
+            page(PLAIN, false, false),
+            page(PLAIN, true, false),
+        ) else {
+            return;
+        };
+        let differ = refused
+            .bytes
+            .iter()
+            .zip(&alone.bytes)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differ, 0, "refused, apart from alone");
+        assert_eq!(refused.opened % PLAIN.n, 0, "refused, not each its own");
+        assert_eq!(
+            refused.opened / PLAIN.n,
+            alone.opened / PLAIN.n - 1,
+            "refused, not each alone but the copy"
+        );
+        assert!(refused.opened > shared.opened, "refused, yet shared");
     }
 }
 

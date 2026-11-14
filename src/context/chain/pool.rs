@@ -58,11 +58,12 @@ use skia_safe::{
     Canvas as SkCanvas, ColorType, ISize, ImageInfo, Surface, SurfaceProps,
 };
 
-use crate::context::{chain::coverage::Plane, layer::MAX_RUN_LAYERS};
+use crate::context::chain::coverage::Plane;
 
-/// How many layers a thread keeps: as many as a run holds open at once, so
-/// that a run of chains like the last finds every layer it needs.
-const KEPT: usize = MAX_RUN_LAYERS;
+/// How many layers a thread keeps: two. A run holds two open at most -- it
+/// lets each layer go once the next is drawn, see `layer::Run::play` -- so
+/// two kept are what a run of chains like the last needs.
+const KEPT: usize = 2;
 
 /// How long a kept layer outlives its last use: the span a thread's GPU
 /// context is kept unused for (`MTL_CONTEXT_LIFESPAN`,
@@ -368,7 +369,6 @@ mod tests {
     use crate::{
         context::{
             chain::{MADE_LAYERS, shares_layers},
-            layer::MAX_RUN_LAYERS,
             page::ExportOptions,
         },
         gpu::RenderingEngine,
@@ -507,9 +507,10 @@ mod tests {
     /// makes none; each page reads the bytes it does with every layer made
     /// afresh.
     ///
-    /// A run holds at most [`MAX_RUN_LAYERS`] layers open whether or not its
-    /// chains share them -- see `layer::Run` -- so the first run makes that
-    /// many with layers kept, and every later run takes them. Made afresh,
+    /// A run holds two layers open at most whether or not its chains share
+    /// them -- see `layer::Run::play` -- so the first run makes two with
+    /// layers kept, its later layers taking them back in turn, and every
+    /// later run takes them. Made afresh,
     /// what a page makes follows from [`shares_layers`]: where chains share,
     /// the shapes, each meeting the next and not the one after, take two
     /// layers between them in one run; where they do not, each takes its
@@ -556,7 +557,7 @@ mod tests {
         KEPT_FOR_HERE.set(KEPT_FOR);
         assert_eq!(
             (made_first, made_second),
-            (MAX_RUN_LAYERS, 0),
+            (2, 0),
             "two pages made {made_first} and {made_second} layers"
         );
         for (name, page) in [("first", &first), ("second", &second)] {
