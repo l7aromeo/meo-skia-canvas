@@ -2331,9 +2331,15 @@ fn shadow_composed(
         }),
     };
     let source = in_floats(&raster)?;
-    let from = match cast {
-        Some(cast) => in_floats(&to_raster(context, cast)?)?,
-        None => source.clone(),
+    let cast = match cast {
+        Some(cast) => Some(to_raster(context, cast)?),
+        None => None,
+    };
+    // What the shadow is cast from, in floats, for the tints and blurs
+    // that read every channel: the cast drawn into floats, or the source.
+    let from = || match &cast {
+        Some(cast) => in_floats(cast),
+        None => Some(source.clone()),
     };
     let named = tint_colour(colour, space, raster.image_info());
     let tint = || tint(named, colour, space);
@@ -2342,22 +2348,28 @@ fn shadow_composed(
         image.color_type(),
         ColorType::RGBA8888 | ColorType::BGRA8888
     );
+    // The alpha blurred is read as it lies: an eight-bit cast's bytes come
+    // back from Skia's read into floats as the floats the cast drawn into
+    // floats holds, each byte times 1/255 -- see
+    // `a_cast_read_into_floats_holds_what_it_drawn_into_floats_does` -- so
+    // the cast is not drawn into floats first.
+    let blurred_from = cast.as_ref().unwrap_or(&source);
     let shadow = match (blurred, bytes) {
         (true, true) => match named {
-            Some((rgb, alpha)) => {
-                blurred_alpha(&from, sigma, |a| tinted_alpha(rgb, alpha, a))?
-            }
+            Some((rgb, alpha)) => blurred_alpha(blurred_from, sigma, |a| {
+                tinted_alpha(rgb, alpha, a)
+            })?,
             None => {
                 let alpha =
-                    blurred_alpha(&from, sigma, |a| [0.0, 0.0, 0.0, a])?;
+                    blurred_alpha(blurred_from, sigma, |a| [0.0, 0.0, 0.0, a])?;
                 filtered(None, &alpha, &tint()?, 1.0)?
             }
         },
         (true, false) => {
-            let tinted = filtered(None, &from, &tint()?, 1.0)?;
+            let tinted = filtered(None, &from()?, &tint()?, 1.0)?;
             blurred_on_cpu(&tinted, sigma.0, sigma.1, 1.0)?
         }
-        (false, _) => filtered(None, &from, &tint()?, 1.0)?,
+        (false, _) => filtered(None, &from()?, &tint()?, 1.0)?,
     };
     let sampling = match offset.x.fract() == 0.0 && offset.y.fract() == 0.0 {
         true => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
@@ -2747,9 +2759,9 @@ mod tests {
 
     use super::{
         Cast, Depth, Outcome, REFUSE_PLACED, Step, TRIMMED, TRIMS_COMPOSITE,
-        apply, blurred_alpha, blurred_on_cpu, exact_blur, filtered,
-        offset_tint, rounded_once, run_cast, shadow_composed, shadowed, tint,
-        tint_colour, tinted_alpha, worked_on,
+        apply, blurred_alpha, blurred_on_cpu, clear_unless_zeroed, exact_blur,
+        filtered, offset_tint, rounded_once, run_cast, shadow_composed,
+        shadowed, tint, tint_colour, tinted_alpha, worked_on,
     };
     #[cfg(all(meo_graphite, feature = "metal"))]
     use crate::{context::page::ExportOptions, gpu::graphite};
@@ -4422,6 +4434,70 @@ mod tests {
     /// the same.
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     const GPU_TIE_LEVELS: f64 = 1e-3;
+
+    #[test]
+    fn a_cast_read_into_floats_holds_what_it_drawn_into_floats_does() {
+        // Every alpha byte, in either byte order and in two spaces, under
+        // the most colour it can hold premultiplied: Skia's read of the
+        // eight-bit image into floats, which `blurred_alpha` makes, against
+        // the image drawn onto a cleared float surface of its own space,
+        // which `shadow_composed` drew a cast into before it read it.
+        let srgb = ColorSpace::new_srgb();
+        let p3 = PixelColorSpace::DisplayP3
+            .to_skia_color_space()
+            .expect("Display P3");
+        let levels = usize::from(u8::MAX) + 1;
+        for (kind, space) in [
+            (ColorType::RGBA8888, &srgb),
+            (ColorType::BGRA8888, &srgb),
+            (ColorType::RGBA8888, &p3),
+        ] {
+            let info = ImageInfo::new(
+                (levels as i32, 1),
+                kind,
+                AlphaType::Premul,
+                Some(space.clone()),
+            );
+            let bytes: Vec<u8> =
+                (0..=u8::MAX).flat_map(|a| [a, a / 2, a, a]).collect();
+            let image = started::raster_from_data(
+                &info,
+                Data::new_copy(&bytes),
+                info.min_row_bytes(),
+            )
+            .expect("an image");
+            let floats = info.with_color_type(ColorType::RGBAF32);
+            let read = |image: &Image| -> Vec<u32> {
+                let mut pixels = vec![0f32; levels * 4];
+                assert!(image.read_pixels(
+                    &floats,
+                    &mut pixels,
+                    levels * 4 * size_of::<f32>(),
+                    (0, 0),
+                    CachingHint::Disallow,
+                ));
+                pixels
+                    .iter()
+                    .skip(3)
+                    .step_by(4)
+                    .map(|a| a.to_bits())
+                    .collect()
+            };
+            let mut surface =
+                started::raster(&floats, None, None).expect("a surface");
+            clear_unless_zeroed(&mut surface);
+            surface.canvas().draw_image(&image, (0, 0), None);
+            let drawn = read(&surface.image_snapshot());
+            let parted: Vec<usize> = read(&image)
+                .iter()
+                .zip(&drawn)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(byte, _)| byte)
+                .collect();
+            assert!(parted.is_empty(), "{kind:?}: bytes {parted:?} part");
+        }
+    }
 
     /// A shadow made by itself from a layer's alpha bytes lands the bytes
     /// the shadow the general route composes does, to the byte: on each
