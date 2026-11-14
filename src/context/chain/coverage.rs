@@ -188,7 +188,7 @@ pub(crate) fn blurred(
 
 /// The coverage of what `draw` draws onto `canvas`, read from `plane` for a
 /// blur of `sigma` canvas pixels, before it is blurred -- see
-/// [`Coverage::of`]. `None` where nothing would show or no plane could be
+/// [`Coverage::on`]. `None` where nothing would show or no plane could be
 /// made.
 pub(crate) fn sharp(
     canvas: &SkCanvas,
@@ -197,7 +197,23 @@ pub(crate) fn sharp(
     plane: Plane,
     draw: impl FnOnce(&SkCanvas),
 ) -> Option<Coverage> {
-    Coverage::of(canvas, sigma, content, plane, draw)
+    let at = Placement::of(canvas, sigma, content)?;
+    Coverage::on(canvas, at, sigma, plane, draw)
+}
+
+/// The coverage of what `draw` draws onto `canvas` within `ink`, device
+/// pixels it can cover, read from `plane` drawn under the canvas's whole
+/// transform, for a draw that is not blurred -- see [`Placement::unblurred`].
+/// [`Coverage::unblurred`] takes its values. `None` where nothing would show
+/// or no plane could be made.
+pub(crate) fn unblurred(
+    canvas: &SkCanvas,
+    ink: IRect,
+    plane: Plane,
+    draw: impl FnOnce(&SkCanvas),
+) -> Option<Coverage> {
+    let at = Placement::unblurred(canvas, ink)?;
+    Coverage::on(canvas, at, 0.0, plane, draw)
 }
 
 /// What a plane of kind `plane` for a draw on `canvas` holds over `drawn`:
@@ -282,7 +298,7 @@ fn zero_within(surface: &mut Surface, within: IRect) -> Option<()> {
 impl Blurred {
     /// This blur, composited `by` whole device pixels from where it was
     /// made. A draw moved by whole pixels does not always cover the same --
-    /// see [`Coverage::of`] -- so the caller holds that its draw's coverage
+    /// see [`Coverage::on`] -- so the caller holds that its draw's coverage
     /// is the same at the new place.
     pub(crate) fn at(&self, by: (i32, i32)) -> Blurred {
         Blurred {
@@ -293,8 +309,9 @@ impl Blurred {
     }
 }
 
-/// Where [`Coverage::of`] places a draw's coverage for a blur on `canvas`,
-/// decided before anything is drawn: by the canvas's transform and clip, the
+/// Where a draw's coverage is taken on `canvas` -- see [`Coverage::on`] --
+/// for a blur, or for a draw that is not blurred -- see [`Self::unblurred`]:
+/// decided before anything is drawn, by the canvas's transform and clip, the
 /// blur's sigma and what the draw paints, and by nothing about the plane it
 /// is drawn on.
 pub(crate) struct Placement {
@@ -360,6 +377,34 @@ impl Placement {
             rest,
         })
     }
+
+    /// The placement of a draw on `canvas` that is not blurred, within
+    /// `ink`, the device pixels it can cover: drawn under the canvas's whole
+    /// transform on a plane from the device's origin, as the page draws it,
+    /// so that its coverage is the page's and its result is composited
+    /// unresampled. The blur's split of the transform -- see [`split`] --
+    /// would leave a turned draw to be resampled onto the device. `None`
+    /// under a perspective, which the device's pixels are not drawn in, or
+    /// where `ink` lies outside the clip.
+    pub(crate) fn unblurred(
+        canvas: &SkCanvas,
+        ink: IRect,
+    ) -> Option<Placement> {
+        let base = canvas.local_to_device_as_3x3();
+        if base.has_perspective() {
+            return None;
+        }
+        let region = IRect::intersect(&ink, &canvas.device_clip_bounds()?)?;
+        let (region, drawn) = placed(canvas, region, true, false);
+        Some(Placement {
+            worked: region,
+            region,
+            inked: region,
+            drawn,
+            layer: base,
+            rest: Matrix::new_identity(),
+        })
+    }
 }
 
 /// A draw's coverage before it is blurred: one byte a pixel of `inked`, zero
@@ -398,19 +443,19 @@ fn drawn_plane(canvas: &SkCanvas, drawn: IRect) -> Option<Surface> {
 }
 
 impl Coverage {
-    /// The coverage of what `draw` draws onto `canvas`, on the plane
-    /// [`run`](super::run) would make its layer for a blur of `sigma`: placed
-    /// alike and drawn under the same transform, so that Skia's
-    /// anti-aliasing, which depends on where a path lies in the plane it
-    /// fills, gives the coverage the layer's alpha would hold.
+    /// The coverage of what `draw` draws onto `canvas`, on a plane placed at
+    /// `at` for a blur of `sigma` -- where [`run`](super::run) would make its
+    /// layer, by [`Placement::of`] -- drawn under the same transform, so
+    /// that Skia's anti-aliasing, which depends on where a path lies in the
+    /// plane it fills, gives the coverage the layer's alpha would hold.
     ///
     /// The plane starts where the chain's layer does: on the CPU at the
     /// device's origin, so a draw moved by whole pixels lands elsewhere in
     /// it, and Skia's coverage of a curve can change with where it lands.
-    fn of(
+    fn on(
         canvas: &SkCanvas,
+        at: Placement,
         sigma: f32,
-        content: Option<Rect>,
         plane: Plane,
         draw: impl FnOnce(&SkCanvas),
     ) -> Option<Coverage> {
@@ -421,7 +466,7 @@ impl Coverage {
             drawn,
             layer,
             rest,
-        } = Placement::of(canvas, sigma, content)?;
+        } = at;
         let surface = |drawn: IRect| {
             let surface = match plane {
                 Plane::Drawn => drawn_plane(canvas, drawn),
@@ -556,6 +601,18 @@ impl Coverage {
             rest: self.rest,
         }
     }
+
+    /// This coverage as [`Self::blurred`] hands it on, unblurred: for a
+    /// draw placed by [`Placement::unblurred`], which no blur reaches past.
+    pub(crate) fn unblurred(self) -> Blurred {
+        let mut values = vec![0.0f32; self.region_len()];
+        self.widen_into(&mut values, f32::from);
+        Blurred {
+            values,
+            region: self.region,
+            rest: self.rest,
+        }
+    }
 }
 
 /// `blurred` coloured for `canvas` as the chain's result is, ready to
@@ -645,7 +702,7 @@ mod tests {
     };
 
     use super::{
-        Coverage, Plane, READ_IN_PLACE, alpha_into, coloured, kept_plane,
+        Plane, READ_IN_PLACE, alpha_into, coloured, kept_plane,
         pool::{self, PlaneScope},
     };
     use crate::{
@@ -866,7 +923,7 @@ mod tests {
                         let canvas = surface.canvas();
                         let mut paint = Paint::default();
                         paint.set_anti_alias(true).set_style(PaintStyle::Fill);
-                        let coverage = Coverage::of(
+                        let coverage = super::sharp(
                             canvas,
                             sigma,
                             Some(*shape.bounds()),

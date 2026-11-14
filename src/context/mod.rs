@@ -1227,6 +1227,55 @@ impl Context2D {
         ))
     }
 
+    /// The flat colour of a run of text drawn in `paint` for `style`, where
+    /// the run is translucent in one, for an eight-bit page on the CPU to
+    /// paint the run from its coverage -- see [`layer::FlatRun`]. `None`
+    /// for a run that holds colour glyphs this library draws (`colour`) or
+    /// names a line colour of its own (`lines`), drawn in two colours; for
+    /// one opaque, or whose alpha rounds to no byte, which draws nothing;
+    /// for a paint carrying a shader, a colour filter or dither, whose
+    /// colour is not one flat colour, a mask filter, or a filter no chain
+    /// runs -- see [`Self::chains_text_filter`]; under a blend
+    /// that covers beyond the draw, which composites the run through a layer
+    /// of its own; and on a page whose pixels do not place the colour on the
+    /// bytes they store -- see [`ExactColour::bytes`].
+    fn flat_run(
+        &self,
+        paint: &Paint,
+        style: PaintStyle,
+        colour: bool,
+        lines: bool,
+    ) -> Option<layer::FlatRun> {
+        #[cfg(test)]
+        if !REPLAYS_TRANSLUCENT_TEXT.get() {
+            return None;
+        }
+        let alpha = paint.alpha_f();
+        let stored = layer::byte_alpha(alpha);
+        let flat = paint.shader().is_none()
+            && paint.color_filter().is_none()
+            && (paint.image_filter().is_none() || self.chains_text_filter())
+            && paint.mask_filter().is_none()
+            && !paint.is_dither()
+            && matches!(self.state.dye(style), Dye::Color(..));
+        let drawn = !colour
+            && !lines
+            && stored > 0.0
+            && stored < 1.0
+            && !covers_beyond_the_draw(self.state.global_composite_operation);
+        if !(flat && drawn) {
+            return None;
+        }
+        let exact = self.exact_colour(style).filter(|exact| exact.bytes)?;
+        let mut opaque = paint.clone();
+        opaque.set_alpha_f(1.0);
+        Some(layer::FlatRun {
+            exact,
+            alpha,
+            opaque,
+        })
+    }
+
     /// `color`, unpremultiplied in `space`, converted exactly into the page's
     /// space and placed on the bytes an eight-bit page stores it as -- see
     /// [`ExactColour::at`] -- tagged with the page's space, on a page that
@@ -1396,10 +1445,18 @@ impl Context2D {
         };
         let replayed = text
             .as_ref()
-            .and_then(|text| text.colour.clone().or(text.blended.clone()));
+            .and_then(|text| text.colour.clone().or(text.redrawn.clone()));
+        // A flat run under a filter is filed for the chain that runs it,
+        // which records it without the filter; drawn here, the filter is
+        // the paint's, which the run's coverage would leave out.
+        let flat = text
+            .as_ref()
+            .filter(|text| text.colour.is_none())
+            .filter(|_| paint.image_filter().is_none())
+            .and_then(|text| text.flat.clone());
         if let Some(run) = replayed
             && self.files_as_replayed_text(
-                paint, exact, features, run, lines, casts, &draw,
+                paint, exact, features, run, flat, lines, casts, &draw,
             )
         {
             return;
@@ -1529,6 +1586,17 @@ impl Context2D {
     fn chains_text(&self) -> bool {
         self.draw_chain(true, false).is_some()
             || self.casts_shadow_through_chain()
+    }
+
+    /// Whether a run of text drawn now has its filter run by a chain, which
+    /// records it without its paint's filter: its filter's own -- see
+    /// [`Self::draw_chain`] -- or, where its shadow is cast apart through a
+    /// chain, the chain of the whole filter it is then run through as a run
+    /// casting none -- see [`Self::render_to_canvas`].
+    fn chains_text_filter(&self) -> bool {
+        self.draw_chain(true, false).is_some()
+            || (self.casts_shadow_through_chain()
+                && self.exact_steps().is_some())
     }
 
     /// Files a draw's `shadowColor` shadow as a group of its own, cast
@@ -1724,6 +1792,69 @@ impl Context2D {
                 document,
             }],
             clip: None,
+        }))
+    }
+
+    /// `entry`, a run of text a chain draws, as a [`layer::ReplayedText`]
+    /// where the run is translucent in one flat colour -- see
+    /// [`TextRun::flat`] -- so that the chain's layer on an eight-bit page
+    /// on the CPU draws it from its coverage as the page does, and a filter
+    /// changes only what it adds: under a `drop-shadow()`, a run drawn as
+    /// Skia blits it stood a level off the same run unfiltered on 230 to
+    /// 1,935 pixels of a run of 13 to 60px in orange, blue and grey -- see
+    /// `a_translucent_runs_shadow_rounds_its_alpha_once`. `recorded` makes
+    /// a paint the chain records the run in, of `pixels` for its pixels and
+    /// of `paint` for a document. Any other entry is handed back.
+    fn flat_entry(
+        &self,
+        entry: Layer,
+        text: Option<&TextRun>,
+        recorded: &dyn Fn(&Paint) -> Paint,
+        pixels: &Paint,
+        paint: &Paint,
+    ) -> Layer {
+        let Some((run, flat)) = text
+            .filter(|text| text.colour.is_none())
+            .and_then(|text| text.redrawn.clone().zip(text.flat.clone()))
+        else {
+            return entry;
+        };
+        // A flat run is filed only on a page that keeps a recording for
+        // each kind of target -- see `Self::flat_run` -- so its entry is a
+        // pair, recorded or to be recorded when first played.
+        let (recording, document) = match entry {
+            Layer::Targeted(pair) => {
+                let (pixels, document) = Arc::unwrap_or_clone(pair);
+                (
+                    LazyPicture::from(Some(pixels)),
+                    layer::ReplayedRecording::recorded(document),
+                )
+            }
+            Layer::Deferred(_) => (
+                LazyPicture::default(),
+                layer::ReplayedRecording::later(recorded(paint), None),
+            ),
+            entry => return entry,
+        };
+        Layer::ReplayedText(Arc::new(layer::ReplayedText {
+            matrix: self.state.matrix,
+            replay: Some(run),
+            paint: recorded(pixels),
+            inked: Rect::new_empty(),
+            shadow: None,
+            blend: None,
+            recording,
+            whole: LazyPicture::default(),
+            bounds: self.bounds,
+            document: Some(document),
+            clip: None,
+            cast_before: false,
+            flat: Some(layer::FlatRun {
+                opaque: recorded(&flat.opaque),
+                ..flat
+            }),
+            #[cfg(test)]
+            watch: None,
         }))
     }
 
@@ -1944,6 +2075,7 @@ impl Context2D {
         exact: Option<&Paint>,
         features: VectorFeatures,
         run: Replay,
+        flat: Option<layer::FlatRun>,
         lines: bool,
         casts: bool,
         draw: &D,
@@ -2032,6 +2164,7 @@ impl Context2D {
             // Where the run casts a shadow and does not cast it itself, it
             // was cast just before, through a chain.
             cast_before: self.casts_shadow() && !casts,
+            flat,
             #[cfg(test)]
             watch: layer::REPLAYED_WATCH.with_borrow(Clone::clone),
         });
@@ -2494,6 +2627,7 @@ impl Context2D {
                     document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
                     cast_before: false,
+                    flat: None,
                     #[cfg(test)]
                     watch: None,
                 }))
@@ -2559,6 +2693,9 @@ impl Context2D {
             }
             (entry, _) => entry,
         }
+        .map(|entry| {
+            self.flat_entry(entry, text, &recorded, pixels_paint, paint)
+        })
         .map(|entry| self.chain_input(cpu_bytes, entry));
         // A run of text in one flat colour that the coverage route could
         // play, or whose `drop-shadow()` is cast from its coverage, is drawn
@@ -2587,7 +2724,10 @@ impl Context2D {
         // run's colour, its glyphs' own colours gone: those this library
         // draws, and those the platform draws -- asked last, since a run
         // not kept is laid out again to answer.
-        let holds_colour = matches!(entry, Some(Layer::ReplayedText(_)));
+        let holds_colour = matches!(
+            &entry,
+            Some(Layer::ReplayedText(run)) if run.flat.is_none()
+        );
         let coverage = match exact {
             Some(exact)
                 if reached.is_some()
@@ -2909,6 +3049,7 @@ impl Context2D {
             document: document.map(layer::ReplayedRecording::recorded),
             clip: None,
             cast_before: false,
+            flat: None,
             #[cfg(test)]
             watch: None,
         }))
@@ -4709,15 +4850,25 @@ impl Context2D {
             // The run kept whole, where it is drawn in a blend that reads the
             // page in the shader, to draw its glyphs where the page is played
             // back as that canvas draws them -- see
-            // `typography::glyph_draws`.
+            // `typography::glyph_draws` -- and where it is translucent in one
+            // flat colour, which an eight-bit page on the CPU paints from its
+            // coverage -- see `layer::FlatRun`. Whether the platform draws a
+            // glyph of it in its own colours is asked last, since a run not
+            // kept is laid out again to answer.
             #[cfg(test)]
             let replays = REPLAYS_BLENDED_TEXT.get();
             #[cfg(not(test))]
             let replays = true;
-            let blended = (replays
-                && !blends_by_coefficients(
-                    self.state.global_composite_operation,
-                ))
+            let op = self.state.global_composite_operation;
+            let lines = typesetter.names_a_line_colour();
+            let flat = self
+                .flat_run(&paint, style, colour.is_some(), lines)
+                .filter(|_| match &kept {
+                    Some(kept) => !kept.draws_own_colours(),
+                    None => !typesetter.draws_own_colours(),
+                });
+            let redrawn = ((replays && !blends_by_coefficients(op))
+                || flat.is_some())
             .then(|| {
                 let (run, offset, condensation) =
                     typesetter.replayed(kept.as_deref());
@@ -4801,7 +4952,7 @@ impl Context2D {
                 features,
                 replay,
                 Some(TextRun {
-                    lines: typesetter.names_a_line_colour(),
+                    lines,
                     reached: &reached,
                     kept: kept.as_ref().map(|kept| kept.drawn()),
                     anchor: kept.as_ref().map_or_else(
@@ -4816,7 +4967,8 @@ impl Context2D {
                     ),
                     defer: Some(&defer),
                     colour,
-                    blended,
+                    redrawn,
+                    flat,
                     own_colours: &own_colours,
                 }),
                 self.state.dye(style).gradient().map(|spec| {
@@ -5476,11 +5628,16 @@ pub struct TextRun<'a> {
     /// itself, to draw them where the page is played back -- see
     /// [`Context2D::files_as_replayed_text`].
     pub colour: Option<Replay>,
-    /// The run kept whole where it is drawn in a blend that reads the page
-    /// in the shader, to draw its glyphs where the page is played back, as
-    /// that canvas draws them -- see `typography::glyph_draws` and
-    /// [`Context2D::files_as_replayed_text`].
-    pub blended: Option<Replay>,
+    /// The run kept whole to draw again where the page is played back --
+    /// see [`Context2D::files_as_replayed_text`]: where it is drawn in a
+    /// blend that reads the page in the shader, so that its glyphs are drawn
+    /// as that canvas draws them -- see `typography::glyph_draws` -- and
+    /// where it is translucent in one flat colour -- see [`Self::flat`].
+    pub redrawn: Option<Replay>,
+    /// The run's flat colour, where it is translucent in one, which an
+    /// eight-bit page on the CPU paints from its coverage -- see
+    /// [`layer::FlatRun`].
+    pub flat: Option<layer::FlatRun>,
     /// Whether the run holds a glyph the platform draws in its own colours
     /// -- see `font::platform_colour` -- asked only where the coverage route
     /// could otherwise take the run.
@@ -5768,10 +5925,16 @@ thread_local! {
     pub(crate) static REPLAYED_RECORDED_AT_ONCE: Cell<bool> =
         const { Cell::new(false) };
     /// Whether a run drawn in a blend that reads the page is kept whole to
-    /// be drawn again where it is played -- see [`TextRun::blended`]: off,
+    /// be drawn again where it is played -- see [`TextRun::redrawn`]: off,
     /// it is recorded as it is drawn, the mutant the tests of that route
     /// are held against.
     pub(crate) static REPLAYS_BLENDED_TEXT: Cell<bool> =
+        const { Cell::new(true) };
+    /// Whether a translucent run in one flat colour is kept whole to be
+    /// drawn again where it is played -- see [`TextRun::exact`]: off, it is
+    /// recorded as it is drawn, the reference every target but an eight-bit
+    /// page on the CPU is held to.
+    pub(crate) static REPLAYS_TRANSLUCENT_TEXT: Cell<bool> =
         const { Cell::new(true) };
 }
 
@@ -7992,7 +8155,11 @@ mod tests {
     /// each frame's draws in its own picture, as a page always has: the run
     /// is drawn into the page's recording when its frame ends, and the page
     /// is one picture however many frames it was drawn under -- or one pair
-    /// of them, on a page that keeps a recording for pixels.
+    /// of them, on a page that keeps a recording for pixels. A run of text
+    /// translucent in one flat colour is an entry of its own, drawn again
+    /// where it is played -- see `layer::FlatRun` -- so its frame is filed
+    /// in pieces, the draws before it one and the run another -- see
+    /// `layer::Clipped`.
     #[test]
     fn a_page_no_cut_or_read_splits_is_one_picture() {
         let steps = [
@@ -8008,10 +8175,32 @@ mod tests {
             Step::Restore,
             Step::Fill(95.0),
         ];
-        let mut canvas = program(&steps, false, true).canvas;
-        let page = canvas.page(0).expect("a page").inner.page();
-        assert_eq!(page.layers.len(), 1, "the page's entries");
-        assert!(!recordings(&page.layers[0]).is_empty(), "a picture");
+        let kinds = |flat: bool| {
+            REPLAYS_TRANSLUCENT_TEXT.set(flat);
+            let mut canvas = program(&steps, false, true).canvas;
+            REPLAYS_TRANSLUCENT_TEXT.set(true);
+            let page = canvas.page(0).expect("a page").inner.page();
+            let kind = |entry: &layer::Layer| match entry {
+                layer::Layer::ReplayedText(_) => "text",
+                entry if !recordings(entry).is_empty() => "picture",
+                _ => "other",
+            };
+            page.layers
+                .iter()
+                .map(|entry| match entry {
+                    layer::Layer::Clipped(piece) => {
+                        format!("clipped {}", kind(piece.entry()))
+                    }
+                    entry => kind(entry).to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(false), ["picture"], "the page's entries");
+        assert_eq!(
+            kinds(true),
+            ["picture", "clipped picture", "clipped text", "picture"],
+            "the page's entries, its run flat"
+        );
     }
 
     #[test]

@@ -65,7 +65,7 @@ use crate::{
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
-        typography::{DrawnText, RunPaint, WholeRuns},
+        typography::{DrawnText, HeldGroup, RunPaint, WholeRuns, held_groups},
         utils::{color_space_name, skia_paint_color_onto_own},
     },
     pixels::PixelColorSpace,
@@ -724,6 +724,12 @@ thread_local! {
     pub(crate) static COVERAGE_ROUTE: Cell<bool> = const { Cell::new(true) };
     /// How many blurred draws played on this thread took the coverage route.
     pub(crate) static COVERAGE_RUNS: Cell<usize> = const { Cell::new(0) };
+    /// How many translucent runs played on this thread were drawn from their
+    /// coverage -- see [`FlatRun`].
+    pub(crate) static FLAT_RUNS: Cell<usize> = const { Cell::new(0) };
+    /// The device pixels the planes of the translucent runs drawn from their
+    /// coverage on this thread were read over, joined.
+    pub(crate) static FLAT_REGION: Cell<Option<IRect>> = const { Cell::new(None) };
     /// How many shadows played on this thread were cast from a run's opaque
     /// copy -- see [`chain::Cast`].
     pub(crate) static CAST_RUNS: Cell<usize> = const { Cell::new(0) };
@@ -909,7 +915,7 @@ const PLACED_MARGIN_LEVELS: f64 = 0.5 - GPU_HALF_ROUNDING_LEVELS;
 /// Skia rounds a paint's own colour
 /// (`SkRasterPipeline::append_constant_color`): a fraction of 255, so that it
 /// multiplies onto a whole byte.
-fn byte_alpha(alpha: f32) -> f32 {
+pub(crate) fn byte_alpha(alpha: f32) -> f32 {
     let levels = f32::from(u8::MAX);
     (alpha.clamp(0.0, 1.0) * levels + 0.5).trunc() / levels
 }
@@ -1932,10 +1938,50 @@ pub struct ReplayedText {
     /// reading the page back for the run draws on the CPU with it -- see
     /// [`replayed_on_their_backdrop`].
     pub cast_before: bool,
+    /// The run's one flat colour, where it is translucent, which an
+    /// eight-bit page on the CPU paints from the run's coverage -- see
+    /// [`FlatRun`].
+    pub flat: Option<FlatRun>,
     /// Where the thread that filed it counts the recordings
     /// [`Self::recorded`] makes -- see [`REPLAYED_WATCH`].
     #[cfg(test)]
     pub watch: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+/// A translucent run of text in one flat colour, kept so that an eight-bit
+/// page on the CPU lands each pixel's alpha on the exact product of the
+/// paint's alpha and the glyph's coverage, `round(a * c / 255)`, and each
+/// premultiplied channel on the colour times that, rounded once, as a GPU
+/// canvas does.
+///
+/// Skia's raster blit of a glyph mask onto eight bits a channel multiplies
+/// the two as `a * (c + 1) >> 8` (Skia M156, `blit_mask_d32_a8_general` in
+/// `src/opts/SkBlitMask_opts.h`, through `SkAlphaMulQ` and
+/// `SkAlpha255To256`), a level under the exact product on about one covered
+/// pixel in ten of a run at 0.3; Chrome's software canvas lands the same, and
+/// its accelerated one the exact product -- see `docs/browser-differences.md`.
+/// So on such a page the run is drawn opaque into a plane of the page's own
+/// type, whose alpha is its coverage, coloured from it -- see
+/// `chain::coverage::coloured` -- and composited through the run's blend and
+/// the page's clip, as a blurred run is from its coverage -- see
+/// [`CoverageRun`]: a group of its glyphs at a time where glyphs share a
+/// pixel, so that the later is composited over the earlier, as the raster
+/// composites a blob's glyphs -- see `typography::held_groups`.
+///
+/// The plane is drawn in [`Self::opaque`], the colour the run was named in,
+/// and not the colour [`ReplayedText::paint`] places for the page's bytes:
+/// Skia pre-blends a glyph mask by the paint's colour -- see
+/// `chain::coverage::Plane` -- and the placed colour for grey at 0.3 is in
+/// another table's bucket, which left 2,815 of 8,484 pixels of a 44px Oswald
+/// run off the product Skia's blit makes of the named grey's coverage.
+#[derive(Clone, Debug)]
+pub struct FlatRun {
+    /// The colour, held exactly in the page's space.
+    pub exact: ExactColour,
+    /// The alpha the run is drawn at, `globalAlpha` included.
+    pub alpha: f32,
+    /// The run's paint in the colour it was named in, opaque.
+    pub opaque: Paint,
 }
 
 #[cfg(test)]
@@ -2040,6 +2086,104 @@ impl ReplayedText {
         Some(IRect::intersect(&inked.round_out(), &clip).unwrap_or_default())
     }
 
+    /// Draws `replay`, the run, onto `canvas` from its coverage, where it is
+    /// translucent in one flat colour and `canvas` is an eight-bit page on
+    /// the CPU in the colour's space -- see [`FlatRun`] -- and reports
+    /// whether it did. Not through a layer for a blend that covers beyond
+    /// the draw, whose own composite would round the run again.
+    fn drawn_flat(&self, canvas: &SkCanvas, replay: &Replay) -> bool {
+        let Some(flat) = &self.flat else {
+            return false;
+        };
+        if self.blend.is_some() || !coverage_plays(canvas, &flat.exact, false) {
+            return false;
+        }
+        // The run's draws held rather than made -- a group of its glyphs at
+        // a time, no two of which ink a pixel in common -- and what each can
+        // ink in the page's device pixels: from the blobs a raster keeps, so
+        // that nothing builds them again -- see `RunPaint::paint`.
+        canvas.save();
+        let groups = held_groups(canvas, || {
+            replay.draw(canvas, &self.matrix, &flat.opaque);
+        });
+        canvas.restore();
+        // Skia bounds a glyph at the font's own size, unhinted, and FreeType
+        // hints it at the size it is drawn -- see [`Self::ink_under`].
+        let Some(ink) = groups
+            .iter()
+            .map(HeldGroup::bounds)
+            .reduce(Rect::join2)
+            .map(|ink| {
+                ink.with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT))
+                    .round_out()
+            })
+        else {
+            return false;
+        };
+        // The colour placed for a fill at the alpha -- see
+        // [`ExactColour::at`] -- so that each pixel is a fill's
+        // premultiplied bytes times the coverage, rounded once: what a GPU
+        // canvas draws the run's paint as, and what a fill of the colour
+        // stores where the run covers a pixel whole.
+        let (rgb, gain) =
+            (flat.exact.at(flat.alpha).0.rgb, byte_alpha(flat.alpha));
+        // Through the run's blend alone: its paint carries the colour, and
+        // on a page in another space than sRGB a colour filter that places
+        // it -- see `Context2D::exact_text_paint` -- which would recolour
+        // the coloured image again.
+        let mut through = Paint::default();
+        through
+            .set_anti_alias(true)
+            .set_blend_mode(self.paint.blend_mode_or(BlendMode::SrcOver));
+        let composited = |draw: &dyn Fn(&SkCanvas)| {
+            chain::coverage::unblurred(
+                canvas,
+                ink,
+                chain::coverage::Plane::Alpha,
+                draw,
+            )
+            .and_then(|coverage| {
+                #[cfg(test)]
+                FLAT_REGION.set(Some(
+                    FLAT_REGION.get().map_or(coverage.region(), |region| {
+                        IRect::join(&region, &coverage.region())
+                    }),
+                ));
+                chain::coverage::coloured(
+                    canvas,
+                    &coverage.unblurred(),
+                    rgb,
+                    gain,
+                )
+            })
+            .map(|outcome| outcome.composite(canvas, &through))
+            .is_some()
+        };
+        // A group of the run's glyphs at a time, no two of which ink a pixel
+        // in common, each from its own coverage and composited over the
+        // groups before it, as a raster composites a blob's glyphs one after
+        // another: drawn as one coverage, glyphs that overlap would cover
+        // their shared pixels once where the page covers them twice -- 79
+        // levels from Oswald's run at -12px of letter spacing. A run whose
+        // glyphs share no pixel is one group.
+        //
+        // A group that inks nothing the clip shows composites nothing, which
+        // drawing it as it stands leaves alone too. `false` where no group
+        // composited, a plane not made among the reasons.
+        // Counted rather than asked with `any`, which would stop at the
+        // first group composited and leave the rest undrawn.
+        let drawn = groups
+            .iter()
+            .filter(|group| composited(&|plane| group.draw(plane)))
+            .count()
+            > 0;
+        #[cfg(test)]
+        if drawn {
+            FLAT_RUNS.set(FLAT_RUNS.get() + 1);
+        }
+        drawn
+    }
+
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         // Its runs join a batch only where nothing of its own lies between
         // them and the page: no clip, no layer for a blend, no shadow
@@ -2072,7 +2216,9 @@ impl ReplayedText {
                     shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
                     canvas.restore();
                 }
-                if let Some(replay) = &self.replay {
+                if let Some(replay) = &self.replay
+                    && !self.drawn_flat(canvas, replay)
+                {
                     canvas.save();
                     replay.draw(canvas, &self.matrix, &self.paint);
                     canvas.restore();
@@ -4266,7 +4412,8 @@ impl Group {
                 // rounded its alpha to a byte before the blur and again
                 // after. A translucent run's `drop-shadow()` is cast from it
                 // drawn opaque for the same reason, the run itself still
-                // drawn translucent over it -- see `chain::Cast`.
+                // drawn translucent over it, as the page draws it -- see
+                // `chain::Cast` and [`FlatRun`].
                 let opaque = coverage
                     .as_deref()
                     .filter(|_| eight_bits(canvas))
@@ -9289,7 +9436,10 @@ mod shadow_run_tests {
 
     use super::CAST_RUNS;
     use crate::{
-        EngineKind, context::exact_blur, pixels::PixelDepth, prelude::*,
+        EngineKind,
+        context::{REPLAYS_TRANSLUCENT_TEXT, exact_blur},
+        pixels::PixelDepth,
+        prelude::*,
     };
 
     /// The family Oswald is registered under for these runs, so that it
@@ -9588,6 +9738,55 @@ mod shadow_run_tests {
             }
         }
         assert!(apart.is_empty(), "pixels off the exact shadow: {apart:#?}");
+    }
+
+    #[test]
+    fn a_translucent_run_casting_a_shadow_apart_is_drawn_as_casting_none() {
+        // A run casting a `shadowColor` shadow under a `drop-shadow()` of
+        // its own has the shadow filed apart and is run through its filter's
+        // chain as a run casting none -- see `Context2D::render_to_canvas`
+        // -- so it is drawn from its coverage as that run is: cast off the
+        // page, the shadow leaves the two pages alike.
+        use super::FLAT_RUNS;
+        FontLibrary::new()
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let drawn = |shadow: bool| {
+            let mut canvas = Canvas::with_options(
+                PAGE.0 as f32,
+                PAGE.1 as f32,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(SIXTY));
+            ctx.set_fill_style_css(TRANSLUCENT.fill).expect("a colour");
+            ctx.set_filter_css(TRANSLUCENT.filter).expect("a filter");
+            if shadow {
+                ctx.set_shadow_color_css("black").expect("a colour");
+                // A page's height and more below the run: off the page.
+                ctx.set_shadow_offset(0.0, (2 * PAGE.1) as f32);
+            }
+            let before = FLAT_RUNS.get();
+            ctx.fill_text("Hamburgefonstiv", AT.0, AT.1, None);
+            let pixels = canvas
+                .to_image_data(None, &ImageDataExport::default())
+                .expect("pixels")
+                .pixels()
+                .to_vec();
+            (pixels, FLAT_RUNS.get() - before)
+        };
+        let (alone, flat) = drawn(false);
+        assert!(flat > 0, "the control: the run casting none is not flat");
+        let (casting, flat) = drawn(true);
+        assert!(casting == alone, "the run casting a shadow parts");
+        assert!(flat > 0, "the run casting a shadow is not drawn flat");
     }
 
     #[test]
@@ -10018,6 +10217,19 @@ mod shadow_run_tests {
         pages(&[page], filter, false).remove(0).pixels
     }
 
+    /// Has this thread record a translucent run as Skia blits it -- see
+    /// `REPLAYS_TRANSLUCENT_TEXT` -- for a test that needs two runs alike
+    /// in their input and not in their cast. Blitted, an alpha of a byte of
+    /// 1 lands only the pixels a run covers whole -- `(a * (c + 1)) >> 8` --
+    /// where drawn from its coverage it lands every pixel covered by half,
+    /// and no two runs searched here then land alike. The cast is filed by
+    /// the same key either way, and a run the flat route leaves -- dithered,
+    /// naming a line colour, on a page that does not place its colour on
+    /// its bytes -- is drawn as blitted.
+    fn as_skia_blits() {
+        REPLAYS_TRANSLUCENT_TEXT.set(false);
+    }
+
     #[test]
     fn a_shadow_cast_from_a_kept_run_is_taken_without_drawing_its_cast() {
         // A run is kept from its second draw -- see `Typesetter::laid_out`
@@ -10075,6 +10287,7 @@ mod shadow_run_tests {
         // 30.3 lies 242.4 eighths of a pixel in, short of 243, an odd eighth
         // its placement turns at: 30.33 lies in its class, 30.4 past it in
         // the next -- see `run_mask::PLACEMENT_STEPS`.
+        as_skia_blits();
         let filter = TRANSLUCENT.filter;
         let at = |x: f32| Page {
             text: "I",
@@ -10287,6 +10500,7 @@ mod shadow_run_tests {
         // an alpha of a byte of 1 lands, as they were and its edges moved.
         // Only where the run lies tells the two casts apart.
         use crate::context::run_mask::{CAST_EXACTLY, PLACEMENT_STEPS};
+        as_skia_blits();
         let at = |x: f32, fill| Page {
             text: "I",
             font: SIXTY,
@@ -10334,6 +10548,7 @@ mod shadow_run_tests {
         // "I" in Oswald at another weight: another run, its stem's edges
         // elsewhere, its whole pixels -- all an alpha of a byte of 1 lands
         // -- the same. Only the run in the cast's key tells them apart.
+        as_skia_blits();
         fn at<'a>(font: &'a str, fill: &'a str) -> Page<'a> {
             Page {
                 text: "I",
@@ -10366,6 +10581,7 @@ mod shadow_run_tests {
         // but whose masks Skia blends by their luminance otherwise -- see
         // `CoverageRun` -- so that their copies cover otherwise. Only the
         // paint in the cast's key tells them apart.
+        as_skia_blits();
         let fills: Vec<(String, String)> = (128..=255)
             .step_by(4)
             .map(|level| {
@@ -10400,6 +10616,7 @@ mod shadow_run_tests {
         // same cast. Their shadows, rounded once from the coverage times
         // the alpha, are a level apart where the coverage is near half:
         // only the alpha in the cast's key tells them apart.
+        as_skia_blits();
         let filter = "drop-shadow(3px 2px 1px black)";
         let at = |fill| Page {
             text: "iiiiiiii",

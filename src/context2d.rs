@@ -5743,7 +5743,8 @@ mod overlapping_glyph_tests {
         filter::BlurStyle,
         font::FontLibrary,
         node::typography::{
-            GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws, forget_laid_out,
+            GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GLYPHS_HELD_APART, GlyphDraws,
+            forget_laid_out,
         },
         paint::BlendMode::*,
         pixels::PixelDepth,
@@ -5966,12 +5967,15 @@ mod overlapping_glyph_tests {
                 .flat_map(|run| SCENES.map(|scene| (run, scene)))
             {
                 GLYPHS_DRAWN_ALONE.set(0);
+                GLYPHS_HELD_APART.set(0);
                 GLYPH_DRAWS_FOR.set(Some(GlyphDraws::Each));
                 let alone = drawn(false, run, blend, scene);
                 GLYPH_DRAWS_FOR.set(None);
                 // Each glyph drawn alone, in every recording and onto every
-                // canvas the run is drawn on.
-                let (glyphs, each) = (GLYPHS_DRAWN_ALONE.get(), run.2);
+                // canvas the run is drawn on -- or, a translucent run drawn
+                // from its coverage, held alone, onto a plane of its own.
+                let (glyphs, each) =
+                    (GLYPHS_DRAWN_ALONE.get() + GLYPHS_HELD_APART.get(), run.2);
                 assert!(
                     glyphs >= each && glyphs % each == 0,
                     "{} {blend:?} {scene:?}: {glyphs} glyphs drawn alone",
@@ -8829,5 +8833,730 @@ mod recording_tests {
         }
         FORKS_LAZILY.set(true);
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod translucent_text_tests {
+    //! Translucent text in one flat colour, whose every pixel's alpha is the
+    //! exact product of the paint's alpha and the glyph's coverage on an
+    //! eight-bit page on the CPU -- see `layer::FlatRun` -- as it is on the
+    //! GPU.
+    use std::iter::zip;
+
+    use skia_safe::{Contains, Rect};
+
+    use super::{Canvas, CanvasOptions};
+    use crate::{
+        canvas::EngineKind,
+        context::{
+            REPLAYS_TRANSLUCENT_TEXT,
+            layer::{COVERAGE_ROUTE, FLAT_REGION, FLAT_RUNS, HINTED_INK_DRIFT},
+        },
+        export::{EncodeOptions, ImageFormat},
+        font::FontLibrary,
+        gpu::RenderingEngine,
+        paint::BlendMode,
+        path::FillRule,
+        pixels::{
+            ImageDataExport, PixelColorSpace, PixelDepth, PixelExportOptions,
+        },
+    };
+
+    const W: f32 = 360.0;
+    const H: f32 = 120.0;
+
+    /// The colours drawn: the issue's two, and a grey, whose colour placed
+    /// for the page's bytes at 0.3 Skia pre-blends through another of its
+    /// tables than the grey named -- see `layer::FlatRun`.
+    const COLOURS: [[u8; 3]; 3] =
+        [[20, 60, 200], [200, 80, 30], [128, 128, 128]];
+
+    /// What a scene draws the run under besides its colour.
+    #[derive(Clone, Copy, Debug)]
+    struct Scene {
+        /// The colour's own alpha.
+        alpha: f32,
+        /// `globalAlpha`.
+        global: f32,
+        /// Stroked rather than filled.
+        stroke: bool,
+        /// Under a circle clip, anti-aliased.
+        clipped: bool,
+        /// Under a rotation.
+        turned: bool,
+        blend: BlendMode,
+        /// The page drawn into another canvas, which is read.
+        nested: bool,
+        /// The density the page is read at.
+        density: u32,
+        /// The page's space, which the colour is named in.
+        space: PixelColorSpace,
+        /// Drawn dithered.
+        dither: bool,
+    }
+
+    /// Plain source-over text at `alpha` on an sRGB page.
+    const fn plain(alpha: f32) -> Scene {
+        Scene {
+            alpha,
+            global: 1.0,
+            stroke: false,
+            clipped: false,
+            turned: false,
+            blend: BlendMode::SourceOver,
+            nested: false,
+            density: 1,
+            space: PixelColorSpace::Srgb,
+            dither: false,
+        }
+    }
+
+    /// The scenes held to the exact product over a transparent page.
+    const SCENES: [Scene; 12] = [
+        plain(0.3),
+        plain(0.6),
+        Scene {
+            global: 0.5,
+            ..plain(0.6)
+        },
+        Scene {
+            stroke: true,
+            ..plain(0.3)
+        },
+        Scene {
+            clipped: true,
+            ..plain(0.3)
+        },
+        Scene {
+            turned: true,
+            ..plain(0.3)
+        },
+        Scene {
+            blend: BlendMode::Multiply,
+            ..plain(0.55)
+        },
+        Scene {
+            blend: BlendMode::Lighter,
+            ..plain(0.3)
+        },
+        Scene {
+            nested: true,
+            ..plain(0.3)
+        },
+        Scene {
+            density: 2,
+            ..plain(0.3)
+        },
+        Scene {
+            space: PixelColorSpace::DisplayP3,
+            ..plain(0.3)
+        },
+        Scene {
+            space: PixelColorSpace::DisplayP3,
+            ..plain(0.6)
+        },
+    ];
+
+    /// Registers the face the scenes draw in, once on each thread: a face
+    /// another test thread registered is not found on this one.
+    fn register() {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if REGISTERED.replace(true) {
+            return;
+        }
+        FontLibrary::new()
+            .register_font_from_path(
+                "TranslucentOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled face registers");
+    }
+
+    /// The canvas `scene` draws its run onto in `rgb`, named in the page's
+    /// space, opaque where `opaque`, over a page of two colours where
+    /// `background`.
+    fn canvas(
+        gpu: bool,
+        depth: PixelDepth,
+        rgb: [u8; 3],
+        scene: Scene,
+        opaque: bool,
+        background: bool,
+    ) -> Canvas {
+        register();
+        let options = CanvasOptions {
+            gpu,
+            color_type: depth,
+            color_space: scene.space,
+            ..CanvasOptions::default()
+        };
+        let mut canvas =
+            Canvas::with_options(W, H, options.clone()).expect("a canvas");
+        let ctx = canvas.context();
+        if background {
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgba(30,120,90,0.7)")
+                .expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+        }
+        if scene.clipped {
+            ctx.begin_path();
+            ctx.arc(150.3, 60.2, 52.7, 0.0, std::f32::consts::TAU, false)
+                .expect("an arc");
+            ctx.clip(FillRule::NonZero);
+        }
+        if scene.turned {
+            ctx.translate(20.0, 10.0);
+            ctx.rotate(0.13);
+        }
+        ctx.set_global_composite_operation(scene.blend);
+        let (alpha, global) = match opaque {
+            true => (1.0, 1.0),
+            false => (scene.alpha, scene.global),
+        };
+        ctx.set_global_alpha(global);
+        ctx.set_dither(scene.dither);
+        let ink = named(rgb, alpha, scene.space);
+        ctx.set_fill_style_css(&ink).expect("a colour");
+        ctx.set_stroke_style_css(&ink).expect("a colour");
+        ctx.set_line_width(1.5);
+        assert!(ctx.set_font_css("44px TranslucentOswald"));
+        for (text, y) in [("Hamburgefonstiv", 50.6), ("Wq jaxy Rg", 104.3)] {
+            match scene.stroke {
+                true => ctx.stroke_text(text, 10.3, y, None),
+                false => ctx.fill_text(text, 10.3, y, None),
+            }
+        }
+        if !scene.nested {
+            return canvas;
+        }
+        let mut into = Canvas::with_options(W, H, options).expect("a canvas");
+        into.context().draw_canvas(&mut canvas, 0.0, 0.0);
+        into
+    }
+
+    /// The premultiplied bytes of `canvas`'s page at `density`, read in
+    /// `space`, the page's own, so that nothing is converted.
+    fn bytes(
+        canvas: &mut Canvas,
+        density: u32,
+        space: PixelColorSpace,
+    ) -> Vec<u8> {
+        canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    density,
+                    pixels: PixelExportOptions {
+                        color_space: space,
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("the page reads back")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The bytes of the page `scene` draws, on the GPU where `gpu`, over a
+    /// transparent page or a page of two colours where `background`.
+    fn drawn_on(
+        gpu: bool,
+        rgb: [u8; 3],
+        scene: Scene,
+        opaque: bool,
+        background: bool,
+    ) -> Vec<u8> {
+        let mut canvas =
+            canvas(gpu, PixelDepth::Uint8, rgb, scene, opaque, background);
+        let bytes = bytes(&mut canvas, scene.density, scene.space);
+        // A canvas that asks for the GPU falls back to the CPU where it
+        // cannot have one, and a comparison of the CPU with itself passes.
+        let engine = canvas.engine_kind();
+        assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+        bytes
+    }
+
+    /// The bytes of the page `scene` draws on the CPU over a transparent
+    /// page.
+    fn drawn(rgb: [u8; 3], scene: Scene, opaque: bool) -> Vec<u8> {
+        drawn_on(false, rgb, scene, opaque, false)
+    }
+
+    /// `alpha` on the byte an eight-bit page stores it on, rounded half up.
+    fn byte(alpha: f32) -> u32 {
+        (alpha * 255.0 + 0.5) as u32
+    }
+
+    /// The exact product of `a` and `c`, two bytes, rounded: 255 is odd, so
+    /// it never meets a tie.
+    fn product(a: u32, c: u32) -> u32 {
+        (2 * a * c + 255) / 510
+    }
+
+    /// The product Skia's eight-bit blit of a glyph mask lands,
+    /// `a * (c + 1) >> 8`: `SkAlphaMulQ(pmc, SkAlpha255To256(c))` in Skia
+    /// M156's `blit_mask_d32_a8_general`.
+    fn shifted(a: u32, c: u32) -> u32 {
+        (a * (c + 1)) >> 8
+    }
+
+    /// How many covered pixels a scene's alpha stands off `model` at, and
+    /// how many it covers, the coverage `c` of each read from the run
+    /// drawn opaque.
+    fn alpha_off(
+        opaque: &[u8],
+        translucent: &[u8],
+        a: u32,
+        model: fn(u32, u32) -> u32,
+    ) -> (usize, usize) {
+        zip(opaque.chunks(4), translucent.chunks(4))
+            .filter(|(o, _)| o[3] > 0)
+            .fold((0, 0), |(off, covered), (o, t)| {
+                let off_here = u32::from(t[3]) != model(a, u32::from(o[3]));
+                (off + usize::from(off_here), covered + 1)
+            })
+    }
+
+    /// `rgb` at `alpha`, named in `space`, as CSS.
+    fn named(rgb: [u8; 3], alpha: f32, space: PixelColorSpace) -> String {
+        let [r, g, b] = rgb.map(|c| f32::from(c) / 255.0);
+        let space = match space {
+            PixelColorSpace::DisplayP3 => "display-p3",
+            _ => "srgb",
+        };
+        format!("color({space} {r} {g} {b} / {alpha})")
+    }
+
+    /// The premultiplied pixel a fill of `rgb` stores under `scene`'s
+    /// alphas, on a page in its space: what the run lands where its
+    /// coverage is whole.
+    fn filled(rgb: [u8; 3], scene: Scene) -> [u8; 4] {
+        let mut canvas = Canvas::with_options(
+            1.0,
+            1.0,
+            CanvasOptions {
+                gpu: false,
+                color_space: scene.space,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        ctx.set_global_alpha(scene.global);
+        ctx.set_fill_style_css(&named(rgb, scene.alpha, scene.space))
+            .expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+        let bytes = bytes(&mut canvas, 1, scene.space);
+        [bytes[0], bytes[1], bytes[2], bytes[3]]
+    }
+
+    /// How far each covered pixel of `translucent` stands off `fill`, the
+    /// premultiplied pixel a fill of its colour stores, times the coverage
+    /// `opaque` reads, rounded once, the most of its four values.
+    fn apart(
+        opaque: &[u8],
+        translucent: &[u8],
+        fill: [u8; 4],
+    ) -> Vec<Option<u32>> {
+        zip(opaque.chunks(4), translucent.chunks(4))
+            .map(|(o, t)| {
+                let c = u32::from(o[3]);
+                (c > 0).then(|| {
+                    zip(fill, t)
+                        .map(|(f, t)| {
+                            u32::from(*t).abs_diff(product(u32::from(f), c))
+                        })
+                        .max()
+                        .unwrap_or(0)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn translucent_text_lands_the_exact_product_on_the_cpu() {
+        let mut problems = vec![];
+        for (rgb, scene) in
+            COLOURS.into_iter().flat_map(|rgb| SCENES.map(|s| (rgb, s)))
+        {
+            let opaque = drawn(rgb, scene, true);
+            FLAT_RUNS.set(0);
+            let translucent = drawn(rgb, scene, false);
+            // Each line of the run, drawn from its coverage.
+            assert!(FLAT_RUNS.get() >= 2, "{rgb:?} {scene:?}: the route");
+            let fill = filled(rgb, scene);
+            assert_eq!(
+                u32::from(fill[3]),
+                byte(scene.alpha * scene.global),
+                "{rgb:?} {scene:?}: a fill's alpha"
+            );
+            let apart = apart(&opaque, &translucent, fill);
+            let covered = apart.iter().flatten().count();
+            // Thousands, or the scene holds nothing to fail.
+            assert!(covered > 3000, "{rgb:?} {scene:?}: {covered} covered");
+            // Where an anti-aliased clip's edge crosses the run, Skia applies
+            // the clip's coverage to the coloured run as it composites it,
+            // which rounds each value once more: within a level there. The
+            // edge is where the clip changes the opaque run's coverage, which
+            // a fill under the clip does not find: Skia covers a glyph mask
+            // under a clip otherwise than a rectangle. Elsewhere, exact.
+            let unclipped = match scene.clipped {
+                true => drawn(
+                    rgb,
+                    Scene {
+                        clipped: false,
+                        ..scene
+                    },
+                    true,
+                ),
+                false => opaque.clone(),
+            };
+            let edges = zip(opaque.chunks(4), unclipped.chunks(4))
+                .map(|(clipped, whole)| clipped[3] != whole[3]);
+            // Where two of the run's glyphs share a pixel, the second is
+            // composited over the first, as a raster composites a blob's
+            // glyphs, and the pixel is no one product of the run's coverage:
+            // left to the tests against the GPU, which composites them so as
+            // well. Found as where the run drawn opaque under `lighter`,
+            // which adds the glyphs' coverage, parts from it drawn
+            // `source-over`, which does not.
+            let opaque_in = |blend| drawn(rgb, Scene { blend, ..scene }, true);
+            let (over, added) = (
+                opaque_in(BlendMode::SourceOver),
+                opaque_in(BlendMode::Lighter),
+            );
+            let shared = zip(over.chunks(4), added.chunks(4))
+                .map(|(over, added)| over[3] != added[3]);
+            let (mut off, mut on_edge, mut overlaps) = (0, 0, 0);
+            for ((apart, edge), shared) in zip(zip(&apart, edges), shared) {
+                let Some(apart) = apart else { continue };
+                if shared {
+                    overlaps += 1;
+                    continue;
+                }
+                on_edge += usize::from(edge);
+                off += usize::from(*apart > u32::from(edge));
+            }
+            // A handful where kerning brings two glyphs' edges together, or
+            // the run's overlaps are what is being tested.
+            assert!(overlaps < 20, "{rgb:?} {scene:?}: {overlaps} shared");
+            if scene.clipped {
+                assert!(on_edge > 100, "{rgb:?}: {on_edge} on the clip's edge");
+            }
+            if off > 0 {
+                problems.push(format!(
+                    "{rgb:?} {scene:?}: {off} of {covered} pixels off"
+                ));
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// A translucent run is covered on a plane over its own ink, not over
+    /// the page: drawing one is a pass over the pixels it can ink, however
+    /// large the page it lies on.
+    #[test]
+    fn a_translucent_runs_plane_spans_its_ink_not_the_page() {
+        /// How far past the ink `measureText` reports a run's glyph boxes
+        /// may stand, in pixels: chosen, room for the 2.7 measured beyond
+        /// the drift for 44px Oswald, and two orders of magnitude short of
+        /// the page the test draws on.
+        const GLYPH_BOX_MARGIN: f32 = 6.0;
+        register();
+        const TEXT: &str = "Hamburgefonstiv";
+        let (x, y) = (900.3, 1000.6);
+        let mut canvas = Canvas::with_options(
+            2000.0,
+            2000.0,
+            CanvasOptions {
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css("44px TranslucentOswald"));
+        ctx.set_fill_style_css("rgba(30,120,90,0.3)")
+            .expect("a colour");
+        let ink = ctx.measure_text(TEXT, None);
+        ctx.fill_text(TEXT, x, y, None);
+        FLAT_RUNS.set(0);
+        FLAT_REGION.set(None);
+        bytes(&mut canvas, 1, PixelColorSpace::Srgb);
+        assert_eq!(FLAT_RUNS.get(), 1, "the route");
+        let region = FLAT_REGION.get().expect("a plane");
+        // The run's ink box as `measureText` reports it, widened by the
+        // drift the plane allows for and the margin the glyphs' own boxes,
+        // which bound the plane, stand past that ink: 4.7 pixels at most
+        // here.
+        let reach = HINTED_INK_DRIFT + GLYPH_BOX_MARGIN;
+        let bound = Rect::new(
+            x - ink.actual_bounding_box_left - reach,
+            y - ink.actual_bounding_box_ascent - reach,
+            x + ink.actual_bounding_box_right + reach,
+            y + ink.actual_bounding_box_descent + reach,
+        );
+        assert!(
+            bound.contains(Rect::from(region)),
+            "a plane over {region:?} for a run inking {bound:?}"
+        );
+    }
+
+    #[test]
+    fn without_the_route_translucent_text_lands_skias_shifted_product() {
+        // The control: the same scenes, the route off, land the product
+        // Skia's blit does on every pixel, and stand off the exact one.
+        COVERAGE_ROUTE.set(false);
+        for rgb in COLOURS {
+            let scene = plain(0.3);
+            let (opaque, translucent) =
+                (drawn(rgb, scene, true), drawn(rgb, scene, false));
+            let a = byte(scene.alpha);
+            let (shifted_off, _) = alpha_off(&opaque, &translucent, a, shifted);
+            let (exact_off, covered) =
+                alpha_off(&opaque, &translucent, a, product);
+            assert!(exact_off > 100, "{rgb:?}: {exact_off} of {covered}");
+            // Grey at 0.3 is drawn in the colour placed for the page's
+            // bytes, which Skia pre-blends through another table than the
+            // grey named, so its coverage is not the opaque run's either --
+            // see `layer::FlatRun`.
+            if rgb != [128, 128, 128] {
+                assert_eq!(shifted_off, 0, "{rgb:?}");
+            }
+        }
+        COVERAGE_ROUTE.set(true);
+    }
+
+    #[test]
+    fn translucent_text_kept_whole_draws_as_before_everywhere_else() {
+        // Kept whole or recorded as it is drawn -- see
+        // `REPLAYS_TRANSLUCENT_TEXT` -- a run in source-over lands the same
+        // bytes on every target but an eight-bit page on the CPU: the GPU, a
+        // float page, the CPU with the route off, a PDF and an SVG, and an
+        // opaque run anywhere; a dithered run, whose colour varies from pixel
+        // to pixel, lands them on every target. A run in a blend read in the
+        // shader is drawn
+        // on the CPU on a GPU canvas -- see the test after next -- and a
+        // document rasterizes one in a blend it cannot write, `lighter`
+        // among them, on the CPU too.
+        let gpu = RenderingEngine::GPU.selectable();
+        let scenes = [
+            plain(0.3),
+            Scene {
+                stroke: true,
+                ..plain(0.3)
+            },
+            Scene {
+                clipped: true,
+                ..plain(0.3)
+            },
+            Scene {
+                space: PixelColorSpace::DisplayP3,
+                ..plain(0.3)
+            },
+            Scene {
+                dither: true,
+                ..plain(0.3)
+            },
+        ];
+        let mut problems = vec![];
+        for (rgb, scene) in
+            COLOURS.into_iter().flat_map(|rgb| scenes.map(|s| (rgb, s)))
+        {
+            let both = |made: &dyn Fn() -> Vec<u8>| {
+                REPLAYS_TRANSLUCENT_TEXT.set(false);
+                let recorded = made();
+                REPLAYS_TRANSLUCENT_TEXT.set(true);
+                (recorded, made())
+            };
+            /// A target named, and what it lands.
+            type Target = (&'static str, Box<dyn Fn() -> Vec<u8>>);
+            let mut targets: Vec<Target> = vec![
+                ("opaque", Box::new(move || drawn(rgb, scene, true))),
+                (
+                    "route off",
+                    Box::new(move || {
+                        COVERAGE_ROUTE.set(false);
+                        let bytes = drawn(rgb, scene, false);
+                        COVERAGE_ROUTE.set(true);
+                        bytes
+                    }),
+                ),
+                (
+                    "F16",
+                    Box::new(move || {
+                        let mut canvas = canvas(
+                            false,
+                            PixelDepth::F16,
+                            rgb,
+                            scene,
+                            false,
+                            false,
+                        );
+                        bytes(&mut canvas, 1, scene.space)
+                    }),
+                ),
+            ];
+            if scene.dither {
+                targets
+                    .push(("CPU", Box::new(move || drawn(rgb, scene, false))));
+            }
+            for format in [ImageFormat::Pdf, ImageFormat::Svg] {
+                targets.push((
+                    match format {
+                        ImageFormat::Pdf => "PDF",
+                        _ => "SVG",
+                    },
+                    Box::new(move || {
+                        canvas(
+                            false,
+                            PixelDepth::Uint8,
+                            rgb,
+                            scene,
+                            false,
+                            false,
+                        )
+                        .to_buffer(format, &EncodeOptions::default())
+                        .expect("encodes")
+                    }),
+                ));
+            }
+            if gpu {
+                targets.push((
+                    "GPU",
+                    Box::new(move || drawn_on(true, rgb, scene, false, false)),
+                ));
+                targets.push((
+                    "GPU over a page",
+                    Box::new(move || drawn_on(true, rgb, scene, false, true)),
+                ));
+            }
+            for (target, made) in &targets {
+                FLAT_RUNS.set(0);
+                let (recorded, kept) = both(made.as_ref());
+                if FLAT_RUNS.get() > 0 {
+                    problems.push(format!(
+                        "{rgb:?} {scene:?}: {target} took the route"
+                    ));
+                }
+                if recorded != kept {
+                    let apart =
+                        zip(&recorded, &kept).filter(|(a, b)| a != b).count();
+                    problems.push(format!(
+                        "{rgb:?} {scene:?}: {target} {apart} bytes apart"
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// Whether this machine's GPU canvas is Mesa's llvmpipe.
+    fn on_llvmpipe() -> bool {
+        crate::canvas::BackendInfo::query()
+            .device
+            .is_some_and(|device| device.contains("llvmpipe"))
+    }
+
+    /// How far a channel of the GPU canvas stood from the CPU canvas's on
+    /// Metal, where these scenes were measured, for a run filled at 0.3 and
+    /// 0.6 in blue and orange: 2 levels on a transparent page and 1 over a
+    /// page of two colours, on at most 125 and 3,247 bytes of the 172,800.
+    /// The GPU composites half floats, the CPU eight bits.
+    const METAL_LEVELS: u8 = 2;
+
+    /// How far elsewhere -- Mesa's llvmpipe on the Linux binding job, where
+    /// these scenes were not measured.
+    const UNMEASURED_LEVELS: u8 = 8;
+
+    #[test]
+    fn translucent_text_on_the_cpu_lands_within_a_level_or_two_of_the_gpu() {
+        if !RenderingEngine::GPU.selectable() {
+            // A Mac built with Metal always has a GPU, so there a missing one
+            // is a failure; a build without a GPU backend says the test did
+            // not run.
+            if cfg!(all(target_os = "macos", feature = "metal")) {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let llvmpipe = on_llvmpipe();
+        let bound = match llvmpipe {
+            true => UNMEASURED_LEVELS,
+            false => METAL_LEVELS,
+        };
+        // Grey, whose GPU draw covers the run otherwise than the grey named
+        // -- see `layer::FlatRun` -- is left out, as are strokes and
+        // clips, whose edges the GPU covers otherwise than the CPU, by up to
+        // 15 and 19 levels on Metal with the route or without it.
+        let mut problems = vec![];
+        for rgb in [COLOURS[0], COLOURS[1]] {
+            for (scene, background) in [plain(0.3), plain(0.6)]
+                .into_iter()
+                .flat_map(|scene| [(scene, false), (scene, true)])
+            {
+                let gpu = drawn_on(true, rgb, scene, false, background);
+                let apart = |cpu: &[u8]| {
+                    let apart = zip(cpu, &gpu).map(|(a, b)| a.abs_diff(*b));
+                    apart.fold((0, 0), |(n, most), d| {
+                        (n + usize::from(d > 0), most.max(d))
+                    })
+                };
+                let route =
+                    apart(&drawn_on(false, rgb, scene, false, background));
+                COVERAGE_ROUTE.set(false);
+                let main =
+                    apart(&drawn_on(false, rgb, scene, false, background));
+                COVERAGE_ROUTE.set(true);
+                // Measured on Metal: Skia's blit stood off the GPU on 3,573
+                // to 21,682 bytes, the route on 4 to 3,247.
+                let closer = llvmpipe || route.0 < main.0;
+                if route.1 > bound || !closer {
+                    problems.push(format!(
+                        "{rgb:?} {scene:?} over a page {background}: \
+                         {route:?} apart, Skia's blit {main:?}"
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
+    fn under_a_blend_read_in_the_shader_the_gpu_lands_the_cpus_bytes() {
+        // A run in a blend read in the shader is drawn on the CPU over the
+        // GPU's pixels read back -- see `layer::replayed_on_their_backdrop`
+        // -- and takes the route there too.
+        if !RenderingEngine::GPU.selectable() {
+            if cfg!(all(target_os = "macos", feature = "metal")) {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let scene = Scene {
+            blend: BlendMode::Multiply,
+            ..plain(0.55)
+        };
+        for (rgb, background) in COLOURS
+            .into_iter()
+            .flat_map(|rgb| [(rgb, false), (rgb, true)])
+        {
+            let cpu = drawn_on(false, rgb, scene, false, background);
+            FLAT_RUNS.set(0);
+            let gpu = drawn_on(true, rgb, scene, false, background);
+            assert!(FLAT_RUNS.get() >= 2, "{rgb:?}: the route on the GPU");
+            let apart = zip(&cpu, &gpu).filter(|(a, b)| a != b).count();
+            assert_eq!(apart, 0, "{rgb:?} over a page {background}");
+        }
     }
 }

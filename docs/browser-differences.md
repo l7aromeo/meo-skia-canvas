@@ -89,7 +89,10 @@ of those that store it on either engine -- see
 `ExactColour::nearest_text_paint` -- which keeps the named colour's contrast
 for all but 637 of the 65,025 pairs above, 456 of them at an alpha under 32
 levels. Those store the exact product inside the glyph, and their edges take
-the contrast of the bucket next to the named colour's.
+the contrast of the bucket next to the named colour's. On an eight-bit canvas
+on the CPU a translucent run in one flat colour takes its coverage from the
+named colour itself -- see the entry on translucent text below -- and a GPU
+canvas still from the colour placed for it.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS
@@ -211,6 +214,37 @@ upright; that is inferred, and Chrome on Linux was not measured. macOS and
 Windows draw text with CoreText and DirectWrite rather than FreeType, and are
 unchanged; macOS draws 85 degrees sheared through its glyph masks. The
 `UPSTREAM` note at `past_freetype_shear` carries the re-check.
+
+**Translucent text on an eight-bit CPU canvas lands the exact product of its
+alpha and the glyph's coverage, where Chrome's CPU canvas lands a level under
+it on about one covered pixel in ten.** Skia's raster blit of a glyph mask
+multiplies the premultiplied colour, alpha byte `a` included, by the
+coverage `c` as `(a × (c + 1)) >> 8` -- Skia M156's
+`blit_mask_d32_a8_general` in `src/opts/SkBlitMask_opts.h`, through
+`SkAlphaMulQ(pmc, SkAlpha255To256(c))` -- not `round(a × c / 255)`. On 60px
+Helvetica "Hamburgefonstiv", 8,427 pixels covered, Chrome 156's software
+canvas (`willReadFrequently`) lands the shifted
+product on every pixel and stands off the exact one on 698 at
+`rgba(20, 60, 200, 0.3)`, 571 at `rgba(200, 80, 30, 0.6)` and 814 at
+`rgba(128, 128, 128, 0.55)`; its accelerated canvas lands the exact product,
+as this library's GPU canvas does. Here a CPU canvas draws such a run opaque,
+reads its coverage, and lands each pixel on the premultiplied bytes a fill of
+the colour stores times the coverage, rounded once (`layer::FlatRun`) -- what
+the GPU canvas draws the run's paint as. Two differences remain. Where an
+anti-aliased clip's edge crosses the run, Skia applies the clip's coverage to
+the coloured run as it composites it, a second rounding: within a level on
+those pixels. And the coverage is the named colour's: Skia sets a glyph
+mask's contrast from the paint's colour, and the colour placed for the
+page's bytes can fall in another bucket -- grey 128 at 0.3, which left
+2,815 of 8,484 pixels of a 44px Oswald run off the product Skia's own blit
+makes of the named grey's coverage -- and a GPU canvas still draws in that
+bucket. A run under a `drop-shadow()`, or casting a `shadowColor` shadow,
+is drawn the same way above its shadow, and one under `blur()` is blurred
+from its coverage times its alpha. A run in a gradient or a pattern, under a
+blend that covers beyond the draw such as `copy`, dithered, holding colour
+glyphs, naming a line colour of its own, or under a filter the library
+leaves to Skia, such as `brightness()` alone, is blitted as Skia blits it,
+and so is every run on a float canvas, where nothing is rounded to a byte.
 
 **Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
 17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
