@@ -1981,6 +1981,9 @@ impl Context2D {
             bounds: self.bounds,
             document,
             clip: None,
+            // Where the run casts a shadow and does not cast it itself, it
+            // was cast just before, through a chain.
+            cast_before: self.casts_shadow() && !casts,
             #[cfg(test)]
             watch: layer::REPLAYED_WATCH.with_borrow(Clone::clone),
         });
@@ -2437,6 +2440,7 @@ impl Context2D {
                     bounds: self.bounds,
                     document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
+                    cast_before: false,
                     #[cfg(test)]
                     watch: None,
                 }))
@@ -2831,6 +2835,7 @@ impl Context2D {
             bounds: self.bounds,
             document: document.map(layer::ReplayedRecording::recorded),
             clip: None,
+            cast_before: false,
             #[cfg(test)]
             watch: None,
         }))

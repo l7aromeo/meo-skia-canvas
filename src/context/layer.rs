@@ -1808,6 +1808,12 @@ pub struct ReplayedText {
     /// The clip the run was drawn under, in device pixels of the recording,
     /// where it is not a piece of a run that applies it -- see [`Clipped`].
     pub clip: Option<Data>,
+    /// Whether the run's shadow was filed just before it, as a group cast
+    /// through a chain of its own -- see
+    /// `Context2D::files_shadow_through_chain` -- which a GPU playback
+    /// reading the page back for the run draws on the CPU with it -- see
+    /// [`replayed_on_their_backdrop`].
+    pub cast_before: bool,
     /// Where the thread that filed it counts the recordings
     /// [`Self::recorded`] makes -- see [`REPLAYED_WATCH`].
     #[cfg(test)]
@@ -3443,6 +3449,34 @@ impl Entries {
 }
 
 impl Group {
+    /// What the group's chain can draw on a canvas whose transform is
+    /// `device`, in that canvas's pixels: what its entries draw -- the
+    /// chain's own reach where it has one, as a run of text answers it, and
+    /// what the entries reach otherwise -- through the group's transforms,
+    /// widened by as far as its steps carry a pixel -- see
+    /// [`chain::canvas_reach`] -- at the device's scale, and a pixel either
+    /// side for anti-aliasing. Too wide only reads more of the page. `None`
+    /// for a group that runs no chain, or whose entries reach what the clip
+    /// allows.
+    pub(crate) fn chain_reach_under(&self, device: &Matrix) -> Option<IRect> {
+        let Composite::Chain { steps, reach, .. } = &self.composite else {
+            return None;
+        };
+        let drawn = reach.or_else(|| reach_of(&self.contents.layers))?;
+        let to_device = Matrix::concat(device, &self.contents_matrix);
+        let scale = device
+            .decompose_scale(None)
+            .map_or(1.0, |scale| scale.width.max(scale.height));
+        let spread = chain::canvas_reach(steps, &self.matrix) * scale;
+        Some(
+            to_device
+                .map_rect(drawn)
+                .0
+                .with_outset((spread.x + 1.0, spread.y + 1.0))
+                .round_out(),
+        )
+    }
+
     /// Confines `canvas` to the destination the group is drawn into --
     /// `within` -- which `to_device` maps to the canvas's pixels and the
     /// canvas carries as its transform when this is called.
@@ -4424,13 +4458,14 @@ fn drawn_on_their_backdrop(
 
 /// Plays the runs of text `entries` opens with, each under a blend read in
 /// the shader, a [`ReplayedText`] or a run dyed by a canvas pattern, alone
-/// or a piece of a clip's run -- see [`read_on_the_cpu`] -- onto a GPU
-/// canvas as the CPU draws them, over one read back of the pixels they
-/// ink -- see [`drawn_on_their_backdrop`]: on the CPU a run is drawn whole
-/// and composites each glyph over the last, where Ganesh, with no
-/// framebuffer fetch on Metal, copies the page for every draw that reads it
-/// and draws a run's overlapping glyphs in groups that share no pixel, each
-/// copy ending a render pass. How many entries it played, `0` where
+/// or a piece of a clip's run -- see [`read_on_the_cpu`] -- and each with
+/// the group casting its shadow where that was filed just before it -- see
+/// [`cpu_run_at`] -- onto a GPU canvas as the CPU draws them, over one read
+/// back of the pixels they ink -- see [`drawn_on_their_backdrop`]: on the CPU a
+/// run is drawn whole and composites each glyph over the last, where Ganesh,
+/// with no framebuffer fetch on Metal, copies the page for every draw that
+/// reads it and draws a run's overlapping glyphs in groups that share no pixel,
+/// each copy ending a render pass. How many entries it played, `0` where
 /// `entries` opens with no such run or the pixels cannot be read.
 ///
 /// The runs need not be consecutive. An entry between two of them joins the
@@ -4452,7 +4487,7 @@ fn replayed_on_their_backdrop(
     if !BACKDROP_ROUTE.get() {
         return 0;
     }
-    if entries.first().and_then(read_on_the_cpu).is_none() {
+    if entries.is_empty() || cpu_run_at(entries, 0).is_none() {
         return 0;
     }
     let device = canvas.local_to_device_as_3x3();
@@ -4491,30 +4526,72 @@ fn replayed_on_their_backdrop(
         BackdropReach::Device(reach) => *reach,
         BackdropReach::Local(reach) => device.map_rect(reach).0.round_out(),
     };
-    let mut runs: Vec<(usize, &Layer, BackdropReach)> = vec![];
+    let mut runs: Vec<CpuRun> = vec![];
     let mut between: Vec<IRect> = vec![];
-    for (at, entry) in entries.iter().enumerate() {
-        match read_on_the_cpu(entry) {
-            Some((run, within)) => {
-                let reach = reach_of_run(&run, within);
+    let mut at = 0;
+    while at < entries.len() {
+        match cpu_run_at(entries, at) {
+            Some((span, run, within)) => {
+                let last = at + span - 1;
+                // A shadow cast before the run is drawn with it, over what
+                // it reaches as well.
+                let reach = match (reach_of_run(&run, within), span) {
+                    (reach, 1) | (reach @ BackdropReach::Beyond, _) => reach,
+                    (reach, _) => {
+                        let Layer::Group(group) = &entries[at] else {
+                            break;
+                        };
+                        let Some(cast) = group.chain_reach_under(&device)
+                        else {
+                            break;
+                        };
+                        let inks = in_pixels(&reach);
+                        BackdropReach::Device(
+                            IRect::intersect(
+                                &IRect::new(
+                                    inks.left.min(cast.left),
+                                    inks.top.min(cast.top),
+                                    inks.right.max(cast.right),
+                                    inks.bottom.max(cast.bottom),
+                                ),
+                                &clip,
+                            )
+                            .unwrap_or_default(),
+                        )
+                    }
+                };
                 let inks = in_pixels(&reach);
                 if between.iter().any(|drawn| IRect::intersects(drawn, &inks)) {
                     break;
                 }
-                runs.push((at, entry, reach));
+                let clip_bounds = entries[at..=last]
+                    .iter()
+                    .filter_map(clip_path_bounds)
+                    .reduce(|mut all, bounds| {
+                        all.join(bounds);
+                        all
+                    });
+                runs.push(CpuRun {
+                    first: at,
+                    last,
+                    reach,
+                    clip: clip_bounds,
+                });
+                at = last + 1;
             }
             None if runs.is_empty() => break,
             None => {
-                let Some(reach) = entry.reach() else {
+                let Some(reach) = entries[at].reach() else {
                     break;
                 };
                 let drawn = device.map_rect(reach).0.round_out();
-                if runs.iter().any(|(_, _, reach)| {
-                    IRect::intersects(&in_pixels(reach), &drawn)
+                if runs.iter().any(|run| {
+                    IRect::intersects(&in_pixels(&run.reach), &drawn)
                 }) {
                     break;
                 }
                 between.push(drawn);
+                at += 1;
             }
         }
         #[cfg(test)]
@@ -4523,13 +4600,13 @@ fn replayed_on_their_backdrop(
         }
     }
     // The batch ends at its last run; the entries after it play as they do.
-    let Some(&(last, ..)) = runs.last() else {
+    let Some(last) = runs.last().map(|run| run.last) else {
         return 0;
     };
     // The entries between are those between each two runs of the batch.
     let mut between_played = false;
     for pair in runs.windows(2) {
-        let (from, to) = (pair[0].0 + 1, pair[1].0);
+        let (from, to) = (pair[0].last + 1, pair[1].first);
         if from < to {
             play_entries(
                 &entries[from..to],
@@ -4542,15 +4619,20 @@ fn replayed_on_their_backdrop(
     }
     let plays: Vec<_> = runs
         .iter()
-        .map(|&(_, entry, _)| {
-            move |raster: &SkCanvas| entry.playback(raster, Target::Pixels)
+        .map(|run| {
+            let drawn = &entries[run.first..=run.last];
+            move |raster: &SkCanvas| {
+                for entry in drawn {
+                    entry.playback(raster, Target::Pixels);
+                }
+            }
         })
         .collect();
     let draws: Vec<BackdropDraw<'_>> = zip(&runs, &plays)
-        .map(|((_, entry, reach), play)| BackdropDraw {
-            reach: reach.clone(),
+        .map(|(run, play)| BackdropDraw {
+            reach: run.reach.clone(),
             draw: play,
-            clip: read_on_the_cpu(entry).and_then(|(_, within)| within),
+            clip: run.clip,
         })
         .collect();
     // Where the pixels cannot be read, the runs are drawn as they are
@@ -4561,16 +4643,75 @@ fn replayed_on_their_backdrop(
         if !between_played {
             return 0;
         }
-        for &(_, entry, _) in &runs {
-            entry.playback(canvas, Target::Pixels);
+        for run in &runs {
+            for entry in &entries[run.first..=run.last] {
+                entry.playback(canvas, Target::Pixels);
+            }
         }
     }
-    for &(at, ..) in &runs {
-        if let Some(features) = features.get(at) {
-            pacing::played(canvas, offscreen_layers(&entries[at], *features));
+    for run in &runs {
+        let drawn = &entries[run.first..=run.last];
+        let paced = features.get(run.first..).unwrap_or_default();
+        for (entry, features) in zip(drawn, paced) {
+            pacing::played(canvas, offscreen_layers(entry, *features));
         }
     }
     last + 1
+}
+
+/// A run [`replayed_on_their_backdrop`] draws on the CPU: the entries from
+/// `first` to `last` -- the run, and the group casting its shadow where
+/// that was filed just before it -- what they can change, and the bounds of
+/// any clip path they apply themselves.
+struct CpuRun {
+    first: usize,
+    last: usize,
+    reach: BackdropReach,
+    clip: Option<Rect>,
+}
+
+/// The run `entries` holds at `at` that [`replayed_on_their_backdrop`]
+/// draws on the CPU -- see [`read_on_the_cpu`] -- how many entries it
+/// spans, and the bounds of the clip it is drawn under where it has one: a
+/// run alone, or the group a kept run's shadow is cast through followed by
+/// the run -- see [`ReplayedText::cast_before`] -- which the CPU page
+/// composites one after the other, as the raster then does. `None` for any
+/// other entry.
+fn cpu_run_at(
+    entries: &[Layer],
+    at: usize,
+) -> Option<(usize, KeptRun<'_>, Option<Rect>)> {
+    if let Some((run, within)) = read_on_the_cpu(&entries[at]) {
+        return Some((1, run, within));
+    }
+    let cast = matches!(&entries[at], Layer::Group(group)
+        if matches!(group.composite, Composite::Chain { .. }));
+    let next = entries.get(at + 1).filter(|next| match next {
+        Layer::ReplayedText(text) => text.cast_before,
+        Layer::Clipped(piece) => matches!(piece.entry(),
+            Layer::ReplayedText(text) if text.cast_before),
+        _ => false,
+    })?;
+    let (run, within) = read_on_the_cpu(next)?;
+    cast.then_some((2, run, within))
+}
+
+/// The bounds of a clip path `entry` applies itself, in the coordinates it
+/// is played back under: a piece's, or the clip a run or a pattern's draw
+/// holds where the page keeps no run of it. A group casting a run's shadow
+/// is filed under the clip the run is, and needs no bounds of its own.
+fn clip_path_bounds(entry: &Layer) -> Option<Rect> {
+    let bounds = |clip: &Option<Data>| {
+        clip.as_ref()
+            .and_then(Path::deserialize)
+            .map(|clip| *clip.bounds())
+    };
+    match entry {
+        Layer::Clipped(piece) => Some(piece.bounds),
+        Layer::ReplayedText(text) => bounds(&text.clip),
+        Layer::Pattern(draw) => bounds(&draw.clip),
+        _ => None,
+    }
 }
 
 /// A draw of text under a blend read in the shader that
@@ -4622,18 +4763,11 @@ fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
             _ => None,
         }
     }
-    let bounds = |clip: &Option<Data>| {
-        clip.as_ref()
-            .and_then(Path::deserialize)
-            .map(|clip| *clip.bounds())
-    };
     match entry {
         Layer::Clipped(piece) => {
             Some((kept(piece.entry())?, Some(piece.bounds)))
         }
-        Layer::ReplayedText(text) => Some((kept(entry)?, bounds(&text.clip))),
-        Layer::Pattern(draw) => Some((kept(entry)?, bounds(&draw.clip))),
-        _ => None,
+        entry => Some((kept(entry)?, clip_path_bounds(entry))),
     }
 }
 
@@ -4695,7 +4829,7 @@ pub(crate) fn play_entries(
         if paced {
             // A batch of colour runs still open draws when it closes: closed
             // first, so that the read back finds what it drew.
-            if read_on_the_cpu(&entries[at]).is_some() {
+            if cpu_run_at(entries, at).is_some() {
                 batch = None;
             }
             let played = replayed_on_their_backdrop(

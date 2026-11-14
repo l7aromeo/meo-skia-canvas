@@ -6713,6 +6713,117 @@ mod overlapping_glyph_tests {
     }
 
     /// A page of runs under a blend read in the shader, every line its own
+    /// run casting a shadow, drawn on the GPU reads the bytes it reads drawn
+    /// on the CPU, over one read back: each run's shadow is cast through a
+    /// chain of its own, filed just before the run -- see
+    /// `layer::ReplayedText::cast_before` -- and drawn on the CPU with the
+    /// run, rather than on the GPU between two runs, which would end the
+    /// batch at every line. Blurred, sharp, and blurred under a clip. A run
+    /// dyed by a pattern casting a shadow is not taken: its shadow's group
+    /// is drawn on the GPU, and each run reads the page back alone. Its
+    /// bytes are not compared: Ganesh composites the shadow under the blend
+    /// a level or three from the CPU, as it did every run's shadow before
+    /// the two were drawn together.
+    #[test]
+    fn a_page_of_runs_casting_shadows_is_drawn_on_the_cpu_over_one_read_back() {
+        use crate::context::layer::BACKDROPS_READ;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 8;
+        /// The shadows the runs cast.
+        const SHADOWS: [&str; 4] =
+            ["blurred", "sharp", "blurred, clipped", "blurred, pattern"];
+        let page = |gpu: bool, blend: BlendMode, shadow: &str| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            if shadow.ends_with("pattern") {
+                let mut tile = Canvas::new(8.0, 8.0);
+                tile.set_gpu(false);
+                {
+                    let tile_ctx = tile.context();
+                    tile_ctx
+                        .set_fill_style_css("rgb(40,90,160)")
+                        .expect("a colour");
+                    tile_ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+                    tile_ctx
+                        .set_fill_style_css("rgba(160,40,90,0.7)")
+                        .expect("a colour");
+                    tile_ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+                }
+                let pattern = ctx.create_pattern_from_canvas(
+                    &mut tile,
+                    PatternRepeat::Repeat,
+                );
+                ctx.set_fill_pattern(&pattern);
+            }
+            ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
+                .expect("a colour");
+            ctx.set_shadow_offset(3.0, 2.0);
+            if shadow.starts_with("blurred") {
+                ctx.set_shadow_blur(2.0);
+            }
+            if shadow.ends_with("clipped") {
+                ctx.begin_path();
+                ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
+                    .expect("a positive radius");
+                ctx.clip(FillRule::NonZero);
+            }
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+            }
+            let before = BACKDROPS_READ.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for shadow in SHADOWS {
+                let (cpu, _) = page(false, blend, shadow);
+                let (gpu, reads) = page(true, blend, shadow);
+                if gpu != cpu && !shadow.ends_with("pattern") {
+                    wrong.push(format!(
+                        "{blend:?} {shadow}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                let expected = if shadow.ends_with("pattern") {
+                    LINES
+                } else {
+                    1
+                };
+                if reads != expected {
+                    wrong.push(format!(
+                        "{blend:?} {shadow}: {reads} read backs, not \
+                         {expected}"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page of runs under a blend read in the shader, every line its own
     /// run, drawn on the GPU reads the bytes it reads drawn on the CPU: the
     /// runs are played on the CPU over one read back of the GPU's pixels --
     /// see `layer::replayed_on_their_backdrop` -- with a draw between every
