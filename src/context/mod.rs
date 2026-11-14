@@ -2487,8 +2487,9 @@ impl Context2D {
         }
         .map(|entry| self.chain_input(gradient, entry));
         // A run of text in one flat colour that the coverage route could
-        // play is drawn once more, in its colour opaque, through the paint
-        // its pixels are drawn in -- see `layer::CoverageRun`. Where that is
+        // play, or whose `drop-shadow()` is cast from its coverage, is drawn
+        // once more, in its colour opaque, through the paint its pixels are
+        // drawn in -- see `layer::CoverageRun`. Where that is
         // the paint the run's pixels are recorded in, as it is for an opaque
         // colour placed on the page's bytes, the same calls would record the
         // same picture, and the run's own is taken -- recorded when first
@@ -2527,7 +2528,12 @@ impl Context2D {
             {
                 self.exact_colour(paint.style())
                     .filter(|colour| {
-                        coverage_files(&steps, colour, exact.is_dither())
+                        coverage_files(
+                            &steps,
+                            colour,
+                            exact.is_dither(),
+                            paint.alpha_f(),
+                        )
                     })
                     .and_then(|colour| {
                         let mut opaque = exact.clone();
@@ -2570,16 +2576,30 @@ impl Context2D {
                                 picture,
                                 exact: colour,
                                 alpha: paint.alpha_f(),
-                                kept: text.and_then(|text| {
-                                    Kept::new(
-                                        text.kept.clone()?,
-                                        Matrix::concat(
-                                            &self.state.matrix,
-                                            &text.anchor,
-                                        ),
-                                        &opaque,
-                                    )
-                                }),
+                                // Kept for the coverage route and for a
+                                // shadow cast from the copy -- see
+                                // `layer::CoverageRun`.
+                                kept: text
+                                    .filter(|_| {
+                                        matches!(
+                                            steps[..],
+                                            [Step::Blur(_)]
+                                                | [Step::Shadow {
+                                                    shadow_only: false,
+                                                    ..
+                                                }]
+                                        )
+                                    })
+                                    .and_then(|text| {
+                                        Kept::new(
+                                            text.kept.clone()?,
+                                            Matrix::concat(
+                                                &self.state.matrix,
+                                                &text.anchor,
+                                            ),
+                                            &opaque,
+                                        )
+                                    }),
                             })
                         })
                     })

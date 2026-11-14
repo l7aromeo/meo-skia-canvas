@@ -93,7 +93,7 @@ const PHASE_STEPS: f32 = 256.0;
 /// eighths. Either way it turns only on an eighth -- see [`turns_at`] -- so a
 /// glyph's eighths decide its placement whatever the font's sub-pixel flag
 /// and the axis Skia aligns it to.
-const PLACEMENT_STEPS: f64 = 8.0;
+pub(crate) const PLACEMENT_STEPS: f64 = 8.0;
 
 /// Whether Skia's placement of a mask can turn at `step`
 /// [`PLACEMENT_STEPS`]ths of a pixel: at an odd eighth or a half -- see
@@ -424,6 +424,129 @@ impl Kept {
             anchor,
             paint: PaintKey::of(paint)?,
         })
+    }
+
+    /// What a shadow cast from this run's opaque copy is cast from -- see
+    /// [`CastKey`] -- where the copy is drawn under `to_layer`, the
+    /// transform from its picture into the pixels a chain's `region` is in,
+    /// onto a layer that starts at `drawn`, or at `region` where that layer
+    /// is refused. `None` where the transform does more than scale and
+    /// translate, for the cast to be drawn and compared instead.
+    pub(crate) fn cast_key(
+        &self,
+        to_layer: &Matrix,
+        region: IRect,
+        drawn: IRect,
+    ) -> Option<CastKey> {
+        let device = Matrix::concat(to_layer, &self.anchor);
+        if !device.is_scale_translate() {
+            return None;
+        }
+        let origin = (
+            device.translate_x().floor() as i32,
+            device.translate_y().floor() as i32,
+        );
+        // Skia's sums run in the layer's pixels, which start at `drawn` or
+        // at `region`.
+        let farthest = |a: i32, b: i32| a.unsigned_abs().max(b.unsigned_abs());
+        let offset = (
+            farthest(drawn.left, region.left),
+            farthest(drawn.top, region.top),
+        );
+        let lies = match placement(self, to_layer, offset, origin) {
+            Some(classes) => CastLies::Classes {
+                classes,
+                origin: (origin.0 - region.left, origin.1 - region.top),
+            },
+            None => {
+                #[cfg(test)]
+                CAST_EXACTLY.set(CAST_EXACTLY.get() + 1);
+                CastLies::Exactly {
+                    translate: [device.translate_x(), device.translate_y()]
+                        .map(f32::to_bits),
+                    region: [
+                        region.left,
+                        region.top,
+                        region.right,
+                        region.bottom,
+                    ],
+                    drawn: [drawn.left, drawn.top, drawn.right, drawn.bottom],
+                }
+            }
+        };
+        Some(CastKey {
+            run: Arc::clone(&self.run),
+            paint: self.paint,
+            linear: [
+                device.scale_x(),
+                device.skew_x(),
+                device.skew_y(),
+                device.scale_y(),
+            ]
+            .map(f32::to_bits),
+            lies,
+        })
+    }
+}
+
+/// What a shadow cast from a kept run's opaque copy is cast from, as a
+/// chain's kept result is filed under it in place of the cast's pixels --
+/// see `kept::ChainInput::cast_placed`: the run and the paint its copy is
+/// drawn in, the part of the transform onto the chain's layer that is not a
+/// translation, and where the run lies -- see [`CastLies`]. Two copies
+/// alike in all of them are drawn alike, so they cover the chain's region
+/// alike to the byte. The run is held, so that the address the key compares
+/// by is not reused while the key lives.
+#[derive(Clone, Debug)]
+pub(crate) struct CastKey {
+    run: Arc<RunPaint>,
+    paint: PaintKey,
+    linear: [u32; 4],
+    lies: CastLies,
+}
+
+/// Where a cast's run lies, as its [`CastKey`] tells placements apart.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CastLies {
+    /// Each glyph's placement class -- see [`Classes`] -- and the whole
+    /// pixels of the run's origin relative to the region the chain reads,
+    /// where every glyph is classed: the copy then blits the same masks at
+    /// the same place in that region wherever it is drawn in those classes,
+    /// as [`kept`] composites a run without drawing it.
+    Classes {
+        classes: Classes,
+        origin: (i32, i32),
+    },
+    /// The transform's translation to the bit, and the region the chain
+    /// reads and the layer it is drawn into, where a glyph lies too near a
+    /// step its placement turns at to be classed -- a run drawn from whole
+    /// pixels whose advances fall on eighths does: the copy is then drawn
+    /// from the same run by the same sums, so alike only where it is drawn
+    /// again exactly where it was.
+    Exactly {
+        translate: [u32; 2],
+        region: [i32; 4],
+        drawn: [i32; 4],
+    },
+}
+
+impl PartialEq for CastKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.run, &other.run)
+            && self.paint == other.paint
+            && self.linear == other.linear
+            && self.lies == other.lies
+    }
+}
+
+impl Eq for CastKey {}
+
+impl Hash for CastKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.run).hash(state);
+        self.paint.hash(state);
+        self.linear.hash(state);
+        self.lies.hash(state);
     }
 }
 
@@ -888,6 +1011,9 @@ thread_local! {
     /// The rule [`kept`] decides by: [`Rule::Exact`], or a mutant of it a
     /// test shows the sweep refuses.
     pub(crate) static RULE: Cell<Rule> = const { Cell::new(Rule::Exact) };
+    /// How many casts [`Kept::cast_key`] has filed by where their run lies
+    /// exactly on this thread -- see [`CastLies::Exactly`].
+    pub(crate) static CAST_EXACTLY: Cell<usize> = const { Cell::new(0) };
     /// Whether [`kept`] draws again each run it trusts, to compare it: off,
     /// a test sees what a build outside tests leaves undrawn.
     pub(crate) static SHADOWS: Cell<bool> = const { Cell::new(true) };
