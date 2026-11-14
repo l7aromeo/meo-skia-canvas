@@ -5586,7 +5586,7 @@ mod overlapping_glyph_tests {
     use skia_safe::{
         AlphaType, ColorType, Data, Image, ImageInfo, image::CachingHint,
     };
-    use std::iter::zip;
+    use std::{f32::consts::TAU, iter::zip};
 
     use crate::{
         canvas::{BackendInfo, EngineKind},
@@ -6348,12 +6348,156 @@ mod overlapping_glyph_tests {
         assert!(apart.is_empty(), "{}", apart.join("\n"));
     }
 
+    /// A batch of runs drawn over a GPU page's pixels read back leaves every
+    /// pixel beside its runs as the GPU's own route leaves it: the entries
+    /// between the runs, drawn on the GPU before the read, come back to the
+    /// byte with the pixels around them, and a draw after the batch crossing
+    /// the area written back lands the bytes it lands without the batch --
+    /// read single-sampled, multisampled and at the backend's default. Two
+    /// runs at opposite corners, so that the area read spans the page over
+    /// translucent fills, a translucent ellipse between them, and a
+    /// translucent circle after them across that area. The runs' own pixels,
+    /// which the two routes draw differently, are left out. A float page
+    /// never takes the route: it is drawn on the CPU.
+    #[test]
+    fn a_batch_leaves_the_pixels_beside_its_runs_as_they_were() {
+        use crate::{
+            context::layer::{BACKDROP_ROUTE, BACKDROPS_READ},
+            pixels::{ImageDataExport, PixelExportOptions},
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        /// Where each run's line is drawn from, and how far past it either
+        /// route's ink can reach: its measured box widened by this many
+        /// pixels.
+        const RUNS: [(f32, f32); 2] = [(10.0, 24.0), (W - 90.0, H - 12.0)];
+        const MARGIN: f32 = 6.0;
+        let page = |route: bool, msaa: Option<usize>| {
+            register();
+            forget_laid_out();
+            BACKDROP_ROUTE.set(route);
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(true);
+            let ctx = canvas.context();
+            for i in 0..60 {
+                let (x, y) = ((i * 37 % 300) as f32, (i * 53 % 150) as f32);
+                ctx.set_fill_style_css(&format!(
+                    "rgba({}, {}, {}, 0.6)",
+                    i * 41 % 256,
+                    i * 97 % 256,
+                    i * 13 % 256
+                ))
+                .expect("a colour");
+                ctx.fill_rect(x, y, 23.0, 17.0);
+            }
+            ctx.set_global_composite_operation(Multiply);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, RUNS[0].0, RUNS[0].1, None);
+            ctx.set_global_composite_operation(SourceOver);
+            ctx.set_fill_style_css("rgba(160,40,90,0.5)")
+                .expect("a colour");
+            ctx.begin_path();
+            ctx.ellipse(W / 2.0, H / 2.0, 40.0, 25.0, 0.3, 0.0, TAU, false)
+                .expect("positive radii");
+            ctx.fill(FillRule::NonZero);
+            ctx.set_global_composite_operation(Multiply);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, RUNS[1].0, RUNS[1].1, None);
+            ctx.set_global_composite_operation(SourceOver);
+            ctx.set_fill_style_css("rgba(20,160,60,0.5)")
+                .expect("a colour");
+            ctx.begin_path();
+            ctx.arc(W / 2.0 + 30.0, H / 2.0, 55.0, 0.0, TAU, false)
+                .expect("a positive radius");
+            ctx.fill(FillRule::NonZero);
+            let export = ImageDataExport {
+                pixels: PixelExportOptions::default(),
+                msaa,
+                ..ImageDataExport::default()
+            };
+            let bytes = canvas
+                .to_image_data(None, &export)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            BACKDROP_ROUTE.set(true);
+            assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a GPU page");
+            bytes
+        };
+        // The runs' boxes, measured as drawn, widened.
+        let runs: Vec<SkRect> = {
+            let mut canvas = Canvas::new(W, H);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            let metrics = ctx.measure_text(OSWALD.1, None);
+            RUNS.iter()
+                .map(|&(x, y)| {
+                    SkRect::new(
+                        x - metrics.actual_bounding_box_left,
+                        y - metrics.actual_bounding_box_ascent,
+                        x + metrics.actual_bounding_box_right,
+                        y + metrics.actual_bounding_box_descent,
+                    )
+                    .with_outset((MARGIN, MARGIN))
+                })
+                .collect()
+        };
+        let beside = |at: usize| {
+            let (x, y) = ((at / 4) % W as usize, (at / 4) / W as usize);
+            let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+            !runs.iter().any(|run| {
+                (run.left..run.right).contains(&x)
+                    && (run.top..run.bottom).contains(&y)
+            })
+        };
+        let mut wrong = vec![];
+        for msaa in [None, Some(1), Some(4)] {
+            let (with, without) = (page(true, msaa), page(false, msaa));
+            let apart = zip(&with, &without)
+                .enumerate()
+                .filter(|&(at, (a, b))| a != b && beside(at))
+                .count();
+            if apart != 0 {
+                wrong.push(format!(
+                    "msaa {msaa:?}: {apart} channels beside the runs apart"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        // An `F16` page asked for the GPU is drawn on the CPU -- see
+        // `RenderingEngine::can_composite` -- so no batch is read back in a
+        // float format.
+        let options = CanvasOptions {
+            color_type: PixelDepth::F16,
+            ..CanvasOptions::default()
+        };
+        let mut canvas = Canvas::with_options(W, H, options).expect("a canvas");
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css("16px OverlapOswald"));
+        let before = BACKDROPS_READ.get();
+        for &(x, y) in &RUNS {
+            ctx.fill_text(OSWALD.1, x, y, None);
+        }
+        ctx.get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back");
+        assert_eq!(canvas.engine_kind(), EngineKind::Cpu, "an F16 page");
+        assert_eq!(BACKDROPS_READ.get(), before, "read back on an F16 page");
+    }
+
     /// A page of runs under a blend read in the shader, every line its own
     /// run, drawn on the GPU reads the bytes it reads drawn on the CPU: the
-    /// runs one after another are played on the CPU over one read back of
-    /// the GPU's pixels -- see `layer::replayed_on_their_backdrop` -- and a
-    /// page alternating runs with other draws reads back once for each run,
-    /// since the draws between them land on the GPU.
+    /// runs are played on the CPU over one read back of the GPU's pixels --
+    /// see `layer::replayed_on_their_backdrop` -- with a draw between every
+    /// two of them where the draw lies beside them. A draw under each line,
+    /// meeting its run, or one whose reach is not known, a blurred one, ends
+    /// the batch, so that the page reads back once for each run.
     #[test]
     fn a_page_of_runs_is_drawn_on_the_cpu_over_one_read_back() {
         use crate::context::layer::{BACKDROP_EACH_RUN, BACKDROPS_READ};
@@ -6362,10 +6506,13 @@ mod overlapping_glyph_tests {
             return;
         }
         const LINES: usize = 8;
+        /// What lies between every two runs: nothing, a rectangle beside
+        /// them, one under each line, or a blurred one beside them.
+        const BETWEEN: [&str; 4] = ["nothing", "beside", "under", "blurred"];
         let page = |gpu: bool,
                     blend: BlendMode,
                     spacing: f32,
-                    between: bool| {
+                    between: &str| {
             register();
             forget_laid_out();
             let mut canvas = Canvas::new(W, H);
@@ -6384,11 +6531,18 @@ mod overlapping_glyph_tests {
                     .expect("a colour");
                 ctx.fill_text(OSWALD.1, 10.0, y, None);
                 // Opaque and in `source-over`, which the GPU fills in the
-                // CPU's bytes, so that only the runs are judged.
-                if between {
+                // CPU's bytes, so that only the runs are judged. Blurred, it
+                // is drawn a level from the CPU's on the GPU, and only the
+                // half of the page holding the runs is compared.
+                if between != "nothing" {
                     ctx.set_global_composite_operation(SourceOver);
                     ctx.set_fill_style_css("rgb(160,40,90)").expect("a colour");
-                    ctx.fill_rect(200.0, y - 10.0, 40.0, 8.0);
+                    if between == "blurred" {
+                        ctx.set_filter_css("blur(2px)").expect("a filter");
+                    }
+                    let x = if between == "under" { 10.0 } else { 200.0 };
+                    ctx.fill_rect(x, y - 10.0, 40.0, 8.0);
+                    ctx.set_filter_css("none").expect("no filter");
                     ctx.set_global_composite_operation(blend);
                 }
             }
@@ -6405,9 +6559,20 @@ mod overlapping_glyph_tests {
         let mut wrong = vec![];
         for blend in READ_IN_THE_SHADER {
             for spacing in [0.0, -12.0] {
-                for between in [false, true] {
+                for between in BETWEEN {
                     let (cpu, _) = page(false, blend, spacing, between);
                     let (gpu, reads) = page(true, blend, spacing, between);
+                    let judged = |bytes: Vec<u8>| -> Vec<u8> {
+                        match between {
+                            "blurred" => bytes
+                                .chunks(4 * W as usize)
+                                .flat_map(|row| &row[..2 * W as usize])
+                                .copied()
+                                .collect(),
+                            _ => bytes,
+                        }
+                    };
+                    let (cpu, gpu) = (judged(cpu), judged(gpu));
                     if gpu != cpu {
                         wrong.push(format!(
                             "{blend:?} {spacing} between {between}: {} levels \
@@ -6415,7 +6580,10 @@ mod overlapping_glyph_tests {
                             most_apart(&gpu, &cpu)
                         ));
                     }
-                    let expected = if between { LINES } else { 1 };
+                    let expected = match between {
+                        "under" | "blurred" => LINES,
+                        _ => 1,
+                    };
                     if reads != expected {
                         wrong.push(format!(
                             "{blend:?} {spacing} between {between}: {reads} \
@@ -6427,7 +6595,7 @@ mod overlapping_glyph_tests {
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
         BACKDROP_EACH_RUN.set(true);
-        let (_, each) = page(true, Multiply, 0.0, false);
+        let (_, each) = page(true, Multiply, 0.0, "nothing");
         BACKDROP_EACH_RUN.set(false);
         assert!(each > 1, "a run at a time read back {each} times");
     }

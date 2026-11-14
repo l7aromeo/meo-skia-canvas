@@ -388,6 +388,10 @@ thread_local! {
     /// [`ReplayedText`] runs on a GPU canvas, set on this thread: each run
     /// read back on its own.
     pub(crate) static BACKDROP_EACH_RUN: Cell<bool> = const { Cell::new(false) };
+    /// Whether [`replayed_on_their_backdrop`] draws runs on this thread:
+    /// off, every run takes the GPU's own route, the reference the bytes a
+    /// batch leaves beside its runs are held to.
+    pub(crate) static BACKDROP_ROUTE: Cell<bool> = const { Cell::new(true) };
 }
 
 /// How many of a [`DeferredPicture`]'s recordings were made: those played as
@@ -4231,6 +4235,7 @@ pub(crate) struct BackdropDraw<'a> {
 }
 
 /// What a [`BackdropDraw`] can change.
+#[derive(Clone)]
 pub(crate) enum BackdropReach {
     /// A rectangle in the coordinates the draw is made in, under the
     /// canvas's transform.
@@ -4337,61 +4342,140 @@ fn drawn_on_their_backdrop(
     true
 }
 
-/// Plays the consecutive [`ReplayedText`] runs `entries` opens with, each
-/// under a blend read in the shader -- see [`ReplayedText::reads_the_page`]
-/// -- onto a GPU canvas as the CPU draws them, over one read back of the
-/// pixels they reach -- see [`drawn_on_their_backdrop`]: on the CPU a run is
-/// drawn whole and composites each glyph over the last, where Ganesh, with
-/// no framebuffer fetch on Metal, copies the page for every draw that reads
-/// it and draws a run's overlapping glyphs in groups that share no pixel,
-/// each copy ending a render pass. How many it played, `0` where `entries`
-/// opens with no such run or the pixels cannot be read.
-fn replayed_on_their_backdrop(entries: &[Layer], canvas: &SkCanvas) -> usize {
-    let runs: Vec<&ReplayedText> = entries
-        .iter()
-        .map_while(|entry| match entry {
-            Layer::ReplayedText(text) if text.reads_the_page() => Some(&**text),
-            _ => None,
-        })
-        .collect();
-    if runs.is_empty() {
+/// Plays the runs of [`ReplayedText`] `entries` opens with, each under a
+/// blend read in the shader -- see [`ReplayedText::reads_the_page`] -- onto
+/// a GPU canvas as the CPU draws them, over one read back of the pixels they
+/// ink -- see [`drawn_on_their_backdrop`]: on the CPU a run is drawn whole
+/// and composites each glyph over the last, where Ganesh, with no
+/// framebuffer fetch on Metal, copies the page for every draw that reads it
+/// and draws a run's overlapping glyphs in groups that share no pixel, each
+/// copy ending a render pass. How many entries it played, `0` where
+/// `entries` opens with no such run or the pixels cannot be read.
+///
+/// The runs need not be consecutive. An entry between two of them joins the
+/// batch where what it can draw -- see [`Layer::reach`] -- meets what no run
+/// of the batch inks, before it or after it; one that meets a run's ink, or
+/// whose reach is not known, ends the batch before it, as does a run whose
+/// ink meets an entry already taken. The entries between are played first,
+/// on the GPU, in their order -- see [`play_entries`] -- then the page read
+/// back over the runs' ink, the runs drawn over it in theirs and the result
+/// written back: a run reads the page only where it inks, which no entry
+/// between touches, so each finds what it would have in the order drawn, and
+/// the entries' pixels within the area read come back as they were.
+fn replayed_on_their_backdrop(
+    entries: &[Layer],
+    features: &[VectorFeatures],
+    canvas: &SkCanvas,
+) -> usize {
+    #[cfg(test)]
+    if !BACKDROP_ROUTE.get() {
         return 0;
     }
-    #[cfg(test)]
-    let runs = match BACKDROP_EACH_RUN.get() {
-        true => runs[..1].to_vec(),
-        false => runs,
-    };
-    let Some(format) = Format::of(canvas) else {
+    if !matches!(entries.first(), Some(Layer::ReplayedText(text)) if text.reads_the_page())
+    {
+        return 0;
+    }
+    let device = canvas.local_to_device_as_3x3();
+    let (Some(format), Some(clip)) =
+        (Format::of(canvas), canvas.device_clip_bounds())
+    else {
         return 0;
     };
+    if InLayer::open() || device.has_perspective() {
+        return 0;
+    }
+    // What each run inks, recorded under the transform it is played under;
+    // what it reaches where that cannot be had.
+    let reach_of_run = |text: &ReplayedText| match text.blend {
+        Some(_) => BackdropReach::Beyond,
+        None => text
+            .ink_under(&device, clip)
+            .map_or(BackdropReach::Local(text.reach()), BackdropReach::Device),
+    };
+    let in_pixels = |reach: &BackdropReach| match reach {
+        BackdropReach::Beyond => clip,
+        BackdropReach::Device(reach) => *reach,
+        BackdropReach::Local(reach) => device.map_rect(reach).0.round_out(),
+    };
+    let mut runs: Vec<(usize, &ReplayedText, BackdropReach)> = vec![];
+    let mut between: Vec<IRect> = vec![];
+    for (at, entry) in entries.iter().enumerate() {
+        match entry {
+            Layer::ReplayedText(text) if text.reads_the_page() => {
+                let reach = reach_of_run(text);
+                let inks = in_pixels(&reach);
+                if between.iter().any(|drawn| IRect::intersects(drawn, &inks)) {
+                    break;
+                }
+                runs.push((at, text, reach));
+            }
+            _ if runs.is_empty() => break,
+            entry => {
+                let Some(reach) = entry.reach() else {
+                    break;
+                };
+                let drawn = device.map_rect(reach).0.round_out();
+                if runs.iter().any(|(_, _, reach)| {
+                    IRect::intersects(&in_pixels(reach), &drawn)
+                }) {
+                    break;
+                }
+                between.push(drawn);
+            }
+        }
+        #[cfg(test)]
+        if BACKDROP_EACH_RUN.get() && !runs.is_empty() {
+            break;
+        }
+    }
+    // The batch ends at its last run; the entries after it play as they do.
+    let Some(&(last, ..)) = runs.last() else {
+        return 0;
+    };
+    // The entries between are those between each two runs of the batch.
+    let mut between_played = false;
+    for pair in runs.windows(2) {
+        let (from, to) = (pair[0].0 + 1, pair[1].0);
+        if from < to {
+            play_entries(
+                &entries[from..to],
+                &features[from..to],
+                canvas,
+                Target::Pixels,
+            );
+            between_played = true;
+        }
+    }
     let plays: Vec<_> = runs
         .iter()
-        .map(|&text| {
+        .map(|&(_, text, _)| {
             move |raster: &SkCanvas| text.playback(raster, Target::Pixels)
         })
         .collect();
-    // What each run inks, recorded under the transform it is played under;
-    // what it reaches where that cannot be had.
-    let device = canvas.local_to_device_as_3x3();
-    let clip = canvas.device_clip_bounds();
     let draws: Vec<BackdropDraw<'_>> = zip(&runs, &plays)
-        .map(|(text, play)| BackdropDraw {
-            reach: match (text.blend, clip) {
-                (Some(_), _) => BackdropReach::Beyond,
-                (None, Some(clip)) => text.ink_under(&device, clip).map_or(
-                    BackdropReach::Local(text.reach()),
-                    BackdropReach::Device,
-                ),
-                (None, None) => BackdropReach::Local(text.reach()),
-            },
+        .map(|((_, _, reach), play)| BackdropDraw {
+            reach: reach.clone(),
             draw: play,
         })
         .collect();
-    match drawn_on_their_backdrop(canvas, &draws, &format) {
-        true => runs.len(),
-        false => 0,
+    // Where the pixels cannot be read, the runs are drawn as they are
+    // otherwise: by the caller where nothing has played, and here after the
+    // entries between, which they do not meet, so in an order that draws
+    // the same.
+    if !drawn_on_their_backdrop(canvas, &draws, &format) {
+        if !between_played {
+            return 0;
+        }
+        for &(_, text, _) in &runs {
+            text.playback(canvas, Target::Pixels);
+        }
     }
+    for &(at, ..) in &runs {
+        if let Some(features) = features.get(at) {
+            pacing::played(canvas, offscreen_layers(&entries[at], *features));
+        }
+    }
+    last + 1
 }
 
 /// Plays `entries`, each asking for `features` at the same index, onto
@@ -4416,10 +4500,10 @@ fn replayed_on_their_backdrop(entries: &[Layer], canvas: &SkCanvas) -> usize {
 /// them once, before any of its runs draws; and it holds consecutive runs of
 /// colour text open in one [`BatchScope`], so that those drawn from a sheet
 /// are drawn together, before the next entry of another kind plays. On the
-/// GPU it plays consecutive kept runs under a blend read in the shader on
-/// the CPU, over one read back of the pixels they reach -- see
-/// [`replayed_on_their_backdrop`] -- closing an open batch first, so that
-/// the read finds what it drew.
+/// GPU it plays kept runs under a blend read in the shader on the CPU, over
+/// one read back of the pixels they ink, with the entries between them that
+/// meet none of them -- see [`replayed_on_their_backdrop`] -- closing an
+/// open batch first, so that the read finds what it drew.
 pub(crate) fn play_entries(
     entries: &[Layer],
     features: &[VectorFeatures],
@@ -4456,13 +4540,12 @@ pub(crate) fn play_entries(
             {
                 batch = None;
             }
-            let played = replayed_on_their_backdrop(&entries[at..], canvas);
+            let played = replayed_on_their_backdrop(
+                &entries[at..],
+                &features[at..],
+                canvas,
+            );
             if played > 0 {
-                let kept =
-                    zip(&entries[at..at + played], features.iter().skip(at));
-                for (entry, features) in kept {
-                    pacing::played(canvas, offscreen_layers(entry, *features));
-                }
                 batch = None;
                 at += played;
                 continue;
