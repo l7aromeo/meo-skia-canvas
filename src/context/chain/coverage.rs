@@ -651,7 +651,8 @@ mod tests {
     };
 
     /// A blurred shape on an eight-bit page, through the coverage route or
-    /// the chain's layer, as premultiplied pixels at `density`.
+    /// the chain's layer, as premultiplied pixels at `density`; a `sigma` of
+    /// 0 draws it unblurred.
     fn drawn(
         space: PixelColorSpace,
         shape: usize,
@@ -672,8 +673,10 @@ mod tests {
         )
         .expect("a canvas");
         let ctx = canvas.context();
-        ctx.set_filter_css(&format!("blur({sigma}px)"))
-            .expect("a filter");
+        if sigma > 0.0 {
+            ctx.set_filter_css(&format!("blur({sigma}px)"))
+                .expect("a filter");
+        }
         ctx.set_fill_style_css(colour).expect("a colour");
         ctx.set_stroke_style_css(colour).expect("a colour");
         ctx.begin_path();
@@ -955,6 +958,24 @@ mod tests {
         assert!(ties * 400 < checked, "{ties} ties of {checked}");
     }
 
+    /// `shape`'s exact blur by `sigma` at `density`, in alpha levels a
+    /// pixel, from its coverage drawn unblurred -- see
+    /// [`exact_blur::reference`].
+    fn exact_alphas(
+        space: PixelColorSpace,
+        shape: usize,
+        sigma: f32,
+        density: u32,
+    ) -> Vec<f64> {
+        let plane = drawn(space, shape, "black", 0.0, density, false);
+        let device = sigma * density as f32;
+        let (w, h) = (120 * density as usize, 90 * density as usize);
+        exact_blur::reference(&plane, w, h, device, device)
+            .chunks(4)
+            .map(|pixel| pixel[3])
+            .collect()
+    }
+
     #[test]
     fn the_coverage_route_moves_only_an_edge_colour_byte_by_a_level() {
         // Against the chain's layer, on every eight-bit page space, with the
@@ -963,22 +984,32 @@ mod tests {
         // level, and some edge moved -- the route is not the chain. Taken on
         // every draw, at device sigmas summed tap by tap and through the FFT:
         // 3 and 4.9 at density 2, and 8 at either.
+        //
+        // An alpha may part only on a tie. Each route rounds the exact
+        // product once, but through the FFT a value within float noise of a
+        // half-level lands on either side of it, and which side depends on
+        // the FFT's algorithm, which rustfft picks for the machine: its
+        // scalar and AVX FFTs part the routes on a pixel whose exact alpha
+        // is 1.4999996. So an alpha apart is held to the exact blur, which
+        // must put it within [`TIE`] of a half-level.
         let colours = [
-            "rgb(200 120 40)",
-            "rgb(30 60 200 / 0.7)",
-            "black",
-            "rgb(128 128 128 / 0.3)",
-            "rgb(250 20 140 / 0.55)",
+            ("rgb(200 120 40)", 1.0),
+            ("rgb(30 60 200 / 0.7)", 0.7),
+            ("black", 1.0),
+            ("rgb(128 128 128 / 0.3)", 0.3),
+            ("rgb(250 20 140 / 0.55)", 0.55),
         ];
         for space in [
             PixelColorSpace::Srgb,
             PixelColorSpace::DisplayP3,
             PixelColorSpace::Rec2020,
         ] {
-            let (mut px, mut moved, mut worst, mut alpha, mut runs) =
+            let (mut px, mut moved, mut worst, mut ties, mut runs) =
                 (0usize, 0usize, 0u8, 0usize, 0usize);
             for shape in 0..4 {
-                for colour in colours {
+                for (colour, given) in colours {
+                    // The alpha the colour is drawn at, on its byte.
+                    let gain = (given * 255.0f64).round() / 255.0;
                     for sigma in [0.5f32, 1.5, 3.0, 4.9, 8.0] {
                         for density in [1, 2] {
                             let before = COVERAGE_RUNS.with(|r| r.get());
@@ -989,10 +1020,25 @@ mod tests {
                             let chain = drawn(
                                 space, shape, colour, sigma, density, false,
                             );
-                            for (a, b) in ours.chunks(4).zip(chain.chunks(4)) {
+                            let mut exact = None;
+                            for (i, (a, b)) in
+                                ours.chunks(4).zip(chain.chunks(4)).enumerate()
+                            {
                                 px += 1;
                                 if a[3] != b[3] {
-                                    alpha += 1;
+                                    let v = exact.get_or_insert_with(|| {
+                                        exact_alphas(
+                                            space, shape, sigma, density,
+                                        )
+                                    })[i]
+                                        * gain;
+                                    assert!(
+                                        (v - v.floor() - 0.5).abs() < TIE,
+                                        "{space:?}: shape {shape} {colour} at sigma {sigma}, density {density}: alpha {} against {} at pixel {i}, whose exact alpha {v} is no tie",
+                                        a[3],
+                                        b[3]
+                                    );
+                                    ties += 1;
                                 }
                                 let d = (0..3)
                                     .map(|c| a[c].abs_diff(b[c]))
@@ -1007,12 +1053,12 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(alpha, 0, "{space:?}: alphas moved");
+            assert!(ties * 10_000 < px, "{space:?}: {ties} ties of {px}");
             assert!(worst <= 1, "{space:?}: a colour byte moved by {worst}");
             assert!(moved > 0, "{space:?}: nothing moved of {px} pixels");
             assert_eq!(runs, 4 * 5 * 5 * 2, "{space:?}");
             // Deep inside the triangle, past a reach of the blur at density 1.
-            for colour in colours {
+            for (colour, _) in colours {
                 for sigma in [0.5f32, 1.5] {
                     let ours = drawn(space, 0, colour, sigma, 1, true);
                     let chain = drawn(space, 0, colour, sigma, 1, false);

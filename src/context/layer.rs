@@ -7222,6 +7222,7 @@ mod coverage_run_tests {
 
     use super::{COVERAGE_ROUTE, COVERAGE_RUNS};
     use crate::{
+        context::exact_blur,
         pixels::{PixelColorSpace, PixelDepth},
         prelude::*,
     };
@@ -7229,6 +7230,14 @@ mod coverage_run_tests {
     /// The family Oswald is registered under for these runs, so that it
     /// cannot be found as a system font of the same name instead.
     const OSWALD: &str = "CoverageRunOswald";
+
+    /// The page every run is played on, wide enough for 60px Oswald
+    /// "Hamburgefonstiv" and a reach of 8 pixels' blur either side.
+    const PAGE: (usize, usize) = (220, 70);
+
+    /// Further from a half-level than float noise moves a sum: an alpha
+    /// nearer a tie than this may round to either side of it.
+    const TIE: f64 = 1e-3;
 
     /// A run of text through `filter`, how it is filled, the page it is
     /// drawn on, and the depth and space of the page that one is drawn
@@ -7266,8 +7275,8 @@ mod coverage_run_tests {
             .expect("registers");
         COVERAGE_ROUTE.with(|route| route.set(coverage));
         let mut canvas = Canvas::with_options(
-            220.0,
-            70.0,
+            PAGE.0 as f32,
+            PAGE.1 as f32,
             CanvasOptions {
                 color_type: run.depth,
                 gpu: false,
@@ -7302,8 +7311,8 @@ mod coverage_run_tests {
         let mut page = match run.onto {
             Some((depth, space)) => {
                 let mut page = Canvas::with_options(
-                    220.0,
-                    70.0,
+                    PAGE.0 as f32,
+                    PAGE.1 as f32,
                     CanvasOptions {
                         color_type: depth,
                         color_space: space,
@@ -7335,23 +7344,59 @@ mod coverage_run_tests {
         (pixels, COVERAGE_RUNS.with(|runs| runs.get()) - before)
     }
 
+    /// The alpha bytes of premultiplied `pixels`.
+    fn alphas(pixels: &[u8]) -> Vec<u8> {
+        pixels.chunks(4).map(|p| p[3]).collect()
+    }
+
+    /// The pixels where the alphas of `route` and `chain` part and the
+    /// exact blur by `sigma` of `opaque` -- the run in its colour opaque and
+    /// unblurred, whose alpha is its coverage -- at `gain` is no tie. Each
+    /// rounds the exact product once, but through the FFT a value within
+    /// float noise of a half-level lands on either side of it, and which
+    /// side depends on the FFT's algorithm, which rustfft picks for the
+    /// machine.
+    fn apart_off_ties(
+        route: &[u8],
+        chain: &[u8],
+        opaque: &Run,
+        sigma: f32,
+        gain: f64,
+    ) -> Vec<usize> {
+        let (route, chain) = (alphas(route), alphas(chain));
+        let parted: Vec<usize> =
+            (0..route.len()).filter(|&i| route[i] != chain[i]).collect();
+        if parted.is_empty() {
+            return parted;
+        }
+        let (plain, _) = played(opaque, false);
+        let exact = exact_blur::reference(&plain, PAGE.0, PAGE.1, sigma, sigma);
+        parted
+            .into_iter()
+            .filter(|&i| {
+                let v = exact[i * 4 + 3] * gain;
+                (v - v.floor() - 0.5).abs() >= TIE
+            })
+            .collect()
+    }
+
     #[test]
     fn translucent_text_in_the_chain_keeps_the_routes_alpha() {
         // Where the route does not play, a run in one flat colour through
         // the chain's layer is drawn opaque, its alpha the chain's gain, so
         // that its alpha is rounded once, as the route's is: byte for byte
-        // the route's, at sigmas tap by tap and through the FFT, at sizes
-        // from a hinted 13px to 60px, at alphas on and off a tie.
-        let alpha = |pixels: &[u8]| -> Vec<u8> {
-            pixels.chunks(4).map(|p| p[3]).collect()
-        };
+        // the route's but on a tie -- see `apart_off_ties` -- at sigmas tap
+        // by tap and through the FFT, at sizes from a hinted 13px to 60px,
+        // at alphas on and off a byte's tie.
         let mut apart = Vec::new();
-        for fill in [
-            "rgba(200, 80, 30, 0.6)",
-            "rgba(20, 60, 200, 0.3)",
-            "rgba(128, 128, 128, 0.55)",
+        for (fill, opaque, given) in [
+            ("rgba(200, 80, 30, 0.6)", "rgb(200, 80, 30)", 0.6),
+            ("rgba(20, 60, 200, 0.3)", "rgb(20, 60, 200)", 0.3),
+            ("rgba(128, 128, 128, 0.55)", "rgb(128, 128, 128)", 0.55),
         ] {
-            for filter in ["blur(3px)", "blur(8px)"] {
+            // The alpha the run is drawn at, on its byte.
+            let gain = (given * 255.0f64).round() / 255.0;
+            for (filter, sigma) in [("blur(3px)", 3.0), ("blur(8px)", 8.0)] {
                 for size in [13, 32, 60] {
                     let run = Run {
                         fill,
@@ -7366,14 +7411,18 @@ mod coverage_run_tests {
                         (1, 0),
                         "{fill} {filter} {size}px"
                     );
-                    let differ = alpha(&route)
-                        .iter()
-                        .zip(alpha(&chain))
-                        .filter(|(a, b)| **a != *b)
-                        .count();
-                    if differ > 0 {
+                    let plain = Run {
+                        fill: opaque,
+                        filter: "none",
+                        size,
+                        ..OPAQUE
+                    };
+                    let off =
+                        apart_off_ties(&route, &chain, &plain, sigma, gain);
+                    if !off.is_empty() {
                         apart.push(format!(
-                            "{fill} {filter} {size}px: {differ} alphas"
+                            "{fill} {filter} {size}px: {} alphas off a tie",
+                            off.len()
                         ));
                     }
                 }
@@ -7386,11 +7435,15 @@ mod coverage_run_tests {
     fn translucent_text_drawn_onto_another_space_keeps_the_routes_alpha() {
         // A page drawn onto one in another space is where the route does
         // not play and the chain does: its alpha is the route's, byte for
-        // byte, as it would be on a page of its own space.
-        let alpha = |pixels: &[u8]| -> Vec<u8> {
-            pixels.chunks(4).map(|p| p[3]).collect()
+        // byte but on a tie -- see `apart_off_ties` -- as it would be on a
+        // page of its own space.
+        let plain = Run {
+            fill: "rgb(20, 60, 200)",
+            filter: "none",
+            ..OPAQUE
         };
-        for filter in ["blur(3px)", "blur(8px)"] {
+        let gain = (0.3f64 * 255.0).round() / 255.0;
+        for (filter, sigma) in [("blur(3px)", 3.0), ("blur(8px)", 8.0)] {
             let run = Run {
                 fill: "rgba(20, 60, 200, 0.3)",
                 filter,
@@ -7403,7 +7456,8 @@ mod coverage_run_tests {
             };
             let (other, chained) = played(&onto, true);
             assert_eq!((runs, chained), (1, 0), "{filter}");
-            assert_eq!(alpha(&own), alpha(&other), "{filter}: the alpha moved");
+            let off = apart_off_ties(&own, &other, &plain, sigma, gain);
+            assert!(off.is_empty(), "{filter}: {} alphas off a tie", off.len());
         }
     }
 
@@ -7415,10 +7469,7 @@ mod coverage_run_tests {
         let (route, runs) = played(&OPAQUE, true);
         let (chain, chained) = played(&OPAQUE, false);
         assert_eq!((runs, chained), (1, 0), "the route took the run once");
-        let alpha = |pixels: &[u8]| -> Vec<u8> {
-            pixels.chunks(4).map(|p| p[3]).collect()
-        };
-        assert_eq!(alpha(&route), alpha(&chain), "the alpha moved");
+        assert_eq!(alphas(&route), alphas(&chain), "the alpha moved");
         assert_ne!(route, chain, "the colour did not move");
     }
 
