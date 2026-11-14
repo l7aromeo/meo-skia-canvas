@@ -208,6 +208,11 @@ pub struct Context2D {
     /// so that a run of draws in one colour holds one shader between them
     /// rather than one each -- see [`Self::exact_paint`].
     exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
+    /// Whether a draw files its shadow alone and not itself: the first of
+    /// the two paintings [`Context2D::draw_text`] makes of a run whose
+    /// shadow and image are composited apart -- see
+    /// [`Context2D::paints_run_whole`].
+    shadow_alone: bool,
     pub state: State,
     stack: Vec<State>,
     /// Parallel to `stack`: whether each saved frame opened a Skia layer
@@ -689,6 +694,7 @@ impl Context2D {
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(recorder),
             exact_shader: RefCell::default(),
+            shadow_alone: false,
             path: PathBuilder::new(),
             stack: vec![],
             layers: vec![],
@@ -1322,6 +1328,10 @@ impl Context2D {
         {
             return;
         }
+        // A shadow filed apart is all a painting of the shadow alone files.
+        if self.shadow_alone && cast_apart {
+            return;
+        }
         let casts = self.casts_shadow() && !cast_apart;
         // Which recording it is reaches the draw only through `paint_for`
         // and the shadow's paint, so with no shadow and no exact paint apart
@@ -1364,8 +1374,10 @@ impl Context2D {
                     // draw the dropshadow (if applicable)
                     render_shadow(layer, &layer_paint, recording);
                     // draw normally
-                    layer.set_matrix(&self.state.matrix.into());
-                    f(layer, &layer_paint, Pass::Draw);
+                    if !self.shadow_alone {
+                        layer.set_matrix(&self.state.matrix.into());
+                        f(layer, &layer_paint, Pass::Draw);
+                    }
                 }
 
                 // transfer the picture contents to the canvas in a single
@@ -1388,7 +1400,9 @@ impl Context2D {
                 // draw the dropshadow (if applicable)
                 render_shadow(canvas, cast, recording);
                 // draw with the normal paint
-                f(canvas, drawn, Pass::Draw);
+                if !self.shadow_alone {
+                    f(canvas, drawn, Pass::Draw);
+                }
             }
         };
         let draw = |canvas: &SkCanvas, recording: Recording| {
@@ -1988,6 +2002,11 @@ impl Context2D {
             (drawn, shadow)
         };
         let (drawn, shadow) = paints(pixels);
+        // A painting of the shadow alone with no shadow to cast files
+        // nothing.
+        if self.shadow_alone && shadow.is_none() {
+            return true;
+        }
         #[cfg_attr(not(test), expect(unused_mut))]
         let mut recording = LazyPicture::default();
         #[cfg_attr(not(test), expect(unused_mut))]
@@ -2023,6 +2042,7 @@ impl Context2D {
             paint: drawn,
             inked: Rect::new_empty(),
             shadow,
+            shadow_alone: self.shadow_alone,
             blend: beyond.then_some(blend),
             recording,
             whole: LazyPicture::default(),
@@ -2310,6 +2330,11 @@ impl Context2D {
                         offset,
                     );
                 }
+                // A painting of the shadow alone files the shadow alone --
+                // see `Self::draw_text`.
+                if self.shadow_alone {
+                    return;
+                }
                 if alone {
                     let clip = self.state.clip.as_ref();
                     recorder.append_tile(tile, clip, features);
@@ -2343,7 +2368,12 @@ impl Context2D {
             if let Some(shadow) = shadow {
                 held.push(group(shadow, &shadow_unit, offset));
             }
-            held.push(group(drawn, &unit, Point::default()));
+            if !self.shadow_alone {
+                held.push(group(drawn, &unit, Point::default()));
+            }
+            if held.is_empty() {
+                return;
+            }
             let mut blended = Paint::default();
             blended.set_anti_alias(true).set_blend_mode(blend);
             recorder.append_group(
@@ -2487,6 +2517,7 @@ impl Context2D {
                     paint: recorded(pixels_paint),
                     inked: Rect::new_empty(),
                     shadow: None,
+                    shadow_alone: false,
                     blend: None,
                     recording: LazyPicture::from(Some(recorded_as)),
                     whole: LazyPicture::default(),
@@ -2902,6 +2933,7 @@ impl Context2D {
             paint: Paint::default(),
             inked,
             shadow: None,
+            shadow_alone: false,
             blend: None,
             recording: LazyPicture::from(Some(recorded)),
             whole: LazyPicture::default(),
@@ -4664,7 +4696,101 @@ impl Context2D {
         self.state.font_width = width;
     }
 
+    /// Paints a run of text: `text` at (`x`, `y`), condensed to `width`
+    /// where given, filled or stroked by `style`.
+    ///
+    /// The HTML Standard paints the shapes `fillText` and `strokeText`
+    /// prepare once, through its drawing model: the shadow cast from the
+    /// painted image, composited with the operator, then the image itself,
+    /// multiplied by `globalAlpha` and composited with the operator. A run
+    /// that casts a shadow under an operator that is not `source-over` is
+    /// painted so -- see [`Self::paints_run_whole`] -- in two paintings: its
+    /// shadow alone, as any draw casts one, then the run drawn `source-over`
+    /// at full alpha into a layer the operator and `globalAlpha` composite,
+    /// which a GPU canvas composites on the CPU with the shadow, over one
+    /// read back of the page -- see `layer::LayerRec::one_image`.
+    /// Any other run is drawn glyph by glyph after its shadow, as Chrome
+    /// draws one: under `source-over` the two stand apart only by rounding,
+    /// and a run casting no shadow is drawn so, under an operator that stays
+    /// within it, by every browser measured.
+    ///
+    /// So at a `globalAlpha` below 1, where glyphs overlap, a run fades
+    /// differently casting a shadow and casting none under an operator that
+    /// reaches beyond it -- `source-in`, `copy` and the rest. Casting one,
+    /// it fades as one image, as Firefox and WebKit fade it; casting none,
+    /// each glyph is faded inside the one picture that operator composites,
+    /// its overlap compounding, as Chrome 158 fades it and Firefox and WebKit
+    /// do not -- docs/browser-differences.md has the figures.
     pub fn draw_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        width: Option<f32>,
+        style: PaintStyle,
+    ) {
+        if !self.paints_run_whole() {
+            self.paint_text(text, x, y, width, style);
+            return;
+        }
+        self.shadow_alone = true;
+        self.paint_text(text, x, y, width, style);
+        self.shadow_alone = false;
+
+        let mut composite = Paint::default();
+        composite
+            .set_alpha_f(self.state.global_alpha as f32)
+            .set_blend_mode(self.state.global_composite_operation);
+        let composite = self.faint().drawable(&composite).into_owned();
+        self.with_recorder(|mut recorder| {
+            recorder.open_layer(LayerRec {
+                paint: Some(composite),
+                one_image: true,
+                ..LayerRec::default()
+            });
+        });
+        let held = (
+            self.state.global_alpha,
+            self.state.global_composite_operation,
+            self.state.shadow_color.0,
+        );
+        self.state.global_alpha = 1.0;
+        self.state.global_composite_operation = BlendMode::SrcOver;
+        self.state.paint.set_blend_mode(BlendMode::SrcOver);
+        self.state.shadow_color.0.a = 0.0;
+        self.paint_text(text, x, y, width, style);
+        (
+            self.state.global_alpha,
+            self.state.global_composite_operation,
+            self.state.shadow_color.0,
+        ) = held;
+        self.state.paint.set_blend_mode(held.1);
+        self.with_recorder(|mut recorder| {
+            recorder.close_layer();
+        });
+    }
+
+    /// Whether a run of text drawn now is painted as the HTML Standard
+    /// paints it, its shadow composited and then the run as one image -- see
+    /// [`Self::draw_text`]: one casting a shadow under an operator other
+    /// than `source-over`, where the two part. Not under `clear` or
+    /// `modulate`, which leave a layer's transparent pixels no more alone
+    /// than its opaque ones, so a run composited through one would clear or
+    /// darken the layer's whole box rather than its glyphs; nor
+    /// `destination`, which draws nothing either way.
+    fn paints_run_whole(&self) -> bool {
+        self.casts_shadow()
+            && !matches!(
+                self.state.global_composite_operation,
+                BlendMode::SrcOver
+                    | BlendMode::Clear
+                    | BlendMode::Modulate
+                    | BlendMode::Dst
+            )
+    }
+
+    /// One painting of a run of text -- see [`Self::draw_text`].
+    fn paint_text(
         &mut self,
         text: &str,
         x: f32,

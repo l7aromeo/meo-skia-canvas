@@ -50,7 +50,7 @@ use crate::{
             self, Depth, Step,
             pool::{self, LayerScope},
         },
-        chain_cache, coverage_of,
+        chain_cache, coverage_of, covers_beyond_the_draw,
         exact_gradient::{Exact, GradientSpec},
         faint::{Faint, composited},
         kept::CoverageInput,
@@ -146,13 +146,20 @@ impl Layer {
     /// bytes than a CPU canvas does: what holds colour glyphs or draws dyed
     /// by gradients, which choose where they are played how a GPU canvas
     /// draws them in the CPU's bytes -- see [`ReplayedText`] and
-    /// [`GradientDraw`] -- and have no such choice inside a recording, which
-    /// does not know the canvas it will be played onto. A canvas whose page
-    /// holds one is drawn as an image through that choice too -- see
-    /// `Context2D::draw_source_image`.
+    /// [`GradientDraw`] -- and a run painted as one image, which a GPU
+    /// canvas composites on the CPU -- see [`KeptRun::Image`] -- and have no
+    /// such choice inside a recording, which does not know the canvas it
+    /// will be played onto. A canvas whose page holds one is drawn as an
+    /// image through that choice too -- see `Context2D::draw_source_image`.
     pub(crate) fn plays_apart_on_gpu(&self) -> bool {
         match self {
             Layer::ReplayedText(_) => true,
+            Layer::Group(group)
+                if matches!(&group.composite,
+                    Composite::Layer(rec) if rec.one_image) =>
+            {
+                true
+            }
             Layer::Gradient(op) => op
                 .draws
                 .iter()
@@ -1905,6 +1912,11 @@ pub struct ReplayedText {
     pub inked: Rect,
     /// The shadow the run casts on pixels, drawn beneath it.
     pub shadow: Option<ReplayedShadow>,
+    /// Whether the run is filed for its shadow alone, the run itself drawn
+    /// by nothing here: the first of the two paintings
+    /// `Context2D::draw_text` makes of a run whose shadow and image are
+    /// composited apart -- see `Context2D::paints_run_whole`.
+    pub shadow_alone: bool,
     /// The blend a layer holding the run and its shadow composites through,
     /// where the blend covers beyond the draw -- see
     /// `Context2D::render_to_canvas`.
@@ -2031,7 +2043,9 @@ impl ReplayedText {
                 shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
                 canvas.restore();
             }
-            replay.draw(canvas, &self.matrix, &self.paint);
+            if !self.shadow_alone {
+                replay.draw(canvas, &self.matrix, &self.paint);
+            }
         });
         // Skia bounds a run by its glyphs at the font's own size, unhinted,
         // and FreeType hints them at the size they are drawn: at a density
@@ -2072,7 +2086,9 @@ impl ReplayedText {
                     shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
                     canvas.restore();
                 }
-                if let Some(replay) = &self.replay {
+                if let Some(replay) =
+                    self.replay.as_ref().filter(|_| !self.shadow_alone)
+                {
                     canvas.save();
                     replay.draw(canvas, &self.matrix, &self.paint);
                     canvas.restore();
@@ -2160,10 +2176,12 @@ impl ReplayedText {
                 reach_the_clip(canvas);
                 canvas.restore();
             }
-            canvas.save();
-            replay.draw(canvas, &self.matrix, paint);
-            reach_the_clip(canvas);
-            canvas.restore();
+            if !self.shadow_alone {
+                canvas.save();
+                replay.draw(canvas, &self.matrix, paint);
+                reach_the_clip(canvas);
+                canvas.restore();
+            }
         };
         let mut recorder = PictureRecorder::new();
         let canvas = recorder.begin_recording(self.bounds, true);
@@ -3409,6 +3427,11 @@ pub struct LayerRec {
     /// The backdrop a page's pixels open the layer with in place of
     /// `backdrop`, built for those pixels -- see `Context2D::pixels_onto`.
     pub pixels_backdrop: Option<ImageFilter>,
+    /// Whether the layer holds a run of text painted as one image, which
+    /// `paint` composites -- see `Context2D::draw_text` -- and which a GPU
+    /// canvas composites on the CPU, as the CPU canvas does -- see
+    /// [`KeptRun::Image`].
+    pub one_image: bool,
 }
 
 impl LayerRec {
@@ -4537,12 +4560,14 @@ fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
 }
 
 /// Whether `entries` hold a run drawn on the CPU over the pixels it reads --
-/// see [`read_on_the_cpu`] -- themselves or in a group they hold, whose layer
-/// [`played_on_a_root`] plays in turn.
+/// see [`read_on_the_cpu`] -- themselves, a run painted as one image among
+/// them, or in a group they hold, whose layer [`played_on_a_root`] plays in
+/// turn.
 fn reads_the_page(entries: &[Layer]) -> bool {
-    entries.iter().any(|entry| match entry {
-        Layer::Group(group) => reads_the_page(&group.contents.layers),
-        entry => read_on_the_cpu(entry).is_some(),
+    entries.iter().any(|entry| {
+        read_on_the_cpu(entry).is_some()
+            || matches!(entry, Layer::Group(group)
+                if reads_the_page(&group.contents.layers))
     })
 }
 
@@ -4919,7 +4944,8 @@ fn drawn_on_their_backdrop(
 
 /// Plays the runs of text `entries` opens with, each under a blend read in
 /// the shader, a [`ReplayedText`] or a run dyed by a canvas pattern, alone
-/// or a piece of a clip's run -- see [`read_on_the_cpu`] -- and each with
+/// or a piece of a clip's run, or painted as one image through a layer of
+/// its own under any blend -- see [`read_on_the_cpu`] -- and each with
 /// the group casting its shadow where that was filed just before it -- see
 /// [`cpu_run_at`] -- onto a GPU canvas as the CPU draws them, over one read
 /// back of the pixels they ink -- see [`drawn_on_their_backdrop`]: on the CPU a
@@ -5159,9 +5185,9 @@ struct CpuRun {
 /// spans, and the bounds of the clip it is drawn under where it has one: a
 /// run alone, or the group a run's shadow is cast through followed by the
 /// run -- see [`ReplayedText::cast_before`] and [`PatternDraw::cast_before`]
-/// -- which the CPU page composites one after the other, as the raster then
-/// does. `None` for any
-/// other entry.
+/// -- or a run painted as one image -- see [`LayerRec::one_image`] -- which
+/// the CPU page composites one after the other, as the raster then does.
+/// `None` for any other entry.
 fn cpu_run_at(
     entries: &[Layer],
     at: usize,
@@ -5169,11 +5195,29 @@ fn cpu_run_at(
     if let Some((run, within)) = read_on_the_cpu(&entries[at]) {
         return Some((1, run, within));
     }
-    let cast = matches!(&entries[at], Layer::Group(group)
-        if matches!(group.composite, Composite::Chain { .. }));
+    // A shadow cast through a chain, alone or inside the layer that
+    // composites it through a blend that covers beyond the draw -- see
+    // `Context2D::files_shadow_through_chain`.
+    let chain = |entry: &Layer| {
+        matches!(entry, Layer::Group(group)
+            if matches!(group.composite, Composite::Chain { .. }))
+    };
+    let cast = match &entries[at] {
+        Layer::Group(group) => {
+            chain(&entries[at])
+                || matches!(group.composite, Composite::Layer(_))
+                    && matches!(&group.contents.layers[..], [only] if chain(only))
+        }
+        _ => false,
+    };
+    // A run painted as one image follows its shadow, painted alone just
+    // before it -- see `Context2D::draw_text`. A chain before it that is some
+    // other draw's is drawn on the CPU with it, as the CPU page draws it.
     let cast_before = |entry: &Layer| match entry {
         Layer::ReplayedText(text) => text.cast_before,
         Layer::Pattern(draw) => draw.cast_before,
+        Layer::Group(group) => matches!(&group.composite,
+            Composite::Layer(rec) if rec.one_image),
         _ => false,
     };
     let next = entries.get(at + 1).filter(|next| match next {
@@ -5206,10 +5250,16 @@ fn clip_path_bounds(entry: &Layer) -> Option<Rect> {
 /// [`replayed_on_their_backdrop`] draws on the CPU: a kept run -- see
 /// [`ReplayedText::reads_the_page`] -- or a run dyed by a canvas pattern --
 /// see [`PatternDraw::reads_the_page`], whose tile a raster makes on the CPU
-/// as the CPU page makes it.
+/// as the CPU page makes it; or a run painted as one image, through a
+/// layer of its own -- see [`LayerRec::one_image`].
 enum KeptRun<'a> {
     Text(&'a ReplayedText),
     Pattern(&'a PatternDraw),
+    /// The layer a run painted as one image is drawn into and composited
+    /// through. Composited by Ganesh, the layer stood up to 19 levels from
+    /// the CPU canvas under `color-burn`, and 2 to 3 under `source-atop`,
+    /// where the run drawn glyph by glyph on its backdrop stood none.
+    Image(&'a Group),
 }
 
 impl KeptRun<'_> {
@@ -5227,6 +5277,25 @@ impl KeptRun<'_> {
             ),
             KeptRun::Pattern(draw) => {
                 BackdropReach::Device(draw.ink_under(device, clip))
+            }
+            // A layer under a blend other than `source-over` covers beyond
+            // the draw; one under a blend that leaves the page alone where the
+            // layer is transparent reaches what its contents reach, and those
+            // are the run recorded into the layer's picture, which reaches the
+            // whole clip it is recorded under -- see [`reach_the_clip`].
+            KeptRun::Image(group) => {
+                let Composite::Layer(rec) = &group.composite else {
+                    return BackdropReach::Beyond;
+                };
+                let blend = rec
+                    .paint
+                    .as_ref()
+                    .and_then(Paint::as_blend_mode)
+                    .unwrap_or(BlendMode::SrcOver);
+                match covers_beyond_the_draw(blend) {
+                    true => BackdropReach::Beyond,
+                    false => BackdropReach::Device(clip),
+                }
             }
         }
     }
@@ -5247,6 +5316,12 @@ fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
             }
             Layer::Pattern(draw) if draw.reads_the_page() => {
                 Some(KeptRun::Pattern(draw))
+            }
+            Layer::Group(group)
+                if matches!(&group.composite, Composite::Layer(rec)
+                    if rec.one_image) =>
+            {
+                Some(KeptRun::Image(group))
             }
             _ => None,
         }
@@ -7223,13 +7298,15 @@ mod tests {
     /// blurred and sharp, turned, slanted by a synthesized oblique, large
     /// enough to be drawn from its outlines, and played at a density of 2.
     /// A shadow is cast through a chain of its own, an entry apart from the
-    /// run, except under a CanvasKit filter, where the run holds it; the
-    /// last scene is that one. What it inks is read from the run played alone
-    /// on a transparent raster, where under `multiply` it is its own
-    /// colour.
+    /// run, which is then painted as one image through a layer of its own --
+    /// see [`KeptRun::Image`] -- except under a CanvasKit filter, where the
+    /// run holds it; the last scene is that one. What it inks is read from
+    /// the run played alone on a transparent raster, where under `multiply`
+    /// it is its own colour. And no run reports the whole page, which every
+    /// run's recording reaches and which would hold every scene.
     #[test]
     fn a_kept_run_inks_nothing_past_what_it_reports() {
-        use super::{Layer, ReplayedText};
+        use super::{BackdropReach, Composite, KeptRun, Layer, ReplayedText};
         use crate::{canvas::Canvas, font::FontLibrary, paint::BlendMode};
         use skia_safe::{Contains, IRect};
         FontLibrary::new()
@@ -7321,25 +7398,47 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            if texts.is_empty() {
+            let size = ((PAGE.0 * density) as i32, (PAGE.1 * density) as i32);
+            let device = Matrix::scale((density, density));
+            let clip = IRect::from_wh(size.0, size.1);
+            // Each kept run and what it reports it inks.
+            let kept: Vec<(&Layer, Option<IRect>)> = entries
+                .layers
+                .iter()
+                .filter_map(|entry| match entry {
+                    Layer::ReplayedText(text) => {
+                        Some((entry, text.ink_under(&device, clip)))
+                    }
+                    Layer::Group(group)
+                        if matches!(&group.composite,
+                            Composite::Layer(rec) if rec.one_image) =>
+                    {
+                        let ink =
+                            match KeptRun::Image(group).reach(&device, clip) {
+                                BackdropReach::Device(ink) => Some(ink),
+                                _ => None,
+                            };
+                        Some((entry, ink))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if kept.is_empty() {
                 wrong.push(format!("{name}: no run kept"));
                 continue;
             }
             if name == HELD && texts.iter().all(|text| text.shadow.is_none()) {
                 wrong.push(format!("{name}: no run holds its shadow"));
             }
-            let size = ((PAGE.0 * density) as i32, (PAGE.1 * density) as i32);
-            let device = Matrix::scale((density, density));
-            let clip = IRect::from_wh(size.0, size.1);
-            for text in texts {
-                let Some(ink) = text.ink_under(&device, clip) else {
+            for (entry, ink) in kept {
+                let Some(ink) = ink else {
                     wrong.push(format!("{name}: no ink reported"));
                     continue;
                 };
                 let mut surface =
                     started::raster_n32_premul(size).expect("a surface");
                 surface.canvas().scale((density, density));
-                text.playback(surface.canvas(), super::Target::Pixels);
+                entry.playback(surface.canvas(), super::Target::Pixels);
                 let info = ImageInfo::new(
                     size,
                     ColorType::Alpha8,
@@ -7375,6 +7474,15 @@ mod tests {
                     None => wrong.push(format!("{name}: inked nothing")),
                     Some(inked) if !ink.contains(inked) => wrong
                         .push(format!("{name}: inks {inked:?} past {ink:?}")),
+                    // Every scene inks a corner of the page: a run reporting
+                    // the whole of it bounds nothing. A layer painting a run
+                    // as one image reaches the clip, as its picture does.
+                    Some(_)
+                        if ink == clip
+                            && matches!(entry, Layer::ReplayedText(_)) =>
+                    {
+                        wrong.push(format!("{name}: reports the whole page"))
+                    }
                     Some(_) => {}
                 }
             }

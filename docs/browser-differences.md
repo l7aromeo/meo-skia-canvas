@@ -1396,6 +1396,45 @@ composites the whole canvas, one under a CanvasKit filter, one cast by a run
 holding colour glyphs, and every shadow in a PDF or SVG document. Each is
 cast from what the draw's filter makes, and each blur is Skia's.
 
+**Under an operator other than `source-over`, a run of text casting a shadow
+composites its shadow and then the run as one image; Chrome composites the
+run so, and casts its shadow glyph by glyph.** `fillText` and `strokeText`
+"paint the shapes given in glyphs" through the drawing model once: the
+shadow, cast from the painted image, composited with the operator, then the
+image, multiplied by `globalAlpha` and composited with the operator. Measured
+on CPU canvases with Oswald's "Hello Wq" at 48px and `letterSpacing` -12px,
+against pieces each browser drew itself:
+
+- Chrome 158 composites the run as one image under every operator but
+  `source-over`, within 3 levels, where drawn glyph by glyph it stands 52 to
+  120 levels off. Its shadow is each glyph's, all of them before the run:
+  under `source-over` that is exact, and where glyphs overlap it stands 80
+  to 96 levels darker than one shadow cast from the run.
+- Firefox 159 casts one shadow from the run and composites the run as one
+  image.
+- WebKit 27.2 composites the run glyph by glyph, and casts a sharp shadow
+  glyph by glyph and a blurred one from the run.
+
+Here the shadow is cast from the whole run, as Firefox casts it and as the
+Standard paints the shapes once, and the run is composited as one image, as
+Chrome and Firefox composite it -- see `Context2D::draw_text`. A shadowed run
+under `source-over` is drawn glyph by glyph after its shadow, which stands
+from one image only by rounding. A run casting no shadow is drawn glyph by
+glyph under an operator that stays within it, as every browser measured
+draws one. Under `clear` and `modulate`, which no standard defines, a
+shadowed run is drawn glyph by glyph too: a layer composited through either
+clears or darkens its whole box, its transparent pixels with its glyphs.
+
+One consequence shows at a `globalAlpha` below 1 where glyphs overlap. A
+shadowed run fades as one image, its overlap at the alpha the image holds
+there, as Firefox and WebKit fade it. A run casting no shadow under an
+operator reaching beyond it -- `source-in`, `copy` and the rest -- is faded
+glyph by glyph inside one picture before the picture is composited, its
+overlap compounding, as Chrome fades it; Firefox and WebKit fade the image
+there too. At `globalAlpha` 0.6 the two stand up to 96 levels apart on
+about 3,000 pixels of that run. Pinned in
+tests/suite/text-shadow-blend.test.js.
+
 **On an eight-bit sRGB canvas a shadow stores the exact product of its colour
 and its alpha, on either engine, and Chrome's do not all.** `shadowColor`, a
 CSS `drop-shadow()` and a CanvasKit drop shadow store the product rounded
