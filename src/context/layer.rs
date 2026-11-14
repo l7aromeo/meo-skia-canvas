@@ -2239,8 +2239,12 @@ pub(crate) fn rasterized_onto(
         }
         None => clip,
     };
+    // Under the canvas's own surface properties, so that text the draw holds
+    // is rasterized under the page's contrast and gamma rather than Skia's
+    // defaults, which differ from the page's on Linux.
+    let props = canvas.props();
     let Some(mut surface) =
-        started::raster(&format.image_info(area.size()), None, None)
+        started::raster(&format.image_info(area.size()), None, props.as_ref())
     else {
         return;
     };
@@ -6808,6 +6812,76 @@ mod tests {
     /// The raster the oval is filled on, tall enough for it shifted as far
     /// as [`skia_covers_a_curve_by_where_it_lies`] shifts it.
     const RASTER: (i32, i32) = (520, 380);
+
+    #[test]
+    fn a_draw_rasterized_onto_a_canvas_takes_its_text_contrast_and_gamma() {
+        // `rasterized_onto` draws on a raster of its own and composites it
+        // onto the canvas; text the draw holds is rasterized there under the
+        // canvas's contrast and gamma, so that it lands the bytes it lands
+        // drawn on the canvas itself. Neither value here is a default on any
+        // platform, and the page starts transparent, where compositing the
+        // raster source-over copies it.
+        use skia_safe::{
+            Data, Font, FontMgr, PictureRecorder, PixelGeometry, SurfaceProps,
+            SurfacePropsFlags,
+        };
+        let bytes = std::fs::read(
+            "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+        )
+        .expect("the bundled face");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("a face");
+        let font = Font::from_typeface(face, 18.0);
+        let mut recorder = PictureRecorder::new();
+        let recording =
+            recorder.begin_recording(Rect::from_wh(120.0, 40.0), false);
+        let mut ink = Paint::default();
+        ink.set_anti_alias(true)
+            .set_color(Color::from_rgb(40, 90, 160));
+        recording.draw_str("Wgaxe", (6.0, 26.0), &font, &ink);
+        let picture = recorder
+            .finish_recording_as_picture(None)
+            .expect("a picture");
+        let props = SurfaceProps::new_with_text_properties(
+            SurfacePropsFlags::default(),
+            PixelGeometry::Unknown,
+            0.7,
+            2.0,
+        );
+        let info = ImageInfo::new(
+            (120, 40),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let read = |surface: &mut skia_safe::Surface| {
+            let mut bytes = vec![0u8; 120 * 40 * 4];
+            assert!(surface.read_pixels(&info, &mut bytes, 120 * 4, (0, 0)));
+            bytes
+        };
+        let mut direct =
+            started::raster(&info, None, Some(&props)).expect("a page");
+        picture.playback(direct.canvas());
+        let mut routed =
+            started::raster(&info, None, Some(&props)).expect("a page");
+        let format =
+            crate::font::colr::Format::of(routed.canvas()).expect("pixels");
+        super::rasterized_onto(
+            routed.canvas(),
+            &picture,
+            Some(picture.cull_rect()),
+            &format,
+            &Paint::default(),
+        );
+        let (direct, routed) = (read(&mut direct), read(&mut routed));
+        assert!(direct.iter().any(|&b| b != 0), "the run inks the page");
+        let most = zip(&direct, &routed)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert_eq!(most, 0, "levels from the run drawn on the page");
+    }
 
     /// The alpha of [`OVAL`] moved `by` device pixels down, filled
     /// anti-aliased on a CPU raster.

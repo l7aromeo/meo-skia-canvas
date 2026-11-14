@@ -1312,9 +1312,10 @@ thread_local! {
     /// by.
     pub(crate) static MADE_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
-    /// Whether the canvas's device makes no layer for [`layer_surface`] on
-    /// this thread, as where `SkCanvas::makeSurface` returns null, so that a
-    /// test can hold what is drawn on the memory it falls back to.
+    /// Whether the canvas's device makes no layer for [`layer_surface`], nor
+    /// a coverage's drawn plane, on this thread, as where
+    /// `SkCanvas::makeSurface` returns null, so that a test can hold what is
+    /// drawn on the memory it falls back to.
     pub(crate) static NO_DEVICE_LAYERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
     /// The most pixels a chain [`plan`] on this thread has worked on, which
@@ -1585,7 +1586,8 @@ pub(crate) fn layer_surface(
     }
 }
 
-/// A layer in memory for `canvas`, under its surface properties.
+/// A layer, or a coverage's plane, in memory for `canvas`, under its
+/// surface properties.
 ///
 /// `SkCanvas::makeSurface` gives a layer the canvas's own properties where
 /// it is passed none; a raster made apart from the canvas takes Skia's
