@@ -1014,11 +1014,15 @@ impl Spare {
 /// derived: any value from 4 to about 64 measured the same, and 16 sits
 /// inside that range.
 ///
-/// It trades the wrapper's cost against culling. The wrapper is what lets a
-/// canvas drawn into another under a clip replay only what the clip shows;
-/// "a clipped nested draw costs the region, not the page", in
-/// `tests/suite/canvas.test.js`, holds that side, and fails with nothing
-/// wrapped. The wrapper costs a recorder begun and finished for every
+/// It trades the wrapper's cost against the size of the page's picture. A
+/// canvas drawn into another is captured as its page's picture, which is
+/// made by playing the page's entries into one recording: a bare recording's
+/// ops are copied in, where a wrapped one goes in as the one op that holds
+/// it. A source holding 20000 fills made a picture of 20009 ops with them
+/// bare and of 6 wrapped, and a clipped draw of it cost about ten times as
+/// much; `a_nested_source_holds_its_recordings_whole` holds the picture's
+/// size to the same whatever the source holds. The wrapper costs a recorder
+/// begun and finished for every
 /// recording the page files, and where gradient fills alternate with flat
 /// ones each flat fill is a recording of 4 ops: a frame of 2000 of each
 /// took 13.6 ms with them wrapped and 12.6 unwrapped. Unwrapped, a clipped
