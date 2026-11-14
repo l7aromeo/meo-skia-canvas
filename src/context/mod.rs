@@ -19,7 +19,7 @@ use skia_safe::{
     textlayout::{StrutStyle, TextStyle},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     rc::Rc,
     sync::Arc,
 };
@@ -51,7 +51,7 @@ use crate::{
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
     export::{VectorFeatures, blend_features},
     filter::onto::{Onto, PageFilter},
-    font::GenericFamily,
+    font::{GenericFamily, colr::blends_by_coefficients},
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
     gpu::{self, RenderingEngine},
     gradient::{BoxedCanvasGradient, CanvasGradient},
@@ -64,7 +64,7 @@ use crate::{
         pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
         texture::{BoxedCanvasTexture, CanvasTexture},
-        typography::with_style_axes,
+        typography::{WholeRuns, with_style_axes},
     },
     pixels::PixelColorSpace,
     started,
@@ -654,6 +654,12 @@ thread_local! {
 }
 
 impl Context2D {
+    /// Says whether the canvas plays the page on the GPU -- see
+    /// [`PageRecorder::set_plays_on_gpu`].
+    pub(crate) fn set_plays_on_gpu(&self, gpu: bool) {
+        self.recorder.borrow_mut().set_plays_on_gpu(gpu);
+    }
+
     /// A context sized to the canvas that owns it.
     ///
     /// The size is taken here rather than applied afterwards because a
@@ -1289,7 +1295,7 @@ impl Context2D {
             _ => paint,
         };
         // A run holding colour glyphs casts its shadow where it is filed --
-        // see `Self::files_as_colour_text`.
+        // see `Self::files_as_replayed_text`.
         let colour_run =
             text.as_ref().is_some_and(|text| text.colour.is_some());
         let cast_apart = !colour_run
@@ -1388,9 +1394,13 @@ impl Context2D {
         let draw = |canvas: &SkCanvas, recording: Recording| {
             draw_in(canvas, recording, paint_for(recording), paint)
         };
-        if let Some(run) = text.as_ref().and_then(|text| text.colour.clone())
-            && self
-                .files_as_colour_text(paint, exact, features, run, lines, &draw)
+        let replayed = text
+            .as_ref()
+            .and_then(|text| text.colour.clone().or(text.blended.clone()));
+        if let Some(run) = replayed
+            && self.files_as_replayed_text(
+                paint, exact, features, run, lines, casts, &draw,
+            )
         {
             return;
         }
@@ -1871,22 +1881,29 @@ impl Context2D {
     }
 
     /// Files a run of text holding colour glyphs as a
-    /// [`ColourText`](layer::ColourText), which draws the run again where
+    /// [`ReplayedText`](layer::ReplayedText), which draws the run again where
     /// the page is played back on pixels, its colour glyphs made there for
     /// those pixels: `run`, the run kept whole, with its shadow and through
     /// the blend that covers beyond it, as `draw` -- the run's draw into one
     /// recording, as `render_to_canvas` records it -- draws them. Recorded
     /// as well, from the run, in the paints `draw` takes for each recording
     /// the page keeps, when something first asks -- see
-    /// `layer::ColourText::recorded`; a test records them now, by `draw`,
+    /// `layer::ReplayedText::recorded`; a test records them now, by `draw`,
     /// to hold the one to the other.
-    fn files_as_colour_text<D>(
+    ///
+    /// `casts` is whether `draw` casts the run's shadow, as `draw_text`
+    /// decides it: not where the shadow is filed as a chain of its own -- see
+    /// [`Self::files_shadow_through_chain`] -- before the run, which then
+    /// keeps no shadow to cast again.
+    #[allow(clippy::too_many_arguments)]
+    fn files_as_replayed_text<D>(
         &self,
         paint: &Paint,
         exact: Option<&Paint>,
         features: VectorFeatures,
         run: Replay,
         lines: bool,
+        casts: bool,
         draw: &D,
     ) -> bool
     where
@@ -1912,14 +1929,15 @@ impl Context2D {
                 drawn.set_blend_mode(BlendMode::SrcOver);
             }
             let cast_from = if beyond { &drawn } else { paint };
-            let shadow = self
-                .paint_for_shadow_in(cast_from, recording, lines)
+            let shadow = casts
+                .then(|| self.paint_for_shadow_in(cast_from, recording, lines))
+                .flatten()
                 .map(|(shadow, pass)| {
                     let replay = match pass {
                         Pass::Draw => run.clone(),
                         Pass::AlphaInShadow => run.opaque(),
                     };
-                    layer::ColourShadow {
+                    layer::ReplayedShadow {
                         paint: shadow,
                         replay,
                         offset: self.state.shadow_offset,
@@ -1933,10 +1951,10 @@ impl Context2D {
         #[cfg_attr(not(test), expect(unused_mut))]
         let mut document = dual.then(|| {
             let (paint, shadow) = paints(Recording::Document);
-            layer::ColourRecording::later(paint, shadow)
+            layer::ReplayedRecording::later(paint, shadow)
         });
         #[cfg(test)]
-        if COLOUR_RECORDED_AT_ONCE.get() {
+        if REPLAYED_RECORDED_AT_ONCE.get() {
             let record = |recording: Recording| {
                 let mut recorder = PictureRecorder::new();
                 let canvas = recorder.begin_recording(self.bounds, true);
@@ -1952,12 +1970,12 @@ impl Context2D {
                 let Some(recorded) = record(Recording::Document) else {
                     return false;
                 };
-                document = Some(layer::ColourRecording::recorded(recorded));
+                document = Some(layer::ReplayedRecording::recorded(recorded));
             }
         }
         #[cfg(not(test))]
         let _ = draw;
-        let text = Arc::new(layer::ColourText {
+        let text = Arc::new(layer::ReplayedText {
             matrix: self.state.matrix,
             replay: Some(run),
             paint: drawn,
@@ -1965,14 +1983,18 @@ impl Context2D {
             shadow,
             blend: beyond.then_some(blend),
             recording,
+            whole: LazyPicture::default(),
             bounds: self.bounds,
             document,
             clip: None,
+            // Where the run casts a shadow and does not cast it itself, it
+            // was cast just before, through a chain.
+            cast_before: self.casts_shadow() && !casts,
             #[cfg(test)]
-            watch: layer::COLOUR_WATCH.with_borrow(Clone::clone),
+            watch: layer::REPLAYED_WATCH.with_borrow(Clone::clone),
         });
         self.with_recorder(|mut recorder| {
-            recorder.append_colour_text(
+            recorder.append_replayed_text(
                 text,
                 self.state.clip.as_ref(),
                 features,
@@ -2089,18 +2111,21 @@ impl Context2D {
             recorder.finish_recording_as_picture(None)
         };
         // The draw as a document writes it, less what a group composites
-        // through where one does: its filter, and its blend.
+        // through where one does: its filter, and its blend. Its glyphs are
+        // whole, as a document takes a run -- see `WholeRuns`.
         let mut plain = paint.clone();
         plain.set_image_filter(None);
         if !alone {
             plain.set_blend_mode(BlendMode::SrcOver);
         }
+        let whole = WholeRuns::hold();
         let Some(recorded) = record(&plain) else {
             return false;
         };
+        drop(whole);
         let mut through = plain;
         through.set_shader(None);
-        let unit_of = |paint: Paint, replay: Replay| {
+        let unit_of = |paint: Paint, replay: Replay, cast_before: bool| {
             let tile = Arc::new(layer::PatternDraw {
                 source: Arc::clone(&source),
                 matrix: self.state.matrix,
@@ -2110,6 +2135,7 @@ impl Context2D {
                 paint,
                 clip: None,
                 replay,
+                cast_before,
                 aligned,
             });
             let unit = Entries::new(
@@ -2149,11 +2175,9 @@ impl Context2D {
                     Pass::AlphaInShadow => replay.opaque(),
                     Pass::Draw => replay.clone(),
                 };
-                (shadow, unit_of(held, replay).1)
+                (shadow, unit_of(held, replay, false).1)
             });
         let (pixels_shadow, shadow_unit) = moved.unzip();
-        let (tile, unit) = unit_of(through, replay);
-        let shadow_unit = shadow_unit.unwrap_or_else(|| unit.clone());
         let rec = |paint: Paint| LayerRec {
             paint: Some(paint),
             ..LayerRec::default()
@@ -2221,6 +2245,11 @@ impl Context2D {
                 None => Composite::Layer(rec),
             }
         });
+        // A draw filed alone after the group casting its shadow was cast
+        // just before it.
+        let cast_before = !beyond && alone && shadow.is_some();
+        let (tile, unit) = unit_of(through, replay, cast_before);
+        let shadow_unit = shadow_unit.unwrap_or_else(|| unit.clone());
         let offset = self.state.shadow_offset;
         let identity = Matrix::new_identity();
         // A group, which the SVG backend drops whole -- see
@@ -2409,7 +2438,7 @@ impl Context2D {
         };
         let colour_entry =
             |run: Replay, recorded_as: Picture, document: Option<Picture>| {
-                Layer::ColourText(Arc::new(layer::ColourText {
+                Layer::ReplayedText(Arc::new(layer::ReplayedText {
                     matrix: self.state.matrix,
                     replay: Some(run),
                     paint: recorded(pixels_paint),
@@ -2417,9 +2446,11 @@ impl Context2D {
                     shadow: None,
                     blend: None,
                     recording: LazyPicture::from(Some(recorded_as)),
+                    whole: LazyPicture::default(),
                     bounds: self.bounds,
-                    document: document.map(layer::ColourRecording::recorded),
+                    document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
+                    cast_before: false,
                     #[cfg(test)]
                     watch: None,
                 }))
@@ -2431,7 +2462,7 @@ impl Context2D {
         // paint for a document too, the reach the two join to.
         // A run holding colour glyphs is drawn again where the chain plays
         // it, its colour glyphs made for those pixels -- see
-        // `layer::ColourText` -- and is never deferred.
+        // `layer::ReplayedText` -- and is never deferred.
         let colour = text.and_then(|text| text.colour.clone());
         let deferred = text
             .and_then(|text| text.defer)
@@ -2512,7 +2543,7 @@ impl Context2D {
         // run's colour, its glyphs' own colours gone: those this library
         // draws, and those the platform draws -- asked last, since a run
         // not kept is laid out again to answer.
-        let holds_colour = matches!(entry, Some(Layer::ColourText(_)));
+        let holds_colour = matches!(entry, Some(Layer::ReplayedText(_)));
         let coverage = match exact {
             Some(exact)
                 if reached.is_some()
@@ -2707,7 +2738,7 @@ impl Context2D {
         let blend = self.state.global_composite_operation;
         // A draw holding colour glyphs this library draws itself -- every one
         // composites through a layer of its own -- is rasterized on the CPU
-        // where it is played on pixels -- see `layer::ColourText`.
+        // where it is played on pixels -- see `layer::ReplayedText`.
         let colour = features
             .refused_by(VectorFeatures::LAYER)
             .then(|| self.colour_recording(&f))
@@ -2716,7 +2747,7 @@ impl Context2D {
         if alpha == 1.0 && blend == BlendMode::SrcOver {
             match colour {
                 Some(text) => self.with_recorder(|mut recorder| {
-                    recorder.append_colour_text(
+                    recorder.append_replayed_text(
                         text,
                         self.state.clip.as_ref(),
                         features,
@@ -2747,7 +2778,7 @@ impl Context2D {
         // Once for each recording the page keeps, as every draw is: the
         // pixels' first, as `Layer::Targeted` holds them.
         let entry = match (colour, self.recorder.borrow().dual()) {
-            (Some(text), _) => Some(Layer::ColourText(text)),
+            (Some(text), _) => Some(Layer::ReplayedText(text)),
             (None, false) => record(Recording::Shared).map(Layer::Picture),
             (None, true) => record(Recording::Pixels)
                 .zip(record(Recording::Document))
@@ -2772,12 +2803,12 @@ impl Context2D {
         });
     }
 
-    /// The draw `f` makes as a [`ColourText`](layer::ColourText) with no
+    /// The draw `f` makes as a [`ReplayedText`](layer::ReplayedText) with no
     /// replay, rasterized on the CPU where it is played on pixels: recorded
     /// under the canvas's transform into each recording the page keeps, and
     /// bounded by what it inks -- see [`layer::inked_by`]. `None` where
     /// Skia records nothing.
-    fn colour_recording<F>(&self, f: &F) -> Option<Arc<layer::ColourText>>
+    fn colour_recording<F>(&self, f: &F) -> Option<Arc<layer::ReplayedText>>
     where
         F: Fn(&SkCanvas, Recording),
     {
@@ -2802,7 +2833,7 @@ impl Context2D {
             layer::inked_by(self.bounds, &self.state.matrix, |canvas| {
                 f(canvas, pixels);
             });
-        Some(Arc::new(layer::ColourText {
+        Some(Arc::new(layer::ReplayedText {
             matrix: self.state.matrix,
             replay: None,
             paint: Paint::default(),
@@ -2810,9 +2841,11 @@ impl Context2D {
             shadow: None,
             blend: None,
             recording: LazyPicture::from(Some(recorded)),
+            whole: LazyPicture::default(),
             bounds: self.bounds,
-            document: document.map(layer::ColourRecording::recorded),
+            document: document.map(layer::ReplayedRecording::recorded),
             clip: None,
+            cast_before: false,
             #[cfg(test)]
             watch: None,
         }))
@@ -3714,7 +3747,14 @@ impl Context2D {
         dst_rect: &Rect,
         source: VectorFeatures,
     ) {
-        self.draw_picture_costing(picture, None, src_rect, dst_rect, source, 1)
+        self.draw_picture_costing(
+            &|| Some(picture.clone()),
+            None,
+            src_rect,
+            dst_rect,
+            source,
+            1,
+        )
     }
 
     /// As [`Self::draw_picture`], charging this page for what replaying the
@@ -3724,6 +3764,15 @@ impl Context2D {
     /// so the charge is what makes a page that keeps drawing copies of itself
     /// declare its own cost. See `PageRecorder::replay_cost`.
     ///
+    /// `picture` records the source as one picture, and is called only where
+    /// the draw needs one: a source drawn as its entries -- below -- whose
+    /// crop is not in question is not recorded at all. Recording a page's
+    /// kept run -- see `layer::ReplayedText` -- into a picture, which cannot
+    /// know what it will be played onto, draws its glyphs a glyph at a time:
+    /// a page of 16px Oswald under `multiply` drawn into a CPU canvas took
+    /// 1.09 ms recording a picture its entries then stood in for, and takes
+    /// 0.27 ms without, measured in a release build.
+    ///
     /// `entries` is the source page's own list where the picture is a
     /// canvas's, each entry with what it asks of a vector backend, so that a
     /// draw through its paint holds the page as it was recorded and each
@@ -3732,7 +3781,7 @@ impl Context2D {
     /// asking for what `source` names.
     pub(crate) fn draw_picture_costing(
         &mut self,
-        picture: &Picture,
+        picture: &dyn Fn() -> Option<Picture>,
         entries: Option<Entries>,
         src_rect: &Rect,
         dst_rect: &Rect,
@@ -3740,6 +3789,8 @@ impl Context2D {
         cost: usize,
     ) {
         self.recorder.borrow_mut().charge_replay(cost);
+        let recorded = OnceCell::new();
+        let picture = || recorded.get_or_init(picture).as_ref();
         let paint = self.paint_for_image();
         let mag = Point::new(
             dst_rect.width() / src_rect.width(),
@@ -3792,17 +3843,25 @@ impl Context2D {
                 || holds_a_cut(&entries.layers)
                 || holds_a_pair(&entries.layers)
         });
-        let crops = !dst_rect.contains(matrix.map_rect(picture.cull_rect()).0);
-        if (through_paint || cut || crops)
+        let crops = || {
+            picture().is_some_and(|picture| {
+                !dst_rect.contains(matrix.map_rect(picture.cull_rect()).0)
+            })
+        };
+        if (through_paint || cut || crops())
             && !covers_beyond_the_draw(self.state.global_composite_operation)
         {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
-            let contents = entries.unwrap_or_else(|| {
-                Entries::new(
-                    vec![Layer::Picture(picture.clone())],
-                    vec![source],
-                )
-            });
+            let Some(contents) = entries.or_else(|| {
+                picture().map(|picture| {
+                    Entries::new(
+                        vec![Layer::Picture(picture.clone())],
+                        vec![source],
+                    )
+                })
+            }) else {
+                return;
+            };
             let shadow = self
                 .paint_for_shadow(&paint)
                 .map(|shadow| self.faint().drawable(&shadow).into_owned());
@@ -3872,6 +3931,9 @@ impl Context2D {
             return;
         }
 
+        let Some(picture) = picture() else {
+            return;
+        };
         let pixels = self.pixels_paint(&paint);
         self.render_to_canvas(
             &paint,
@@ -4502,9 +4564,33 @@ impl Context2D {
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
             // The run kept whole, where it holds colour glyphs, to draw them
-            // where the page is played back -- see `layer::ColourText`.
+            // where the page is played back -- see `layer::ReplayedText`.
             // Every colour glyph composites through a layer of its own.
             let colour = colour.refused_by(VectorFeatures::LAYER).then(|| {
+                let (run, offset, condensation) =
+                    typesetter.replayed(kept.as_deref());
+                Replay::Text {
+                    run,
+                    at: origin,
+                    offset,
+                    condensation,
+                    global_alpha,
+                    faint,
+                }
+            });
+            // The run kept whole, where it is drawn in a blend that reads the
+            // page in the shader, to draw its glyphs where the page is played
+            // back as that canvas draws them -- see
+            // `typography::glyph_draws`.
+            #[cfg(test)]
+            let replays = REPLAYS_BLENDED_TEXT.get();
+            #[cfg(not(test))]
+            let replays = true;
+            let blended = (replays
+                && !blends_by_coefficients(
+                    self.state.global_composite_operation,
+                ))
+            .then(|| {
                 let (run, offset, condensation) =
                     typesetter.replayed(kept.as_deref());
                 Replay::Text {
@@ -4602,6 +4688,7 @@ impl Context2D {
                     ),
                     defer: Some(&defer),
                     colour,
+                    blended,
                     own_colours: &own_colours,
                 }),
                 self.state.dye(style).gradient().map(|spec| GradientDye {
@@ -5257,8 +5344,13 @@ pub struct TextRun<'a> {
     pub(crate) defer: Option<&'a Defer<'a>>,
     /// The run kept whole where it holds colour glyphs this library draws
     /// itself, to draw them where the page is played back -- see
-    /// [`Context2D::files_as_colour_text`].
+    /// [`Context2D::files_as_replayed_text`].
     pub colour: Option<Replay>,
+    /// The run kept whole where it is drawn in a blend that reads the page
+    /// in the shader, to draw its glyphs where the page is played back, as
+    /// that canvas draws them -- see `typography::glyph_draws` and
+    /// [`Context2D::files_as_replayed_text`].
+    pub blended: Option<Replay>,
     /// Whether the run holds a glyph the platform draws in its own colours
     /// -- see `font::platform_colour` -- asked only where the coverage route
     /// could otherwise take the run.
@@ -5528,10 +5620,16 @@ thread_local! {
     pub(crate) static DEFERS: Cell<bool> = const { Cell::new(true) };
     /// Whether a run holding colour glyphs is recorded for pixels as it is
     /// drawn rather than when first asked for -- see
-    /// `layer::ColourText::recorded` -- so that a test can hold the one to
+    /// `layer::ReplayedText::recorded` -- so that a test can hold the one to
     /// the other.
-    pub(crate) static COLOUR_RECORDED_AT_ONCE: Cell<bool> =
+    pub(crate) static REPLAYED_RECORDED_AT_ONCE: Cell<bool> =
         const { Cell::new(false) };
+    /// Whether a run drawn in a blend that reads the page is kept whole to
+    /// be drawn again where it is played -- see [`TextRun::blended`]: off,
+    /// it is recorded as it is drawn, the mutant the tests of that route
+    /// are held against.
+    pub(crate) static REPLAYS_BLENDED_TEXT: Cell<bool> =
+        const { Cell::new(true) };
 }
 
 #[cfg(test)]
@@ -9640,21 +9738,21 @@ mod text_reach_tests {
 mod colour_recording_tests {
     //! A run holding colour glyphs is recorded for pixels only when first
     //! asked for, and the recording is the one made as it was drawn -- see
-    //! `layer::ColourText::recorded`.
+    //! `layer::ReplayedText::recorded`.
 
     use super::{
-        COLOUR_RECORDED_AT_ONCE,
-        layer::{COLOUR_WATCH, ColourText, Layer, drawn_by},
+        REPLAYED_RECORDED_AT_ONCE,
+        layer::{Layer, REPLAYED_WATCH, ReplayedText, drawn_by},
     };
     use crate::{
-        export::{EncodeOptions, ImageFormat},
+        export::{EncodeOptions, ImageFormat, VectorFeatures},
         font::colr::assert_colour_text,
         paint::BlendMode,
         pixels::{ImageDataExport, PixelExportOptions},
         prelude::*,
         started,
     };
-    use skia_safe::Color;
+    use skia_safe::{Color, Rect as SkRect};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -9687,12 +9785,15 @@ mod colour_recording_tests {
 
     /// The ways a page is read, and how many recordings each asks for of
     /// the two runs a scene draws: none on its own pixels, nor as an SVG,
-    /// which embeds a colour glyph as pixels; the pixels' of each run drawn
-    /// into another canvas, which takes the page as a picture -- see
-    /// `Context2D::picture` -- and the document's of each as a PDF.
-    const READS: [(&str, usize); 4] = [
+    /// which embeds a colour glyph as pixels, nor drawn into another canvas,
+    /// which takes the page as its entries and records no picture of it --
+    /// see `Context2D::draw_picture_costing`; the pixels' of each run where
+    /// the page is taken as a picture -- see `Context2D::picture` -- and the
+    /// document's of each as a PDF.
+    const READS: [(&str, usize); 5] = [
         ("pixels", 0),
-        ("drawn into another canvas", 2),
+        ("drawn into another canvas", 0),
+        ("as a picture", 2),
         ("PDF", 2),
         ("SVG", 0),
     ];
@@ -9719,8 +9820,9 @@ mod colour_recording_tests {
             .use_paths(Some(FAMILY), [FONT])
             .expect("the font registers");
         let asked = Arc::new(AtomicUsize::new(0));
-        COLOUR_RECORDED_AT_ONCE.set(at_once);
-        COLOUR_WATCH.with_borrow_mut(|watch| *watch = Some(Arc::clone(&asked)));
+        REPLAYED_RECORDED_AT_ONCE.set(at_once);
+        REPLAYED_WATCH
+            .with_borrow_mut(|watch| *watch = Some(Arc::clone(&asked)));
         let mut canvas = canvas();
         let ctx = canvas.context();
         ctx.set_fill_style_css("white").expect("a colour");
@@ -9759,8 +9861,8 @@ mod colour_recording_tests {
         for (x, y) in [(20.3, 60.6), (40.7, 130.2)] {
             ctx.fill_text(TEXT, x, y, width);
         }
-        COLOUR_RECORDED_AT_ONCE.set(false);
-        COLOUR_WATCH.with_borrow_mut(|watch| *watch = None);
+        REPLAYED_RECORDED_AT_ONCE.set(false);
+        REPLAYED_WATCH.with_borrow_mut(|watch| *watch = None);
         (canvas, asked)
     }
 
@@ -9789,6 +9891,21 @@ mod colour_recording_tests {
                     .pixels()
                     .to_vec()
             }
+            "as a picture" => {
+                let picture = canvas.context().inner.picture();
+                let mut outer = self::canvas();
+                outer.context().inner.draw_picture(
+                    &picture.expect("a picture"),
+                    &SkRect::from_wh(SIDE.0, SIDE.1),
+                    &SkRect::from_xywh(3.0, 2.0, SIDE.0, SIDE.1),
+                    VectorFeatures::PLAIN,
+                );
+                outer
+                    .to_image_data(None, &premultiplied)
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec()
+            }
             _ => canvas
                 .to_image_data(None, &premultiplied)
                 .expect("pixels")
@@ -9798,14 +9915,14 @@ mod colour_recording_tests {
     }
 
     /// The runs holding colour glyphs `canvas`'s page files.
-    fn runs(canvas: &mut Canvas) -> Vec<Arc<ColourText>> {
+    fn runs(canvas: &mut Canvas) -> Vec<Arc<ReplayedText>> {
         let page = canvas.context().inner.page();
         page.layers
             .iter()
             .filter_map(|layer| match layer {
-                Layer::ColourText(text) => Some(Arc::clone(text)),
+                Layer::ReplayedText(text) => Some(Arc::clone(text)),
                 Layer::Clipped(piece) => match piece.entry() {
-                    Layer::ColourText(text) => Some(Arc::clone(text)),
+                    Layer::ReplayedText(text) => Some(Arc::clone(text)),
                     _ => None,
                 },
                 _ => None,
@@ -9815,7 +9932,7 @@ mod colour_recording_tests {
 
     /// Each of `runs`' recordings, for pixels and for a document, played
     /// onto a white raster of the page's size.
-    fn played(runs: &[Arc<ColourText>]) -> Vec<Vec<u8>> {
+    fn played(runs: &[Arc<ReplayedText>]) -> Vec<Vec<u8>> {
         runs.iter()
             .flat_map(|run| [run.recorded(), run.recorded_for_document()])
             .map(|recorded| {

@@ -1527,7 +1527,7 @@ is played back, at the scale and in the pixel format it is played onto, so
 that an export at a density, a canvas drawn into another and a canvas pattern
 draw the glyph as drawing it there would. A shadow's filter is applied to
 the glyph image on the CPU, as the CPU canvas applied it to the glyph's layer
-(`layer::ColourText`). On the GPU canvas the four test glyphs, standing
+(`layer::ReplayedText`). On the GPU canvas the four test glyphs, standing
 apart, are the CPU canvas's bytes under a shadow, a blur filter,
 `source-in` and a rotation, and through a `Paragraph`.
 

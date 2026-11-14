@@ -23,6 +23,7 @@ use std::{
     cell::{Cell, RefCell},
     f32::consts::SQRT_2,
     fmt,
+    iter::zip,
     marker::PhantomData,
     sync::{
         Arc, OnceLock,
@@ -54,11 +55,14 @@ use crate::{
         run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
-    font::colr::{BatchScope, Format, ImageRoute, composite_onto, grow_sheets},
+    font::colr::{
+        BatchScope, Format, ImageRoute, blends_by_coefficients, composite_onto,
+        grow_sheets,
+    },
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
-        typography::{DrawnText, RunPaint},
+        typography::{DrawnText, RunPaint, WholeRuns},
         utils::{color_space_name, skia_paint_color_onto_own},
     },
     pixels::PixelColorSpace,
@@ -102,8 +106,8 @@ pub enum Layer {
     /// [`DeferredPicture`]: as a picture once recorded.
     Deferred(Arc<DeferredPicture>),
     /// A run of text holding colour glyphs, drawn again where it is played
-    /// back on pixels -- see [`ColourText`].
-    ColourText(Arc<ColourText>),
+    /// back on pixels -- see [`ReplayedText`].
+    ReplayedText(Arc<ReplayedText>),
     /// A run of draws dyed by gradients, drawn on a GPU canvas in the bytes
     /// the CPU draws them in -- see [`GradientDraw`].
     Gradient(Arc<GradientDraw>),
@@ -129,7 +133,7 @@ impl Layer {
                     picture.playback(canvas);
                 }
             }
-            Layer::ColourText(text) => text.playback(canvas, target),
+            Layer::ReplayedText(text) => text.playback(canvas, target),
             Layer::Gradient(op) => op.playback(canvas, target),
         }
     }
@@ -159,8 +163,25 @@ impl Layer {
                     picture.cull_rect()
                 }),
             ),
-            Layer::ColourText(text) => Some(text.reach()),
+            Layer::ReplayedText(text) => Some(text.reach()),
             Layer::Gradient(op) => Some(op.reach()),
+        }
+    }
+
+    /// What the entry reaches as a batch of runs drawn on the CPU asks it
+    /// where its [`Self::reach`] meets a run -- see
+    /// [`replayed_on_their_backdrop`]: a piece of a clip's run, which reaches
+    /// its clip -- see `page::Run::cull` -- by what it draws within the clip,
+    /// found once -- see [`Clipped::drawn`]; anything else, and a cut draw,
+    /// which reaches what it paints before its clip, by its reach.
+    pub(crate) fn found_reach(&self) -> Option<Rect> {
+        match self {
+            Layer::Clipped(piece)
+                if !matches!(piece.entry(), Layer::Cut(_)) =>
+            {
+                piece.drawn()
+            }
+            entry => entry.reach(),
         }
     }
 
@@ -170,7 +191,8 @@ impl Layer {
     /// no draws.
     ///
     /// A picture recorded only when a target first plays it -- a deferred
-    /// run, a colour run's recording -- counts once it has been recorded.
+    /// run, a replayed run's recordings for pixels and for a document --
+    /// counts once it has been recorded.
     /// Left out: a blur's geometry and the filter it makes at playback,
     /// which hold no pixels, and a pattern's source, which is another
     /// canvas's page, reported by that canvas.
@@ -215,8 +237,9 @@ impl Layer {
                         .as_ref()
                         .map_or(0, |document| recorded(&document.picture))
             }
-            Layer::ColourText(text) => {
+            Layer::ReplayedText(text) => {
                 recorded(&text.recording)
+                    + recorded(&text.whole)
                     + text
                         .document
                         .as_ref()
@@ -243,8 +266,9 @@ impl Layer {
                     document.picture.count_into(count);
                 }
             }
-            Layer::ColourText(text) => {
+            Layer::ReplayedText(text) => {
                 text.recording.count_into(count);
+                text.whole.count_into(count);
                 if let Some(document) = &text.document {
                     document.picture.count_into(count);
                 }
@@ -377,6 +401,21 @@ thread_local! {
     /// How many times [`drawn_on_their_backdrop`] has read a GPU canvas's
     /// pixels back on this thread.
     pub(crate) static BACKDROPS_READ: Cell<usize> = const { Cell::new(0) };
+    /// How many times [`Clipped::drawn`] has found what a piece draws on
+    /// this thread, each piece once.
+    pub(crate) static PIECES_FOUND: Cell<usize> = const { Cell::new(0) };
+    /// A mutant of [`replayed_on_their_backdrop`] set on this thread: an
+    /// entry whose reach meets a run ends the batch there, without asking
+    /// what a piece draws within its clip.
+    pub(crate) static REACH_UNFOUND: Cell<bool> = const { Cell::new(false) };
+    /// A mutant of the batch [`play_entries`] makes of consecutive
+    /// [`ReplayedText`] runs on a GPU canvas, set on this thread: each run
+    /// read back on its own.
+    pub(crate) static BACKDROP_EACH_RUN: Cell<bool> = const { Cell::new(false) };
+    /// Whether [`replayed_on_their_backdrop`] draws runs on this thread:
+    /// off, every run takes the GPU's own route, the reference the bytes a
+    /// batch leaves beside its runs are held to.
+    pub(crate) static BACKDROP_ROUTE: Cell<bool> = const { Cell::new(true) };
 }
 
 /// How many of a [`DeferredPicture`]'s recordings were made: those played as
@@ -1644,6 +1683,10 @@ pub struct PatternDraw {
     /// The draw kept whole, to draw on pixels with the pattern as its
     /// shader, as a draw dyed by a pattern of the canvas's pixels is.
     pub replay: Replay,
+    /// Whether the draw's shadow was filed just before it, as a group of
+    /// its own, which a GPU playback reading the page back for the draw
+    /// draws on the CPU with it -- see [`replayed_on_their_backdrop`].
+    pub cast_before: bool,
     /// Whether a document paints the draw from the tile as pixels do: the
     /// pattern lands on whole device pixels under the transform it was made
     /// under -- see [`TileSource::lands_whole`] -- and the draw is
@@ -1758,7 +1801,7 @@ impl Replay {
 /// such; so do pixels played into a recording, which does not know the
 /// pixels it will be played onto.
 #[derive(Clone, Debug)]
-pub struct ColourText {
+pub struct ReplayedText {
     /// The transform the run was drawn under.
     pub matrix: Matrix,
     /// The run kept whole, to draw on pixels; `None` for a draw that cannot
@@ -1771,7 +1814,7 @@ pub struct ColourText {
     /// it has no replay: the raster it is rasterized into.
     pub inked: Rect,
     /// The shadow the run casts on pixels, drawn beneath it.
-    pub shadow: Option<ColourShadow>,
+    pub shadow: Option<ReplayedShadow>,
     /// The blend a layer holding the run and its shadow composites through,
     /// where the blend covers beyond the draw -- see
     /// `Context2D::render_to_canvas`.
@@ -1780,44 +1823,55 @@ pub struct ColourText {
     /// something has asked for it -- see [`Self::recorded`]; its bounds are
     /// what the run reaches.
     pub recording: LazyPicture,
+    /// The run recorded whole for a document, on a page that keeps one
+    /// recording, where its paint reads the page and the recording for
+    /// pixels -- [`Self::recording`] -- draws its glyphs apart -- see
+    /// [`Self::recorded_for_document`].
+    pub whole: LazyPicture,
     /// The bounds of the page the run is recorded over.
     pub bounds: Rect,
     /// The run as recorded for a document, on a page that keeps a recording
     /// for each kind of target -- see `page::Recorders` -- where it differs.
-    pub document: Option<ColourRecording>,
+    pub document: Option<ReplayedRecording>,
     /// The clip the run was drawn under, in device pixels of the recording,
     /// where it is not a piece of a run that applies it -- see [`Clipped`].
     pub clip: Option<Data>,
+    /// Whether the run's shadow was filed just before it, as a group cast
+    /// through a chain of its own -- see
+    /// `Context2D::files_shadow_through_chain` -- which a GPU playback
+    /// reading the page back for the run draws on the CPU with it -- see
+    /// [`replayed_on_their_backdrop`].
+    pub cast_before: bool,
     /// Where the thread that filed it counts the recordings
-    /// [`Self::recorded`] makes -- see [`COLOUR_WATCH`].
+    /// [`Self::recorded`] makes -- see [`REPLAYED_WATCH`].
     #[cfg(test)]
     pub watch: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Where the colour runs filed on this thread count the recordings made
+    /// Where the runs filed on this thread count the recordings made
     /// of them when first asked for, on whichever thread makes them -- see
-    /// [`ColourText::recorded`].
-    pub(crate) static COLOUR_WATCH: RefCell<
+    /// [`ReplayedText::recorded`].
+    pub(crate) static REPLAYED_WATCH: RefCell<
         Option<Arc<std::sync::atomic::AtomicUsize>>,
     > = const { RefCell::new(None) };
 }
 
-/// A [`ColourText`]'s recording for a document: the paints the run and its
+/// A [`ReplayedText`]'s recording for a document: the paints the run and its
 /// shadow are recorded in, and the picture once something has asked for it
-/// -- see [`ColourText::recorded`].
+/// -- see [`ReplayedText::recorded`].
 #[derive(Clone, Debug)]
-pub struct ColourRecording {
+pub struct ReplayedRecording {
     /// What the run is recorded in.
     pub paint: Paint,
     /// The shadow recorded beneath the run.
-    pub shadow: Option<ColourShadow>,
+    pub shadow: Option<ReplayedShadow>,
     /// The picture, once recorded.
     pub picture: LazyPicture,
 }
 
-impl ColourRecording {
+impl ReplayedRecording {
     /// `picture`, recorded already.
     pub(crate) fn recorded(picture: Picture) -> Self {
         Self {
@@ -1829,7 +1883,7 @@ impl ColourRecording {
 
     /// The run in `paint`, `shadow` beneath it, recorded when first asked
     /// for.
-    pub(crate) fn later(paint: Paint, shadow: Option<ColourShadow>) -> Self {
+    pub(crate) fn later(paint: Paint, shadow: Option<ReplayedShadow>) -> Self {
         Self {
             paint,
             shadow,
@@ -1838,17 +1892,64 @@ impl ColourRecording {
     }
 }
 
-/// The shadow a [`ColourText`] casts: the run in the shadow's paint, which
+/// The shadow a [`ReplayedText`] casts: the run in the shadow's paint, which
 /// is the run's own at full alpha where the shadow's colour took the
 /// `globalAlpha`, moved by the shadow's offset in the page's own units.
 #[derive(Clone, Debug)]
-pub struct ColourShadow {
+pub struct ReplayedShadow {
     pub paint: Paint,
     pub replay: Replay,
     pub offset: Vector,
 }
 
-impl ColourText {
+impl ReplayedText {
+    /// Whether the run's draw reads the page in the shader: its paint's
+    /// blend, or the blend a layer holding it composites through, past the
+    /// blends a GPU does in its fixed-function stage -- see
+    /// [`blends_by_coefficients`].
+    pub(crate) fn reads_the_page(&self) -> bool {
+        !blends_by_coefficients(self.paint.blend_mode_or(BlendMode::SrcOver))
+            || self
+                .blend
+                .is_some_and(|blend| !blends_by_coefficients(blend))
+    }
+
+    /// What the run inks on a canvas whose transform is `device`, within
+    /// `clip`, in that canvas's pixels: its replay and its shadow recorded
+    /// under `device` -- see [`inked_by`] -- bounded as Skia bounds them,
+    /// which its own culling depends on, and widened by [`HINTED_INK_DRIFT`]
+    /// device pixels, since Skia takes a glyph's bounds at the font's own
+    /// size while FreeType hints it at the size it is drawn: the drift that
+    /// constant was measured for, at most 1.73 pixels over its CoreText and
+    /// FreeType sweeps. Too wide only ends a batch of runs sooner; too
+    /// narrow leaves ink unwritten. `None` where the
+    /// run has no replay, a paragraph drawn from its raster, or composites
+    /// through a layer of its own, which covers the clip.
+    pub(crate) fn ink_under(
+        &self,
+        device: &Matrix,
+        clip: IRect,
+    ) -> Option<IRect> {
+        let replay = self.replay.as_ref().filter(|_| self.blend.is_none())?;
+        // Its glyphs drawn whole, as one blob bounded by them all, rather
+        // than apart as a recording draws them.
+        let _whole = WholeRuns::hold();
+        let inked = inked_by(Rect::from(clip), device, |canvas| {
+            if let Some(shadow) = &self.shadow {
+                canvas.save();
+                canvas.translate(shadow.offset);
+                shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
+                canvas.restore();
+            }
+            replay.draw(canvas, &self.matrix, &self.paint);
+        });
+        // Skia bounds a run by its glyphs at the font's own size, unhinted,
+        // and FreeType hints them at the size they are drawn: at a density
+        // of 2 a run inked a row below what its recording reported.
+        let inked = inked.with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
+        Some(IRect::intersect(&inked.round_out(), &clip).unwrap_or_default())
+    }
+
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         // Its runs join a batch only where nothing of its own lies between
         // them and the page: no clip, no layer for a blend, no shadow
@@ -1924,11 +2025,22 @@ impl ColourText {
     }
 
     /// The run as recorded for a document, recorded now if nothing has
-    /// asked for it yet: its own on a page that keeps a recording for each
-    /// kind of target, the pixels' otherwise -- see [`Self::recorded`].
+    /// asked for it yet, its glyphs drawn whole -- see [`WholeRuns`]: in
+    /// the document's own paint on a page that keeps one; otherwise the
+    /// recording for pixels -- see [`Self::recorded`] -- where a blend by
+    /// coefficients draws its glyphs whole there too, and a recording of
+    /// its own where the recording for pixels draws them apart.
     pub(crate) fn recorded_for_document(&self) -> Option<&Picture> {
+        let _whole = WholeRuns::hold();
         let Some(document) = &self.document else {
-            return self.recorded();
+            if blends_by_coefficients(
+                self.paint.blend_mode_or(BlendMode::SrcOver),
+            ) {
+                return self.recorded();
+            }
+            return self.whole.get_or_record(|| {
+                self.record(&self.paint, self.shadow.as_ref())
+            });
         };
         document.picture.get_or_record(|| {
             self.record(&document.paint, document.shadow.as_ref())
@@ -1940,7 +2052,7 @@ impl ColourText {
     fn record(
         &self,
         paint: &Paint,
-        shadow: Option<&ColourShadow>,
+        shadow: Option<&ReplayedShadow>,
     ) -> Option<Picture> {
         #[cfg(test)]
         if let Some(watch) = &self.watch {
@@ -2118,107 +2230,28 @@ impl Drop for InLayer {
 }
 
 /// Draws `recorded` onto `canvas` as the CPU draws it, over the pixels
-/// `canvas` holds there: those pixels read back into a raster made on the
-/// CPU in `format`, `recorded` played onto them under the transform `canvas`
-/// carries, and the result written back as it is. The raster covers what
-/// `recorded` reaches within the clip, or the clip's bounds whole where
-/// `beyond` says its blend changes what lies beyond the draw. `false`,
-/// having drawn nothing, where the pixels cannot be read: inside a layer,
-/// under a perspective, or where Skia refuses the read.
-///
-/// The one route that reproduces a draw the CPU blends in floats and rounds
-/// once, after blending, as its `highp` pipeline does: compositing a raster
-/// of the draw made over transparent rounds the draw's colour first and the
-/// blend again, a level apart wherever the two roundings differ.
+/// `canvas` holds there -- see [`drawn_on_their_backdrop`]: it reaches its
+/// cull rectangle, or the clip's bounds whole where `beyond` says its blend
+/// changes what lies beyond the draw.
 fn drawn_on_its_backdrop(
     canvas: &SkCanvas,
     recorded: &Picture,
     format: &Format,
     beyond: bool,
 ) -> bool {
-    drawn_on_their_backdrop(canvas, &[(recorded, beyond)], format)
-}
-
-/// [`drawn_on_its_backdrop`] for several draws one after another, read back
-/// once over all they reach and written back once: each is played onto the
-/// raster over what the one before it left there, as reading back between
-/// them would have found, so the bytes are the same. A read back from the
-/// GPU waits for it, and one each made 200 Oklab radials cost 23 times what
-/// Ganesh's own gradient did.
-fn drawn_on_their_backdrop(
-    canvas: &SkCanvas,
-    draws: &[(&Picture, bool)],
-    format: &Format,
-) -> bool {
-    if InLayer::open() {
-        return false;
-    }
-    let device = canvas.local_to_device_as_3x3();
-    if device.has_perspective() {
-        return false;
-    }
-    let Some(clip) = canvas.device_clip_bounds() else {
-        return true;
-    };
-    let area =
-        draws
-            .iter()
-            .fold(None, |area: Option<IRect>, (recorded, beyond)| {
-                let reach = match beyond {
-                    true => Some(clip),
-                    false => IRect::intersect(
-                        &device.map_rect(recorded.cull_rect()).0.round_out(),
-                        &clip,
-                    ),
-                };
-                match (area, reach) {
-                    (Some(area), Some(reach)) => Some(IRect::new(
-                        area.left.min(reach.left),
-                        area.top.min(reach.top),
-                        area.right.max(reach.right),
-                        area.bottom.max(reach.bottom),
-                    )),
-                    (area, reach) => area.or(reach),
-                }
-            });
-    let Some(area) = area else {
-        return true;
-    };
-    let info = format.image_info(area.size());
-    let row = info.min_row_bytes();
-    let mut backdrop = vec![0u8; info.compute_byte_size(row)];
-    if !canvas.read_pixels(&info, &mut backdrop, row, (area.left, area.top)) {
-        return false;
-    }
-    #[cfg(test)]
-    BACKDROPS_READ.set(BACKDROPS_READ.get() + 1);
-    // The raster reaches from the canvas's origin, so that the draws are
-    // made at the device coordinates the CPU canvas makes them at: offset to
-    // the area, the transform inverted with another translation moved a
-    // value on a half level to the next, 2 bytes in 40 Oklab radials.
-    let whole = format.image_info(ISize::new(area.right, area.bottom));
-    let Some(mut surface) = started::raster(&whole, None, None) else {
-        return false;
-    };
-    let raster = surface.canvas();
-    if !raster.write_pixels(&info, &backdrop, row, (area.left, area.top)) {
-        return false;
-    }
-    raster.clip_irect(area, ClipOp::Intersect);
-    raster.concat(&device);
-    for (recorded, _) in draws {
-        recorded.playback(raster);
-    }
-    let Some(drawn) = surface.image_snapshot_with_bounds(area) else {
-        return false;
-    };
-    canvas.save();
-    canvas.reset_matrix();
-    let mut src = Paint::default();
-    src.set_blend_mode(BlendMode::Src);
-    canvas.draw_image(drawn, (area.left as f32, area.top as f32), Some(&src));
-    canvas.restore();
-    true
+    let draw = |raster: &SkCanvas| recorded.playback(raster);
+    drawn_on_their_backdrop(
+        canvas,
+        &[BackdropDraw {
+            reach: match beyond {
+                true => BackdropReach::Beyond,
+                false => BackdropReach::Local(recorded.cull_rect()),
+            },
+            draw: &draw,
+            clip: None,
+        }],
+        format,
+    )
 }
 
 /// A run of draws dyed by gradients, kept so that a GPU canvas draws them in
@@ -2878,9 +2911,21 @@ impl GradientDraw {
                         _ => None,
                     })
                     .collect();
-                let drawn: Vec<(&Picture, bool)> = span
+                let plays: Vec<_> = span
                     .iter()
-                    .map(|(recorded, beyond)| (&**recorded, *beyond))
+                    .map(|(recorded, _)| {
+                        move |raster: &SkCanvas| recorded.playback(raster)
+                    })
+                    .collect();
+                let drawn: Vec<BackdropDraw<'_>> = zip(&span, &plays)
+                    .map(|((recorded, beyond), play)| BackdropDraw {
+                        reach: match beyond {
+                            true => BackdropReach::Beyond,
+                            false => BackdropReach::Local(recorded.cull_rect()),
+                        },
+                        draw: play,
+                        clip: None,
+                    })
                     .collect();
                 if drawn.len() > 1
                     && Format::of(canvas).is_some_and(|format| {
@@ -3019,6 +3064,31 @@ impl PatternDraw {
     /// What the draw covers, under the transform it is played under.
     fn reach(&self) -> Rect {
         self.plain.cull_rect()
+    }
+
+    /// Whether the draw is a run of text drawn under a blend read in the
+    /// shader -- see [`blends_by_coefficients`] -- which a GPU draws apart
+    /// where its glyphs overlap, as it does a [`ReplayedText`]'s.
+    pub(crate) fn reads_the_page(&self) -> bool {
+        matches!(self.replay, Replay::Text { .. })
+            && !blends_by_coefficients(
+                self.paint.blend_mode_or(BlendMode::SrcOver),
+            )
+    }
+
+    /// What the draw inks on a canvas whose transform is `device`, within
+    /// `clip`, in that canvas's pixels, as [`ReplayedText::ink_under`]
+    /// finds it: its replay recorded under `device`, the pattern left out,
+    /// which inks nothing the draw's shape does not, and widened by
+    /// [`HINTED_INK_DRIFT`]. Its own clip, where it has one, is left out
+    /// too, which only widens it.
+    fn ink_under(&self, device: &Matrix, clip: IRect) -> IRect {
+        let _whole = WholeRuns::hold();
+        let inked = inked_by(Rect::from(clip), device, |canvas| {
+            self.replay.draw(canvas, &self.matrix, &self.paint);
+        });
+        let inked = inked.with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
+        IRect::intersect(&inked.round_out(), &clip).unwrap_or_default()
     }
 }
 
@@ -3426,6 +3496,34 @@ impl Entries {
 }
 
 impl Group {
+    /// What the group's chain can draw on a canvas whose transform is
+    /// `device`, in that canvas's pixels: what its entries draw -- the
+    /// chain's own reach where it has one, as a run of text answers it, and
+    /// what the entries reach otherwise -- through the group's transforms,
+    /// widened by as far as its steps carry a pixel -- see
+    /// [`chain::canvas_reach`] -- at the device's scale, and a pixel either
+    /// side for anti-aliasing. Too wide only reads more of the page. `None`
+    /// for a group that runs no chain, or whose entries reach what the clip
+    /// allows.
+    pub(crate) fn chain_reach_under(&self, device: &Matrix) -> Option<IRect> {
+        let Composite::Chain { steps, reach, .. } = &self.composite else {
+            return None;
+        };
+        let drawn = reach.or_else(|| reach_of(&self.contents.layers))?;
+        let to_device = Matrix::concat(device, &self.contents_matrix);
+        let scale = device
+            .decompose_scale(None)
+            .map_or(1.0, |scale| scale.width.max(scale.height));
+        let spread = chain::canvas_reach(steps, &self.matrix) * scale;
+        Some(
+            to_device
+                .map_rect(drawn)
+                .0
+                .with_outset((spread.x + 1.0, spread.y + 1.0))
+                .round_out(),
+        )
+    }
+
     /// Confines `canvas` to the destination the group is drawn into --
     /// `within` -- which `to_device` maps to the canvas's pixels and the
     /// canvas carries as its transform when this is called.
@@ -4102,6 +4200,9 @@ thread_local! {
     pub(crate) static BOUNDS_PAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     /// Every rectangle a run's clip has been bounded by on this thread.
     pub(crate) static BOUNDED: std::cell::RefCell<Vec<IRect>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many times a run's clip has been applied for its pieces on this
+    /// thread -- see [`Clipped::play_run`].
+    pub(crate) static CLIPS_APPLIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A clip as the entries played under it keep it: serialized, and its
@@ -4157,19 +4258,22 @@ impl Clipped {
     /// What the piece draws, within the clip's bounds, as Skia bounds each
     /// draw -- its stroke, its join and caps, a shadow's offset and blur, a
     /// filter's reach. A run is recorded without a bounding hierarchy, so a
-    /// piece's picture culls to the page; its draws are replayed once into a
+    /// piece's picture culls to the page or its clip -- see
+    /// `page::Run::cull`; its draws are replayed once into a
     /// recording with one, which Skia trims to what they draw, and the
     /// rectangle kept. `None` where a draw has no rectangle to take -- see
     /// [`Layer::reach`].
     pub(crate) fn drawn(&self) -> Option<Rect> {
         *self.drawn.get_or_init(|| {
+            #[cfg(test)]
+            PIECES_FOUND.set(PIECES_FOUND.get() + 1);
             let mut within = match &self.entry {
                 Layer::Picture(picture) => drawn_by(picture),
                 Layer::Targeted(pictures) => drawn_by(&pictures.0),
                 Layer::Deferred(deferred) => {
                     deferred.picture().and_then(drawn_by)
                 }
-                Layer::ColourText(text) => Some(text.reach()),
+                Layer::ReplayedText(text) => Some(text.reach()),
                 entry => entry.reach(),
             }?;
             if !within.intersect(self.bounds) {
@@ -4241,6 +4345,8 @@ impl Clipped {
                 }
             }
             canvas.clip_path(&clip, ClipOp::Intersect, true);
+            #[cfg(test)]
+            CLIPS_APPLIED.set(CLIPS_APPLIED.get() + 1);
         }
         for piece in pieces {
             match &piece.borrow().entry {
@@ -4266,6 +4372,487 @@ impl Clipped {
     }
 }
 
+/// A draw [`drawn_on_their_backdrop`] makes: what it can change -- see
+/// [`BackdropReach`] -- the draw itself, made onto a canvas under that
+/// canvas's transform, and the bounds of a clip path it applies itself, in
+/// the coordinates it is made in, where it applies one.
+pub(crate) struct BackdropDraw<'a> {
+    pub(crate) reach: BackdropReach,
+    pub(crate) draw: &'a dyn Fn(&SkCanvas),
+    pub(crate) clip: Option<Rect>,
+}
+
+/// What a [`BackdropDraw`] can change.
+#[derive(Clone)]
+pub(crate) enum BackdropReach {
+    /// A rectangle in the coordinates the draw is made in, under the
+    /// canvas's transform.
+    Local(Rect),
+    /// A rectangle in the canvas's pixels.
+    Device(IRect),
+    /// The whole clip: the draw's blend changes what lies beyond it.
+    Beyond,
+}
+
+/// Draws `draws` onto `canvas` one after another as the CPU draws them, over
+/// the pixels `canvas` holds there: those pixels read back once into a raster
+/// made on the CPU in `format`, each draw made onto it under the transform
+/// `canvas` carries, over what the one before it left there, as reading back
+/// between them would have found, and the result written back once as it
+/// is. The raster covers what the draws reach within the clip, or the
+/// clip's bounds whole where one's blend changes what lies beyond it, and
+/// reaches over the bounds of any clip path a draw applies itself.
+/// `false`, having drawn nothing, where the pixels cannot be read: inside a
+/// layer, under a perspective, or where Skia refuses the read or the write.
+///
+/// The one route that reproduces a draw the CPU blends in floats and rounds
+/// once, after blending, as its `highp` pipeline does: compositing a raster
+/// of the draw made over transparent rounds the draw's colour first and the
+/// blend again, a level apart wherever the two roundings differ. A read back
+/// from the GPU waits for it, so the draws share one: one each made 200
+/// Oklab radials cost 23 times what Ganesh's own gradient did.
+fn drawn_on_their_backdrop(
+    canvas: &SkCanvas,
+    draws: &[BackdropDraw<'_>],
+    format: &Format,
+) -> bool {
+    if InLayer::open() {
+        return false;
+    }
+    let device = canvas.local_to_device_as_3x3();
+    if device.has_perspective() {
+        return false;
+    }
+    let Some(clip) = canvas.device_clip_bounds() else {
+        return true;
+    };
+    let area = draws.iter().fold(None, |area: Option<IRect>, draw| {
+        let reach = match &draw.reach {
+            BackdropReach::Beyond => Some(clip),
+            BackdropReach::Local(reach) => {
+                IRect::intersect(&device.map_rect(reach).0.round_out(), &clip)
+            }
+            BackdropReach::Device(reach) => IRect::intersect(reach, &clip),
+        };
+        match (area, reach) {
+            (Some(area), Some(reach)) => Some(IRect::new(
+                area.left.min(reach.left),
+                area.top.min(reach.top),
+                area.right.max(reach.right),
+                area.bottom.max(reach.bottom),
+            )),
+            (area, reach) => area.or(reach),
+        }
+    });
+    let Some(area) = area else {
+        return true;
+    };
+    let info = format.image_info(area.size());
+    let row = info.min_row_bytes();
+    let mut backdrop = vec![0u8; info.compute_byte_size(row)];
+    if !canvas.read_pixels(&info, &mut backdrop, row, (area.left, area.top)) {
+        return false;
+    }
+    #[cfg(test)]
+    BACKDROPS_READ.set(BACKDROPS_READ.get() + 1);
+    // The raster reaches from the canvas's origin, so that the draws are
+    // made at the device coordinates the CPU canvas makes them at: offset to
+    // the area, the transform inverted with another translation moved a
+    // value on a half level to the next, 2 bytes in 40 Oklab radials.
+    //
+    // A draw applying a clip path of its own finds the raster's bounds
+    // where the page's lie, over the path, and no clip to the area: Skia
+    // rasterizes an anti-aliased clip's edge against the bounds that cut it
+    // as it does a path against a clip, other than over the path's own --
+    // 59 channels of a page of runs under a circle, the area cutting it.
+    let page = canvas.image_info().bounds();
+    let clipped = draws
+        .iter()
+        .filter_map(|draw| draw.clip)
+        .filter_map(|clip| {
+            IRect::intersect(&device.map_rect(clip).0.round_out(), &page)
+        })
+        .map(|clip| (clip.right, clip.bottom))
+        .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
+    let (right, bottom) = clipped.map_or((area.right, area.bottom), |at| {
+        (area.right.max(at.0), area.bottom.max(at.1))
+    });
+    let whole = format.image_info(ISize::new(right, bottom));
+    // Under the canvas's own surface properties, so that text on the raster
+    // takes the page's contrast and gamma rather than Skia's defaults, which
+    // differ from the page's on Linux.
+    let props = canvas.props();
+    let Some(mut surface) = started::raster(&whole, None, props.as_ref())
+    else {
+        return false;
+    };
+    let raster = surface.canvas();
+    if !raster.write_pixels(&info, &backdrop, row, (area.left, area.top)) {
+        return false;
+    }
+    if clipped.is_none() {
+        raster.clip_irect(area, ClipOp::Intersect);
+    }
+    raster.concat(&device);
+    for draw in draws {
+        raster.save();
+        (draw.draw)(raster);
+        raster.restore();
+    }
+    let Some(drawn) = surface.image_snapshot_with_bounds(area) else {
+        return false;
+    };
+    canvas.save();
+    canvas.reset_matrix();
+    let mut src = Paint::default();
+    src.set_blend_mode(BlendMode::Src);
+    canvas.draw_image(drawn, (area.left as f32, area.top as f32), Some(&src));
+    canvas.restore();
+    true
+}
+
+/// Plays the runs of text `entries` opens with, each under a blend read in
+/// the shader, a [`ReplayedText`] or a run dyed by a canvas pattern, alone
+/// or a piece of a clip's run -- see [`read_on_the_cpu`] -- and each with
+/// the group casting its shadow where that was filed just before it -- see
+/// [`cpu_run_at`] -- onto a GPU canvas as the CPU draws them, over one read
+/// back of the pixels they ink -- see [`drawn_on_their_backdrop`]: on the CPU a
+/// run is drawn whole and composites each glyph over the last, where Ganesh,
+/// with no framebuffer fetch on Metal, copies the page for every draw that
+/// reads it and draws a run's overlapping glyphs in groups that share no pixel,
+/// each copy ending a render pass. How many entries it played, `0` where
+/// `entries` opens with no such run or the pixels cannot be read.
+///
+/// The runs need not be consecutive. An entry between two of them joins the
+/// batch where what it can draw -- see [`Layer::reach`] -- meets what no run
+/// of the batch inks, before it or after it; one that meets a run's ink, or
+/// whose reach is not known, ends the batch before it, as does a run whose
+/// ink meets an entry already taken. The entries between are played first,
+/// on the GPU, in their order -- see [`play_entries`] -- then the page read
+/// back over the runs' ink, the runs drawn over it in theirs and the result
+/// written back: a run reads the page only where it inks, which no entry
+/// between touches, so each finds what it would have in the order drawn, and
+/// the entries' pixels within the area read come back as they were.
+fn replayed_on_their_backdrop(
+    entries: &[Layer],
+    features: &[VectorFeatures],
+    canvas: &SkCanvas,
+) -> usize {
+    #[cfg(test)]
+    if !BACKDROP_ROUTE.get() {
+        return 0;
+    }
+    if entries.is_empty() || cpu_run_at(entries, 0).is_none() {
+        return 0;
+    }
+    let device = canvas.local_to_device_as_3x3();
+    let (Some(format), Some(clip)) =
+        (Format::of(canvas), canvas.device_clip_bounds())
+    else {
+        return 0;
+    };
+    if InLayer::open() || device.has_perspective() {
+        return 0;
+    }
+    // What each run inks, recorded under the transform it is played under,
+    // within the bounds of the clip it is drawn under where it has one; what
+    // it reaches where that cannot be had.
+    let reach_of_run = |run: &KeptRun<'_>, within: Option<Rect>| match (
+        run.reach(&device, clip),
+        within,
+    ) {
+        (reach, None) => reach,
+        (BackdropReach::Device(inks), Some(within)) => {
+            let within = device.map_rect(within).0.round_out();
+            BackdropReach::Device(
+                IRect::intersect(&inks, &within).unwrap_or_default(),
+            )
+        }
+        (BackdropReach::Local(mut reach), Some(within)) => {
+            if !reach.intersect(within) {
+                reach = Rect::new_empty();
+            }
+            BackdropReach::Local(reach)
+        }
+        (BackdropReach::Beyond, Some(_)) => BackdropReach::Beyond,
+    };
+    let in_pixels = |reach: &BackdropReach| match reach {
+        BackdropReach::Beyond => clip,
+        BackdropReach::Device(reach) => *reach,
+        BackdropReach::Local(reach) => device.map_rect(reach).0.round_out(),
+    };
+    let mut runs: Vec<CpuRun> = vec![];
+    let mut between: Vec<IRect> = vec![];
+    // The batch ends at its last run, so nothing past the last on the page
+    // is asked what it reaches.
+    let last_run = (0..entries.len())
+        .rev()
+        .find(|&at| cpu_run_at(entries, at).is_some())
+        .unwrap_or_default();
+    let mut at = 0;
+    while at < entries.len() {
+        match cpu_run_at(entries, at) {
+            Some((span, run, within)) => {
+                let last = at + span - 1;
+                // A shadow cast before the run is drawn with it, over what
+                // it reaches as well.
+                let reach = match (reach_of_run(&run, within), span) {
+                    (reach, 1) | (reach @ BackdropReach::Beyond, _) => reach,
+                    (reach, _) => {
+                        let Layer::Group(group) = &entries[at] else {
+                            break;
+                        };
+                        let Some(cast) = group.chain_reach_under(&device)
+                        else {
+                            break;
+                        };
+                        let inks = in_pixels(&reach);
+                        BackdropReach::Device(
+                            IRect::intersect(
+                                &IRect::new(
+                                    inks.left.min(cast.left),
+                                    inks.top.min(cast.top),
+                                    inks.right.max(cast.right),
+                                    inks.bottom.max(cast.bottom),
+                                ),
+                                &clip,
+                            )
+                            .unwrap_or_default(),
+                        )
+                    }
+                };
+                let inks = in_pixels(&reach);
+                if between.iter().any(|drawn| IRect::intersects(drawn, &inks)) {
+                    break;
+                }
+                let clip_bounds = entries[at..=last]
+                    .iter()
+                    .filter_map(clip_path_bounds)
+                    .reduce(|mut all, bounds| {
+                        all.join(bounds);
+                        all
+                    });
+                runs.push(CpuRun {
+                    first: at,
+                    last,
+                    reach,
+                    clip: clip_bounds,
+                });
+                at = last + 1;
+            }
+            None if runs.is_empty() || at > last_run => break,
+            None => {
+                let meets = |reach: Rect| {
+                    let drawn = device.map_rect(reach).0.round_out();
+                    let met = runs.iter().any(|run| {
+                        IRect::intersects(&in_pixels(&run.reach), &drawn)
+                    });
+                    (met, drawn)
+                };
+                let Some(reach) = entries[at].reach() else {
+                    break;
+                };
+                let (mut met, mut drawn) = meets(reach);
+                // Asked again, as found, only where the reach alone would end
+                // the batch -- see `Layer::found_reach`.
+                #[cfg(test)]
+                let found = !REACH_UNFOUND.get();
+                #[cfg(not(test))]
+                let found = true;
+                if met
+                    && found
+                    && let Some(within) = entries[at].found_reach()
+                {
+                    (met, drawn) = meets(within);
+                }
+                if met {
+                    break;
+                }
+                between.push(drawn);
+                at += 1;
+            }
+        }
+        #[cfg(test)]
+        if BACKDROP_EACH_RUN.get() && !runs.is_empty() {
+            break;
+        }
+    }
+    // The batch ends at its last run; the entries after it play as they do.
+    let Some(last) = runs.last().map(|run| run.last) else {
+        return 0;
+    };
+    // The entries between are those between each two runs of the batch.
+    let mut between_played = false;
+    for pair in runs.windows(2) {
+        let (from, to) = (pair[0].last + 1, pair[1].first);
+        if from < to {
+            play_entries(
+                &entries[from..to],
+                &features[from..to],
+                canvas,
+                Target::Pixels,
+            );
+            between_played = true;
+        }
+    }
+    let plays: Vec<_> = runs
+        .iter()
+        .map(|run| {
+            let drawn = &entries[run.first..=run.last];
+            move |raster: &SkCanvas| {
+                for entry in drawn {
+                    entry.playback(raster, Target::Pixels);
+                }
+            }
+        })
+        .collect();
+    let draws: Vec<BackdropDraw<'_>> = zip(&runs, &plays)
+        .map(|(run, play)| BackdropDraw {
+            reach: run.reach.clone(),
+            draw: play,
+            clip: run.clip,
+        })
+        .collect();
+    // Where the pixels cannot be read, the runs are drawn as they are
+    // otherwise: by the caller where nothing has played, and here after the
+    // entries between, which they do not meet, so in an order that draws
+    // the same.
+    if !drawn_on_their_backdrop(canvas, &draws, &format) {
+        if !between_played {
+            return 0;
+        }
+        for run in &runs {
+            for entry in &entries[run.first..=run.last] {
+                entry.playback(canvas, Target::Pixels);
+            }
+        }
+    }
+    for run in &runs {
+        let drawn = &entries[run.first..=run.last];
+        let paced = features.get(run.first..).unwrap_or_default();
+        for (entry, features) in zip(drawn, paced) {
+            pacing::played(canvas, offscreen_layers(entry, *features));
+        }
+    }
+    last + 1
+}
+
+/// A run [`replayed_on_their_backdrop`] draws on the CPU: the entries from
+/// `first` to `last` -- the run, and the group casting its shadow where
+/// that was filed just before it -- what they can change, and the bounds of
+/// any clip path they apply themselves.
+struct CpuRun {
+    first: usize,
+    last: usize,
+    reach: BackdropReach,
+    clip: Option<Rect>,
+}
+
+/// The run `entries` holds at `at` that [`replayed_on_their_backdrop`]
+/// draws on the CPU -- see [`read_on_the_cpu`] -- how many entries it
+/// spans, and the bounds of the clip it is drawn under where it has one: a
+/// run alone, or the group a run's shadow is cast through followed by the
+/// run -- see [`ReplayedText::cast_before`] and [`PatternDraw::cast_before`]
+/// -- which the CPU page composites one after the other, as the raster then
+/// does. `None` for any
+/// other entry.
+fn cpu_run_at(
+    entries: &[Layer],
+    at: usize,
+) -> Option<(usize, KeptRun<'_>, Option<Rect>)> {
+    if let Some((run, within)) = read_on_the_cpu(&entries[at]) {
+        return Some((1, run, within));
+    }
+    let cast = matches!(&entries[at], Layer::Group(group)
+        if matches!(group.composite, Composite::Chain { .. }));
+    let cast_before = |entry: &Layer| match entry {
+        Layer::ReplayedText(text) => text.cast_before,
+        Layer::Pattern(draw) => draw.cast_before,
+        _ => false,
+    };
+    let next = entries.get(at + 1).filter(|next| match next {
+        Layer::Clipped(piece) => cast_before(piece.entry()),
+        next => cast_before(next),
+    })?;
+    let (run, within) = read_on_the_cpu(next)?;
+    cast.then_some((2, run, within))
+}
+
+/// The bounds of a clip path `entry` applies itself, in the coordinates it
+/// is played back under: a piece's, or the clip a run or a pattern's draw
+/// holds where the page keeps no run of it. A group casting a run's shadow
+/// is filed under the clip the run is, and needs no bounds of its own.
+fn clip_path_bounds(entry: &Layer) -> Option<Rect> {
+    let bounds = |clip: &Option<Data>| {
+        clip.as_ref()
+            .and_then(Path::deserialize)
+            .map(|clip| *clip.bounds())
+    };
+    match entry {
+        Layer::Clipped(piece) => Some(piece.bounds),
+        Layer::ReplayedText(text) => bounds(&text.clip),
+        Layer::Pattern(draw) => bounds(&draw.clip),
+        _ => None,
+    }
+}
+
+/// A draw of text under a blend read in the shader that
+/// [`replayed_on_their_backdrop`] draws on the CPU: a kept run -- see
+/// [`ReplayedText::reads_the_page`] -- or a run dyed by a canvas pattern --
+/// see [`PatternDraw::reads_the_page`], whose tile a raster makes on the CPU
+/// as the CPU page makes it.
+enum KeptRun<'a> {
+    Text(&'a ReplayedText),
+    Pattern(&'a PatternDraw),
+}
+
+impl KeptRun<'_> {
+    /// What the run can change on a canvas whose transform is `device`,
+    /// within `clip`: what it inks, the whole clip where its blend covers
+    /// beyond the draw, or what it reaches where its ink cannot be had.
+    fn reach(&self, device: &Matrix, clip: IRect) -> BackdropReach {
+        match self {
+            KeptRun::Text(text) if text.blend.is_some() => {
+                BackdropReach::Beyond
+            }
+            KeptRun::Text(text) => text.ink_under(device, clip).map_or(
+                BackdropReach::Local(text.reach()),
+                BackdropReach::Device,
+            ),
+            KeptRun::Pattern(draw) => {
+                BackdropReach::Device(draw.ink_under(device, clip))
+            }
+        }
+    }
+}
+
+/// The run `entry` draws that [`replayed_on_their_backdrop`] draws on the
+/// CPU -- see [`KeptRun`] -- and the bounds of the clip path it applies
+/// itself, in the coordinates it is played back under, where it applies
+/// one: as a piece of a clip's run -- see [`Clipped`] -- or under a clip
+/// of its own, where the page keeps no run of the clip. Played onto the
+/// raster, it applies that clip there as the CPU page applies it. `None`
+/// for any other entry.
+fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
+    fn kept(entry: &Layer) -> Option<KeptRun<'_>> {
+        match entry {
+            Layer::ReplayedText(text) if text.reads_the_page() => {
+                Some(KeptRun::Text(text))
+            }
+            Layer::Pattern(draw) if draw.reads_the_page() => {
+                Some(KeptRun::Pattern(draw))
+            }
+            _ => None,
+        }
+    }
+    match entry {
+        Layer::Clipped(piece) => {
+            Some((kept(piece.entry())?, Some(piece.bounds)))
+        }
+        entry => Some((kept(entry)?, clip_path_bounds(entry))),
+    }
+}
+
 /// Plays `entries`, each asking for `features` at the same index, onto
 /// `canvas` for `target`, in order: each as [`Layer::playback`] plays it,
 /// but for consecutive pieces of one run played into a document or a
@@ -4280,14 +4867,23 @@ impl Clipped {
 /// applied one for the frame. A cut draw there clips by coverage, alone --
 /// see [`CutOp::playback`] -- and the pieces between cut draws share one
 /// clip. A document clips a cut draw by the path, among the run's pieces
-/// under their one clip. A raster or GPU canvas plays each piece under its
-/// own clip.
+/// under their one clip. A raster on the CPU plays the pieces between cut
+/// draws under one clip, bounded by what they draw, as it bounds a piece
+/// played alone, since it builds the clip's mask each time the clip is
+/// applied: applied piece by piece, the clip was 7.3% of the samples of a
+/// page of 40 runs, each a piece of one clip's run, drawn and read on the
+/// CPU in a release build. A GPU canvas plays each piece under its own
+/// clip.
 ///
 /// On pixels it first adds to the colour glyph sheets the glyph images the
 /// last playback drew again -- see [`grow_sheets`] -- so that a page adds
 /// them once, before any of its runs draws; and it holds consecutive runs of
 /// colour text open in one [`BatchScope`], so that those drawn from a sheet
-/// are drawn together, before the next entry of another kind plays.
+/// are drawn together, before the next entry of another kind plays. On the
+/// GPU it plays kept runs under a blend read in the shader on the CPU, over
+/// one read back of the pixels they ink, with the entries between them that
+/// meet none of them -- see [`replayed_on_their_backdrop`] -- closing an
+/// open batch first, so that the read finds what it drew.
 pub(crate) fn play_entries(
     entries: &[Layer],
     features: &[VectorFeatures],
@@ -4299,17 +4895,30 @@ pub(crate) fn play_entries(
         grow_sheets();
     }
     let paced = target == Target::Pixels && blur_mask::on_gpu(canvas);
-    let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
+    let raster = target != Target::Document && blur_mask::draws_on_cpu(canvas);
+    let grouped =
+        target == Target::Document || !blur_mask::draws_on(canvas) || raster;
     let coverage = clips_by_coverage(canvas, target);
     // Only on a page holding a cut draw: a document walks the picture of a
     // page holding none as vectors -- see `Page::picture` -- and would write
-    // the bound as a clip of its own.
-    let bounded = target == Target::Pixels
-        && !blur_mask::draws_on(canvas)
-        && holds_a_cut(entries)
-        && bounds_pieces();
+    // the bound as a clip of its own. A raster bounds the clip as it bounds
+    // a piece played alone -- see `Clipped::playback`.
+    let bounded = match raster {
+        true => bounds_page(),
+        false => {
+            target == Target::Pixels
+                && !blur_mask::draws_on(canvas)
+                && holds_a_cut(entries)
+                && bounds_pieces()
+        }
+    };
+    // On a raster, a cut draw clips itself, as it does played alone, and a
+    // piece whose draws have no known rectangle plays alone, unbounded,
+    // rather than leaving the pieces beside it unbounded with it.
     let shares_the_clip = |piece: &Clipped| {
-        grouped && !(coverage && matches!(piece.entry, Layer::Cut(_)))
+        grouped
+            && !((coverage || raster) && matches!(piece.entry, Layer::Cut(_)))
+            && !(raster && piece.drawn().is_none())
     };
     // Consecutive runs of colour text drawn from one sheet are drawn
     // together -- see `BatchScope` -- the batch drawn before any other
@@ -4317,8 +4926,25 @@ pub(crate) fn play_entries(
     let mut batch = None;
     let mut at = 0;
     while at < entries.len() {
+        if paced {
+            // A batch of colour runs still open draws when it closes: closed
+            // first, so that the read back finds what it drew.
+            if cpu_run_at(entries, at).is_some() {
+                batch = None;
+            }
+            let played = replayed_on_their_backdrop(
+                &entries[at..],
+                &features[at..],
+                canvas,
+            );
+            if played > 0 {
+                batch = None;
+                at += played;
+                continue;
+            }
+        }
         match &entries[at] {
-            Layer::ColourText(_) if target == Target::Pixels => {
+            Layer::ReplayedText(_) if target == Target::Pixels => {
                 batch.get_or_insert_with(|| BatchScope::open(canvas));
             }
             _ => batch = None,
@@ -5017,7 +5643,7 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         | Layer::Targeted(_)
         | Layer::Pattern(_)
         | Layer::Deferred(_)
-        | Layer::ColourText(_)
+        | Layer::ReplayedText(_)
         | Layer::Gradient(_) => false,
     })
 }
@@ -5031,14 +5657,14 @@ pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
         Layer::Targeted(_) => true,
         Layer::Deferred(deferred) => deferred.is_pair(),
-        Layer::ColourText(text) => text.is_pair(),
+        Layer::ReplayedText(text) => text.is_pair(),
         Layer::Gradient(op) => op.is_pair(),
         Layer::Cut(op) => op.documents.is_some(),
         Layer::Group(group) => holds_a_pair(&group.contents.layers),
         Layer::Clipped(piece) => match &piece.entry {
             Layer::Targeted(_) => true,
             Layer::Deferred(deferred) => deferred.is_pair(),
-            Layer::ColourText(text) => text.is_pair(),
+            Layer::ReplayedText(text) => text.is_pair(),
             Layer::Gradient(op) => op.is_pair(),
             Layer::Cut(op) => op.documents.is_some(),
             _ => false,
@@ -5987,6 +6613,462 @@ mod tests {
                 })
         });
         assert!(moved.is_some(), "the oval covered alike at every shift");
+    }
+
+    /// Every pixel a kept run inks lies within
+    /// [`ReplayedText::ink_under`] for the transform it is played under:
+    /// its glyphs into one another, stroked thin and wide, casting a shadow
+    /// blurred and sharp, turned, slanted by a synthesized oblique, large
+    /// enough to be drawn from its outlines, and played at a density of 2.
+    /// A shadow is cast through a chain of its own, an entry apart from the
+    /// run, except under a CanvasKit filter, where the run holds it; the
+    /// last scene is that one. What it inks is read from the run played alone
+    /// on a transparent raster, where under `multiply` it is its own
+    /// colour.
+    #[test]
+    fn a_kept_run_inks_nothing_past_what_it_reports() {
+        use super::{Layer, ReplayedText};
+        use crate::{canvas::Canvas, font::FontLibrary, paint::BlendMode};
+        use skia_safe::{Contains, IRect};
+        FontLibrary::new()
+            .register_font_from_path(
+                "InkOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled face registers");
+        /// A scene: its name, the font, the spacing, the stroke width (0
+        /// for a fill), the shadow's blur (`None` for none), the turn in
+        /// radians, and the density it is played at.
+        type Scene =
+            (&'static str, &'static str, f32, f32, Option<f32>, f32, f32);
+        /// The scene whose run holds its shadow, under a CanvasKit filter.
+        const HELD: &str = "shadow held by the run";
+        const SCENES: [Scene; 11] = [
+            ("plain", "32px InkOswald", 0.0, 0.0, None, 0.0, 1.0),
+            (
+                "into one another",
+                "32px InkOswald",
+                -12.0,
+                0.0,
+                None,
+                0.0,
+                1.0,
+            ),
+            ("stroked", "32px InkOswald", 0.0, 3.0, None, 0.0, 1.0),
+            ("stroked wide", "32px InkOswald", 0.0, 20.0, None, 0.0, 1.0),
+            (
+                "blurred shadow",
+                "32px InkOswald",
+                0.0,
+                0.0,
+                Some(6.0),
+                0.0,
+                1.0,
+            ),
+            (
+                "sharp shadow",
+                "32px InkOswald",
+                0.0,
+                0.0,
+                Some(0.0),
+                0.0,
+                1.0,
+            ),
+            ("turned", "32px InkOswald", 0.0, 0.0, None, 0.3, 1.0),
+            ("oblique", "italic 32px InkOswald", 0.0, 0.0, None, 0.0, 1.0),
+            ("outlines", "300px InkOswald", 0.0, 0.0, None, 0.0, 1.0),
+            ("density 2", "32px InkOswald", 0.0, 0.0, None, 0.0, 2.0),
+            (HELD, "32px InkOswald", 0.0, 0.0, Some(6.0), 0.0, 1.0),
+        ];
+        const PAGE: (f32, f32) = (900.0, 420.0);
+        let mut wrong = vec![];
+        for (name, font, spacing, stroke, shadow, turn, density) in SCENES {
+            let mut canvas = Canvas::new(PAGE.0, PAGE.1);
+            let ctx = canvas.context();
+            ctx.set_global_composite_operation(BlendMode::Multiply);
+            assert!(ctx.set_font_css(font), "{font} parses");
+            ctx.set_letter_spacing(spacing);
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.set_stroke_style_css("rgb(40,90,160)")
+                .expect("a colour");
+            ctx.set_line_width(stroke.max(1.0));
+            if name == HELD {
+                let still =
+                    crate::filter::ImageFilter::offset(0.0, 0.0, None, None)
+                        .expect("an offset filter");
+                ctx.set_image_filter(Some(&still));
+            }
+            if let Some(blur) = shadow {
+                ctx.set_shadow_color_css("rgba(0,0,0,0.8)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(14.0, 9.0);
+                ctx.set_shadow_blur(blur);
+            }
+            ctx.translate(40.0, 300.0);
+            ctx.rotate(turn);
+            match stroke > 0.0 {
+                true => ctx.stroke_text("Wq jumps", 0.0, 0.0, None),
+                false => ctx.fill_text("Wq jumps", 0.0, 0.0, None),
+            }
+            let entries = ctx.inner.entries();
+            let texts: Vec<&ReplayedText> = entries
+                .layers
+                .iter()
+                .filter_map(|entry| match entry {
+                    Layer::ReplayedText(text) => Some(&**text),
+                    _ => None,
+                })
+                .collect();
+            if texts.is_empty() {
+                wrong.push(format!("{name}: no run kept"));
+                continue;
+            }
+            if name == HELD && texts.iter().all(|text| text.shadow.is_none()) {
+                wrong.push(format!("{name}: no run holds its shadow"));
+            }
+            let size = ((PAGE.0 * density) as i32, (PAGE.1 * density) as i32);
+            let device = Matrix::scale((density, density));
+            let clip = IRect::from_wh(size.0, size.1);
+            for text in texts {
+                let Some(ink) = text.ink_under(&device, clip) else {
+                    wrong.push(format!("{name}: no ink reported"));
+                    continue;
+                };
+                let mut surface =
+                    started::raster_n32_premul(size).expect("a surface");
+                surface.canvas().scale((density, density));
+                text.playback(surface.canvas(), super::Target::Pixels);
+                let info = ImageInfo::new(
+                    size,
+                    ColorType::Alpha8,
+                    AlphaType::Premul,
+                    None,
+                );
+                let mut alpha = vec![0u8; (size.0 * size.1) as usize];
+                assert!(surface.read_pixels(
+                    &info,
+                    &mut alpha,
+                    size.0 as usize,
+                    (0, 0)
+                ));
+                let width = size.0 as usize;
+                let inked = alpha
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| **a > 0)
+                    .map(|(at, _)| ((at % width) as i32, (at / width) as i32))
+                    .fold(None, |bounds: Option<IRect>, (x, y)| {
+                        let pixel = IRect::new(x, y, x + 1, y + 1);
+                        Some(match bounds {
+                            Some(bounds) => IRect::new(
+                                bounds.left.min(pixel.left),
+                                bounds.top.min(pixel.top),
+                                bounds.right.max(pixel.right),
+                                bounds.bottom.max(pixel.bottom),
+                            ),
+                            None => pixel,
+                        })
+                    });
+                match inked {
+                    None => wrong.push(format!("{name}: inked nothing")),
+                    Some(inked) if !ink.contains(inked) => wrong
+                        .push(format!("{name}: inks {inked:?} past {ink:?}")),
+                    Some(_) => {}
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A draw between two kept runs is filed as an entry whose reach, as a
+    /// batch asks it -- see [`Layer::found_reach`] -- is what it draws, not
+    /// the page, in a blend by coefficients or one read in the shader, under
+    /// a clip or not: the page's recording keeps a bounding hierarchy, an
+    /// isolated layer -- see `page::PageRecorder::flush` -- does not reach
+    /// it as one operation bounded by the page, and a clip's run -- see
+    /// `page::Run::cull` -- is found within its clip. The read back that draws
+    /// kept runs on the CPU -- see [`super::replayed_on_their_backdrop`] --
+    /// can then tell a draw beside the runs from one over them.
+    #[test]
+    fn a_draw_between_kept_runs_reaches_only_what_it_draws() {
+        use super::Layer;
+        use crate::{
+            canvas::Canvas, font::FontLibrary, paint::BlendMode, path::FillRule,
+        };
+        use skia_safe::Contains;
+        FontLibrary::new()
+            .register_font_from_path(
+                "ReachOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled face registers");
+        /// Fills of the rectangle between the runs: more ops than a
+        /// recording is filed bare with.
+        const FILLS: usize = 24;
+        let drawn = Rect::from_xywh(300.0, 10.0, 40.0, 8.0);
+        // Anti-aliasing may widen the bounds Skia keeps by a pixel.
+        let outset = drawn.with_outset((1.0, 1.0));
+        let mut wrong = vec![];
+        for blend in [BlendMode::SourceOver, BlendMode::Multiply] {
+            for clipped in [false, true] {
+                let mut canvas = Canvas::new(400.0, 200.0);
+                let ctx = canvas.context();
+                // Only a page played on the GPU bounds a clip's run, and
+                // only the reach is under test here, not the engine the
+                // machine running it has.
+                ctx.inner.set_plays_on_gpu(true);
+                assert!(ctx.set_font_css("16px ReachOswald"));
+                ctx.set_global_composite_operation(BlendMode::Multiply);
+                ctx.fill_text("Sphinx of black quartz", 10.0, 20.0, None);
+                ctx.set_global_composite_operation(blend);
+                ctx.save();
+                if clipped {
+                    ctx.begin_path();
+                    ctx.rect(250.0, 0.0, 120.0, 100.0);
+                    ctx.clip(FillRule::NonZero);
+                }
+                // More fills than a recording is filed bare with, so that
+                // the wrapped one is held too -- see `page::UNWRAPPED_OPS`.
+                for _ in 0..FILLS {
+                    ctx.fill_rect(
+                        drawn.left,
+                        drawn.top,
+                        drawn.width(),
+                        drawn.height(),
+                    );
+                }
+                ctx.restore();
+                ctx.set_global_composite_operation(BlendMode::Multiply);
+                ctx.fill_text("Sphinx of black quartz", 10.0, 40.0, None);
+                let entries = ctx.inner.entries();
+                let kept =
+                    |entry: &&Layer| matches!(entry, Layer::ReplayedText(_));
+                let reaches: Vec<_> = entries
+                    .layers
+                    .iter()
+                    .skip_while(|entry| !kept(entry))
+                    .skip(1)
+                    .take_while(|entry| !kept(entry))
+                    .map(Layer::found_reach)
+                    .collect();
+                // Every entry between the runs within the rectangle, and the
+                // rectangle among them.
+                let within = reaches.iter().all(|reach| {
+                    reach.is_some_and(|reach| {
+                        reach.is_empty() || outset.contains(reach)
+                    })
+                });
+                let found = reaches.iter().any(|reach| {
+                    reach.is_some_and(|reach| reach.contains(drawn))
+                });
+                if !(within && found) {
+                    wrong.push(format!(
+                        "{blend:?} clipped {clipped}: {reaches:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the rectangle {drawn:?} reaches\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// A clip's run between kept runs reaches every pixel its draws ink,
+    /// past the geometry they are given, as a batch asks it -- see
+    /// [`Layer::found_reach`]: a stroke's half width, a miter join's point
+    /// and a square cap -- each recorded into the run's picture and bounded
+    /// with its paint, as Skia bounds a draw -- see
+    /// `page::PageRecorder::holds_reading_runs`. A shadow, sharp or
+    /// blurred, and a blur filter are filed as a [`BlurOp`], whose reach is
+    /// not known, which ends a batch of runs drawn on the CPU there instead
+    /// -- see [`super::replayed_on_their_backdrop`]. A reach
+    /// short of the ink would let the batch read back before the draw inks
+    /// under its runs.
+    ///
+    /// The ink is what the same draw alone inks on a CPU canvas, and every
+    /// draw is held to ink past its geometry, so that no case passes on the
+    /// geometry alone; and each is held to the way it is bounded, so that
+    /// none passes vacuously on an unknown reach.
+    #[test]
+    fn a_clips_run_reaches_what_its_draws_ink_past_their_geometry() {
+        use super::Layer;
+        use crate::{
+            canvas::Canvas,
+            context2d::Context2D,
+            font::FontLibrary,
+            paint::{BlendMode, StrokeCap, StrokeJoin},
+            path::FillRule,
+        };
+        use skia_safe::Contains;
+        FontLibrary::new()
+            .register_font_from_path(
+                "ReachOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            )
+            .expect("a bundled face registers");
+        const SIZE: (f32, f32) = (400.0, 200.0);
+        /// Each draw, and whether its reach is known: recorded into the
+        /// clip's run, or filed as a blur, its shadow's or its own.
+        const DRAWS: [(&str, bool); 7] = [
+            ("stroke", true),
+            ("miter join", true),
+            ("square cap", true),
+            ("sharp shadow", false),
+            ("stroke's sharp shadow", false),
+            ("blurred shadow", false),
+            ("blur filter", false),
+        ];
+        // The geometry each draw is given, clear of the runs at its left.
+        let geometry = Rect::from_xywh(260.0, 60.0, 40.0, 30.0);
+        let draw = |ctx: &mut Context2D, kind: &str| {
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.set_stroke_style_css("rgb(160,40,90)")
+                .expect("a colour");
+            let (left, top) = (geometry.left, geometry.top);
+            let (right, bottom) = (geometry.right, geometry.bottom);
+            if kind.contains("shadow") {
+                ctx.set_shadow_color_css("rgba(0,0,0,0.8)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(18.0, 14.0);
+                ctx.set_shadow_blur(if kind == "blurred shadow" {
+                    6.0
+                } else {
+                    0.0
+                });
+            }
+            match kind {
+                "stroke" | "stroke's sharp shadow" => {
+                    // Round joins, which Skia bounds by the half width
+                    // alone: a miter join is bounded by the miter limit
+                    // too, which would hold a reach short of the stroke's
+                    // own width to the ink all the same.
+                    ctx.set_line_width(14.0);
+                    ctx.set_line_join(StrokeJoin::Round);
+                    ctx.stroke_rect(
+                        left,
+                        top,
+                        geometry.width(),
+                        geometry.height(),
+                    );
+                }
+                "miter join" => {
+                    // A narrow angle, whose miter reaches far past the
+                    // points it joins.
+                    ctx.set_line_width(8.0);
+                    ctx.set_line_join(StrokeJoin::Miter);
+                    ctx.set_miter_limit(20.0);
+                    ctx.begin_path();
+                    ctx.move_to(left, top);
+                    ctx.line_to(right, top + 6.0);
+                    ctx.line_to(left, top + 12.0);
+                    ctx.stroke();
+                }
+                "square cap" => {
+                    ctx.set_line_width(16.0);
+                    ctx.set_line_cap(StrokeCap::Square);
+                    ctx.begin_path();
+                    ctx.move_to(left, bottom);
+                    ctx.line_to(right, bottom);
+                    ctx.stroke();
+                }
+                "blur filter" => {
+                    ctx.set_filter_css("blur(5px)").expect("a filter");
+                    ctx.fill_rect(
+                        left,
+                        top,
+                        geometry.width(),
+                        geometry.height(),
+                    );
+                }
+                _ => ctx.fill_rect(
+                    left,
+                    top,
+                    geometry.width(),
+                    geometry.height(),
+                ),
+            }
+        };
+        // What the draw inks alone, on the CPU: the box of every pixel it
+        // leaves with any alpha.
+        let inked = |kind: &str| {
+            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            draw(ctx, kind);
+            let data = ctx
+                .get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+                .expect("the canvas reads back");
+            let width = SIZE.0 as usize;
+            let mut ink = Rect::new_empty();
+            for (at, pixel) in
+                data.pixels().as_chunks::<4>().0.iter().enumerate()
+            {
+                if pixel[3] > 0 {
+                    let (x, y) = ((at % width) as f32, (at / width) as f32);
+                    ink.join(Rect::new(x, y, x + 1.0, y + 1.0));
+                }
+            }
+            ink
+        };
+        let mut wrong = vec![];
+        for (kind, known) in DRAWS {
+            let ink = inked(kind);
+            if geometry.contains(ink) {
+                wrong
+                    .push(format!("{kind}: inks {ink:?}, within its geometry"));
+                continue;
+            }
+            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+            let ctx = canvas.context();
+            // Only a page played on the GPU bounds a clip's run.
+            ctx.inner.set_plays_on_gpu(true);
+            assert!(ctx.set_font_css("16px ReachOswald"));
+            ctx.set_global_composite_operation(BlendMode::Multiply);
+            ctx.fill_text("Sphinx of black quartz", 10.0, 20.0, None);
+            ctx.set_global_composite_operation(BlendMode::SourceOver);
+            ctx.save();
+            // Clear of the runs and wide of the draw's ink, so that only
+            // what the run records bounds its reach.
+            ctx.begin_path();
+            ctx.rect(200.5, 0.0, 199.0, SIZE.1);
+            ctx.clip(FillRule::NonZero);
+            draw(ctx, kind);
+            ctx.restore();
+            ctx.set_global_composite_operation(BlendMode::Multiply);
+            ctx.fill_text("Sphinx of black quartz", 10.0, 40.0, None);
+            let entries = ctx.inner.entries();
+            let kept = |entry: &&Layer| matches!(entry, Layer::ReplayedText(_));
+            let reach = entries
+                .layers
+                .iter()
+                .skip_while(|entry| !kept(entry))
+                .skip(1)
+                .take_while(|entry| !kept(entry))
+                .try_fold(Rect::new_empty(), |mut all, entry| {
+                    all.join(entry.found_reach()?);
+                    Some(all)
+                });
+            match (reach, known) {
+                (None, false) => {}
+                (None, true) => wrong.push(format!("{kind}: no reach")),
+                (Some(reach), false) => wrong.push(format!(
+                    "{kind}: reaches {reach:?}, where a blur's is not known"
+                )),
+                (Some(reach), true) if !reach.contains(ink) => wrong
+                    .push(format!("{kind}: reaches {reach:?}, inks {ink:?}")),
+                // Bounded, not the page: a reach of the whole page holds
+                // any ink and says nothing.
+                (Some(reach), true)
+                    if reach.contains(Rect::from_wh(SIZE.0, SIZE.1)) =>
+                {
+                    wrong.push(format!("{kind}: reaches the page"))
+                }
+                (Some(_), true) => {}
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// A group through no layer composites what it holds as it is, so a

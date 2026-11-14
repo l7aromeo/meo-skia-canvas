@@ -17,6 +17,7 @@ use crate::{
     context2d::{FontKerning, TextRendering, decoration_from_css},
     css::parse_filter_named,
     export::VectorFeatures,
+    gpu::RenderingEngine,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
@@ -618,13 +619,14 @@ verbs! {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let parent = cx.argument::<BoxedCanvas>(1)?;
-    let parent = parent.borrow();
+    let mut parent = parent.borrow_mut();
     let mut this = Context2D::new(
         parent.color_space.clone(),
         parent.color_type,
         (parent.text_contrast as f32, parent.text_gamma as f32),
         (parent.width, parent.height),
     );
+    this.set_plays_on_gpu(parent.engine() == RenderingEngine::GPU);
     // What the context holds before anything is drawn.
     this.report_resident(&mut cx);
 
@@ -637,6 +639,17 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
 #[cfg(debug_assertions)]
 pub fn context_bytes(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(CONTEXT_BYTES as f64))
+}
+
+/// Tells the page whether its canvas plays it on the GPU, as the canvas's
+/// engine now stands -- see `PageRecorder::set_plays_on_gpu`. Called by the
+/// canvas each time its engine is set.
+pub fn tellEngine(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let this = cx.argument::<BoxedContext2D>(0)?;
+    let parent = cx.argument::<BoxedCanvas>(1)?;
+    let gpu = parent.borrow_mut().engine() == RenderingEngine::GPU;
+    this.borrow().set_plays_on_gpu(gpu);
+    Ok(cx.undefined())
 }
 
 pub fn resetSize(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -1384,24 +1397,30 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // however often it is copied again. Only nesting is counted, so a page
     // with a hundred thousand ordinary draws on it never reaches this.
     let cost = context.borrow().replay_cost();
-    let vector = cost == 0;
+    if cost == 0 {
+        // The page itself, recorded into a picture only where the draw needs
+        // one -- see `Context2D::draw_picture_costing`.
+        let (page, size, entries) = {
+            let context = context.borrow();
+            (context.page(), context.bounds.size(), context.entries())
+        };
+        let (src, dst) = _layout_rects(&mut cx, size, &nums)?;
+        let (src, dst) = Content::snap_rects_to_size(size, src, dst);
+        this.borrow_mut().draw_picture_costing(
+            &|| page.picture(None),
+            Some(entries),
+            &src,
+            &dst,
+            source,
+            cost,
+        );
+        return Ok(cx.undefined());
+    }
 
-    let content = Content::from_context(&mut context.borrow_mut(), vector);
+    let content = Content::from_context(&mut context.borrow_mut(), false);
     let (src, dst) = _layout_rects(&mut cx, content.size(), &nums)?;
     let (src, dst) = content.snap_rects_to_bounds(src, dst);
     match &content {
-        Content::Vector(pict, _) => {
-            let entries = context.borrow().entries();
-            this.borrow_mut().draw_picture_costing(
-                pict,
-                Some(entries),
-                &src,
-                &dst,
-                source,
-                cost,
-            );
-            Ok(cx.undefined())
-        }
         Content::Bitmap(image) => {
             this.borrow_mut().draw_image(image, &src, &dst);
             Ok(cx.undefined())

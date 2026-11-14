@@ -797,7 +797,7 @@ fn on_gpu(_canvas: &Canvas) -> bool {
 /// stage, each fragment over what the one before it wrote. Past it, Ganesh
 /// reads the page beneath in the shader, from a copy it takes once for a
 /// draw.
-fn blends_by_coefficients(mode: BlendMode) -> bool {
+pub(crate) fn blends_by_coefficients(mode: BlendMode) -> bool {
     mode as i32 <= BlendMode::Screen as i32
 }
 
@@ -1689,7 +1689,7 @@ thread_local! {
 /// made on the CPU in its format, at the transform of the canvas they are
 /// drawn on, rather than composited through a layer from their paint
 /// graphs: the route a run of text takes where a page is played onto pixels
-/// -- see `layer::ColourText`. Skia draws a colour glyph the same way, from
+/// -- see `layer::ReplayedText`. Skia draws a colour glyph the same way, from
 /// an image its scaler context made on the CPU (`generateImage` in
 /// `skia/src/ports/SkTypeface_fontations.cpp`), on a raster device and a GPU
 /// one alike.
@@ -3851,9 +3851,10 @@ mod tests {
 
     /// How far a premultiplied channel of the GPU canvas may stand from the
     /// CPU canvas's where one colour glyph image composites over another:
-    /// a level each way from the exact composite. The GPU misses it only
-    /// within [`GPU_TIE_LEVELS`] of a tie -- see
-    /// `the_second_of_two_overlapping_glyphs_misses_the_exact_composite_on_the_gpu_only_near_a_tie`
+    /// a level each way from the exact composite. Under a blend by
+    /// coefficients the GPU misses it only within [`GPU_TIE_LEVELS`] of a
+    /// tie -- see
+    /// `the_second_of_two_overlapping_glyphs_lands_as_on_the_cpu_or_near_the_exact_composite`
     /// -- and the CPU raster rounds an alpha below 1 into its arithmetic up
     /// to 1.24 levels from it. That raster is Chrome's CPU canvas byte for
     /// byte for one glyph image over the page; for one over another it is
@@ -3997,14 +3998,19 @@ mod tests {
     type Composite = fn(f64, f64, f64, f64, bool) -> f64;
 
     #[test]
-    fn the_second_of_two_overlapping_glyphs_misses_the_exact_composite_on_the_gpu_only_near_a_tie()
+    fn the_second_of_two_overlapping_glyphs_lands_as_on_the_cpu_or_near_the_exact_composite()
      {
         // Two colour glyphs drawn as one run, the second over the first.
-        // Each channel the second covers is the exact composite of its
-        // premultiplied bytes, scaled by the alpha, over the page the first
-        // left, on the GPU a level from that only near a tie -- on llvmpipe,
-        // which blends at eight bits, a level from it anywhere. Drawn from
-        // one atlas under a blend that reads the page in the shader, the
+        // Under a blend by coefficients each channel the second covers is
+        // the exact composite of its premultiplied bytes, scaled by the
+        // alpha, over the page the first left, on the GPU a level from that
+        // only near a tie -- on llvmpipe, which blends at eight bits, a
+        // level from it anywhere. Under a blend that reads the page in the
+        // shader the run is drawn on the CPU over the GPU's pixels read back
+        // -- see `layer::replayed_on_their_backdrop` -- and the GPU canvas
+        // holds the CPU canvas's bytes, which under an alpha below 1 stand
+        // up to 1.24 levels from the exact composite -- see
+        // `OVERLAP_LEVELS`. Drawn from one atlas under such a blend, the
         // second read the page as it was before the first landed -- see
         // `ColourRun::draw_all`.
         use crate::{gpu::RenderingEngine, paint::BlendMode::*, prelude::*};
@@ -4067,12 +4073,21 @@ mod tests {
                     set(ctx);
                     ctx.fill_text(&first, at, 40.0, None);
                 });
-                let drawn = overlap_page(true, false, &|ctx| {
+                let run = |ctx: &mut crate::context2d::Context2D| {
                     set(ctx);
                     ctx.set_letter_spacing(spacing);
                     let run = format!("{first}{second}");
                     ctx.fill_text(&run, at, 40.0, None);
-                });
+                };
+                let drawn = overlap_page(true, false, &run);
+                if !blends_by_coefficients(blend.to_skia()) {
+                    assert!(
+                        drawn == overlap_page(false, false, &run),
+                        "{blend:?} at {alpha}: the GPU stores other bytes \
+                         than the CPU"
+                    );
+                    continue;
+                }
                 for p in (0..source.len()).step_by(4) {
                     let sa = f64::from(source[p + 3]) / 255.0 * scale;
                     if sa == 0.0 {
