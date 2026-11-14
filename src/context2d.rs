@@ -6528,9 +6528,12 @@ mod overlapping_glyph_tests {
             ctx.set_fill_style_css("rgba(40,90,160,0.8)")
                 .expect("a colour");
             match clip {
+                // Its left edge on a half pixel inside the runs' ink, which
+                // reaches x 20 under FreeType: at 20.5 the clip holds none of
+                // it there, and the page reads nothing back.
                 "rectangle" => {
                     ctx.begin_path();
-                    ctx.rect(20.5, 20.0, 200.0, 110.0);
+                    ctx.rect(12.5, 20.0, 200.0, 110.0);
                     ctx.clip(FillRule::NonZero);
                 }
                 "circle" | "circle, no run" => {
