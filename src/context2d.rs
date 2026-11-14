@@ -6047,6 +6047,67 @@ mod overlapping_glyph_tests {
         assert!(drawn == own, "the CPU canvas reads other bytes");
     }
 
+    /// A run casting a shadow under a blend read in the shader reads on the
+    /// CPU the bytes it reads recorded as it is drawn, kept to be drawn again
+    /// or not -- see `REPLAYS_BLENDED_TEXT` -- blurred or sharp, its glyphs
+    /// apart or into one another. The shadow is cast once: a draw whose
+    /// shadow is filed as a chain of its own -- see
+    /// `Context2D::files_shadow_through_chain` -- keeps a run that casts
+    /// none.
+    #[test]
+    fn a_kept_run_casts_its_shadow_once() {
+        use crate::context::REPLAYS_BLENDED_TEXT;
+        let drawn =
+            |replays: bool, blend: BlendMode, blur: f32, spacing: f32| {
+                REPLAYS_BLENDED_TEXT.set(replays);
+                register();
+                forget_laid_out();
+                let mut canvas = Canvas::new(W, H);
+                canvas.set_gpu(false);
+                let ctx = canvas.context();
+                ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+                ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+                ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+                ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+                ctx.set_global_composite_operation(blend);
+                assert!(ctx.set_font_css(OSWALD.0));
+                ctx.set_letter_spacing(spacing);
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(3.0, 2.0);
+                ctx.set_shadow_blur(blur);
+                for y in [70.0, 140.0] {
+                    ctx.fill_text(OSWALD.1, 10.0, y, None);
+                }
+                let bytes = ctx
+                    .get_image_data(0.0, 0.0, W, H)
+                    .expect("the canvas reads back")
+                    .pixels()
+                    .to_vec();
+                REPLAYS_BLENDED_TEXT.set(true);
+                bytes
+            };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for blur in [0.0, 2.0] {
+                for spacing in [0.0, -12.0] {
+                    let kept = drawn(true, blend, blur, spacing);
+                    let recorded = drawn(false, blend, blur, spacing);
+                    if kept != recorded {
+                        wrong.push(format!(
+                            "{blend:?} blur {blur} spacing {spacing}: {} levels \
+                             apart",
+                            most_apart(&kept, &recorded)
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A run kept to be drawn again where the page is played writes a PDF
     /// and an SVG with its glyphs whole, the bytes a run drawn as one blob
     /// writes -- see `typography::WholeRuns`. Drawn apart, the PDF differs

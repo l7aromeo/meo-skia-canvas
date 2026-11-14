@@ -1375,7 +1375,7 @@ impl Context2D {
             .and_then(|text| text.colour.clone().or(text.blended.clone()));
         if let Some(run) = replayed
             && self.files_as_replayed_text(
-                paint, exact, features, run, lines, &draw,
+                paint, exact, features, run, lines, casts, &draw,
             )
         {
             return;
@@ -1570,6 +1570,12 @@ impl Context2D {
     /// the page keeps, when something first asks -- see
     /// `layer::ReplayedText::recorded`; a test records them now, by `draw`,
     /// to hold the one to the other.
+    ///
+    /// `casts` is whether `draw` casts the run's shadow, as `draw_text`
+    /// decides it: not where the shadow is filed as a chain of its own -- see
+    /// [`Self::files_shadow_through_chain`] -- before the run, which then
+    /// keeps no shadow to cast again.
+    #[allow(clippy::too_many_arguments)]
     fn files_as_replayed_text<D>(
         &self,
         paint: &Paint,
@@ -1577,6 +1583,7 @@ impl Context2D {
         features: VectorFeatures,
         run: Replay,
         lines: bool,
+        casts: bool,
         draw: &D,
     ) -> bool
     where
@@ -1602,8 +1609,9 @@ impl Context2D {
                 drawn.set_blend_mode(BlendMode::SrcOver);
             }
             let cast_from = if beyond { &drawn } else { paint };
-            let shadow = self
-                .paint_for_shadow_in(cast_from, recording, lines)
+            let shadow = casts
+                .then(|| self.paint_for_shadow_in(cast_from, recording, lines))
+                .flatten()
                 .map(|(shadow, pass)| {
                     let replay = match pass {
                         Pass::Draw => run.clone(),
