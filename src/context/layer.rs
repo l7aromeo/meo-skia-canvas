@@ -4157,6 +4157,9 @@ thread_local! {
     pub(crate) static BOUNDS_PAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     /// Every rectangle a run's clip has been bounded by on this thread.
     pub(crate) static BOUNDED: std::cell::RefCell<Vec<IRect>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many times a run's clip has been applied for its pieces on this
+    /// thread -- see [`Clipped::play_run`].
+    pub(crate) static CLIPS_APPLIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A clip as the entries played under it keep it: serialized, and its
@@ -4296,6 +4299,8 @@ impl Clipped {
                 }
             }
             canvas.clip_path(&clip, ClipOp::Intersect, true);
+            #[cfg(test)]
+            CLIPS_APPLIED.set(CLIPS_APPLIED.get() + 1);
         }
         for piece in pieces {
             match &piece.borrow().entry {
@@ -4793,8 +4798,13 @@ fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
 /// applied one for the frame. A cut draw there clips by coverage, alone --
 /// see [`CutOp::playback`] -- and the pieces between cut draws share one
 /// clip. A document clips a cut draw by the path, among the run's pieces
-/// under their one clip. A raster or GPU canvas plays each piece under its
-/// own clip.
+/// under their one clip. A raster on the CPU plays the pieces between cut
+/// draws under one clip, bounded by what they draw, as it bounds a piece
+/// played alone, since it builds the clip's mask each time the clip is
+/// applied: applied piece by piece, the clip was 7.3% of the samples of a
+/// page of 40 runs, each a piece of one clip's run, drawn and read on the
+/// CPU in a release build. A GPU canvas plays each piece under its own
+/// clip.
 ///
 /// On pixels it first adds to the colour glyph sheets the glyph images the
 /// last playback drew again -- see [`grow_sheets`] -- so that a page adds
@@ -4816,17 +4826,30 @@ pub(crate) fn play_entries(
         grow_sheets();
     }
     let paced = target == Target::Pixels && blur_mask::on_gpu(canvas);
-    let grouped = target == Target::Document || !blur_mask::draws_on(canvas);
+    let raster = target != Target::Document && blur_mask::draws_on_cpu(canvas);
+    let grouped =
+        target == Target::Document || !blur_mask::draws_on(canvas) || raster;
     let coverage = clips_by_coverage(canvas, target);
     // Only on a page holding a cut draw: a document walks the picture of a
     // page holding none as vectors -- see `Page::picture` -- and would write
-    // the bound as a clip of its own.
-    let bounded = target == Target::Pixels
-        && !blur_mask::draws_on(canvas)
-        && holds_a_cut(entries)
-        && bounds_pieces();
+    // the bound as a clip of its own. A raster bounds the clip as it bounds
+    // a piece played alone -- see `Clipped::playback`.
+    let bounded = match raster {
+        true => bounds_page(),
+        false => {
+            target == Target::Pixels
+                && !blur_mask::draws_on(canvas)
+                && holds_a_cut(entries)
+                && bounds_pieces()
+        }
+    };
+    // On a raster, a cut draw clips itself, as it does played alone, and a
+    // piece whose draws have no known rectangle plays alone, unbounded,
+    // rather than leaving the pieces beside it unbounded with it.
     let shares_the_clip = |piece: &Clipped| {
-        grouped && !(coverage && matches!(piece.entry, Layer::Cut(_)))
+        grouped
+            && !((coverage || raster) && matches!(piece.entry, Layer::Cut(_)))
+            && !(raster && piece.drawn().is_none())
     };
     // Consecutive runs of colour text drawn from one sheet are drawn
     // together -- see `BatchScope` -- the batch drawn before any other

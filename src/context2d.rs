@@ -6599,6 +6599,39 @@ mod overlapping_glyph_tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// A page of runs under one clip, every line a piece of the clip's
+    /// run, read on a raster on the CPU applies the clip once, bounded by
+    /// what the pieces draw together -- see `layer::play_entries` -- rather
+    /// than once a piece: the raster builds the clip's mask each time the
+    /// clip is applied.
+    #[test]
+    fn a_raster_applies_a_clips_run_once_for_its_pieces() {
+        use crate::context::layer::CLIPS_APPLIED;
+        const LINES: usize = 8;
+        register();
+        forget_laid_out();
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css("16px OverlapOswald"));
+        ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+            .expect("a colour");
+        ctx.begin_path();
+        ctx.rect(2.5, 4.0, W - 4.0, H - 8.0);
+        ctx.clip(FillRule::NonZero);
+        for line in 0..LINES {
+            ctx.fill_text(OSWALD.1, 10.0, 30.0 + line as f32 * 16.0, None);
+        }
+        CLIPS_APPLIED.set(0);
+        // One pixel, as a page read in part plays its tiles onto rasters.
+        canvas
+            .context()
+            .get_image_data(0.0, 0.0, 1.0, 1.0)
+            .expect("the canvas reads back");
+        assert_eq!(CLIPS_APPLIED.get(), 1, "times the clip was applied");
+    }
+
     /// A kept run read on a raster on the CPU builds its blobs once, and
     /// draws them for every page after that draws it -- see
     /// `RunPaint::raster_blobs` -- while the same page drawn into a GPU
