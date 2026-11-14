@@ -1558,9 +1558,6 @@ thread_local! {
     /// How many glyphs [`draw_glyphs_apart`] has drawn on this thread.
     pub(crate) static GLYPHS_DRAWN_ALONE: Cell<usize> =
         const { Cell::new(0) };
-    /// How many draws [`draw_glyphs_apart`] has made of them on this
-    /// thread: one for each group, or one for each glyph.
-    pub(crate) static GLYPH_DRAWS: Cell<usize> = const { Cell::new(0) };
     /// How far, in the units a run is laid out in, [`RunPaint::reach`]
     /// draws its answer in on this thread: a mutant, a reach that cuts ink,
     /// for the checks on it to refuse.
@@ -2206,8 +2203,12 @@ pub(crate) enum GlyphDraws {
 ///
 /// So the choice is the canvas's. On the CPU a run is one blob: its raster
 /// composites a blob's glyphs in order, each over the last, and draws the
-/// same bytes either way. On the GPU its glyphs are drawn in groups that
-/// share no pixel of the canvas -- see [`glyph_groups`]. Into a recording,
+/// same bytes either way. A run kept on a GPU page is drawn on the CPU,
+/// over the page's pixels read back -- see
+/// `layer::replayed_on_their_backdrop` -- and reaches this on a raster;
+/// where that route is refused, inside a layer or under a perspective, its
+/// glyphs are drawn on the GPU in groups that share no pixel of the canvas
+/// -- see [`glyph_groups`]. Into a recording,
 /// which does not know the pixels it will be played onto nor at what scale,
 /// a glyph at a time, which is right at any scale; for a document, whole --
 /// see [`WholeRuns`]. A run drawn from its outlines -- see [`draw_outlines`]
@@ -2292,10 +2293,7 @@ pub(crate) fn draw_glyphs_apart(
         }
     };
     #[cfg(test)]
-    {
-        GLYPHS_DRAWN_ALONE.set(GLYPHS_DRAWN_ALONE.get() + glyphs.len());
-        GLYPH_DRAWS.set(GLYPH_DRAWS.get() + groups.len());
-    }
+    GLYPHS_DRAWN_ALONE.set(GLYPHS_DRAWN_ALONE.get() + glyphs.len());
     for group in groups {
         let blob = sheared_blob(
             font,

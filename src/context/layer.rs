@@ -23,6 +23,7 @@ use std::{
     cell::{Cell, RefCell},
     f32::consts::SQRT_2,
     fmt,
+    iter::zip,
     marker::PhantomData,
     sync::{
         Arc, OnceLock,
@@ -383,6 +384,10 @@ thread_local! {
     /// How many times [`drawn_on_their_backdrop`] has read a GPU canvas's
     /// pixels back on this thread.
     pub(crate) static BACKDROPS_READ: Cell<usize> = const { Cell::new(0) };
+    /// A mutant of the batch [`play_entries`] makes of consecutive
+    /// [`ReplayedText`] runs on a GPU canvas, set on this thread: each run
+    /// read back on its own.
+    pub(crate) static BACKDROP_EACH_RUN: Cell<bool> = const { Cell::new(false) };
 }
 
 /// How many of a [`DeferredPicture`]'s recordings were made: those played as
@@ -1860,6 +1865,17 @@ pub struct ReplayedShadow {
 }
 
 impl ReplayedText {
+    /// Whether the run's draw reads the page in the shader: its paint's
+    /// blend, or the blend a layer holding it composites through, past the
+    /// blends a GPU does in its fixed-function stage -- see
+    /// [`blends_by_coefficients`].
+    pub(crate) fn reads_the_page(&self) -> bool {
+        !blends_by_coefficients(self.paint.blend_mode_or(BlendMode::SrcOver))
+            || self
+                .blend
+                .is_some_and(|blend| !blends_by_coefficients(blend))
+    }
+
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         // Its runs join a batch only where nothing of its own lies between
         // them and the page: no clip, no layer for a blend, no shadow
@@ -2140,107 +2156,25 @@ impl Drop for InLayer {
 }
 
 /// Draws `recorded` onto `canvas` as the CPU draws it, over the pixels
-/// `canvas` holds there: those pixels read back into a raster made on the
-/// CPU in `format`, `recorded` played onto them under the transform `canvas`
-/// carries, and the result written back as it is. The raster covers what
-/// `recorded` reaches within the clip, or the clip's bounds whole where
-/// `beyond` says its blend changes what lies beyond the draw. `false`,
-/// having drawn nothing, where the pixels cannot be read: inside a layer,
-/// under a perspective, or where Skia refuses the read.
-///
-/// The one route that reproduces a draw the CPU blends in floats and rounds
-/// once, after blending, as its `highp` pipeline does: compositing a raster
-/// of the draw made over transparent rounds the draw's colour first and the
-/// blend again, a level apart wherever the two roundings differ.
+/// `canvas` holds there -- see [`drawn_on_their_backdrop`]: it reaches its
+/// cull rectangle, or the clip's bounds whole where `beyond` says its blend
+/// changes what lies beyond the draw.
 fn drawn_on_its_backdrop(
     canvas: &SkCanvas,
     recorded: &Picture,
     format: &Format,
     beyond: bool,
 ) -> bool {
-    drawn_on_their_backdrop(canvas, &[(recorded, beyond)], format)
-}
-
-/// [`drawn_on_its_backdrop`] for several draws one after another, read back
-/// once over all they reach and written back once: each is played onto the
-/// raster over what the one before it left there, as reading back between
-/// them would have found, so the bytes are the same. A read back from the
-/// GPU waits for it, and one each made 200 Oklab radials cost 23 times what
-/// Ganesh's own gradient did.
-fn drawn_on_their_backdrop(
-    canvas: &SkCanvas,
-    draws: &[(&Picture, bool)],
-    format: &Format,
-) -> bool {
-    if InLayer::open() {
-        return false;
-    }
-    let device = canvas.local_to_device_as_3x3();
-    if device.has_perspective() {
-        return false;
-    }
-    let Some(clip) = canvas.device_clip_bounds() else {
-        return true;
-    };
-    let area =
-        draws
-            .iter()
-            .fold(None, |area: Option<IRect>, (recorded, beyond)| {
-                let reach = match beyond {
-                    true => Some(clip),
-                    false => IRect::intersect(
-                        &device.map_rect(recorded.cull_rect()).0.round_out(),
-                        &clip,
-                    ),
-                };
-                match (area, reach) {
-                    (Some(area), Some(reach)) => Some(IRect::new(
-                        area.left.min(reach.left),
-                        area.top.min(reach.top),
-                        area.right.max(reach.right),
-                        area.bottom.max(reach.bottom),
-                    )),
-                    (area, reach) => area.or(reach),
-                }
-            });
-    let Some(area) = area else {
-        return true;
-    };
-    let info = format.image_info(area.size());
-    let row = info.min_row_bytes();
-    let mut backdrop = vec![0u8; info.compute_byte_size(row)];
-    if !canvas.read_pixels(&info, &mut backdrop, row, (area.left, area.top)) {
-        return false;
-    }
-    #[cfg(test)]
-    BACKDROPS_READ.set(BACKDROPS_READ.get() + 1);
-    // The raster reaches from the canvas's origin, so that the draws are
-    // made at the device coordinates the CPU canvas makes them at: offset to
-    // the area, the transform inverted with another translation moved a
-    // value on a half level to the next, 2 bytes in 40 Oklab radials.
-    let whole = format.image_info(ISize::new(area.right, area.bottom));
-    let Some(mut surface) = started::raster(&whole, None, None) else {
-        return false;
-    };
-    let raster = surface.canvas();
-    if !raster.write_pixels(&info, &backdrop, row, (area.left, area.top)) {
-        return false;
-    }
-    raster.clip_irect(area, ClipOp::Intersect);
-    raster.concat(&device);
-    for (recorded, _) in draws {
-        recorded.playback(raster);
-    }
-    let Some(drawn) = surface.image_snapshot_with_bounds(area) else {
-        return false;
-    };
-    canvas.save();
-    canvas.reset_matrix();
-    let mut src = Paint::default();
-    src.set_blend_mode(BlendMode::Src);
-    canvas.draw_image(drawn, (area.left as f32, area.top as f32), Some(&src));
-    canvas.restore();
-    true
+    let draw = |raster: &SkCanvas| recorded.playback(raster);
+    drawn_on_their_backdrop(
+        canvas,
+        &[BackdropDraw {
+            reach: recorded.cull_rect(),
+            beyond,
+            draw: &draw,
+        }],
+        format,
+    )
 }
 
 /// A run of draws dyed by gradients, kept so that a GPU canvas draws them in
@@ -2881,9 +2815,18 @@ impl GradientDraw {
                         _ => None,
                     })
                     .collect();
-                let drawn: Vec<(&Picture, bool)> = span
+                let plays: Vec<_> = span
                     .iter()
-                    .map(|(recorded, beyond)| (&**recorded, *beyond))
+                    .map(|(recorded, _)| {
+                        move |raster: &SkCanvas| recorded.playback(raster)
+                    })
+                    .collect();
+                let drawn: Vec<BackdropDraw<'_>> = zip(&span, &plays)
+                    .map(|((recorded, beyond), play)| BackdropDraw {
+                        reach: recorded.cull_rect(),
+                        beyond: *beyond,
+                        draw: play,
+                    })
                     .collect();
                 if drawn.len() > 1
                     && Format::of(canvas).is_some_and(|format| {
@@ -4236,6 +4179,156 @@ impl Clipped {
     }
 }
 
+/// A draw [`drawn_on_their_backdrop`] makes: what it reaches, in the
+/// coordinates of the canvas it is made on; whether its blend changes what
+/// lies beyond it; and the draw itself, made onto a canvas under that
+/// canvas's transform.
+pub(crate) struct BackdropDraw<'a> {
+    pub(crate) reach: Rect,
+    pub(crate) beyond: bool,
+    pub(crate) draw: &'a dyn Fn(&SkCanvas),
+}
+
+/// Draws `draws` onto `canvas` one after another as the CPU draws them, over
+/// the pixels `canvas` holds there: those pixels read back once into a raster
+/// made on the CPU in `format`, each draw made onto it under the transform
+/// `canvas` carries, over what the one before it left there, as reading back
+/// between them would have found, and the result written back once as it
+/// is. The raster covers what the draws reach within the clip, or the
+/// clip's bounds whole where one's blend changes what lies beyond it.
+/// `false`, having drawn nothing, where the pixels cannot be read: inside a
+/// layer, under a perspective, or where Skia refuses the read or the write.
+///
+/// The one route that reproduces a draw the CPU blends in floats and rounds
+/// once, after blending, as its `highp` pipeline does: compositing a raster
+/// of the draw made over transparent rounds the draw's colour first and the
+/// blend again, a level apart wherever the two roundings differ. A read back
+/// from the GPU waits for it, so the draws share one: one each made 200
+/// Oklab radials cost 23 times what Ganesh's own gradient did.
+fn drawn_on_their_backdrop(
+    canvas: &SkCanvas,
+    draws: &[BackdropDraw<'_>],
+    format: &Format,
+) -> bool {
+    if InLayer::open() {
+        return false;
+    }
+    let device = canvas.local_to_device_as_3x3();
+    if device.has_perspective() {
+        return false;
+    }
+    let Some(clip) = canvas.device_clip_bounds() else {
+        return true;
+    };
+    let area = draws.iter().fold(None, |area: Option<IRect>, draw| {
+        let reach = match draw.beyond {
+            true => Some(clip),
+            false => IRect::intersect(
+                &device.map_rect(draw.reach).0.round_out(),
+                &clip,
+            ),
+        };
+        match (area, reach) {
+            (Some(area), Some(reach)) => Some(IRect::new(
+                area.left.min(reach.left),
+                area.top.min(reach.top),
+                area.right.max(reach.right),
+                area.bottom.max(reach.bottom),
+            )),
+            (area, reach) => area.or(reach),
+        }
+    });
+    let Some(area) = area else {
+        return true;
+    };
+    let info = format.image_info(area.size());
+    let row = info.min_row_bytes();
+    let mut backdrop = vec![0u8; info.compute_byte_size(row)];
+    if !canvas.read_pixels(&info, &mut backdrop, row, (area.left, area.top)) {
+        return false;
+    }
+    #[cfg(test)]
+    BACKDROPS_READ.set(BACKDROPS_READ.get() + 1);
+    // The raster reaches from the canvas's origin, so that the draws are
+    // made at the device coordinates the CPU canvas makes them at: offset to
+    // the area, the transform inverted with another translation moved a
+    // value on a half level to the next, 2 bytes in 40 Oklab radials.
+    let whole = format.image_info(ISize::new(area.right, area.bottom));
+    let Some(mut surface) = started::raster(&whole, None, None) else {
+        return false;
+    };
+    let raster = surface.canvas();
+    if !raster.write_pixels(&info, &backdrop, row, (area.left, area.top)) {
+        return false;
+    }
+    raster.clip_irect(area, ClipOp::Intersect);
+    raster.concat(&device);
+    for draw in draws {
+        raster.save();
+        (draw.draw)(raster);
+        raster.restore();
+    }
+    let Some(drawn) = surface.image_snapshot_with_bounds(area) else {
+        return false;
+    };
+    canvas.save();
+    canvas.reset_matrix();
+    let mut src = Paint::default();
+    src.set_blend_mode(BlendMode::Src);
+    canvas.draw_image(drawn, (area.left as f32, area.top as f32), Some(&src));
+    canvas.restore();
+    true
+}
+
+/// Plays the consecutive [`ReplayedText`] runs `entries` opens with, each
+/// under a blend read in the shader -- see [`ReplayedText::reads_the_page`]
+/// -- onto a GPU canvas as the CPU draws them, over one read back of the
+/// pixels they reach -- see [`drawn_on_their_backdrop`]: on the CPU a run is
+/// drawn whole and composites each glyph over the last, where Ganesh, with
+/// no framebuffer fetch on Metal, copies the page for every draw that reads
+/// it and draws a run's overlapping glyphs in groups that share no pixel,
+/// each copy ending a render pass. How many it played, `0` where `entries`
+/// opens with no such run or the pixels cannot be read.
+fn replayed_on_their_backdrop(entries: &[Layer], canvas: &SkCanvas) -> usize {
+    let runs: Vec<&Layer> = entries
+        .iter()
+        .take_while(|entry| {
+            matches!(entry, Layer::ReplayedText(text) if text.reads_the_page())
+        })
+        .collect();
+    if runs.is_empty() {
+        return 0;
+    }
+    #[cfg(test)]
+    let runs = match BACKDROP_EACH_RUN.get() {
+        true => runs[..1].to_vec(),
+        false => runs,
+    };
+    let Some(format) = Format::of(canvas) else {
+        return 0;
+    };
+    let plays: Vec<_> = runs
+        .iter()
+        .map(|&entry| {
+            move |raster: &SkCanvas| entry.playback(raster, Target::Pixels)
+        })
+        .collect();
+    let draws: Vec<BackdropDraw<'_>> = zip(&runs, &plays)
+        .map(|(entry, play)| BackdropDraw {
+            reach: match entry {
+                Layer::ReplayedText(text) => text.reach(),
+                _ => Rect::new_empty(),
+            },
+            beyond: matches!(entry, Layer::ReplayedText(text) if text.blend.is_some()),
+            draw: play,
+        })
+        .collect();
+    match drawn_on_their_backdrop(canvas, &draws, &format) {
+        true => runs.len(),
+        false => 0,
+    }
+}
+
 /// Plays `entries`, each asking for `features` at the same index, onto
 /// `canvas` for `target`, in order: each as [`Layer::playback`] plays it,
 /// but for consecutive pieces of one run played into a document or a
@@ -4257,7 +4350,11 @@ impl Clipped {
 /// last playback drew again -- see [`grow_sheets`] -- so that a page adds
 /// them once, before any of its runs draws; and it holds consecutive runs of
 /// colour text open in one [`BatchScope`], so that those drawn from a sheet
-/// are drawn together, before the next entry of another kind plays.
+/// are drawn together, before the next entry of another kind plays. On the
+/// GPU it plays consecutive kept runs under a blend read in the shader on
+/// the CPU, over one read back of the pixels they reach -- see
+/// [`replayed_on_their_backdrop`] -- closing an open batch first, so that
+/// the read finds what it drew.
 pub(crate) fn play_entries(
     entries: &[Layer],
     features: &[VectorFeatures],
@@ -4287,6 +4384,25 @@ pub(crate) fn play_entries(
     let mut batch = None;
     let mut at = 0;
     while at < entries.len() {
+        if paced {
+            // A batch of colour runs still open draws when it closes: closed
+            // first, so that the read back finds what it drew.
+            if matches!(entries[at], Layer::ReplayedText(ref text) if text.reads_the_page())
+            {
+                batch = None;
+            }
+            let played = replayed_on_their_backdrop(&entries[at..], canvas);
+            if played > 0 {
+                let kept =
+                    zip(&entries[at..at + played], features.iter().skip(at));
+                for (entry, features) in kept {
+                    pacing::played(canvas, offscreen_layers(entry, *features));
+                }
+                batch = None;
+                at += played;
+                continue;
+            }
+        }
         match &entries[at] {
             Layer::ReplayedText(_) if target == Target::Pixels => {
                 batch.get_or_insert_with(|| BatchScope::open(canvas));

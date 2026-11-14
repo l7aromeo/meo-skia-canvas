@@ -5510,8 +5510,7 @@ mod overlapping_glyph_tests {
         filter::BlurStyle,
         font::FontLibrary,
         node::typography::{
-            GLYPH_DRAWS, GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws,
-            forget_laid_out,
+            GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws, forget_laid_out,
         },
         paint::BlendMode::*,
         pixels::PixelDepth,
@@ -5763,38 +5762,35 @@ mod overlapping_glyph_tests {
     /// A run drawn straight onto the page in a blend that reads it costs
     /// the CPU canvas what it did before glyphs were drawn apart: the page
     /// keeps it whole and draws it again where it is played, whole on the
-    /// CPU, and on the GPU in groups, fewer draws than it has glyphs where
-    /// they do not all overlap.
+    /// CPU, and on the GPU whole too, on the CPU over one read back of the
+    /// GPU's pixels -- see `layer::replayed_on_their_backdrop`. Where that
+    /// route is refused, inside a layer, the GPU groups the run's glyphs;
+    /// `every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu` holds
+    /// that.
     #[test]
-    fn a_run_drawn_on_the_page_is_whole_on_the_cpu_and_grouped_on_the_gpu() {
+    fn a_run_drawn_on_the_page_is_whole_on_either_engine() {
+        use crate::context::layer::BACKDROPS_READ;
         let gpu = RenderingEngine::GPU.selectable();
         let mut wrong = vec![];
         for blend in [Multiply, Difference, Luminosity] {
             for scene in SCENES {
-                GLYPHS_DRAWN_ALONE.set(0);
-                drawn(false, OSWALD, blend, scene);
-                if GLYPHS_DRAWN_ALONE.get() != 0 {
-                    wrong.push(format!(
-                        "CPU {blend:?} {scene:?}: {} glyphs drawn apart",
-                        GLYPHS_DRAWN_ALONE.get()
-                    ));
-                }
-                // Glyphs a quarter em apart share no pixel, so where no
-                // spacing pulls them together a run is drawn in fewer
-                // draws than it has glyphs.
-                if !gpu || scene.0 < 0.0 {
-                    continue;
-                }
-                GLYPHS_DRAWN_ALONE.set(0);
-                GLYPH_DRAWS.set(0);
-                drawn(true, OSWALD, blend, scene);
-                let (glyphs, draws) =
-                    (GLYPHS_DRAWN_ALONE.get(), GLYPH_DRAWS.get());
-                if glyphs == 0 || draws >= glyphs {
-                    wrong.push(format!(
-                        "GPU {blend:?} {scene:?}: {glyphs} glyphs in \
-                         {draws} draws"
-                    ));
+                for on_gpu in [false, true] {
+                    if on_gpu && !gpu {
+                        continue;
+                    }
+                    GLYPHS_DRAWN_ALONE.set(0);
+                    let read = BACKDROPS_READ.get();
+                    drawn(on_gpu, OSWALD, blend, scene);
+                    let (glyphs, reads) =
+                        (GLYPHS_DRAWN_ALONE.get(), BACKDROPS_READ.get() - read);
+                    // The two lines are one batch, read back once.
+                    let expected = usize::from(on_gpu);
+                    if glyphs != 0 || reads != expected {
+                        wrong.push(format!(
+                            "GPU {on_gpu} {blend:?} {scene:?}: {glyphs} \
+                             glyphs drawn apart, {reads} read backs"
+                        ));
+                    }
                 }
             }
         }
@@ -6205,6 +6201,90 @@ mod overlapping_glyph_tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page of runs under a blend read in the shader, every line its own
+    /// run, drawn on the GPU reads the bytes it reads drawn on the CPU: the
+    /// runs one after another are played on the CPU over one read back of
+    /// the GPU's pixels -- see `layer::replayed_on_their_backdrop` -- and a
+    /// page alternating runs with other draws reads back once for each run,
+    /// since the draws between them land on the GPU.
+    #[test]
+    fn a_page_of_runs_is_drawn_on_the_cpu_over_one_read_back() {
+        use crate::context::layer::{BACKDROP_EACH_RUN, BACKDROPS_READ};
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 8;
+        let page = |gpu: bool,
+                    blend: BlendMode,
+                    spacing: f32,
+                    between: bool| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(spacing);
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+                // Opaque and in `source-over`, which the GPU fills in the
+                // CPU's bytes, so that only the runs are judged.
+                if between {
+                    ctx.set_global_composite_operation(SourceOver);
+                    ctx.set_fill_style_css("rgb(160,40,90)").expect("a colour");
+                    ctx.fill_rect(200.0, y - 10.0, 40.0, 8.0);
+                    ctx.set_global_composite_operation(blend);
+                }
+            }
+            let before = BACKDROPS_READ.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for spacing in [0.0, -12.0] {
+                for between in [false, true] {
+                    let (cpu, _) = page(false, blend, spacing, between);
+                    let (gpu, reads) = page(true, blend, spacing, between);
+                    if gpu != cpu {
+                        wrong.push(format!(
+                            "{blend:?} {spacing} between {between}: {} levels \
+                             from the CPU",
+                            most_apart(&gpu, &cpu)
+                        ));
+                    }
+                    let expected = if between { LINES } else { 1 };
+                    if reads != expected {
+                        wrong.push(format!(
+                            "{blend:?} {spacing} between {between}: {reads} \
+                             read backs, not {expected}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        BACKDROP_EACH_RUN.set(true);
+        let (_, each) = page(true, Multiply, 0.0, false);
+        BACKDROP_EACH_RUN.set(false);
+        assert!(each > 1, "a run at a time read back {each} times");
     }
 
     /// A run kept to be drawn again where the page is played writes a PDF
