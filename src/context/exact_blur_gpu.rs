@@ -37,7 +37,7 @@
 
 use skia_safe::{
     AlphaType, BlendMode, Color, ColorSpace, ColorType, Data, FilterMode,
-    Image, ImageInfo, MipmapMode, Paint, Recorder, Rect, RuntimeEffect,
+    IRect, Image, ImageInfo, MipmapMode, Paint, Recorder, Rect, RuntimeEffect,
     SamplingOptions, TileMode,
     gpu::{Budgeted, RecordingContext, SurfaceOrigin, surfaces},
     runtime_effect::ChildPtr,
@@ -96,6 +96,14 @@ uniform float c;
 uniform float norm;
 uniform float part;
 uniform float source;
+uniform float outX;
+uniform float outY;
+uniform float inX;
+uniform float inY;
+uniform float boxL;
+uniform float boxT;
+uniform float boxR;
+uniform float boxB;
 float4 snap(float4 x) {
     float4 a = abs(x);
     float4 e = floor(log2(max(a, HALF_MIN_NORMAL)));
@@ -105,6 +113,10 @@ float4 snap(float4 x) {
     return sign(x) * floor(a / ulp + 0.5) * ulp;
 }
 float4 at(float2 q) {
+    if (BOXED && (q.x < boxL || q.y < boxT || q.x >= boxR || q.y >= boxB)) {
+        return float4(0);
+    }
+    q += float2(inX, inY);
     if (source == 3) {
         float4 x = float4(hi.eval(q));
         return float4(x.r + x.g);
@@ -114,7 +126,12 @@ float4 at(float2 q) {
     if (source == 2) { return v * 255; }
     return v;
 }
-float4 main(float2 p) {
+float4 main(float2 position) {
+    // The pixel's centre exactly, in the lane's own pixels: the position a
+    // draw interpolates is off it by an amount that grows with how far the
+    // lane lies from the target's origin, and on NVIDIA's Vulkan driver a
+    // lane thousands of pixels in moved taps near a tie to its other side.
+    float2 p = floor(position) + 0.5 - float2(outX, outY);
     float2 across = p * (float2(1) - dir);
     float o = dot(p, dir) - 0.5;
     float4 acc = float4(0);
@@ -165,18 +182,23 @@ const HALF_MIN_NORMAL: f64 = 1.0 / (1u32 << (HALF_EXPONENT_BIAS - 1)) as f64;
 const HALF_MANTISSA_BITS: u32 = 10;
 
 /// [`PASS`] behind the constants it names.
-fn source() -> String {
+fn source(boxed: bool) -> String {
     format!(
         "const int MAX_TAPS = {MAX_TAPS};\n\
          const float HALF_MIN_NORMAL = {HALF_MIN_NORMAL:?};\n\
          const float HALF_MANTISSA_BITS = {HALF_MANTISSA_BITS}.0;\n\
+         const bool BOXED = {boxed};\n\
          {PASS}"
     )
 }
 
 thread_local! {
-    /// [`PASS`], compiled once per thread.
-    static EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(source(), None).ok();
+    /// [`PASS`], compiled once per thread, holding each lane to its box.
+    static EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(source(true), None).ok();
+    /// [`PASS`] for a pass of one lane reading all of its input, which the
+    /// input's own edge holds it to: the box's test, made on every tap, is
+    /// left out of the shader rather than made and passed.
+    static WHOLE_EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(source(false), None).ok();
 }
 
 /// What a pass's children hold, as [`PASS`]'s `source` uniform reads it.
@@ -262,6 +284,7 @@ pub(crate) fn blur(
         return None;
     }
     let effect = EFFECT.with(Clone::clone)?;
+    let whole = WHOLE_EFFECT.with(Clone::clone)?;
     let space = image
         .color_space()
         .or_else(|| Some(ColorSpace::new_srgb()))?;
@@ -279,18 +302,19 @@ pub(crate) fn blur(
     let mut gpu = Gpu {
         context,
         effect,
+        whole,
         space,
         zero: zero.clone(),
         packed: false,
     };
     // Along rows, into a value and its remainder; then along columns, into
     // the target.
-    let (hi, lo) = gpu.axis(
+    let (rows, lanes) = gpu.axis(
         (image.clone(), zero.clone()),
         first,
         [1.0, 0.0],
-        width,
-        height,
+        &[Lane::whole((width, height))],
+        &[(width, height)],
         sigma_x,
         None,
     )?;
@@ -300,15 +324,15 @@ pub(crate) fn blur(
         Part::Rounded
     };
     gpu.axis(
-        (hi, lo),
+        rows,
         Input::Split,
         [0.0, 1.0],
-        height,
-        width,
+        &lanes,
+        &[(height, width)],
         sigma_y,
         Some((last, out_type, f64::from(gain))),
     )
-    .map(|(image, _)| image)
+    .map(|((image, _), _)| image)
 }
 
 /// The drop shadow's last pass: `src`, an 8-bit image whose byte is
@@ -323,6 +347,13 @@ pub(crate) fn blur(
 /// bottom -- and nothing else; where `bilinear` is set it is resampled from its
 /// four nearest pixels, each tinted first and each held to the rectangle's edge
 /// pixels, and otherwise read at the one pixel the whole offset lands it on.
+///
+/// One target holds many shadows, each a lane written at `(outX, outY)`,
+/// its blur read from `(blurX, blurY)` and its draw from `(srcX, srcY)`. The
+/// blur past a lane never shows -- the four pixels are held to the
+/// rectangle, and the one pixel past it is masked out -- so it needs no test
+/// of its own; the draw is read only within `srcL..srcR` by `srcT..srcB`
+/// and is transparent past it, as in a layer of the lane's own.
 const SHADOW: &str = r#"
 uniform shader blurred;
 uniform shader src;
@@ -337,15 +368,25 @@ uniform float gain;
 uniform float w;
 uniform float h;
 uniform float shadowOnly;
+uniform float outX;
+uniform float outY;
+uniform float blurX;
+uniform float blurY;
+uniform float srcX;
+uniform float srcY;
+uniform float srcL;
+uniform float srcT;
+uniform float srcR;
+uniform float srcB;
 float4 tinted(float2 q) {
-    float4 x = float4(blurred.eval(q));
+    float4 x = float4(blurred.eval(q + float2(blurX, blurY)));
     float t = ca * ((x.r + x.g) / 255);
     return float4(float3(r, g, b) * t, t);
 }
 float4 main(float2 position) {
     // The pixel's centre exactly: the position a draw interpolates along a
     // triangle's edge can land an ulp off it, and an edge's test then tips.
-    float2 p = floor(position) + 0.5;
+    float2 p = floor(position) + 0.5 - float2(outX, outY);
     float2 at = p - float2(ox, oy);
     float2 edge = floor(float2(ox, oy) + 0.5);
     float2 end = floor(float2(ox + w, oy + h) + 0.5);
@@ -369,55 +410,108 @@ float4 main(float2 position) {
     // textures alike.
     float2 inside = step(edge, px) * (float2(1) - step(end, px));
     d *= inside.x * inside.y;
-    float4 s = (1 - shadowOnly) * floor(float4(src.eval(p)) * 255 + 0.5) / 255;
+    float2 sp = p;
+    float4 read = (sp.x < srcL || sp.y < srcT || sp.x >= srcR || sp.y >= srcB)
+        ? float4(0) : float4(src.eval(sp + float2(srcX, srcY)));
+    float4 s = (1 - shadowOnly) * floor(read * 255 + 0.5) / 255;
     float4 v = s + d * (1 - s.a);
     return clamp(floor(v * 255 * gain + 0.5), 0, 255) / 255;
 }
 "#;
 
 /// How many floats [`SHADOW`] declares as uniforms, in the order it declares
-/// them: `r`, `g`, `b`, `ca`, `ox`, `oy`, `bilinear`, `gain`, `w`, `h` and
-/// `shadowOnly`.
-const SHADOW_UNIFORMS: usize = 11;
+/// them: `r`, `g`, `b`, `ca`, `ox`, `oy`, `bilinear`, `gain`, `w`, `h`,
+/// `shadowOnly`, then where the lane writes (`outX`, `outY`), where its blur
+/// lies in the blurred child (`blurX`, `blurY`), where its pixel `(0, 0)` lies
+/// in the source (`srcX`, `srcY`), and what of the source it reads (`srcL`,
+/// `srcT`, `srcR`, `srcB`, in its own pixels).
+const SHADOW_UNIFORMS: usize = 21;
 
 thread_local! {
     /// [`SHADOW`], compiled once per thread.
     static SHADOW_EFFECT: Option<RuntimeEffect> = RuntimeEffect::make_for_shader(SHADOW, None).ok();
 }
 
+/// One chain's drop shadow in a batch -- see [`shadows`]: its lane of the
+/// source, which is the chain's 8-bit input, `size` of it from `from`, of
+/// which only `reads` holds the draw; and how its shadow is cast: moved by
+/// `offset`, tinted to `rgb` at `alpha` of the blurred alpha, scaled by
+/// `gain`, and with `shadow_only`, without the draw over it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShadowJob {
+    pub(crate) from: (i32, i32),
+    pub(crate) reads: IRect,
+    pub(crate) size: (usize, usize),
+    pub(crate) offset: (f32, f32),
+    pub(crate) tint: ([f32; 3], f32),
+    pub(crate) gain: f32,
+    pub(crate) shadow_only: bool,
+}
+
 /// `image`, an 8-bit layer `(width, height)`, over its drop shadow, made on
-/// `context`: its alpha blurred by `sigma_x` along rows and `sigma_y` along
-/// columns by the passes [`blur`] makes, its value and remainder packed,
-/// tinted to `rgb` at `alpha` of it, moved by `offset` and composited under
-/// `image` by [`SHADOW`], scaled by `gain` and rounded once to `image`'s own
-/// 8-bit type. With `shadow_only`, the shadow by itself, without `image`
-/// over it. The bytes are those the CPU makes in floats but on exact ties.
-/// `None` for a layer that is not 8 bits a channel, and wherever [`blur`]
-/// gives `None`, all of which the CPU takes.
+/// `context`: [`shadows`] of one chain reading all of `image`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shadow(
     context: &mut RecordingContext,
     image: &Image,
     (width, height): (usize, usize),
-    (sigma_x, sigma_y): (f32, f32),
-    (ox, oy): (f32, f32),
-    ([r, g, b], alpha): ([f32; 3], f32),
+    sigma: (f32, f32),
+    offset: (f32, f32),
+    tint: ([f32; 3], f32),
     gain: f32,
     shadow_only: bool,
 ) -> Option<Image> {
-    let out_type = image.color_type();
-    if !matches!(out_type, ColorType::RGBA8888 | ColorType::BGRA8888) {
+    let job = ShadowJob {
+        from: (0, 0),
+        reads: IRect::from_wh(width as i32, height as i32),
+        size: (width, height),
+        offset,
+        tint,
+        gain,
+        shadow_only,
+    };
+    shadows(context, image, sigma, &[job]).map(|(image, _)| image)
+}
+
+/// Each of `jobs` over its drop shadow, made on `context` from `source`, an
+/// 8-bit image holding every job's draw, all of them blurred by the same
+/// `(sigma_x, sigma_y)`: each one's alpha blurred along rows and columns by
+/// the passes [`Gpu::axis`] makes, its value and remainder packed, tinted,
+/// moved and composited under the draw by [`SHADOW`], scaled by its gain and
+/// rounded once to `source`'s own 8-bit type. One target per pass serves
+/// every job, each writing into a place of its own and reading only its own
+/// lane, so a run of shadowed draws pays the passes of one. The bytes are a
+/// job's as made alone, which are those the CPU makes in floats but on
+/// exact ties. The target and where each job's result lies in it; `None`
+/// for a source not 8 bits a channel, a blur reaching past a job's lines by
+/// more than [`REACH_PER_LINE`] times their length, results more than one
+/// target can hold, and wherever a pass gives `None` -- all of which each
+/// job then takes alone, or the CPU.
+pub(crate) fn shadows(
+    context: &mut RecordingContext,
+    source: &Image,
+    (sigma_x, sigma_y): (f32, f32),
+    jobs: &[ShadowJob],
+) -> Option<(Image, Vec<(i32, i32)>)> {
+    let out_type = source.color_type();
+    if !matches!(out_type, ColorType::RGBA8888 | ColorType::BGRA8888)
+        || jobs.is_empty()
+    {
         return None;
     }
     let reaches = |sigma: f32, n: usize| {
         f64::from(sigma) * REACH_SIGMAS > (n * REACH_PER_LINE) as f64
     };
-    if reaches(sigma_x, width) || reaches(sigma_y, height) {
+    if jobs
+        .iter()
+        .any(|job| reaches(sigma_x, job.size.0) || reaches(sigma_y, job.size.1))
+    {
         return None;
     }
     let effect = EFFECT.with(Clone::clone)?;
+    let whole = WHOLE_EFFECT.with(Clone::clone)?;
     let compose = SHADOW_EFFECT.with(Clone::clone)?;
-    let space = image
+    let space = source
         .color_space()
         .or_else(|| Some(ColorSpace::new_srgb()))?;
     // The shadow needs the alpha alone, so each pass carries just its value
@@ -427,56 +521,54 @@ pub(crate) fn shadow(
     let mut gpu = Gpu {
         context,
         effect,
+        whole,
         space,
         zero: zero.clone(),
         packed: true,
     };
-    let rows = gpu.axis(
-        (image.clone(), zero),
+    let lanes: Vec<Lane> = jobs
+        .iter()
+        .map(|job| Lane {
+            from: job.from,
+            reads: job.reads,
+            size: job.size,
+        })
+        .collect();
+    let rows_lines: Vec<(usize, usize)> =
+        jobs.iter().map(|job| (job.size.0, job.size.1)).collect();
+    let (rows, rows_lanes) = gpu.axis(
+        (source.clone(), zero),
         Input::Bytes,
         [1.0, 0.0],
-        width,
-        height,
+        &lanes,
+        &rows_lines,
         sigma_x,
         None,
     )?;
-    let (blurred, _) = gpu.axis(
+    let column_lines: Vec<(usize, usize)> =
+        jobs.iter().map(|job| (job.size.1, job.size.0)).collect();
+    let ((blurred, _), blurred_lanes) = gpu.axis(
         rows,
         Input::Packed,
         [0.0, 1.0],
-        height,
-        width,
+        &rows_lanes,
+        &column_lines,
         sigma_y,
         None,
     )?;
-    let whole = ox.fract() == 0.0 && oy.fract() == 0.0;
-    let uniforms: [f32; SHADOW_UNIFORMS] = [
-        r,
-        g,
-        b,
-        alpha,
-        ox,
-        oy,
-        if whole { 0.0 } else { 1.0 },
-        gain,
-        width as f32,
-        height as f32,
-        if shadow_only { 1.0 } else { 0.0 },
-    ];
-    let uniforms: Vec<u8> =
-        uniforms.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let sizes: Vec<(usize, usize)> = jobs.iter().map(|job| job.size).collect();
+    let max = gpu.context.max_render_target_size().max(1) as usize;
+    let ((width, height), places) = shelves(&sizes, max)?;
     let nearest = SamplingOptions::new(FilterMode::Nearest, MipmapMode::None);
     let child = |image: &Image| {
         image
             .to_shader((TileMode::Decal, TileMode::Decal), nearest, None)
             .map(ChildPtr::from)
     };
-    let shader = compose.make_shader(
-        Data::new_copy(&uniforms),
-        &[child(&blurred)?, child(image)?],
-        None,
-    )?;
+    let (blurred, source_child) = (child(&blurred)?, child(source)?);
     let info = gpu.info(width, height, out_type);
+    #[cfg(test)]
+    crate::context::chain::opened_offscreen();
     let mut surface = surfaces::render_target(
         gpu.context,
         Budgeted::Yes,
@@ -487,12 +579,52 @@ pub(crate) fn shadow(
         false,
         None,
     )?;
-    let mut paint = Paint::default();
-    paint.set_shader(shader).set_blend_mode(BlendMode::Src);
-    surface
-        .canvas()
-        .draw_rect(Rect::from_wh(width as f32, height as f32), &paint);
-    Some(surface.image_snapshot())
+    for ((job, blur), &(x, y)) in jobs.iter().zip(&blurred_lanes).zip(&places) {
+        let ((ox, oy), ([r, g, b], alpha)) = (job.offset, job.tint);
+        let whole = ox.fract() == 0.0 && oy.fract() == 0.0;
+        let uniforms: [f32; SHADOW_UNIFORMS] = [
+            r,
+            g,
+            b,
+            alpha,
+            ox,
+            oy,
+            if whole { 0.0 } else { 1.0 },
+            job.gain,
+            job.size.0 as f32,
+            job.size.1 as f32,
+            if job.shadow_only { 1.0 } else { 0.0 },
+            x as f32,
+            y as f32,
+            blur.from.0 as f32,
+            blur.from.1 as f32,
+            job.from.0 as f32,
+            job.from.1 as f32,
+            job.reads.left as f32,
+            job.reads.top as f32,
+            job.reads.right as f32,
+            job.reads.bottom as f32,
+        ];
+        let uniforms: Vec<u8> =
+            uniforms.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let shader = compose.make_shader(
+            Data::new_copy(&uniforms),
+            &[blurred.clone(), source_child.clone()],
+            None,
+        )?;
+        let mut paint = Paint::default();
+        paint.set_shader(shader).set_blend_mode(BlendMode::Src);
+        surface.canvas().draw_rect(
+            Rect::from_xywh(
+                x as f32,
+                y as f32,
+                job.size.0 as f32,
+                job.size.1 as f32,
+            ),
+            &paint,
+        );
+    }
+    Some((surface.image_snapshot(), places))
 }
 
 thread_local! {
@@ -536,6 +668,9 @@ fn zero(context: &mut RecordingContext) -> Option<Image> {
 struct Gpu<'a> {
     context: &'a mut RecordingContext,
     effect: RuntimeEffect,
+    /// [`WHOLE_EFFECT`]: `effect` for a pass of one lane reading all of its
+    /// input.
+    whole: RuntimeEffect,
     space: ColorSpace,
     /// A 1x1 transparent image, the second child of a pass whose input has
     /// no remainder of its own.
@@ -544,6 +679,65 @@ struct Gpu<'a> {
     /// packed into one target -- see [`Part::Packed`] -- rather than four
     /// channels in two.
     packed: bool,
+}
+
+/// One chain's share of a pass that may serve several: where its pixel
+/// `(0, 0)` lies in the pass's children, what of them it reads, and how
+/// large its output is. A pass writes each lane's output into a place of its
+/// own in one target, so that the chains of a run pay one pass between them
+/// rather than one each -- see [`shadows`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Lane {
+    /// Where the lane's own pixel `(0, 0)` lies in the children.
+    from: (i32, i32),
+    /// What the lane reads, in its own pixels; the rest reads as nothing,
+    /// as outside a texture of its own does.
+    reads: IRect,
+    /// The output's width and height.
+    size: (usize, usize),
+}
+
+impl Lane {
+    /// A lane reading all of an image of `size` at the children's origin:
+    /// one chain's pass, as a pass with one lane makes it.
+    fn whole(size: (usize, usize)) -> Self {
+        Lane {
+            from: (0, 0),
+            reads: IRect::from_wh(size.0 as i32, size.1 as i32),
+            size,
+        }
+    }
+}
+
+/// A target's size and where in it each of the sizes [`shelves`] was given
+/// goes.
+pub(crate) type Shelves = ((usize, usize), Vec<(i32, i32)>);
+
+/// Where each of `sizes` goes in one target: left to right in rows no wider
+/// than `max`, a row as tall as its tallest, the rows top to bottom. The
+/// target's size and each place, or `None` where they fill more than `max`
+/// down -- which the caller then makes in more than one target, or leaves
+/// to each chain alone. One size is placed at the origin of a target its
+/// own size.
+pub(crate) fn shelves(sizes: &[(usize, usize)], max: usize) -> Option<Shelves> {
+    let (mut x, mut y, mut row, mut width) = (0usize, 0usize, 0usize, 0usize);
+    let mut places = Vec::with_capacity(sizes.len());
+    for &(w, h) in sizes {
+        if w > max || h > max {
+            return None;
+        }
+        if x + w > max {
+            y += row;
+            x = 0;
+            row = 0;
+        }
+        places.push((x as i32, y as i32));
+        x += w;
+        row = row.max(h);
+        width = width.max(x);
+    }
+    let height = y + row;
+    (height <= max).then_some(((width.max(1), height.max(1)), places))
 }
 
 impl Gpu<'_> {
@@ -556,9 +750,12 @@ impl Gpu<'_> {
         )
     }
 
-    /// One pass: `children` read as `input`, along `dir`, into a `w` x `h`
-    /// target of `ct`, writing `part`. `None` for a pass of more taps than
-    /// [`PASS`]'s loops take.
+    /// One pass: `children` read as `input` by each of `lanes`, along
+    /// `dir`, each lane's output written into a place of its own in one
+    /// target of `ct`, writing `part`. The target and each lane's output, as
+    /// a lane the next pass reads. `None` for a pass of more taps than
+    /// [`PASS`]'s loops take, and where the outputs fill more than one
+    /// target can hold.
     #[allow(clippy::too_many_arguments)]
     fn pass(
         &mut self,
@@ -567,13 +764,19 @@ impl Gpu<'_> {
         dir: [f32; 2],
         taps: Taps,
         part: Part,
-        (w, h): (usize, usize),
+        lanes: &[Lane],
         ct: ColorType,
-    ) -> Option<Image> {
+    ) -> Option<(Image, Vec<Lane>)> {
         if taps.count() > MAX_TAPS {
             return None;
         }
+        let sizes: Vec<(usize, usize)> =
+            lanes.iter().map(|lane| lane.size).collect();
+        let max = self.context.max_render_target_size().max(1) as usize;
+        let ((w, h), places) = shelves(&sizes, max)?;
         let info = self.info(w, h, ct);
+        #[cfg(test)]
+        crate::context::chain::opened_offscreen();
         let mut surface = surfaces::render_target(
             self.context,
             Budgeted::Yes,
@@ -584,21 +787,6 @@ impl Gpu<'_> {
             false,
             None,
         )?;
-        let uniforms: Vec<u8> = [
-            dir[0],
-            dir[1],
-            taps.mode,
-            taps.spacing,
-            taps.origin,
-            taps.reach as f32,
-            (1.0 / (2.0 * taps.sigma * taps.sigma)) as f32,
-            taps.norm as f32,
-            part as u8 as f32,
-            input as u8 as f32,
-        ]
-        .iter()
-        .flat_map(|v| v.to_ne_bytes())
-        .collect();
         let nearest =
             SamplingOptions::new(FilterMode::Nearest, MipmapMode::None);
         let child = |image: &Image| {
@@ -606,17 +794,70 @@ impl Gpu<'_> {
                 .to_shader((TileMode::Decal, TileMode::Decal), nearest, None)
                 .map(ChildPtr::from)
         };
-        let shader = self.effect.make_shader(
-            Data::new_copy(&uniforms),
-            &[child(children.0)?, child(children.1)?],
-            None,
-        )?;
-        let mut paint = Paint::default();
-        paint.set_shader(shader).set_blend_mode(BlendMode::Src);
-        surface
-            .canvas()
-            .draw_rect(Rect::from_wh(w as f32, h as f32), &paint);
-        Some(surface.image_snapshot())
+        let (hi, lo) = (child(children.0)?, child(children.1)?);
+        // One lane reading all of its input is held to its box by the
+        // input's edge, which reads zero past it as the box does.
+        let effect = match lanes {
+            [lane]
+                if lane.from == (0, 0)
+                    && lane.reads
+                        == IRect::from_size(children.0.dimensions()) =>
+            {
+                &self.whole
+            }
+            _ => &self.effect,
+        };
+        for (lane, &(x, y)) in lanes.iter().zip(&places) {
+            let uniforms: Vec<u8> = [
+                dir[0],
+                dir[1],
+                taps.mode,
+                taps.spacing,
+                taps.origin,
+                taps.reach as f32,
+                (1.0 / (2.0 * taps.sigma * taps.sigma)) as f32,
+                taps.norm as f32,
+                part as u8 as f32,
+                input as u8 as f32,
+                x as f32,
+                y as f32,
+                lane.from.0 as f32,
+                lane.from.1 as f32,
+                lane.reads.left as f32,
+                lane.reads.top as f32,
+                lane.reads.right as f32,
+                lane.reads.bottom as f32,
+            ]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+            let shader = effect.make_shader(
+                Data::new_copy(&uniforms),
+                &[hi.clone(), lo.clone()],
+                None,
+            )?;
+            let mut paint = Paint::default();
+            paint.set_shader(shader).set_blend_mode(BlendMode::Src);
+            surface.canvas().draw_rect(
+                Rect::from_xywh(
+                    x as f32,
+                    y as f32,
+                    lane.size.0 as f32,
+                    lane.size.1 as f32,
+                ),
+                &paint,
+            );
+        }
+        let outputs = lanes
+            .iter()
+            .zip(places)
+            .map(|(lane, from)| Lane {
+                from,
+                reads: IRect::from_wh(lane.size.0 as i32, lane.size.1 as i32),
+                size: lane.size,
+            })
+            .collect();
+        Some((surface.image_snapshot(), outputs))
     }
 
     /// What a pass after the first reads: a value and its remainder, in
@@ -629,83 +870,100 @@ impl Gpu<'_> {
     }
 
     /// Both parts of a pass, as half floats: in two targets, or packed into
-    /// one beside the [`zero`] a next pass reads as its second child.
+    /// one beside the [`zero`] a next pass reads as its second child. The
+    /// two targets of a split pass place each lane alike, so one set of
+    /// lanes reads both.
+    #[allow(clippy::type_complexity)]
     fn split(
         &mut self,
         children: (&Image, &Image),
         input: Input,
         dir: [f32; 2],
         taps: Taps,
-        size: (usize, usize),
-    ) -> Option<(Image, Image)> {
+        lanes: &[Lane],
+    ) -> Option<((Image, Image), Vec<Lane>)> {
         if self.packed {
-            let packed = self.pass(
+            let (packed, outputs) = self.pass(
                 children,
                 input,
                 dir,
                 taps,
                 Part::Packed,
-                size,
+                lanes,
                 ColorType::RGBAF16,
             )?;
-            return Some((packed, self.zero.clone()));
+            return Some(((packed, self.zero.clone()), outputs));
         }
-        Some((
-            self.pass(
-                children,
-                input,
-                dir,
-                taps,
-                Part::Value,
-                size,
-                ColorType::RGBAF16,
-            )?,
-            self.pass(
-                children,
-                input,
-                dir,
-                taps,
-                Part::Remainder,
-                size,
-                ColorType::RGBAF16,
-            )?,
-        ))
+        let (value, outputs) = self.pass(
+            children,
+            input,
+            dir,
+            taps,
+            Part::Value,
+            lanes,
+            ColorType::RGBAF16,
+        )?;
+        let (remainder, _) = self.pass(
+            children,
+            input,
+            dir,
+            taps,
+            Part::Remainder,
+            lanes,
+            ColorType::RGBAF16,
+        )?;
+        Some(((value, remainder), outputs))
     }
 
-    /// One axis of `n` samples across `other` lines, from `children` read as
-    /// `input`. Ends in a value and its remainder, or, with `last`, in the
-    /// one image `last` names (its second slot then a copy of it).
-    #[allow(clippy::too_many_arguments)]
+    /// One axis for each of `lanes`, every lane blurred by the same `sigma`
+    /// along `dir`: lane `i` is `lines[i].0` samples along it across
+    /// `lines[i].1` lines, read from `children` as `input`. Ends in a value
+    /// and its remainder, or, with `last`, in the one image `last` names
+    /// (its second slot then a copy of it), and each lane's output in them.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn axis(
         &mut self,
         children: (Image, Image),
         input: Input,
         dir: [f32; 2],
-        n: usize,
-        other: usize,
+        lanes: &[Lane],
+        lines: &[(usize, usize)],
         sigma: f32,
         last: Option<(Part, ColorType, f64)>,
-    ) -> Option<(Image, Image)> {
-        let size = |len: usize| {
+    ) -> Option<((Image, Image), Vec<Lane>)> {
+        let size = |(len, other): (usize, usize)| {
             if dir[0] == 1.0 {
                 (len, other)
             } else {
                 (other, len)
             }
         };
+        // `lanes` as read, each writing `len` samples along the axis.
+        let sized =
+            |lanes: &[Lane], len: &dyn Fn(usize) -> usize| -> Vec<Lane> {
+                lanes
+                    .iter()
+                    .zip(lines)
+                    .map(|(lane, &(n, other))| Lane {
+                        size: size((len(n), other)),
+                        ..*lane
+                    })
+                    .collect()
+            };
         let finish = |gpu: &mut Self,
                       from: (&Image, &Image),
                       input: Input,
-                      taps: Taps| match last {
+                      taps: Taps,
+                      lanes: Vec<Lane>| match last {
             Some((part, ct, gain)) => {
                 let taps = Taps {
                     norm: taps.norm * gain,
                     ..taps
                 };
-                gpu.pass(from, input, dir, taps, part, size(n), ct)
-                    .map(|image| (image.clone(), image))
+                gpu.pass(from, input, dir, taps, part, &lanes, ct)
+                    .map(|(image, outputs)| ((image.clone(), image), outputs))
             }
-            None => gpu.split(from, input, dir, taps, size(n)),
+            None => gpu.split(from, input, dir, taps, &lanes),
         };
         if !(sigma.is_finite() && sigma > 0.0) {
             // No blur along this axis: a pass of one tap carries the input.
@@ -717,7 +975,14 @@ impl Gpu<'_> {
                 sigma: 1.0,
                 norm: 1.0,
             };
-            return finish(self, (&children.0, &children.1), input, taps);
+            let lanes = sized(lanes, &|n| n);
+            return finish(
+                self,
+                (&children.0, &children.1),
+                input,
+                taps,
+                lanes,
+            );
         }
         let sigma = f64::from(sigma);
         let reach = |sg: f64| (REACH_SIGMAS * sg).ceil() as usize;
@@ -730,7 +995,14 @@ impl Gpu<'_> {
                 sigma,
                 norm: norm_of(sigma),
             };
-            return finish(self, (&children.0, &children.1), input, taps);
+            let lanes = sized(lanes, &|n| n);
+            return finish(
+                self,
+                (&children.0, &children.1),
+                input,
+                taps,
+                lanes,
+            );
         };
         let a = s as f64;
         let b = (sigma * sigma - 2.0 * a * a).sqrt() / a;
@@ -739,8 +1011,8 @@ impl Gpu<'_> {
         // sample whose blur reaches the line exists.
         let margin = (ra + rb * s + rc + s).div_ceil(s) * s;
         let origin = -(margin as f32);
-        let coarse = (n + 2 * margin) / s + 1;
-        let (h0, l0) = self.split(
+        let coarse = |n: usize| (n + 2 * margin) / s + 1;
+        let ((h0, l0), first) = self.split(
             (&children.0, &children.1),
             input,
             dir,
@@ -752,9 +1024,9 @@ impl Gpu<'_> {
                 sigma: a,
                 norm: norm_of(a),
             },
-            size(coarse),
+            &sized(lanes, &coarse),
         )?;
-        let (h1, l1) = self.split(
+        let ((h1, l1), second) = self.split(
             (&h0, &l0),
             self.carried(),
             dir,
@@ -766,7 +1038,7 @@ impl Gpu<'_> {
                 sigma: b,
                 norm: norm_of(b),
             },
-            size(coarse),
+            &sized(&first, &coarse),
         )?;
         // The sum back carries the factor: each coarse sample stands for `s`.
         let up = Taps {
@@ -777,7 +1049,8 @@ impl Gpu<'_> {
             sigma: a,
             norm: a * norm_of(a),
         };
-        finish(self, (&h1, &l1), self.carried(), up)
+        let lanes = sized(&second, &|n| n);
+        finish(self, (&h1, &l1), self.carried(), up, lanes)
     }
 }
 
@@ -825,11 +1098,13 @@ mod tests {
     fn the_pass_compiles() {
         // A compile error otherwise reads as no blur at all: `blur` returns
         // `None`, which a caller takes for "no GPU".
-        assert!(
-            EFFECT.with(Option::is_some),
-            "{:?}",
-            RuntimeEffect::make_for_shader(source(), None).err()
-        );
+        for (effect, boxed) in [(&EFFECT, true), (&WHOLE_EFFECT, false)] {
+            assert!(
+                effect.with(Option::is_some),
+                "boxed {boxed}: {:?}",
+                RuntimeEffect::make_for_shader(source(boxed), None).err()
+            );
+        }
     }
 
     /// `src`, premultiplied RGBA bytes, blurred on the GPU and read back.
@@ -976,6 +1251,162 @@ mod tests {
             let s = f64::from(factor(sigma).expect("a factor") as u32);
             let b = (f64::from(sigma).powi(2) - 2.0 * s * s).sqrt();
             assert!(b / s >= MIN_COARSE, "sigma {sigma}: b/s {}", b / s);
+        }
+    }
+
+    /// `src`, premultiplied RGBA bytes `w` by `h`, as a GPU image, with the
+    /// surface it was drawn on for its context.
+    fn uploaded(src: &[u8], w: usize, h: usize) -> Option<(Surface, Image)> {
+        let info = ImageInfo::new(
+            (w as i32, h as i32),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let raster =
+            started::raster_from_data(&info, Data::new_copy(src), w * 4)?;
+        let mut up = surface(w, h, ColorType::RGBA8888)?;
+        let mut paint = Paint::default();
+        paint.set_blend_mode(BlendMode::Src);
+        up.canvas().draw_image(&raster, (0, 0), Some(&paint));
+        let image = up.image_snapshot();
+        Some((up, image))
+    }
+
+    /// `area` of `image`, a GPU image, read back as RGBA bytes.
+    fn read_back(image: &Image, area: IRect) -> Option<Vec<u8>> {
+        let (w, h) = (area.width() as usize, area.height() as usize);
+        let mut down = surface(w, h, ColorType::RGBA8888)?;
+        let mut paint = Paint::default();
+        paint.set_blend_mode(BlendMode::Src);
+        down.canvas()
+            .draw_image(image, (-area.left, -area.top), Some(&paint));
+        let info = ImageInfo::new(
+            (w as i32, h as i32),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let mut px = vec![0u8; w * h * 4];
+        down.read_pixels(&info, &mut px, w * 4, (0, 0))
+            .then_some(px)
+    }
+
+    /// Jobs sharing passes each make the shadow they make alone from their
+    /// own lane, with what lies past it cleared: where the lanes adjoin and
+    /// overlap in the source, where a lane reads less than all of itself,
+    /// and where ink runs to a lane's edge, so that every read past a lane
+    /// -- the passes' of the source and of each other's output, the
+    /// compose's of the blur moved by the offset and of the draw -- picks
+    /// up another's ink. A page cannot show all of this: chains share a
+    /// layer only where none paints within another's reach, which leaves a
+    /// lane's edge clear.
+    #[test]
+    fn jobs_sharing_passes_read_only_their_own_lanes() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let (w, h) = (96, 64);
+        let src = noise(w, h);
+        let job = |from, reads, size, offset, shadow_only| ShadowJob {
+            from,
+            reads,
+            size,
+            offset,
+            tint: ([0.1, 0.3, 0.5], 0.6),
+            gain: 0.8,
+            shadow_only,
+        };
+        let jobs = [
+            job(
+                (0, 0),
+                IRect::new(5, 4, 35, 26),
+                (40, 30),
+                (3.0, 2.0),
+                false,
+            ),
+            job(
+                (40, 0),
+                IRect::new(0, 0, 40, 30),
+                (40, 30),
+                (-4.0, -1.0),
+                false,
+            ),
+            job(
+                (20, 24),
+                IRect::new(0, 0, 50, 40),
+                (50, 40),
+                (2.5, -3.5),
+                true,
+            ),
+            job(
+                (60, 20),
+                IRect::new(2, 0, 36, 44),
+                (36, 44),
+                (-1.5, 4.0),
+                false,
+            ),
+        ];
+        // Direct and decimated, and each axis its own way.
+        for sigma in [(2.0, 3.0), (7.0, 6.5)] {
+            let (up, source) = uploaded(&src, w, h).expect("an upload");
+            let mut context = up.recording_context().expect("a context");
+            let (shared, places) = shadows(&mut context, &source, sigma, &jobs)
+                .expect("shared passes");
+            for (i, (job, &(x, y))) in jobs.iter().zip(&places).enumerate() {
+                let (jw, jh) = job.size;
+                // The job's lane, all but what it reads cleared.
+                let lane: Vec<u8> = (0..jw * jh)
+                    .flat_map(|k| {
+                        let (lx, ly) = ((k % jw) as i32, (k / jw) as i32);
+                        let (sx, sy) = (lx + job.from.0, ly + job.from.1);
+                        let reads = job.reads;
+                        match (reads.left..reads.right).contains(&lx)
+                            && (reads.top..reads.bottom).contains(&ly)
+                            && (0..w as i32).contains(&sx)
+                            && (0..h as i32).contains(&sy)
+                        {
+                            true => {
+                                let at = (sy as usize * w + sx as usize) * 4;
+                                [src[at], src[at + 1], src[at + 2], src[at + 3]]
+                            }
+                            false => [0; 4],
+                        }
+                    })
+                    .collect();
+                let (up, alone) = uploaded(&lane, jw, jh).expect("an upload");
+                let mut context = up.recording_context().expect("a context");
+                let alone = shadow(
+                    &mut context,
+                    &alone,
+                    (jw, jh),
+                    sigma,
+                    job.offset,
+                    job.tint,
+                    job.gain,
+                    job.shadow_only,
+                )
+                .expect("a shadow alone");
+                let want =
+                    read_back(&alone, IRect::from_wh(jw as i32, jh as i32))
+                        .expect("read back");
+                let got = read_back(
+                    &shared,
+                    IRect::from_xywh(x, y, jw as i32, jh as i32),
+                )
+                .expect("read back");
+                let differ =
+                    got.iter().zip(&want).filter(|(a, b)| a != b).count();
+                assert_eq!(
+                    differ, 0,
+                    "sigma {sigma:?}, job {i}: bytes apart from alone"
+                );
+                assert!(
+                    want.chunks(4).any(|p| p[3] > 0),
+                    "sigma {sigma:?}, job {i}: drew nothing"
+                );
+            }
         }
     }
 }

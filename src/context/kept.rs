@@ -23,7 +23,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use skia_safe::{Flattenable, Image, ImageInfo, Vector};
+use skia_safe::{Flattenable, IRect, ISize, Image, ImageInfo, Vector};
 
 use crate::{
     cache_map::{CacheHasher, KeptSets},
@@ -161,38 +161,55 @@ impl StepKey {
     }
 }
 
-/// What `use_rows` makes of a raster image's pixels, row by row, each row
-/// its used bytes alone; `None` for an image whose pixels are not in main
-/// memory.
+/// A rectangle of a raster image's pixels, read where they lie.
+#[derive(Clone)]
+struct Pixels {
+    image: Image,
+    rect: IRect,
+}
+
+/// What `use_rows` makes of `pixels`, row by row, each row the bytes of its
+/// rectangle alone; `None` for an image whose pixels are not in main memory
+/// or a rectangle not within it.
 fn with_rows<T>(
-    image: &Image,
+    pixels: &Pixels,
     use_rows: impl FnOnce(&mut dyn Iterator<Item = &[u8]>) -> T,
 ) -> Option<T> {
-    let pixmap = image.peek_pixels()?;
+    let pixmap = pixels.image.peek_pixels()?;
     let info = pixmap.info();
-    let (line, stride, height) = (
-        info.min_row_bytes(),
-        pixmap.row_bytes(),
-        info.height() as usize,
-    );
+    let rect = pixels.rect;
+    let bounds = IRect::from_size(info.dimensions());
+    let within = rect.left >= bounds.left
+        && rect.top >= bounds.top
+        && rect.right <= bounds.right
+        && rect.bottom <= bounds.bottom;
+    if !within || rect.is_empty() {
+        return None;
+    }
+    let pixel = info.bytes_per_pixel();
+    let (from, to) = (rect.left as usize * pixel, rect.right as usize * pixel);
+    let stride = pixmap.row_bytes();
     let all = pixmap.bytes()?;
-    let mut rows = all.chunks(stride).take(height).map(|row| &row[..line]);
+    let mut rows = all
+        .chunks(stride)
+        .skip(rect.top as usize)
+        .take(rect.height() as usize)
+        .map(|row| &row[from..to]);
     Some(use_rows(&mut rows))
 }
 
-/// The digest of a raster image's pixels, read where they lie -- see
-/// [`digest`].
-fn digest_rows(image: &Image) -> Option<u64> {
-    with_rows(image, |rows| {
+/// The digest of `pixels`, read where they lie -- see [`digest`].
+fn digest_rows(pixels: &Pixels) -> Option<u64> {
+    with_rows(pixels, |rows| {
         let mut hasher = DIGEST_KEYS.build_hasher();
         rows.for_each(|row| hasher.write(row));
         shared(hasher.finish())
     })
 }
 
-/// Whether a raster image's pixels are `bytes`, read where they lie.
-fn rows_are(image: &Image, bytes: &[u8]) -> bool {
-    with_rows(image, |rows| {
+/// Whether `pixels` are `bytes`, read where they lie.
+fn rows_are(pixels: &Pixels, bytes: &[u8]) -> bool {
+    with_rows(pixels, |rows| {
         let mut at = 0;
         for row in rows {
             let next = at + row.len();
@@ -206,10 +223,10 @@ fn rows_are(image: &Image, bytes: &[u8]) -> bool {
     .unwrap_or(false)
 }
 
-/// A raster image's pixels, row by row with nothing between rows, as the
-/// bytes a kept result is compared by.
-fn rows_copied(image: &Image) -> Option<Arc<[u8]>> {
-    with_rows(image, |rows| rows.flatten().copied().collect())
+/// `pixels`, row by row with nothing between rows, as the bytes a kept
+/// result is compared by.
+fn rows_copied(pixels: &Pixels) -> Option<Arc<[u8]>> {
+    with_rows(pixels, |rows| rows.flatten().copied().collect())
 }
 
 /// How many keys the record of keys seen once holds: 256 sets of
@@ -255,6 +272,9 @@ fn kind_of(info: &ImageInfo) -> (i32, i32, Option<(u32, u32)>) {
 pub(crate) struct ChainKey {
     input: u64,
     size: (i32, i32),
+    /// Where the pixels digested lie in the input, left, top, width and
+    /// height: the rest of the input is transparent.
+    inked: [i32; 4],
     kind: (i32, i32, Option<(u32, u32)>),
     steps: Arc<[StepKey]>,
     scale: [u32; 2],
@@ -291,10 +311,10 @@ static SEEN_CHAINS: LazyLock<Mutex<Seen<ChainKey>>> =
     LazyLock::new(|| Mutex::new(Seen::new()));
 
 /// A chain about to run on the CPU, by what decides its result: its key,
-/// and the input it is run on.
+/// and the pixels of its input that are not transparent by construction.
 pub(crate) struct ChainInput {
     key: ChainKey,
-    input: Image,
+    input: Pixels,
 }
 
 impl ChainInput {
@@ -307,19 +327,43 @@ impl ChainInput {
         scale: Vector,
         gain: f32,
     ) -> Option<Self> {
+        let size = image.dimensions();
+        let whole = IRect::from_size(size);
+        Self::of_region(image, whole, size, whole, steps, scale, gain)
+    }
+
+    /// `steps` about to run on an input `size`, transparent but for
+    /// `inked`, within it, whose pixels are `read` of `image`, a raster
+    /// image -- a region of a layer, padded out to what its chain works
+    /// on -- read where they lie rather than copied out first; otherwise as
+    /// [`Self::of`]. Two inputs of one size alike in `inked` and its pixels
+    /// are alike to the byte.
+    pub(crate) fn of_region(
+        image: &Image,
+        read: IRect,
+        size: ISize,
+        inked: IRect,
+        steps: &[Step],
+        scale: Vector,
+        gain: f32,
+    ) -> Option<Self> {
         let steps: Arc<[StepKey]> =
             steps.iter().map(StepKey::of).collect::<Option<_>>()?;
-        let info = image.image_info();
+        let input = Pixels {
+            image: image.clone(),
+            rect: read,
+        };
         Some(Self {
             key: ChainKey {
-                input: digest_rows(image)?,
-                size: (info.width(), info.height()),
-                kind: kind_of(info),
+                input: digest_rows(&input)?,
+                size: (size.width, size.height),
+                inked: [inked.left, inked.top, inked.width(), inked.height()],
+                kind: kind_of(image.image_info()),
                 steps,
                 scale: [scale.x, scale.y].map(f32::to_bits),
                 gain: gain.to_bits(),
             },
-            input: image.clone(),
+            input,
         })
     }
 
@@ -515,7 +559,8 @@ mod tests {
 
     use skia_safe::{
         AlphaType, BlendMode, Color, Color4f, ColorSpace, ColorType, Data,
-        Image, ImageInfo, Matrix, Paint, Rect, Vector, color_filters,
+        IRect, ISize, Image, ImageInfo, Matrix, Paint, Rect, Vector,
+        color_filters,
     };
 
     use super::{
@@ -742,6 +787,80 @@ mod tests {
             info.min_row_bytes(),
         )
         .expect("an image")
+    }
+
+    /// A layer 60 by 50 of one byte, but for a 10 by 8 patch of `patch` at
+    /// `at`, as raster pixels.
+    fn layer_with(patch: u8, at: (i32, i32)) -> Image {
+        let (w, h) = (60, 50);
+        let info = ImageInfo::new(
+            (w, h),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let bytes: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let inside = (at.0..at.0 + 10).contains(&x)
+                    && (at.1..at.1 + 8).contains(&y);
+                [if inside { patch } else { 9 }; 4]
+            })
+            .collect();
+        started::raster_from_data(
+            &info,
+            Data::new_copy(&bytes),
+            info.min_row_bytes(),
+        )
+        .expect("an image")
+    }
+
+    #[test]
+    fn a_region_of_a_layer_is_judged_where_it_lies() {
+        // An input judged by a region of the layer it is drawn in: the same
+        // region bytes elsewhere in another layer find the result, whatever
+        // lies around them; in another place within the input they are
+        // another input.
+        let steps = [Step::Blur(2.5)];
+        let scale = Vector::new(1.0, 1.0);
+        let size = ISize::new(30, 24);
+        let input = |layer: &Image, read: IRect, inked: IRect| {
+            ChainInput::of_region(layer, read, size, inked, &steps, scale, 1.0)
+                .expect("a key")
+        };
+        let inked = IRect::from_xywh(10, 8, 10, 8);
+        let here = || {
+            input(
+                &layer_with(200, (5, 6)),
+                IRect::from_xywh(5, 6, 10, 8),
+                inked,
+            )
+        };
+        here().keep_seen(image(3));
+        let elsewhere = input(
+            &layer_with(200, (40, 30)),
+            IRect::from_xywh(40, 30, 10, 8),
+            inked,
+        );
+        assert!(
+            elsewhere.kept().is_some(),
+            "the same region, elsewhere, not found"
+        );
+        let moved = input(
+            &layer_with(200, (5, 6)),
+            IRect::from_xywh(5, 6, 10, 8),
+            IRect::from_xywh(11, 8, 10, 8),
+        );
+        assert!(
+            moved.kept().is_none(),
+            "the region moved within the input, found"
+        );
+        let other = input(
+            &layer_with(201, (5, 6)),
+            IRect::from_xywh(5, 6, 10, 8),
+            inked,
+        );
+        assert!(other.kept().is_none(), "other bytes, found");
     }
 
     #[test]
