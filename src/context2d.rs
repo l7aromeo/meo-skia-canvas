@@ -6719,14 +6719,12 @@ mod overlapping_glyph_tests {
     /// run casting a shadow, drawn on the GPU reads the bytes it reads drawn
     /// on the CPU, over one read back: each run's shadow is cast through a
     /// chain of its own, filed just before the run -- see
-    /// `layer::ReplayedText::cast_before` -- and drawn on the CPU with the
-    /// run, rather than on the GPU between two runs, which would end the
-    /// batch at every line. Blurred, sharp, and blurred under a clip. A run
-    /// dyed by a pattern casting a shadow is not taken: its shadow's group
-    /// is drawn on the GPU, and each run reads the page back alone. Its
-    /// bytes are not compared: Ganesh composites the shadow under the blend
-    /// a level or three from the CPU, as it did every run's shadow before
-    /// the two were drawn together.
+    /// `layer::ReplayedText::cast_before` and `layer::PatternDraw::cast_before`
+    /// -- and drawn on the CPU with the run, rather than on the GPU between
+    /// two runs, which would end the batch at every line and composite the
+    /// shadow by the GPU's arithmetic and its multisampled clip coverage.
+    /// Blurred, sharp, blurred under a clip, and blurred from runs dyed by a
+    /// pattern, alone and clipped.
     #[test]
     fn a_page_of_runs_casting_shadows_is_drawn_on_the_cpu_over_one_read_back() {
         use crate::context::layer::BACKDROPS_READ;
@@ -6736,8 +6734,13 @@ mod overlapping_glyph_tests {
         }
         const LINES: usize = 8;
         /// The shadows the runs cast.
-        const SHADOWS: [&str; 4] =
-            ["blurred", "sharp", "blurred, clipped", "blurred, pattern"];
+        const SHADOWS: [&str; 5] = [
+            "blurred",
+            "sharp",
+            "blurred, clipped",
+            "blurred, pattern",
+            "blurred, clipped, pattern",
+        ];
         let page = |gpu: bool, blend: BlendMode, shadow: &str| {
             register();
             forget_laid_out();
@@ -6753,7 +6756,7 @@ mod overlapping_glyph_tests {
             ctx.set_letter_spacing(-12.0);
             ctx.set_fill_style_css("rgba(40,90,160,0.8)")
                 .expect("a colour");
-            if shadow.ends_with("pattern") {
+            if shadow.contains("pattern") {
                 let mut tile = Canvas::new(8.0, 8.0);
                 tile.set_gpu(false);
                 {
@@ -6779,7 +6782,7 @@ mod overlapping_glyph_tests {
             if shadow.starts_with("blurred") {
                 ctx.set_shadow_blur(2.0);
             }
-            if shadow.ends_with("clipped") {
+            if shadow.contains("clipped") {
                 ctx.begin_path();
                 ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
                     .expect("a positive radius");
@@ -6804,21 +6807,15 @@ mod overlapping_glyph_tests {
             for shadow in SHADOWS {
                 let (cpu, _) = page(false, blend, shadow);
                 let (gpu, reads) = page(true, blend, shadow);
-                if gpu != cpu && !shadow.ends_with("pattern") {
+                if gpu != cpu {
                     wrong.push(format!(
                         "{blend:?} {shadow}: {} levels from the CPU",
                         most_apart(&gpu, &cpu)
                     ));
                 }
-                let expected = if shadow.ends_with("pattern") {
-                    LINES
-                } else {
-                    1
-                };
-                if reads != expected {
+                if reads != 1 {
                     wrong.push(format!(
-                        "{blend:?} {shadow}: {reads} read backs, not \
-                         {expected}"
+                        "{blend:?} {shadow}: {reads} read backs, not 1"
                     ));
                 }
             }

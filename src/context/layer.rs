@@ -1659,6 +1659,10 @@ pub struct PatternDraw {
     /// The draw kept whole, to draw on pixels with the pattern as its
     /// shader, as a draw dyed by a pattern of the canvas's pixels is.
     pub replay: Replay,
+    /// Whether the draw's shadow was filed just before it, as a group of
+    /// its own, which a GPU playback reading the page back for the draw
+    /// draws on the CPU with it -- see [`replayed_on_their_backdrop`].
+    pub cast_before: bool,
     /// Whether a document paints the draw from the tile as pixels do: the
     /// pattern lands on whole device pixels under the transform it was made
     /// under -- see [`TileSource::lands_whole`] -- and the draw is
@@ -4673,9 +4677,10 @@ struct CpuRun {
 /// The run `entries` holds at `at` that [`replayed_on_their_backdrop`]
 /// draws on the CPU -- see [`read_on_the_cpu`] -- how many entries it
 /// spans, and the bounds of the clip it is drawn under where it has one: a
-/// run alone, or the group a kept run's shadow is cast through followed by
-/// the run -- see [`ReplayedText::cast_before`] -- which the CPU page
-/// composites one after the other, as the raster then does. `None` for any
+/// run alone, or the group a run's shadow is cast through followed by the
+/// run -- see [`ReplayedText::cast_before`] and [`PatternDraw::cast_before`]
+/// -- which the CPU page composites one after the other, as the raster then
+/// does. `None` for any
 /// other entry.
 fn cpu_run_at(
     entries: &[Layer],
@@ -4686,11 +4691,14 @@ fn cpu_run_at(
     }
     let cast = matches!(&entries[at], Layer::Group(group)
         if matches!(group.composite, Composite::Chain { .. }));
-    let next = entries.get(at + 1).filter(|next| match next {
+    let cast_before = |entry: &Layer| match entry {
         Layer::ReplayedText(text) => text.cast_before,
-        Layer::Clipped(piece) => matches!(piece.entry(),
-            Layer::ReplayedText(text) if text.cast_before),
+        Layer::Pattern(draw) => draw.cast_before,
         _ => false,
+    };
+    let next = entries.get(at + 1).filter(|next| match next {
+        Layer::Clipped(piece) => cast_before(piece.entry()),
+        next => cast_before(next),
     })?;
     let (run, within) = read_on_the_cpu(next)?;
     cast.then_some((2, run, within))

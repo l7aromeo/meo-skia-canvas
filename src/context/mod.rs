@@ -2119,7 +2119,7 @@ impl Context2D {
         drop(whole);
         let mut through = plain;
         through.set_shader(None);
-        let unit_of = |paint: Paint, replay: Replay| {
+        let unit_of = |paint: Paint, replay: Replay, cast_before: bool| {
             let tile = Arc::new(layer::PatternDraw {
                 source: Arc::clone(&source),
                 matrix: self.state.matrix,
@@ -2129,6 +2129,7 @@ impl Context2D {
                 paint,
                 clip: None,
                 replay,
+                cast_before,
                 aligned,
             });
             let unit = Entries::new(
@@ -2168,11 +2169,9 @@ impl Context2D {
                     Pass::AlphaInShadow => replay.opaque(),
                     Pass::Draw => replay.clone(),
                 };
-                (shadow, unit_of(held, replay).1)
+                (shadow, unit_of(held, replay, false).1)
             });
         let (pixels_shadow, shadow_unit) = moved.unzip();
-        let (tile, unit) = unit_of(through, replay);
-        let shadow_unit = shadow_unit.unwrap_or_else(|| unit.clone());
         let rec = |paint: Paint| LayerRec {
             paint: Some(paint),
             ..LayerRec::default()
@@ -2240,6 +2239,11 @@ impl Context2D {
                 None => Composite::Layer(rec),
             }
         });
+        // A draw filed alone after the group casting its shadow was cast
+        // just before it.
+        let cast_before = !beyond && alone && shadow.is_some();
+        let (tile, unit) = unit_of(through, replay, cast_before);
+        let shadow_unit = shadow_unit.unwrap_or_else(|| unit.clone());
         let offset = self.state.shadow_offset;
         let identity = Matrix::new_identity();
         // A group, which the SVG backend drops whole -- see
