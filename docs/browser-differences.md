@@ -1576,9 +1576,21 @@ centre's coordinates exactly: drawn directly through a path, or as a rectangle
 whose edges fall inside pixels, it put 0.5% and 16% of its pixels a level off.
 Over 600 generated gradients drawn as a rectangle, a rectangle off whole
 pixels, a triangle and a polygon, the GPU canvas parted from the CPU on 582
-pixels, every one within float noise of a half level or a stop. What stays
-apart: those ties; a shape's anti-aliased edge, which is Ganesh's coverage as
-for a flat colour; a gradient the CPU draws in floats -- a translucent
+pixels, every one within float noise of a half level or a stop. A path's
+anti-aliased edge is the CPU's too: the effect is masked by the CPU's coverage
+of the path, made for the draws that follow one another in one image at the
+same places as the effect's, so that a gradient fill's shadow and blur, which
+a chain makes from the CPU's edge, are those of the edge the canvas draws
+(#766). That coverage is cut where the page ends, as the CPU canvas's is, so
+a gradient path the page's edge cuts moves inside the page as it does on the
+CPU engine -- see the entry on a fill the page's edge cuts. Through Ganesh's coverage, a hard stop's edge stood up to 125 levels
+from the CPU canvas's. What stays apart: those ties; along a path's edge, a
+byte Metal's half-precision composite rounds the other way, within 0.15 of a
+tie; under `multiply` or a `globalAlpha`, a byte along the edge a level from
+the CPU's, whose eight-bit pipeline rounds the blend before it scales it by
+the coverage where the GPU rounds once -- matching that order takes a blend
+reading the destination, #736's case; text's anti-aliased edge, which is
+Ganesh's coverage as for a flat colour; a gradient the CPU draws in floats -- a translucent
 two-point conical one, one interpolated in a space other than the page's, one
 under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
 for -- inside a layer a group opens, where the pixels cannot be read back and

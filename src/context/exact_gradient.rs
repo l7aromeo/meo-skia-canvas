@@ -27,9 +27,11 @@
 //! Ganesh hands it to that pixel's centre, which it then maps to the
 //! gradient's space as the CPU does, by the one matrix the CPU composes --
 //! see [`Exact::placed`]. That coordinate is a pixel's own only where the
-//! effect fills an aliased rectangle on whole pixels, so a draw fills its
-//! shape with an image of the effect over the pixels it reaches, sampled
-//! nearest -- see [`GradientSpec::sampled`].
+//! effect fills an aliased rectangle on whole pixels. So a path is drawn as
+//! such a rectangle over the pixels it reaches, the effect masked by the
+//! CPU's coverage of the path -- see `layer::GradientPath` -- and a run of
+//! text fills its glyphs with an image of the effect over the pixels it
+//! reaches, sampled nearest -- see [`GradientSpec::sampled`].
 //!
 //! What is left is float noise: a GPU may fuse a product into the sum that
 //! follows it where the CPU rounds the two apart, in the matrix and in the
