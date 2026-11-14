@@ -9266,23 +9266,33 @@ mod shadow_run_tests {
         // Translucent lines cast from their copies and an opaque one cast
         // from itself, in one run sharing a layer and an atlas: each line's
         // band is the bytes it lands drawn by itself, which is a chain alone.
-        // And where Skia refuses the layer they would share, each line is
-        // drawn and finished alone after all, its cast with it.
-        use crate::context::chain::REFUSE_PLACED;
+        // And where the lines share no layer -- Skia refuses the one they
+        // would share, or the backend shares none, as Vulkan does -- each line
+        // is drawn and finished alone after all, its cast with it.
+        use crate::context::chain::{REFUSE_PLACED, UNSHARED_LAYERS};
         if !gpu_available() {
             eprintln!("skipped: no GPU engine");
             return;
         }
-        for refuse in [false, true] {
+        for (refuse, unshared) in [(false, false), (true, false), (false, true)]
+        {
             REFUSE_PLACED.set(refuse);
-            lines_against_themselves_alone(refuse);
+            UNSHARED_LAYERS.set(unshared);
+            lines_against_themselves_alone(refuse, unshared);
             REFUSE_PLACED.set(false);
+            UNSHARED_LAYERS.set(false);
         }
     }
 
+    /// Whether chains share layers here: on Metal alone -- see
+    /// `chain::shares_layers` -- which is the backend wherever it is built
+    /// in, as `crate::gpu` chooses it.
+    const SHARES: bool = cfg!(feature = "metal");
+
     /// The body of `lines_sharing_a_layer_on_the_gpu_draw_as_each_does_alone`,
-    /// with the shared layer refused where `refused` says.
-    fn lines_against_themselves_alone(refused: bool) {
+    /// with the shared layer refused where `refused` says, and sharing turned
+    /// off where `unshared` does.
+    fn lines_against_themselves_alone(refused: bool, unshared: bool) {
         use crate::context::chain::SHARED_LAYERS;
         let fills = [
             TRANSLUCENT.fill,
@@ -9332,18 +9342,22 @@ mod shadow_run_tests {
         let casts = CAST_RUNS.get();
         let shared = draw(None);
         // One layer the lines are drawn in, and one their casts are; or
-        // refused, a layer and a cast's for each translucent line, and a
+        // sharing none, a layer and a cast's for each translucent line, and a
         // layer for the opaque one.
-        let expected = match refused {
-            false => 2,
-            true => 5,
+        let expected = match SHARES && !refused && !unshared {
+            true => 2,
+            false => 5,
         };
         assert_eq!(
             SHARED_LAYERS.get() - layers,
             expected,
-            "layers, refused {refused}"
+            "layers, refused {refused}, unshared {unshared}"
         );
-        assert_eq!(CAST_RUNS.get() - casts, 2, "casts, refused {refused}");
+        assert_eq!(
+            CAST_RUNS.get() - casts,
+            2,
+            "casts, refused {refused}, unshared {unshared}"
+        );
         let band = width * LINE_GAP * 4;
         for (line, fill) in fills.iter().enumerate() {
             let alone = draw(Some(line));
@@ -9355,7 +9369,8 @@ mod shadow_run_tests {
                 .count();
             assert_eq!(
                 differ, 0,
-                "line {line} in {fill} parts from itself alone, refused {refused}"
+                "line {line} in {fill} parts from itself alone, refused \
+                 {refused}, unshared {unshared}"
             );
         }
     }
