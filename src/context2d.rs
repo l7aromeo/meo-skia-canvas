@@ -22,11 +22,11 @@ use std::{
 };
 
 use skia_safe::{
-    Color4f, Data, FourByteTag, IRect, ImageInfo as SkImageInfo,
-    Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
-    Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
-    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
-    Size as SkSize,
+    Color4f, Data, FourByteTag, IRect, Image as SkImage,
+    ImageInfo as SkImageInfo, Matrix as SkMatrix, Paint as SkPaint,
+    PaintStyle as SkPaintStyle, Path as SkPath, PathBuilder as SkPathBuilder,
+    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
+    Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -46,7 +46,7 @@ use crate::{
     context::{
         Context2D as Inner, Dye, initial_root_face,
         layer::{Entries, reach_the_clip},
-        page::{ExportOptions, Matte},
+        page::{ExportOptions, Matte, Page},
     },
     css::{
         Dimension, Expect, FontUnits, Percent, ROOT_FONT_PX, evaluate,
@@ -1553,12 +1553,22 @@ impl Context2D {
         gpu: bool,
         options: &CanvasOptions,
     ) -> Self {
-        Self {
+        let context = Self {
             inner,
             gpu,
             canvas_depth: options.color_type,
             canvas_space: options.color_space,
-        }
+        };
+        context.tell_engine();
+        context
+    }
+
+    /// Tells the page whether the canvas plays it on the GPU, as
+    /// [`Self::engine`] now chooses -- see
+    /// `context::page::PageRecorder::set_plays_on_gpu`.
+    pub(crate) fn tell_engine(&self) {
+        self.inner
+            .set_plays_on_gpu(self.engine() == RenderingEngine::GPU);
     }
 
     /// Sets the color subsequent fills use.
@@ -4406,13 +4416,13 @@ impl Context2D {
 
 /// What [`capture`] resolved a source canvas to.
 struct Captured {
-    content: Content,
+    content: Captive,
     size: SkSize,
     features: VectorFeatures,
     cost: usize,
     /// The source's own picture when it was handed over as pixels, so the
     /// draw can replay just the region it shows rather than materializing
-    /// the whole page. `None` when the content is already a picture.
+    /// the whole page. `None` when the content is the page itself.
     picture: Option<SkPicture>,
     /// The source page's own entries where the content is its picture, so a
     /// draw through a paint holds the page as recorded -- see
@@ -4420,10 +4430,19 @@ struct Captured {
     entries: Option<Entries>,
 }
 
+/// A source canvas's page as [`capture`] hands it over: as pixels, or as the
+/// page itself, recorded into a picture only where the draw needs one -- see
+/// `Inner::draw_picture_costing`.
+enum Captive {
+    Bitmap(SkImage),
+    Page(Page),
+}
+
 /// Closes a canvas's recording and hands back its page as vectors.
 ///
-/// `None` when the page recorded nothing, which is a blank canvas rather
-/// than a failure -- the callers treat it as nothing to draw.
+/// `None` only where a source handed over as pixels yields none -- the
+/// callers treat it as nothing to draw. A page handed over as itself is
+/// recorded into a picture, if at all, by the draw -- see [`Captive`].
 fn capture(source: &mut Canvas) -> Option<Captured> {
     let context = source.context();
     let size = context.inner.bounds.size();
@@ -4445,15 +4464,15 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
 
     match cost > 0 {
         true => context.inner.source_image(false).map(|image| Captured {
-            content: Content::Bitmap(image),
+            content: Captive::Bitmap(image),
             size,
             features,
             cost,
             picture: context.inner.picture(),
             entries: None,
         }),
-        false => context.inner.picture().map(|picture| Captured {
-            content: Content::Vector(picture, size),
+        false => Some(Captured {
+            content: Captive::Page(context.inner.page()),
             size,
             features,
             cost,
@@ -4480,8 +4499,8 @@ fn place_capture(
     } = captured;
     let (features, cost) = (*features, *cost);
     match content {
-        Content::Vector(picture, _) => ctx.draw_picture_costing(
-            picture,
+        Captive::Page(page) => ctx.draw_picture_costing(
+            &|| page.picture(None),
             entries.clone(),
             src,
             dst,
@@ -4491,11 +4510,10 @@ fn place_capture(
         // A bitmap here is a source that carries nesting and has yet to be
         // rasterized; `draw_nested_image` takes only the part this draw can
         // show. Charged as well, because the destination now carries it.
-        Content::Bitmap(image) => {
+        Captive::Bitmap(image) => {
             ctx.charge_replay(cost.max(1));
             ctx.draw_nested_image(image, picture.as_ref(), src, dst)
         }
-        _ => {}
     }
 }
 
@@ -4870,6 +4888,91 @@ mod recorded_count_tests {
         shader::{GradientColorSpace, GradientInterpolation, GradientStop},
     };
 
+    /// A draw the clip cuts and a pattern's tile, filed under a clip
+    /// straight after a gradient fill the page isolates, are pieces of the
+    /// frame's run, one clip around both, whether or not the page files its
+    /// gradient draws -- see `RenderingEngine::never_gpu`. The fill follows
+    /// another such fill with nothing recorded between them, where the
+    /// page's flush has nothing to file and resumes nothing; filed, the op
+    /// left the frame unbuilt, and each entry after it took a clip of its
+    /// own, which a PDF writes once for each.
+    #[test]
+    fn entries_under_a_clip_after_an_isolated_gradient_join_its_run() {
+        use crate::{
+            context::layer::Layer, paint::BlendMode, path::FillRule,
+            pattern::PatternRepeat,
+        };
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 30.0, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.5, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.2, 1.0),
+                },
+            ],
+            GradientInterpolation::new(GradientColorSpace::Destination),
+        )
+        .expect("a gradient");
+        let mut wrong = vec![];
+        for never_gpu in [false, true] {
+            NEVER_GPU.set(Some(never_gpu));
+            let mut source = Canvas::new(8.0, 8.0);
+            source
+                .context()
+                .set_fill_style_css("rgb(200 40 90)")
+                .expect("a colour");
+            source.context().fill_rect(0.0, 0.0, 4.0, 4.0);
+            let mut canvas = Canvas::new(96.0, 96.0);
+            let pattern = canvas
+                .context()
+                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(20 40 200)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 96.0, 96.0);
+            // A blend a document cannot write, so the page isolates each
+            // fill, the second in a frame of its own.
+            ctx.set_global_composite_operation(BlendMode::ColorDodge);
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(5.0, 5.0, 30.0, 20.0);
+            ctx.save();
+            ctx.begin_path();
+            ctx.arc(48.0, 48.0, 22.0, 0.0, std::f32::consts::TAU, false)
+                .expect("a positive radius");
+            ctx.clip(FillRule::NonZero);
+            ctx.fill_rect(30.0, 30.0, 30.0, 20.0);
+            ctx.set_global_composite_operation(BlendMode::SourceOver);
+            // A stroke the arc's edge cuts, then a tile.
+            ctx.set_stroke_style_css("rgb(10 200 30)")
+                .expect("a colour");
+            ctx.set_line_width(4.0);
+            ctx.stroke_rect(38.0, 48.0, 30.0, 20.0);
+            ctx.set_fill_pattern(&pattern);
+            ctx.fill_rect(30.0, 30.0, 40.0, 40.0);
+            ctx.restore();
+            let entries = ctx.inner.entries();
+            let runs: Vec<Option<u64>> = entries
+                .layers
+                .iter()
+                .rev()
+                .take(2)
+                .map(|entry| match entry {
+                    Layer::Clipped(piece) => Some(piece.run),
+                    _ => None,
+                })
+                .collect();
+            NEVER_GPU.set(None);
+            if !matches!(runs[..], [Some(a), Some(b)] if a == b) {
+                wrong.push(format!("never_gpu {never_gpu}: runs {runs:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// Gradient fills one after another count what the page records for
     /// them, on a CPU canvas and a GPU one alike. Where the page files them
     /// -- in a process that may play it on a GPU -- they are one run, each
@@ -5099,16 +5202,24 @@ mod run_painter_tests {
     const W: f32 = 420.0;
     const H: f32 = 160.0;
 
-    /// The bundled faces the scenes use, registered once.
+    /// The bundled faces the scenes use, registered once on each thread:
+    /// a registration is seen only on the thread that made it -- see
+    /// `FontLibrary::register_font_from_data` -- and tests run on threads of
+    /// their own.
     fn register() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
             let fonts = FontLibrary::new();
             let m = "tests/assets/fonts/montserrat-latin/montserrat-v30-latin";
             for (family, files) in [
                 (
                     "Oswald",
-                    vec!["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+                    vec![
+                        "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                    ],
                 ),
                 (
                     "Raleway",
@@ -5126,7 +5237,10 @@ mod run_painter_tests {
                     ],
                 ),
                 ("Monoton", vec!["tests/assets/fonts/Monoton-Regular.woff"]),
-                ("Amstelvar", vec!["tests/assets/fonts/AmstelvarAlpha-VF.ttf"]),
+                (
+                    "Amstelvar",
+                    vec!["tests/assets/fonts/AmstelvarAlpha-VF.ttf"],
+                ),
             ] {
                 for file in files {
                     fonts
@@ -5134,7 +5248,7 @@ mod run_painter_tests {
                         .expect("a bundled face registers");
                 }
             }
-        });
+        }
     }
 
     /// The canvas's bytes after `scene`, painted through `Paragraph::paint`
@@ -5474,6 +5588,1849 @@ mod run_painter_tests {
 }
 
 #[cfg(test)]
+mod overlapping_glyph_tests {
+    //! The glyphs of one run drawn into one another under a blend that reads
+    //! the page in the shader -- see
+    //! `node::typography::glyph_draws`.
+    use super::*;
+    use skia_safe::{
+        AlphaType, ColorType, Data, Image, ImageInfo, image::CachingHint,
+    };
+    use std::{f32::consts::TAU, iter::zip};
+
+    use crate::{
+        canvas::{BackendInfo, EngineKind},
+        context::layer::DEFERRED_FILED,
+        export::{EncodeOptions, ImageFormat},
+        filter::BlurStyle,
+        font::FontLibrary,
+        node::typography::{
+            GLYPH_DRAWS_FOR, GLYPHS_DRAWN_ALONE, GlyphDraws, forget_laid_out,
+        },
+        paint::BlendMode::*,
+        pixels::PixelDepth,
+    };
+
+    const W: f32 = 320.0;
+    const H: f32 = 160.0;
+
+    /// A run drawn in the scenes: its font, its text, and how many of its
+    /// glyphs a draw of it sets a glyph at a time under a blend read in the
+    /// shader.
+    type Run = (&'static str, &'static str, usize);
+
+    /// Oswald's plain glyphs, every one drawn alone.
+    const OSWALD: Run = ("48px OverlapOswald", "Hello Wq", 8);
+
+    /// A face with a `COLR` table, whose colour glyph `A` this library draws
+    /// itself and whose lowercase letters are plain boxes, drawn between
+    /// the colour glyphs -- see `draw_colour_run` -- each alone.
+    const PALETTES: Run = ("40px OverlapPalettes", "Abcdef", 5);
+
+    /// `globalCompositeOperation`'s blends that Ganesh does in the shader,
+    /// past those it does by coefficients.
+    const READ_IN_THE_SHADER: [BlendMode; 14] = [
+        Multiply, Overlay, Darken, Lighten, ColorDodge, ColorBurn, HardLight,
+        SoftLight, Difference, Exclusion, Hue, Saturation, Color, Luminosity,
+    ];
+
+    /// The rest, which a GPU blends in its fixed-function stage.
+    const BY_COEFFICIENTS: [BlendMode; 12] = [
+        SourceOver,
+        SourceIn,
+        SourceOut,
+        SourceAtop,
+        DestinationOver,
+        DestinationIn,
+        DestinationOut,
+        DestinationAtop,
+        Copy,
+        Xor,
+        Lighter,
+        Screen,
+    ];
+
+    /// How far a channel of the GPU canvas may stand from the CPU canvas's
+    /// on Metal, where these scenes were measured, for filled text: 3
+    /// levels, the most any of the 14 blends stood with glyphs overlapping
+    /// or not, and what `source-over` stands for the same scene. Drawn as
+    /// one blob, the scenes whose glyphs share a pixel stood 25 to 218
+    /// levels apart in Oswald and 10 to 195 in the `COLR` face, whose boxes
+    /// share their edge pixels with no letter spacing.
+    const METAL_FILL_LEVELS: u8 = 3;
+
+    /// [`METAL_FILL_LEVELS`] for stroked text: 5 levels, which `source-over`
+    /// stands as well, where drawn as one blob the scenes stood 26 to 219
+    /// apart in Oswald and 13 to 195 in the `COLR` face.
+    const METAL_STROKE_LEVELS: u8 = 5;
+
+    /// How far elsewhere -- Mesa's llvmpipe on the Linux binding job, where
+    /// these scenes were not measured: the issue's threshold for a channel
+    /// that differs, under the 10 levels the least of the scenes stood drawn
+    /// as one blob on Metal.
+    const UNMEASURED_LEVELS: u8 = 8;
+
+    /// The scenes: `letterSpacing`, which at -12px draws neighbouring glyphs
+    /// into one another and at 0 does not, `globalAlpha`, the fill
+    /// colour's alpha, and whether the text is stroked rather than filled.
+    const SCENES: [(f32, f32, f32, bool); 8] = [
+        (-12.0, 1.0, 1.0, false),
+        (-12.0, 0.5, 1.0, false),
+        (-12.0, 1.0, 0.5, false),
+        (0.0, 1.0, 1.0, false),
+        (0.0, 0.5, 1.0, false),
+        (-12.0, 1.0, 1.0, true),
+        (-12.0, 0.5, 1.0, true),
+        (0.0, 1.0, 1.0, true),
+    ];
+
+    /// Registers the scenes' faces, once on each thread: a face another
+    /// test thread registered is not found on this one, and the scenes then
+    /// drew in the platform's fallback face.
+    fn register() {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if REGISTERED.replace(true) {
+            return;
+        }
+        {
+            let fonts = FontLibrary::new();
+            for (family, path) in [
+                (
+                    "OverlapOswald",
+                    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                ),
+                (
+                    "OverlapPalettes",
+                    "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
+                ),
+            ] {
+                fonts
+                    .register_font_from_path(family, path)
+                    .expect("a bundled face registers");
+            }
+        }
+    }
+
+    /// Whether this machine's GPU canvas is Mesa's llvmpipe.
+    fn on_llvmpipe() -> bool {
+        BackendInfo::query()
+            .device
+            .is_some_and(|device| device.contains("llvmpipe"))
+    }
+
+    /// The canvas's bytes after `run` is drawn twice in `blend` over a page
+    /// of two colours: first laid out for that draw, then from the run kept
+    /// from it -- see `Typesetter::laid_out`.
+    fn drawn(
+        gpu: bool,
+        (font, text, _): Run,
+        blend: BlendMode,
+        (spacing, alpha, colour_alpha, stroke): (f32, f32, f32, bool),
+    ) -> Vec<u8> {
+        register();
+        forget_laid_out();
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+        ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+        ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+        ctx.set_global_composite_operation(blend);
+        ctx.set_global_alpha(alpha);
+        // The face the scene names, not the fallback a family not found
+        // falls back to.
+        let size = font.split_once(' ').map_or(font, |(size, _)| size);
+        assert!(ctx.set_font_css(&format!("{size} OverlapNowhere")));
+        let fallback = ctx.measure_text("A", None).width;
+        assert!(ctx.set_font_css(font), "{font} parses");
+        let advance = ctx.measure_text("A", None).width;
+        assert_ne!(advance, fallback, "{font} is found");
+        ctx.set_letter_spacing(spacing);
+        let ink = format!("rgba(40,90,160,{colour_alpha})");
+        ctx.set_fill_style_css(&ink).expect("a colour");
+        ctx.set_stroke_style_css(&ink).expect("a colour");
+        ctx.set_line_width(3.0);
+        for y in [70.0, 140.0] {
+            match stroke {
+                true => ctx.stroke_text(text, 10.0, y, None),
+                false => ctx.fill_text(text, 10.0, y, None),
+            }
+        }
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        // A canvas that asks for the GPU falls back to the CPU where it
+        // cannot have one, and a comparison of the CPU with itself passes.
+        let engine = canvas.engine_kind();
+        assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+        bytes
+    }
+
+    /// The most two buffers' channels stand apart.
+    fn most_apart(a: &[u8], b: &[u8]) -> u8 {
+        zip(a, b).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn overlapping_glyphs_blend_on_the_gpu_as_on_the_cpu() {
+        if !RenderingEngine::GPU.selectable() {
+            // A Mac built with Metal always has a GPU, so there a missing one
+            // is a failure; a build without a GPU backend says the test did
+            // not run.
+            if cfg!(all(target_os = "macos", feature = "metal")) {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let llvmpipe = on_llvmpipe();
+        let mut apart = vec![];
+        let blends = READ_IN_THE_SHADER.into_iter().chain([SourceOver, Screen]);
+        for (run, blend) in blends.flat_map(|b| [(OSWALD, b), (PALETTES, b)]) {
+            for scene in SCENES {
+                let bound = match (llvmpipe, scene.3) {
+                    (true, _) => UNMEASURED_LEVELS,
+                    (false, true) => METAL_STROKE_LEVELS,
+                    (false, false) => METAL_FILL_LEVELS,
+                };
+                let cpu = drawn(false, run, blend, scene);
+                // Every pixel is opaque, so the straight bytes compared are
+                // the premultiplied ones.
+                assert!(
+                    cpu.chunks(4).all(|pixel| pixel[3] == u8::MAX),
+                    "{} {blend:?} {scene:?}: the page stays opaque",
+                    run.1
+                );
+                let most = most_apart(&cpu, &drawn(true, run, blend, scene));
+                if most > bound {
+                    apart.push(format!(
+                        "{} {blend:?} {scene:?}: {most} levels, past {bound}",
+                        run.1
+                    ));
+                }
+            }
+        }
+        assert!(apart.is_empty(), "{}", apart.join("\n"));
+    }
+
+    #[test]
+    fn the_cpu_canvas_draws_a_run_a_glyph_at_a_time_as_it_draws_it_whole() {
+        let mut differing = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for (run, scene) in [OSWALD, PALETTES]
+                .into_iter()
+                .flat_map(|run| SCENES.map(|scene| (run, scene)))
+            {
+                GLYPHS_DRAWN_ALONE.set(0);
+                GLYPH_DRAWS_FOR.set(Some(GlyphDraws::Each));
+                let alone = drawn(false, run, blend, scene);
+                GLYPH_DRAWS_FOR.set(None);
+                // Each glyph drawn alone, in every recording and onto every
+                // canvas the run is drawn on.
+                let (glyphs, each) = (GLYPHS_DRAWN_ALONE.get(), run.2);
+                assert!(
+                    glyphs >= each && glyphs % each == 0,
+                    "{} {blend:?} {scene:?}: {glyphs} glyphs drawn alone",
+                    run.1
+                );
+                GLYPH_DRAWS_FOR.set(Some(GlyphDraws::Whole));
+                let whole = drawn(false, run, blend, scene);
+                GLYPH_DRAWS_FOR.set(None);
+                if alone != whole {
+                    differing.push(format!("{} {blend:?} {scene:?}", run.1));
+                }
+            }
+        }
+        assert!(
+            differing.is_empty(),
+            "bytes apart:\n{}",
+            differing.join("\n")
+        );
+    }
+
+    /// A run drawn straight onto the page in a blend that reads it costs
+    /// the CPU canvas what it did before glyphs were drawn apart: the page
+    /// keeps it whole and draws it again where it is played, whole on the
+    /// CPU, and on the GPU whole too, on the CPU over one read back of the
+    /// GPU's pixels -- see `layer::replayed_on_their_backdrop`. Where that
+    /// route is refused, inside a layer, the GPU groups the run's glyphs;
+    /// `every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu` holds
+    /// that.
+    #[test]
+    fn a_run_drawn_on_the_page_is_whole_on_either_engine() {
+        use crate::context::layer::BACKDROPS_READ;
+        let gpu = RenderingEngine::GPU.selectable();
+        let mut wrong = vec![];
+        for blend in [Multiply, Difference, Luminosity] {
+            for scene in SCENES {
+                for on_gpu in [false, true] {
+                    if on_gpu && !gpu {
+                        continue;
+                    }
+                    GLYPHS_DRAWN_ALONE.set(0);
+                    let read = BACKDROPS_READ.get();
+                    drawn(on_gpu, OSWALD, blend, scene);
+                    let (glyphs, reads) =
+                        (GLYPHS_DRAWN_ALONE.get(), BACKDROPS_READ.get() - read);
+                    // The two lines are one batch, read back once.
+                    let expected = usize::from(on_gpu);
+                    if glyphs != 0 || reads != expected {
+                        wrong.push(format!(
+                            "GPU {on_gpu} {blend:?} {scene:?}: {glyphs} \
+                             glyphs drawn apart, {reads} read backs"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The ways a run reaches the page past the plain one, each a route
+    /// `Context2D::render_to_canvas` files it by: under a filter the crate
+    /// runs as a chain, casting a shadow blurred or sharp, through a mask
+    /// filter of its own, clipped, turned, dyed by a pattern, and on a page
+    /// that keeps one recording for both targets.
+    const ROUTES: [&str; 10] = [
+        "plain",
+        "drop-shadow filter",
+        "blur filter",
+        "shadow",
+        "sharp shadow",
+        "mask filter",
+        "clipped",
+        "turned",
+        "pattern",
+        "F16 page",
+    ];
+
+    /// The routes of [`ROUTES`] that run a filter chain over a run kept to
+    /// be recorded when the chain first plays it.
+    const DEFERRED_ROUTES: [&str; 2] = ["drop-shadow filter", "blur filter"];
+
+    /// Oswald's run drawn twice, its glyphs a quarter em into one another,
+    /// under `blend` on the route named, on the GPU where `gpu`.
+    fn drawn_on_route(gpu: bool, route: &str, blend: BlendMode) -> Vec<u8> {
+        register();
+        forget_laid_out();
+        let options = CanvasOptions {
+            color_type: match route {
+                "F16 page" => PixelDepth::F16,
+                _ => PixelDepth::Uint8,
+            },
+            ..CanvasOptions::default()
+        };
+        let mut canvas = Canvas::with_options(W, H, options).expect("a canvas");
+        canvas.set_gpu(gpu);
+        let mut tile = Canvas::new(8.0, 8.0);
+        tile.set_gpu(false);
+        {
+            let ctx = tile.context();
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+            ctx.set_fill_style_css("rgb(160,40,90)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let ctx = canvas.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(&mut tile, PatternRepeat::Repeat);
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+        ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+        ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+        ctx.set_global_composite_operation(blend);
+        assert!(ctx.set_font_css(OSWALD.0));
+        ctx.set_letter_spacing(-12.0);
+        ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+            .expect("a colour");
+        match route {
+            "drop-shadow filter" => ctx
+                .set_filter_css("drop-shadow(3px 2px 1px rgba(0,0,0,0.5))")
+                .expect("a filter"),
+            "blur filter" => ctx.set_filter_css("blur(1px)").expect("a filter"),
+            "shadow" | "sharp shadow" => {
+                ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(3.0, 2.0);
+                if route == "shadow" {
+                    ctx.set_shadow_blur(2.0);
+                }
+            }
+            "clipped" => {
+                ctx.begin_path();
+                ctx.rect(20.5, 20.0, 200.0, 110.0);
+                ctx.clip(FillRule::NonZero);
+            }
+            "mask filter" => ctx.set_mask_filter(Some(
+                &crate::filter::MaskFilter::blur(BlurStyle::Normal, 1.5, true)
+                    .expect("a mask filter"),
+            )),
+            "turned" => ctx.rotate(0.05),
+            "pattern" => ctx.set_fill_pattern(&pattern),
+            _ => {}
+        }
+        for y in [70.0, 140.0] {
+            ctx.fill_text(OSWALD.1, 10.0, y, None);
+        }
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        let engine = canvas.engine_kind();
+        assert_eq!(
+            engine == EngineKind::Gpu,
+            gpu,
+            "{route}: drawn on {engine:?}"
+        );
+        bytes
+    }
+
+    /// Every route draws a run whole on the CPU, and blends its glyphs on
+    /// the GPU as on the CPU.
+    ///
+    /// Where the glyphs meet the page, the GPU canvas stands no further from
+    /// the CPU canvas under a blend read in the shader than the same route
+    /// stands under `source-over`, nor past the levels a fill stands -- see
+    /// [`METAL_FILL_LEVELS`].
+    ///
+    /// Where a chain runs over the run -- [`DEFERRED_ROUTES`] -- the glyphs
+    /// are drawn into the chain's group in `source-over` and the blend
+    /// applies once, to the group, so how the glyphs are drawn cannot change
+    /// the page: the GPU canvas draws the same bytes with its glyphs forced
+    /// whole, forced apart and as it chose, and draws none apart itself.
+    /// How far that page stands from the CPU's is then the chain's blur and
+    /// not the glyphs', and it differs by backend: under `blur(1px)`, 36
+    /// levels under `source-over` and 37 under `multiply` on Metal, 35 and
+    /// 37 on lavapipe.
+    #[test]
+    fn every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu() {
+        let gpu = RenderingEngine::GPU.selectable();
+        let bound = match on_llvmpipe() {
+            true => UNMEASURED_LEVELS,
+            false => METAL_FILL_LEVELS,
+        };
+        let mut wrong = vec![];
+        for route in ROUTES {
+            let chained = DEFERRED_ROUTES.contains(&route);
+            // A float page is not drawn by Ganesh, and with no other GPU
+            // engine in the build it falls back to the CPU.
+            let source_over =
+                (gpu && route != "F16 page" && !chained).then(|| {
+                    most_apart(
+                        &drawn_on_route(false, route, SourceOver),
+                        &drawn_on_route(true, route, SourceOver),
+                    )
+                });
+            for blend in [Multiply, Difference, Luminosity] {
+                GLYPHS_DRAWN_ALONE.set(0);
+                let deferred = DEFERRED_FILED.get();
+                let cpu = drawn_on_route(false, route, blend);
+                // The chain routes keep the run, to be recorded when the
+                // chain first plays it -- see `layer::DeferredPicture` --
+                // so that the sweep holds that path and not another.
+                if chained && DEFERRED_FILED.get() == deferred {
+                    wrong.push(format!(
+                        "CPU {route} {blend:?}: no run deferred"
+                    ));
+                }
+                if GLYPHS_DRAWN_ALONE.get() != 0 {
+                    wrong.push(format!(
+                        "CPU {route} {blend:?}: {} glyphs drawn apart",
+                        GLYPHS_DRAWN_ALONE.get()
+                    ));
+                }
+                if chained && gpu {
+                    GLYPHS_DRAWN_ALONE.set(0);
+                    let chosen = drawn_on_route(true, route, blend);
+                    if GLYPHS_DRAWN_ALONE.get() != 0 {
+                        wrong.push(format!(
+                            "GPU {route} {blend:?}: {} glyphs drawn apart \
+                             inside the chain",
+                            GLYPHS_DRAWN_ALONE.get()
+                        ));
+                    }
+                    for forced in [GlyphDraws::Each, GlyphDraws::Whole] {
+                        GLYPH_DRAWS_FOR.set(Some(forced));
+                        let drawn = drawn_on_route(true, route, blend);
+                        GLYPH_DRAWS_FOR.set(None);
+                        if drawn != chosen {
+                            wrong.push(format!(
+                                "GPU {route} {blend:?}: drawn {forced:?} \
+                                 stands {} levels from the canvas's choice",
+                                most_apart(&drawn, &chosen)
+                            ));
+                        }
+                    }
+                }
+                let Some(source_over) = source_over else {
+                    continue;
+                };
+                let most =
+                    most_apart(&cpu, &drawn_on_route(true, route, blend));
+                if most > source_over.max(bound) {
+                    wrong.push(format!(
+                        "GPU {route} {blend:?}: {most} levels, past \
+                         {source_over} under source-over and {bound}"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The page of [`drawn_on_route`]'s plain route, under `blend`, read
+    /// smaller than it was drawn: drawn at half its size into a canvas on
+    /// the GPU where `gpu`, or exported as a PNG at a density of three
+    /// quarters by a canvas on the GPU where `gpu`.
+    fn read_smaller(gpu: bool, read: &str, blend: BlendMode) -> Vec<u8> {
+        register();
+        forget_laid_out();
+        let mut source = Canvas::new(W, H);
+        source.set_gpu(gpu && read == "density");
+        {
+            let ctx = source.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css(OSWALD.0));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            for y in [70.0, 140.0] {
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+            }
+        }
+        if read == "density" {
+            let options = EncodeOptions {
+                density: SMALLER_DENSITY,
+                ..EncodeOptions::default()
+            };
+            let png =
+                source.to_buffer(ImageFormat::Png, &options).expect("a PNG");
+            let engine = source.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            let image = Image::from_encoded(Data::new_copy(&png))
+                .expect("the PNG decodes");
+            let info = ImageInfo::new(
+                image.dimensions(),
+                ColorType::RGBA8888,
+                AlphaType::Unpremul,
+                None,
+            );
+            let mut pixels = vec![0u8; info.compute_min_byte_size()];
+            assert!(image.read_pixels(
+                &info,
+                &mut pixels,
+                info.min_row_bytes(),
+                (0, 0),
+                CachingHint::Allow,
+            ));
+            return pixels;
+        }
+        let mut into = Canvas::new(W, H);
+        into.set_gpu(gpu);
+        let ctx = into.context();
+        ctx.draw_canvas_sized(&mut source, 0.0, 0.0, W / 2.0, H / 2.0);
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        let engine = into.engine_kind();
+        assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+        bytes
+    }
+
+    /// The density [`read_smaller`] exports at: under one, so that the
+    /// page is played onto fewer pixels than it was drawn for.
+    const SMALLER_DENSITY: f32 = 0.75;
+
+    /// A run played smaller than it was drawn -- drawn into another canvas
+    /// at half its size, or exported at a density under one -- blends its
+    /// glyphs on the GPU as on the CPU, by the bounds of
+    /// [`every_route_blends_a_runs_glyphs_on_the_gpu_as_on_the_cpu`]: its
+    /// glyphs grouped by the pixels they ink where they are played, not
+    /// where they were drawn.
+    #[test]
+    fn a_run_read_smaller_blends_its_glyphs_on_the_gpu_as_on_the_cpu() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let bound = match on_llvmpipe() {
+            true => UNMEASURED_LEVELS,
+            false => METAL_FILL_LEVELS,
+        };
+        let mut wrong = vec![];
+        for read in ["drawn into a canvas", "density"] {
+            let source_over = most_apart(
+                &read_smaller(false, read, SourceOver),
+                &read_smaller(true, read, SourceOver),
+            );
+            for blend in [Multiply, Difference, Luminosity] {
+                let most = most_apart(
+                    &read_smaller(false, read, blend),
+                    &read_smaller(true, read, blend),
+                );
+                if most > source_over.max(bound) {
+                    wrong.push(format!(
+                        "{read} {blend:?}: {most} levels, past {source_over} \
+                         under source-over and {bound}"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A canvas holding a kept run, drawn into a CPU canvas and read there,
+    /// draws none of the run's glyphs apart, and reads the bytes the source
+    /// does. The destination takes the source as its entries and plays the
+    /// run whole on the CPU -- see `typography::glyph_draws` -- and records
+    /// no picture of the source, which, not knowing its target, would draw
+    /// each glyph apart -- see `Context2D::draw_picture_costing`.
+    #[test]
+    fn a_kept_run_drawn_into_a_cpu_canvas_draws_no_glyph_apart() {
+        register();
+        forget_laid_out();
+        let mut source = Canvas::new(W, H);
+        source.set_gpu(false);
+        let ctx = source.context();
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W, H);
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css(OSWALD.0));
+        ctx.set_letter_spacing(-12.0);
+        ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+            .expect("a colour");
+        for y in [70.0, 140.0] {
+            ctx.fill_text(OSWALD.1, 10.0, y, None);
+        }
+        let read = |canvas: &mut Canvas| {
+            canvas
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec()
+        };
+        let own = read(&mut source);
+        let mut into = Canvas::new(W, H);
+        into.set_gpu(false);
+        GLYPHS_DRAWN_ALONE.set(0);
+        into.context().draw_canvas(&mut source, 0.0, 0.0);
+        let drawn = read(&mut into);
+        assert_eq!(
+            GLYPHS_DRAWN_ALONE.get(),
+            0,
+            "glyphs drawn apart for a CPU canvas"
+        );
+        assert!(drawn == own, "the CPU canvas reads other bytes");
+    }
+
+    /// A run casting a shadow under a blend read in the shader reads on the
+    /// CPU the bytes it reads recorded as it is drawn, kept to be drawn again
+    /// or not -- see `REPLAYS_BLENDED_TEXT` -- blurred or sharp, its glyphs
+    /// apart or into one another. The shadow is cast once: a draw whose
+    /// shadow is filed as a chain of its own -- see
+    /// `Context2D::files_shadow_through_chain` -- keeps a run that casts
+    /// none.
+    #[test]
+    fn a_kept_run_casts_its_shadow_once() {
+        use crate::context::REPLAYS_BLENDED_TEXT;
+        let drawn =
+            |replays: bool, blend: BlendMode, blur: f32, spacing: f32| {
+                REPLAYS_BLENDED_TEXT.set(replays);
+                register();
+                forget_laid_out();
+                let mut canvas = Canvas::new(W, H);
+                canvas.set_gpu(false);
+                let ctx = canvas.context();
+                ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+                ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+                ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+                ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+                ctx.set_global_composite_operation(blend);
+                assert!(ctx.set_font_css(OSWALD.0));
+                ctx.set_letter_spacing(spacing);
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
+                    .expect("a colour");
+                ctx.set_shadow_offset(3.0, 2.0);
+                ctx.set_shadow_blur(blur);
+                for y in [70.0, 140.0] {
+                    ctx.fill_text(OSWALD.1, 10.0, y, None);
+                }
+                let bytes = ctx
+                    .get_image_data(0.0, 0.0, W, H)
+                    .expect("the canvas reads back")
+                    .pixels()
+                    .to_vec();
+                REPLAYS_BLENDED_TEXT.set(true);
+                bytes
+            };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for blur in [0.0, 2.0] {
+                for spacing in [0.0, -12.0] {
+                    let kept = drawn(true, blend, blur, spacing);
+                    let recorded = drawn(false, blend, blur, spacing);
+                    if kept != recorded {
+                        wrong.push(format!(
+                            "{blend:?} blur {blur} spacing {spacing}: {} levels \
+                             apart",
+                            most_apart(&kept, &recorded)
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A run drawn on the CPU over a GPU page's pixels read back is
+    /// rasterized under the page's own text contrast and gamma, as the CPU
+    /// page draws it -- see `layer::drawn_on_their_backdrop`: a canvas made
+    /// with others than Skia's defaults reads the same bytes on either
+    /// engine. Drawn under the defaults, the run's glyph masks took other
+    /// coverage, Linux's default gamma of 1.2 13 levels from the CPU page
+    /// under `multiply`.
+    #[test]
+    fn a_run_drawn_on_its_backdrop_takes_the_pages_text_gamma() {
+        use crate::canvas::CanvasOptions;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let page = |gpu: bool, contrast: f32, gamma: f32| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::with_options(
+                W,
+                H,
+                CanvasOptions {
+                    gpu,
+                    text_contrast: contrast,
+                    text_gamma: gamma,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, 16.0, None);
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            bytes
+        };
+        let mut apart = vec![];
+        for (contrast, gamma) in [(0.0, 2.2), (1.0, 1.2), (0.5, 0.0)] {
+            let most = most_apart(
+                &page(false, contrast, gamma),
+                &page(true, contrast, gamma),
+            );
+            if most != 0 {
+                apart.push(format!(
+                    "contrast {contrast} gamma {gamma}: {most} levels"
+                ));
+            }
+        }
+        assert!(apart.is_empty(), "{}", apart.join("\n"));
+    }
+
+    /// A batch of runs drawn over a GPU page's pixels read back leaves every
+    /// pixel beside its runs as the GPU's own route leaves it: the entries
+    /// between the runs, drawn on the GPU before the read, come back to the
+    /// byte with the pixels around them, and a draw after the batch crossing
+    /// the area written back lands the bytes it lands without the batch --
+    /// read single-sampled, multisampled and at the backend's default. Two
+    /// runs at opposite corners, so that the area read spans the page over
+    /// translucent fills, a translucent ellipse between them, and a
+    /// translucent circle after them across that area. The runs' own pixels,
+    /// which the two routes draw differently, are left out. A float page
+    /// never takes the route: it is drawn on the CPU.
+    #[test]
+    fn a_batch_leaves_the_pixels_beside_its_runs_as_they_were() {
+        use crate::{
+            context::layer::{BACKDROP_ROUTE, BACKDROPS_READ},
+            pixels::{ImageDataExport, PixelExportOptions},
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        /// Where each run's line is drawn from, and how far past it either
+        /// route's ink can reach: its measured box widened by this many
+        /// pixels.
+        const RUNS: [(f32, f32); 2] = [(10.0, 24.0), (W - 90.0, H - 12.0)];
+        const MARGIN: f32 = 6.0;
+        let page = |route: bool, msaa: Option<usize>| {
+            register();
+            forget_laid_out();
+            BACKDROP_ROUTE.set(route);
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(true);
+            let ctx = canvas.context();
+            for i in 0..60 {
+                let (x, y) = ((i * 37 % 300) as f32, (i * 53 % 150) as f32);
+                ctx.set_fill_style_css(&format!(
+                    "rgba({}, {}, {}, 0.6)",
+                    i * 41 % 256,
+                    i * 97 % 256,
+                    i * 13 % 256
+                ))
+                .expect("a colour");
+                ctx.fill_rect(x, y, 23.0, 17.0);
+            }
+            ctx.set_global_composite_operation(Multiply);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, RUNS[0].0, RUNS[0].1, None);
+            ctx.set_global_composite_operation(SourceOver);
+            ctx.set_fill_style_css("rgba(160,40,90,0.5)")
+                .expect("a colour");
+            ctx.begin_path();
+            ctx.ellipse(W / 2.0, H / 2.0, 40.0, 25.0, 0.3, 0.0, TAU, false)
+                .expect("positive radii");
+            ctx.fill(FillRule::NonZero);
+            ctx.set_global_composite_operation(Multiply);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, RUNS[1].0, RUNS[1].1, None);
+            ctx.set_global_composite_operation(SourceOver);
+            ctx.set_fill_style_css("rgba(20,160,60,0.5)")
+                .expect("a colour");
+            ctx.begin_path();
+            ctx.arc(W / 2.0 + 30.0, H / 2.0, 55.0, 0.0, TAU, false)
+                .expect("a positive radius");
+            ctx.fill(FillRule::NonZero);
+            let export = ImageDataExport {
+                pixels: PixelExportOptions::default(),
+                msaa,
+                ..ImageDataExport::default()
+            };
+            let bytes = canvas
+                .to_image_data(None, &export)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            BACKDROP_ROUTE.set(true);
+            assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a GPU page");
+            bytes
+        };
+        // The runs' boxes, measured as drawn, widened.
+        let runs: Vec<SkRect> = {
+            let mut canvas = Canvas::new(W, H);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            let metrics = ctx.measure_text(OSWALD.1, None);
+            RUNS.iter()
+                .map(|&(x, y)| {
+                    SkRect::new(
+                        x - metrics.actual_bounding_box_left,
+                        y - metrics.actual_bounding_box_ascent,
+                        x + metrics.actual_bounding_box_right,
+                        y + metrics.actual_bounding_box_descent,
+                    )
+                    .with_outset((MARGIN, MARGIN))
+                })
+                .collect()
+        };
+        let beside = |at: usize| {
+            let (x, y) = ((at / 4) % W as usize, (at / 4) / W as usize);
+            let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+            !runs.iter().any(|run| {
+                (run.left..run.right).contains(&x)
+                    && (run.top..run.bottom).contains(&y)
+            })
+        };
+        let mut wrong = vec![];
+        for msaa in [None, Some(1), Some(4)] {
+            let (with, without) = (page(true, msaa), page(false, msaa));
+            let apart = zip(&with, &without)
+                .enumerate()
+                .filter(|&(at, (a, b))| a != b && beside(at))
+                .count();
+            if apart != 0 {
+                wrong.push(format!(
+                    "msaa {msaa:?}: {apart} channels beside the runs apart"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        // An `F16` page asked for the GPU is drawn on the CPU -- see
+        // `RenderingEngine::can_composite` -- so no batch is read back in a
+        // float format.
+        let options = CanvasOptions {
+            color_type: PixelDepth::F16,
+            ..CanvasOptions::default()
+        };
+        let mut canvas = Canvas::with_options(W, H, options).expect("a canvas");
+        canvas.set_gpu(true);
+        let ctx = canvas.context();
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css("16px OverlapOswald"));
+        let before = BACKDROPS_READ.get();
+        for &(x, y) in &RUNS {
+            ctx.fill_text(OSWALD.1, x, y, None);
+        }
+        ctx.get_image_data(0.0, 0.0, W, H)
+            .expect("the canvas reads back");
+        assert_eq!(canvas.engine_kind(), EngineKind::Cpu, "an F16 page");
+        assert_eq!(BACKDROPS_READ.get(), before, "read back on an F16 page");
+    }
+
+    /// A page of runs under a blend read in the shader and a clip, every
+    /// line its own run, drawn on the GPU reads the bytes it reads drawn on
+    /// the CPU, over one read back: each run is a piece of the clip's run --
+    /// see `layer::Clipped` -- played onto the raster under its clip, as the
+    /// CPU page plays it. Under one clip for the page, a rectangle on half
+    /// pixels or a circle whose edge cuts the glyphs, under a clip of its own
+    /// for each line, and under the circle where each run holds its clip.
+    #[test]
+    fn a_clipped_page_of_runs_is_drawn_on_the_cpu_over_one_read_back() {
+        use crate::context::{layer::BACKDROPS_READ, page::KEEPS_RUNS};
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 8;
+        /// The clips the runs are drawn under: the last on a page that keeps
+        /// no clip's run -- see `page::KEEPS_RUNS` -- so that each run holds
+        /// the clip itself.
+        const CLIPS: [&str; 4] =
+            ["rectangle", "circle", "each line", "circle, no run"];
+        let page = |gpu: bool, blend: BlendMode, clip: &str| {
+            register();
+            forget_laid_out();
+            KEEPS_RUNS.set(clip != "circle, no run");
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            match clip {
+                // Its left edge on a half pixel inside the runs' ink, which
+                // reaches x 20 under FreeType: at 20.5 the clip holds none of
+                // it there, and the page reads nothing back.
+                "rectangle" => {
+                    ctx.begin_path();
+                    ctx.rect(12.5, 20.0, 200.0, 110.0);
+                    ctx.clip(FillRule::NonZero);
+                }
+                "circle" | "circle, no run" => {
+                    ctx.begin_path();
+                    ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
+                        .expect("a positive radius");
+                    ctx.clip(FillRule::NonZero);
+                }
+                _ => {}
+            }
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                if clip == "each line" {
+                    ctx.save();
+                    ctx.begin_path();
+                    ctx.rect(12.5 + line as f32, y - 12.0, 50.0, 14.5);
+                    ctx.clip(FillRule::NonZero);
+                }
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+                if clip == "each line" {
+                    ctx.restore();
+                }
+            }
+            let before = BACKDROPS_READ.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            KEEPS_RUNS.set(true);
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for clip in CLIPS {
+                let (cpu, _) = page(false, blend, clip);
+                let (gpu, reads) = page(true, blend, clip);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} {clip}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                if reads != 1 {
+                    wrong.push(format!(
+                        "{blend:?} {clip}: {reads} read backs, not 1"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page of runs under one clip, every line a piece of the clip's
+    /// run, read on a raster on the CPU applies the clip once, bounded by
+    /// what the pieces draw together -- see `layer::play_entries` -- rather
+    /// than once a piece: the raster builds the clip's mask each time the
+    /// clip is applied.
+    #[test]
+    fn a_raster_applies_a_clips_run_once_for_its_pieces() {
+        use crate::context::layer::CLIPS_APPLIED;
+        const LINES: usize = 8;
+        register();
+        forget_laid_out();
+        let mut canvas = Canvas::new(W, H);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css("16px OverlapOswald"));
+        ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+            .expect("a colour");
+        ctx.begin_path();
+        ctx.rect(2.5, 4.0, W - 4.0, H - 8.0);
+        ctx.clip(FillRule::NonZero);
+        for line in 0..LINES {
+            ctx.fill_text(OSWALD.1, 10.0, 30.0 + line as f32 * 16.0, None);
+        }
+        CLIPS_APPLIED.set(0);
+        // One pixel, as a page read in part plays its tiles onto rasters.
+        canvas
+            .context()
+            .get_image_data(0.0, 0.0, 1.0, 1.0)
+            .expect("the canvas reads back");
+        assert_eq!(CLIPS_APPLIED.get(), 1, "times the clip was applied");
+    }
+
+    /// A kept run read on a raster on the CPU builds its blobs once, and
+    /// draws them for every page after that draws it -- see
+    /// `RunPaint::raster_blobs` -- while the same page drawn into a GPU
+    /// canvas builds them again for every read, as the GPU needs a blob of
+    /// its own each time it draws one. That page is played into the GPU
+    /// canvas's recording and drawn there by the GPU, so a cache that
+    /// reached past a raster would show here.
+    #[test]
+    fn only_a_raster_draws_a_runs_blobs_again() {
+        use crate::node::typography::BLOB_BUILDS;
+        const READS: usize = 3;
+        register();
+        forget_laid_out();
+        // A fresh page of the kept run on the CPU, unread.
+        let page = || {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, 20.0, None);
+            canvas
+        };
+        // Blobs built read by read, after two reads that may lay the run
+        // out, keep it and build the blobs it keeps.
+        let builds = |read: &mut dyn FnMut()| {
+            read();
+            read();
+            (0..READS)
+                .map(|_| {
+                    let before = BLOB_BUILDS.get();
+                    read();
+                    BLOB_BUILDS.get() - before
+                })
+                .collect::<Vec<_>>()
+        };
+        let on_the_cpu = builds(&mut || {
+            page()
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back");
+        });
+        assert_eq!(on_the_cpu, [0; READS], "fresh pages read on the CPU");
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped the GPU half: no GPU");
+            return;
+        }
+        let mut canvas = page();
+        let mut into = Canvas::new(W, H);
+        into.set_gpu(true);
+        let drawn_into = builds(&mut || {
+            let ctx = into.context();
+            ctx.draw_canvas(&mut canvas, 0.0, 0.0);
+            ctx.get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back");
+        });
+        assert_eq!(into.engine_kind(), EngineKind::Gpu, "drawn into the GPU");
+        assert!(
+            drawn_into.iter().all(|&built| built > 0),
+            "drawn into a GPU canvas, blobs built read by read: {drawn_into:?}"
+        );
+    }
+
+    /// A page recorded where the CPU plays it, and played on the GPU after
+    /// its canvas is switched there, draws the bytes the CPU page draws.
+    /// Its clips' runs were not bounded as they recorded -- see
+    /// `page::PageRecorder::plays_on_gpu` -- so each reaches the page and
+    /// ends the batch of runs drawn on the CPU before it: the switched page
+    /// reads back once for each run, where a page recorded for the GPU
+    /// reads back once. That is the cost of a switch, accepted so that a
+    /// CPU canvas pays nothing for a bound only the GPU reads.
+    #[test]
+    fn a_cpu_page_played_on_the_gpu_draws_the_cpu_pages_bytes() {
+        use crate::context::layer::BACKDROPS_READ;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 4;
+        /// How the page reaches the GPU.
+        const ROUTES: [&str; 2] = ["GPU", "switched"];
+        let draw = |ctx: &mut Context2D, blend: BlendMode| {
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                ctx.set_global_composite_operation(blend);
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+                // A clip's run between each run and the next, clear of
+                // them.
+                ctx.set_global_composite_operation(SourceOver);
+                ctx.save();
+                ctx.begin_path();
+                ctx.rect(200.5, 0.0, 100.0, H);
+                ctx.clip(FillRule::NonZero);
+                ctx.set_fill_style_css("rgba(160,40,90,0.5)")
+                    .expect("a colour");
+                ctx.fill_rect(240.0, y - 8.0, 30.0, 6.0);
+                ctx.restore();
+            }
+        };
+        // The page drawn on `route`, or on the CPU throughout for `None`:
+        // its bytes and the read backs reading them took.
+        let page = |route: Option<&str>, blend: BlendMode| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(route == Some("GPU"));
+            draw(canvas.context(), blend);
+            canvas.set_gpu(route.is_some());
+            let before = BACKDROPS_READ.get();
+            let bytes = canvas
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            let gpu = route.is_some();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "read on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            let (cpu, _) = page(None, blend);
+            for route in ROUTES {
+                let (gpu, reads) = page(Some(route), blend);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} {route}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                let expected = match route {
+                    "GPU" => 1,
+                    _ => LINES,
+                };
+                if reads != expected {
+                    wrong.push(format!(
+                        "{blend:?} {route}: {reads} read backs, not {expected}"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A clip's run between two kept runs on a GPU page reaches its clip --
+    /// see `page::Run::cull` -- and where the clip meets a run's ink while
+    /// what it draws does not, the batch of runs drawn on the CPU asks what
+    /// the piece draws -- see `layer::Layer::found_reach` -- finding it once,
+    /// and draws both runs over one read back, in the CPU page's bytes,
+    /// under every blend read in the shader. Left
+    /// at its clip, the piece ends the batch and the page reads back twice,
+    /// which the scene is held to as well, so that it cannot pass without
+    /// the clip meeting a run. And a page whose clip's runs come only after
+    /// its last kept run asks none of them: a batch ends at its last run.
+    #[test]
+    fn a_clips_run_clear_of_the_runs_within_its_clip_keeps_their_batch() {
+        use crate::context::layer::{
+            BACKDROPS_READ, PIECES_FOUND, REACH_UNFOUND,
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let run = |ctx: &mut Context2D, y: f32, blend: BlendMode| {
+            ctx.set_global_composite_operation(blend);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, y, None);
+        };
+        // Under a clip of all but a margin of the page, which meets the
+        // runs' ink, a fill clear of it.
+        let clipped = |ctx: &mut Context2D| {
+            ctx.set_global_composite_operation(SourceOver);
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(2.5, 2.5, W - 5.0, H - 5.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.set_fill_style_css("rgba(160,40,90,0.5)")
+                .expect("a colour");
+            ctx.fill_rect(W - 60.0, H - 20.0, 30.0, 6.0);
+            ctx.restore();
+        };
+        // The page drawn on the GPU or the CPU, its clip's run between its
+        // runs or after both: its bytes, the read backs and the pieces
+        // found.
+        let page = |gpu: bool, between: bool, blend: BlendMode| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            run(ctx, 16.0, blend);
+            if between {
+                clipped(ctx);
+            }
+            run(ctx, 34.0, blend);
+            if !between {
+                clipped(ctx);
+            }
+            let (read, found) = (BACKDROPS_READ.get(), PIECES_FOUND.get());
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            assert_eq!(canvas.engine_kind() == EngineKind::Gpu, gpu);
+            (
+                bytes,
+                BACKDROPS_READ.get() - read,
+                PIECES_FOUND.get() - found,
+            )
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for between in [true, false] {
+                let (cpu, _, _) = page(false, between, blend);
+                let (gpu, reads, found) = page(true, between, blend);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} between {between}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                let expected = (1, usize::from(between));
+                if (reads, found) != expected {
+                    wrong.push(format!(
+                        "{blend:?} between {between}: {reads} read backs \
+                         and {found} pieces found, not {expected:?}"
+                    ));
+                }
+            }
+            // The control: the piece left at its clip ends the batch.
+            REACH_UNFOUND.set(true);
+            let (_, reads, found) = page(true, true, blend);
+            REACH_UNFOUND.set(false);
+            if (reads, found) != (2, 0) {
+                wrong.push(format!(
+                    "{blend:?} left at its clip: {reads} read backs and \
+                     {found} pieces found, not (2, 0)"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page of runs dyed by a pattern under a blend read in the shader,
+    /// every line its own run, drawn on the GPU reads the bytes it reads
+    /// drawn on the CPU, over one read back: each run is a pattern's draw --
+    /// see `layer::PatternDraw` -- played onto the raster, which makes the
+    /// tile on the CPU as the CPU page makes it, from a canvas drawn on the
+    /// CPU or on the GPU, under a clip, as a piece of the clip's run or
+    /// holding the clip itself, and at a scale that rasterizes the tile at a
+    /// density of 2. A pattern of an image is a
+    /// shader on the run's own paint, and is drawn the same way.
+    #[test]
+    fn a_page_of_runs_dyed_by_a_pattern_is_drawn_on_the_cpu_over_one_read_back()
+    {
+        use crate::{
+            context::{layer::BACKDROPS_READ, page::KEEPS_RUNS},
+            image::Image,
+            pixels::PixelExportOptions,
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 8;
+        /// Where the pattern's tile comes from, and whether the runs are
+        /// clipped.
+        const SOURCES: [&str; 6] = [
+            "CPU canvas",
+            "GPU canvas",
+            "image",
+            "CPU canvas, clipped",
+            "CPU canvas, clipped, no run",
+            "CPU canvas, scaled",
+        ];
+        /// The tile: two colours, a quarter of it the second, so that the
+        /// pattern's phase shows.
+        const TILE: u32 = 8;
+        let tile_pixels: Vec<u8> = (0..TILE * TILE)
+            .flat_map(|at| match (at % TILE < TILE / 2, at / TILE < TILE / 2) {
+                (true, true) => [160, 40, 90, 255],
+                _ => [40, 90, 160, 255],
+            })
+            .collect();
+        let page = |gpu: bool, blend: BlendMode, source: &str| {
+            register();
+            forget_laid_out();
+            KEEPS_RUNS.set(!source.ends_with("no run"));
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let mut tile = Canvas::new(TILE as f32, TILE as f32);
+            tile.set_gpu(source == "GPU canvas");
+            {
+                let ctx = tile.context();
+                ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+                ctx.fill_rect(0.0, 0.0, TILE as f32, TILE as f32);
+                ctx.set_fill_style_css("rgba(160,40,90,0.7)")
+                    .expect("a colour");
+                ctx.fill_rect(0.0, 0.0, TILE as f32 / 2.0, TILE as f32 / 2.0);
+            }
+            let image = Image::from_pixels(
+                &tile_pixels,
+                TILE,
+                TILE,
+                4 * TILE as usize,
+                PixelExportOptions::default(),
+            )
+            .expect("an image");
+            let ctx = canvas.context();
+            let pattern = match source {
+                "image" => ctx.create_pattern(&image, PatternRepeat::Repeat),
+                _ => ctx.create_pattern_from_canvas(
+                    &mut tile,
+                    PatternRepeat::Repeat,
+                ),
+            };
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_pattern(&pattern);
+            if source.ends_with("scaled") {
+                ctx.scale(1.25, 1.25);
+            }
+            if source.contains("clipped") {
+                ctx.begin_path();
+                ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
+                    .expect("a positive radius");
+                ctx.clip(FillRule::NonZero);
+            }
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+            }
+            let before = BACKDROPS_READ.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            KEEPS_RUNS.set(true);
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for source in SOURCES {
+                let (cpu, _) = page(false, blend, source);
+                let (gpu, reads) = page(true, blend, source);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} {source}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                if reads != 1 {
+                    wrong.push(format!(
+                        "{blend:?} {source}: {reads} read backs, not 1"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page of runs under a blend read in the shader, every line its own
+    /// run casting a shadow, drawn on the GPU reads the bytes it reads drawn
+    /// on the CPU, over one read back: each run's shadow is cast through a
+    /// chain of its own, filed just before the run -- see
+    /// `layer::ReplayedText::cast_before` and `layer::PatternDraw::cast_before`
+    /// -- and drawn on the CPU with the run, rather than on the GPU between
+    /// two runs, which would end the batch at every line and composite the
+    /// shadow by the GPU's arithmetic and its multisampled clip coverage.
+    /// Blurred, sharp, blurred under a clip, and blurred from runs dyed by a
+    /// pattern, alone and clipped.
+    #[test]
+    fn a_page_of_runs_casting_shadows_is_drawn_on_the_cpu_over_one_read_back() {
+        use crate::context::layer::BACKDROPS_READ;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 8;
+        /// The shadows the runs cast.
+        const SHADOWS: [&str; 5] = [
+            "blurred",
+            "sharp",
+            "blurred, clipped",
+            "blurred, pattern",
+            "blurred, clipped, pattern",
+        ];
+        let page = |gpu: bool, blend: BlendMode, shadow: &str| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                .expect("a colour");
+            if shadow.contains("pattern") {
+                let mut tile = Canvas::new(8.0, 8.0);
+                tile.set_gpu(false);
+                {
+                    let tile_ctx = tile.context();
+                    tile_ctx
+                        .set_fill_style_css("rgb(40,90,160)")
+                        .expect("a colour");
+                    tile_ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+                    tile_ctx
+                        .set_fill_style_css("rgba(160,40,90,0.7)")
+                        .expect("a colour");
+                    tile_ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+                }
+                let pattern = ctx.create_pattern_from_canvas(
+                    &mut tile,
+                    PatternRepeat::Repeat,
+                );
+                ctx.set_fill_pattern(&pattern);
+            }
+            ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
+                .expect("a colour");
+            ctx.set_shadow_offset(3.0, 2.0);
+            if shadow.starts_with("blurred") {
+                ctx.set_shadow_blur(2.0);
+            }
+            if shadow.contains("clipped") {
+                ctx.begin_path();
+                ctx.arc(40.0, 70.0, 55.0, 0.0, TAU, false)
+                    .expect("a positive radius");
+                ctx.clip(FillRule::NonZero);
+            }
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+            }
+            let before = BACKDROPS_READ.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for shadow in SHADOWS {
+                let (cpu, _) = page(false, blend, shadow);
+                let (gpu, reads) = page(true, blend, shadow);
+                if gpu != cpu {
+                    wrong.push(format!(
+                        "{blend:?} {shadow}: {} levels from the CPU",
+                        most_apart(&gpu, &cpu)
+                    ));
+                }
+                if reads != 1 {
+                    wrong.push(format!(
+                        "{blend:?} {shadow}: {reads} read backs, not 1"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A page of runs under a blend read in the shader, every line its own
+    /// run, drawn on the GPU reads the bytes it reads drawn on the CPU: the
+    /// runs are played on the CPU over one read back of the GPU's pixels --
+    /// see `layer::replayed_on_their_backdrop` -- with a draw between every
+    /// two of them where the draw lies beside them. A draw under each line,
+    /// meeting its run, or one whose reach is not known, a blurred one, ends
+    /// the batch, so that the page reads back once for each run.
+    #[test]
+    fn a_page_of_runs_is_drawn_on_the_cpu_over_one_read_back() {
+        use crate::context::layer::{BACKDROP_EACH_RUN, BACKDROPS_READ};
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        const LINES: usize = 8;
+        /// What lies between every two runs: nothing, a rectangle beside
+        /// them, one under each line, or a blurred one beside them.
+        const BETWEEN: [&str; 4] = ["nothing", "beside", "under", "blurred"];
+        let page = |gpu: bool,
+                    blend: BlendMode,
+                    spacing: f32,
+                    between: &str| {
+            register();
+            forget_laid_out();
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css("16px OverlapOswald"));
+            ctx.set_letter_spacing(spacing);
+            for line in 0..LINES {
+                let y = 16.0 + line as f32 * 18.0;
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.fill_text(OSWALD.1, 10.0, y, None);
+                // Opaque and in `source-over`, which the GPU fills in the
+                // CPU's bytes, so that only the runs are judged. Blurred, it
+                // is drawn a level from the CPU's on the GPU, and only the
+                // half of the page holding the runs is compared.
+                if between != "nothing" {
+                    ctx.set_global_composite_operation(SourceOver);
+                    ctx.set_fill_style_css("rgb(160,40,90)").expect("a colour");
+                    if between == "blurred" {
+                        ctx.set_filter_css("blur(2px)").expect("a filter");
+                    }
+                    let x = if between == "under" { 10.0 } else { 200.0 };
+                    ctx.fill_rect(x, y - 10.0, 40.0, 8.0);
+                    ctx.set_filter_css("none").expect("no filter");
+                    ctx.set_global_composite_operation(blend);
+                }
+            }
+            let before = BACKDROPS_READ.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "drawn on {engine:?}");
+            (bytes, BACKDROPS_READ.get() - before)
+        };
+        let mut wrong = vec![];
+        for blend in READ_IN_THE_SHADER {
+            for spacing in [0.0, -12.0] {
+                for between in BETWEEN {
+                    let (cpu, _) = page(false, blend, spacing, between);
+                    let (gpu, reads) = page(true, blend, spacing, between);
+                    let judged = |bytes: Vec<u8>| -> Vec<u8> {
+                        match between {
+                            "blurred" => bytes
+                                .chunks(4 * W as usize)
+                                .flat_map(|row| &row[..2 * W as usize])
+                                .copied()
+                                .collect(),
+                            _ => bytes,
+                        }
+                    };
+                    let (cpu, gpu) = (judged(cpu), judged(gpu));
+                    if gpu != cpu {
+                        wrong.push(format!(
+                            "{blend:?} {spacing} between {between}: {} levels \
+                             from the CPU",
+                            most_apart(&gpu, &cpu)
+                        ));
+                    }
+                    let expected = match between {
+                        "under" | "blurred" => LINES,
+                        _ => 1,
+                    };
+                    if reads != expected {
+                        wrong.push(format!(
+                            "{blend:?} {spacing} between {between}: {reads} \
+                             read backs, not {expected}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        BACKDROP_EACH_RUN.set(true);
+        let (_, each) = page(true, Multiply, 0.0, "nothing");
+        BACKDROP_EACH_RUN.set(false);
+        assert!(each > 1, "a run at a time read back {each} times");
+    }
+
+    /// A run kept to be drawn again where the page is played writes a PDF
+    /// and an SVG with its glyphs whole, the bytes a run drawn as one blob
+    /// writes -- see `typography::WholeRuns`. Drawn apart, the PDF differs
+    /// (a text object for each glyph) and is held to differ, so the
+    /// comparison can fail; the SVG writes the same bytes either way. A
+    /// canvas drawn into another first, which records the run for pixels
+    /// with its glyphs apart, writes the same document, on a page that keeps
+    /// a recording for documents of its own and on one that shares the
+    /// pixels' -- see `Context2D::files_as_replayed_text`.
+    #[test]
+    fn a_kept_run_writes_a_document_whole() {
+        use crate::context::REPLAYS_BLENDED_TEXT;
+        let written = |replays: bool,
+                       draws: Option<GlyphDraws>,
+                       drawn_first: bool,
+                       depth: PixelDepth,
+                       scene: (f32, f32, f32, bool)| {
+            REPLAYS_BLENDED_TEXT.set(replays);
+            GLYPH_DRAWS_FOR.set(draws);
+            register();
+            forget_laid_out();
+            let options = CanvasOptions {
+                gpu: false,
+                color_type: depth,
+                ..CanvasOptions::default()
+            };
+            let mut canvas =
+                Canvas::with_options(W, H, options).expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            ctx.set_global_composite_operation(Multiply);
+            ctx.set_global_alpha(scene.1);
+            assert!(ctx.set_font_css(OSWALD.0));
+            ctx.set_letter_spacing(scene.0);
+            let ink = format!("rgba(40,90,160,{})", scene.2);
+            ctx.set_fill_style_css(&ink).expect("a colour");
+            ctx.set_stroke_style_css(&ink).expect("a colour");
+            ctx.fill_text(OSWALD.1, 10.0, 70.0, None);
+            ctx.stroke_text(OSWALD.1, 10.0, 140.0, None);
+            if drawn_first {
+                let mut into = Canvas::new(W, H);
+                into.set_gpu(false);
+                into.context().draw_canvas(&mut canvas, 0.0, 0.0);
+            }
+            let mut bytes = |format| {
+                canvas
+                    .to_buffer(format, &EncodeOptions::default())
+                    .expect("encodes")
+            };
+            let written = (bytes(ImageFormat::Pdf), bytes(ImageFormat::Svg));
+            REPLAYS_BLENDED_TEXT.set(true);
+            GLYPH_DRAWS_FOR.set(None);
+            written
+        };
+        for (depth, scene) in [PixelDepth::Uint8, PixelDepth::F16]
+            .into_iter()
+            .flat_map(|depth| SCENES.map(|scene| (depth, scene)))
+        {
+            let whole =
+                written(false, Some(GlyphDraws::Whole), false, depth, scene);
+            let apart =
+                written(false, Some(GlyphDraws::Each), false, depth, scene);
+            assert!(
+                apart.0 != whole.0,
+                "{depth:?} {scene:?}: apart writes it whole"
+            );
+            for drawn_first in [false, true] {
+                let kept = written(true, None, drawn_first, depth, scene);
+                assert!(
+                    kept.0 == whole.0,
+                    "{depth:?} {scene:?} {drawn_first}: the PDF is not whole"
+                );
+                assert!(
+                    kept.1 == whole.1,
+                    "{depth:?} {scene:?} {drawn_first}: the SVG is not whole"
+                );
+            }
+        }
+    }
+
+    /// The picture a document records of a kept run with its glyphs whole,
+    /// on a page that keeps one recording for every target, as a float page
+    /// does -- see `layer::ReplayedText::whole` -- counts in what the page
+    /// holds once a document has recorded it: the count rises by its bytes
+    /// and no more, and a build with debug assertions holds that count to a
+    /// walk of the page.
+    #[test]
+    fn a_kept_runs_whole_recording_counts_in_what_the_page_holds() {
+        use crate::context::layer::Layer;
+        register();
+        forget_laid_out();
+        let options = CanvasOptions {
+            gpu: false,
+            color_type: PixelDepth::F16,
+            ..CanvasOptions::default()
+        };
+        let mut canvas = Canvas::with_options(W, H, options).expect("a canvas");
+        let held = |canvas: &mut Canvas| {
+            let mut held = 0;
+            canvas.context().inner.with_recorder(|recorder| {
+                held = recorder.recorded_bytes();
+            });
+            held
+        };
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W, H);
+        ctx.set_global_composite_operation(Multiply);
+        assert!(ctx.set_font_css(OSWALD.0));
+        ctx.set_letter_spacing(-12.0);
+        ctx.set_fill_style_css("rgba(40,90,160,0.5)")
+            .expect("a colour");
+        ctx.fill_text(OSWALD.1, 10.0, 70.0, None);
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a read");
+        let before = held(&mut canvas);
+        canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("encodes");
+        let after = held(&mut canvas);
+        let page = canvas.context().inner.page();
+        let whole: usize = page
+            .layers
+            .iter()
+            .filter_map(|layer| match layer {
+                Layer::ReplayedText(text) => Some(text.whole.bytes()),
+                _ => None,
+            })
+            .sum();
+        assert!(whole > 0, "a document recorded the run whole");
+        assert_eq!(
+            after - before,
+            whole,
+            "the page holds {after} bytes after a document recorded the run \
+             whole, {before} before"
+        );
+    }
+
+    /// A plain run is kept to be drawn again where the page is played only
+    /// under a blend read in the shader: a picture of the page asks each run
+    /// kept for a recording, which the watch counts, and asks none of a run
+    /// recorded as it was drawn.
+    #[test]
+    fn only_a_blend_read_in_the_shader_keeps_a_plain_run() {
+        use crate::context::layer::REPLAYED_WATCH;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let kept = |blend: BlendMode| {
+            register();
+            forget_laid_out();
+            let asked = Arc::new(AtomicUsize::new(0));
+            REPLAYED_WATCH
+                .with_borrow_mut(|watch| *watch = Some(Arc::clone(&asked)));
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_global_composite_operation(blend);
+            assert!(ctx.set_font_css(OSWALD.0));
+            ctx.fill_text(OSWALD.1, 10.0, 70.0, None);
+            REPLAYED_WATCH.with_borrow_mut(|watch| *watch = None);
+            assert!(canvas.context().inner.picture().is_some());
+            asked.load(Ordering::Relaxed)
+        };
+        for blend in BY_COEFFICIENTS {
+            assert_eq!(kept(blend), 0, "{blend:?} keeps no run");
+        }
+        for blend in READ_IN_THE_SHADER {
+            assert_eq!(kept(blend), 1, "{blend:?} keeps the run");
+        }
+    }
+
+    #[test]
+    fn a_blend_by_coefficients_draws_a_run_whole() {
+        for blend in BY_COEFFICIENTS {
+            for (run, scene) in [OSWALD, PALETTES]
+                .into_iter()
+                .flat_map(|run| SCENES.map(|scene| (run, scene)))
+            {
+                GLYPHS_DRAWN_ALONE.set(0);
+                drawn(false, run, blend, scene);
+                assert_eq!(
+                    GLYPHS_DRAWN_ALONE.get(),
+                    0,
+                    "{} {blend:?} {scene:?}: no glyph drawn alone",
+                    run.1
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod paragraph_shadow_tests {
     use super::*;
     use std::iter::zip;
@@ -5491,9 +7448,16 @@ mod paragraph_shadow_tests {
     /// adds to the base.
     type Spans = Vec<(&'static str, fn(&mut TextStyle))>;
 
+    /// A text engine finding the scenes' faces, registered once on each
+    /// thread: a registration is seen only on the thread that made it -- see
+    /// `FontLibrary::register_font_from_data` -- and tests run on threads of
+    /// their own.
     fn engine() -> TextEngine {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
             let fonts = FontLibrary::new();
             for (family, file) in [
                 ("ShadowOswald", "Oswald/Oswald-VariableFont_wght.ttf"),
@@ -5506,7 +7470,7 @@ mod paragraph_shadow_tests {
                     )
                     .expect("a bundled face registers");
             }
-        });
+        }
         TextEngine::new(&FontLibrary::new())
     }
 
