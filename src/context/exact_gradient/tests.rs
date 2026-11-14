@@ -21,11 +21,12 @@ use crate::{
 /// The side of the canvas each case is drawn on.
 const SIDE: usize = 96;
 
-/// How far, in device pixels, f32 arithmetic may misplace the point a pixel
-/// samples: it is mapped through f32 matrices whose translations reach a
-/// hundred or so, whose last bit is eight millionths of a pixel there, and
-/// the effect maps it through two matrices where the CPU composes one.
-const POINT_NOISE_PX: f64 = 1e-4;
+/// How many units in the last place of the sizes of a row's terms the
+/// effect's mapping of a pixel's centre to the gradient's space may lose
+/// against the CPU's: it applies the CPU's own matrix to the same exact
+/// centre in the same order, and a GPU may fuse each of a row's two
+/// products into the sum that follows it, which the CPU rounds apart.
+const MATRIX_ULPS_POINT: f64 = 2.0;
 
 /// How many units in the last place of its largest term the formula for `t`
 /// may lose: a handful of operations, and a two-point conical gradient's
@@ -81,6 +82,17 @@ impl Shape {
 /// How far past each edge of the page [`Shape::OffPixels`] reaches: a part
 /// of a pixel, so that Ganesh draws its edges anti-aliased.
 const OFF_PIXELS_PX: f32 = 0.37;
+
+/// The effect for `spec` on `page` at `alpha`, placed for a draw at the
+/// identity onto the page itself, as [`drawn`] fills it.
+fn effect(
+    spec: &GradientSpec,
+    page: &ColorSpace,
+    alpha: f32,
+) -> Option<Shader> {
+    spec.exact(page, alpha)?
+        .placed(&Matrix::new_identity(), IPoint::new(0, 0))
+}
 
 fn drawn(
     gpu: bool,
@@ -369,7 +381,7 @@ fn a_half_level_is_rounded_as_the_cpu_rounds_it() {
             [level, 0, 255, 255],
             "highp {highp}: the CPU's pixel"
         );
-        let effect = spec.exact(&space, 1.0).expect("the effect");
+        let effect = effect(&spec, &space, 1.0).expect("the effect");
         let Some(gpu) = drawn(true, page, &effect, 1.0) else {
             return;
         };
@@ -403,22 +415,95 @@ fn margins_on(
     let (dx, dy) = ((index % side) as f64 + 0.5, (index / side) as f64 + 0.5);
     let (to_half, to_stop, converting) =
         margins_at(spec, page, dx, dy, channel)?;
-    // The noise `t` can carry there: the point's, through `t`'s rate of
-    // change across the page, and the formula's own.
-    let step = 1e-3;
-    let t = |x: f64, y: f64| t_at(spec, x, y);
-    let gradient = ((t(dx + step, dy)? - t(dx - step, dy)?)
-        .hypot(t(dx, dy + step)? - t(dx, dy - step)?))
-        / (2.0 * step);
-    // A neighbour where `t` is undefined puts the point at the edge of a
-    // two-point conical's cone, where `t`'s rate of change has no bound.
-    let gradient = match gradient.is_nan() {
-        true => f64::INFINITY,
-        false => gradient,
-    };
-    let noise = gradient * POINT_NOISE_PX
+    // The noise `t` can carry there: the matrix's, through `t`'s rate of
+    // change in the gradient's space, and the formula's own.
+    let noise = point_noise(spec, dx, dy)?
         + FORMULA_ULPS * F32_EPSILON * formula_size(spec, dx, dy)?;
     Some((to_half / (noise + converting), to_stop / noise))
+}
+
+/// The noise in `t` at the device point `(dx, dy)` from mapping it to the
+/// gradient's space -- see [`MATRIX_ULPS_POINT`]: each coordinate's, the
+/// sum of the sizes of its row's terms, carried through `t`'s rate of
+/// change along it. Unbounded where that rate is undefined, at the edge of
+/// a two-point conical's cone.
+fn point_noise(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
+    let layout = Layout::of(spec)?;
+    let Mapped {
+        x,
+        y,
+        z,
+        sizes,
+        perspective,
+    } = mapped(spec, &layout, dx, dy)?;
+    // A coordinate's noise: its row's, then, under a perspective, the
+    // third row's and the reciprocal's, relative to it.
+    let relative = match perspective {
+        true => MATRIX_ULPS_POINT * sizes[2] / z.abs() + RECIPROCAL_ULPS,
+        false => 0.0,
+    };
+    let noise_x = MATRIX_ULPS_POINT * sizes[0] / z.abs() + x.abs() * relative;
+    let noise_y = MATRIX_ULPS_POINT * sizes[1] / z.abs() + y.abs() * relative;
+    let h = 1e-6 * (1.0 + x.abs().max(y.abs()));
+    let along_x =
+        (unit_t(&layout, x + h, y) - unit_t(&layout, x - h, y)) / (2.0 * h);
+    let along_y =
+        (unit_t(&layout, x, y + h) - unit_t(&layout, x, y - h)) / (2.0 * h);
+    let noise =
+        F32_EPSILON * (along_x.abs() * noise_x + along_y.abs() * noise_y);
+    Some(match noise.is_nan() {
+        true => f64::INFINITY,
+        false => noise,
+    })
+}
+
+/// How many units in the last place a perspective's division may part by:
+/// the CPU multiplies by `rcp_precise`, an estimate refined to within a
+/// unit or two of the reciprocal, and the effect divides, which a GPU's
+/// fast math lands a unit or two off the quotient.
+const RECIPROCAL_ULPS: f64 = 4.0;
+
+/// The device point `(dx, dy)` in the gradient's space, in f64, by the
+/// CPU's matrix for `spec` in f32 -- see `Exact::placed` -- and the sizes
+/// of each row's terms.
+struct Mapped {
+    x: f64,
+    y: f64,
+    /// The third row's value, 1 without a perspective.
+    z: f64,
+    sizes: [f64; 3],
+    perspective: bool,
+}
+
+fn mapped(
+    spec: &GradientSpec,
+    layout: &Layout,
+    dx: f64,
+    dy: f64,
+) -> Option<Mapped> {
+    let to = match &spec.local {
+        Some(local) => Matrix::concat(&layout.to_unit, &local.invert()?),
+        None => layout.to_unit,
+    };
+    let mut m = [0.0; 9];
+    to.get_9(&mut m);
+    let m = m.map(f64::from);
+    let row = |k: usize| m[3 * k] * dx + m[3 * k + 1] * dy + m[3 * k + 2];
+    let size = |k: usize| {
+        (m[3 * k] * dx).abs() + (m[3 * k + 1] * dy).abs() + m[3 * k + 2].abs()
+    };
+    let perspective = to.has_perspective();
+    let z = match perspective {
+        true => row(2),
+        false => 1.0,
+    };
+    Some(Mapped {
+        x: row(0) / z,
+        y: row(1) / z,
+        z,
+        sizes: [size(0), size(1), size(2)],
+        perspective,
+    })
 }
 
 /// How many units in the last place of its result the conversion to the
@@ -755,17 +840,7 @@ fn toward_page_f64(toward: &Toward, rgb: [f64; 3]) -> [f64; 3] {
 /// rounding error.
 fn formula_size(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
     let layout = Layout::of(spec)?;
-    let local = match &spec.local {
-        Some(local) => Matrix::concat(local, &layout.from_unit),
-        None => layout.from_unit,
-    };
-    let to = local.invert()?;
-    let x = f64::from(to.scale_x()) * dx
-        + f64::from(to.skew_x()) * dy
-        + f64::from(to.translate_x());
-    let y = f64::from(to.skew_y()) * dx
-        + f64::from(to.scale_y()) * dy
-        + f64::from(to.translate_y());
+    let Mapped { x, y, .. } = mapped(spec, &layout, dx, dy)?;
     let p0 = f64::from(layout.p0);
     let size = match layout.kind {
         Kind::Linear => x.abs(),
@@ -788,17 +863,7 @@ fn formula_size(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
 /// `t` at the device point `(dx, dy)`, in f64.
 fn t_at(spec: &GradientSpec, dx: f64, dy: f64) -> Option<f64> {
     let layout = Layout::of(spec)?;
-    let local = match &spec.local {
-        Some(local) => Matrix::concat(local, &layout.from_unit),
-        None => layout.from_unit,
-    };
-    let to = local.invert()?;
-    let x = f64::from(to.scale_x()) * dx
-        + f64::from(to.skew_x()) * dy
-        + f64::from(to.translate_x());
-    let y = f64::from(to.skew_y()) * dx
-        + f64::from(to.scale_y()) * dy
-        + f64::from(to.translate_y());
+    let Mapped { x, y, .. } = mapped(spec, &layout, dx, dy)?;
     Some(unit_t(&layout, x, y))
 }
 
@@ -1352,7 +1417,7 @@ fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
         let Some(native) = spec.native() else {
             continue;
         };
-        let Some(effect) = spec.exact(&p3_space, alpha) else {
+        let Some(page_effect) = effect(&spec, &p3_space, alpha) else {
             continue;
         };
         let mut named = spec.clone();
@@ -1364,12 +1429,11 @@ fn display_p3_by_name_on_a_display_p3_page_takes_the_effect() {
             drawn(false, p3, &native, alpha),
             "seed {seed}: the CPU draws Display P3 by name as the page's"
         );
-        let named_effect = named
-            .exact(&p3_space, alpha)
+        let named_effect = effect(&named, &p3_space, alpha)
             .unwrap_or_else(|| panic!("seed {seed}: refused on a P3 page"));
         assert_eq!(
             drawn(false, p3, &named_effect, 1.0),
-            drawn(false, p3, &effect, 1.0),
+            drawn(false, p3, &page_effect, 1.0),
             "seed {seed}: the effect for it is the page's"
         );
         let srgb = ColorSpace::new_srgb();
@@ -1407,7 +1471,7 @@ fn kept_drawn(
     let space = page.to_skia_color_space().expect("the page's space");
     let before = EXACTS_MADE.get();
     KEEPS_EXACTS.set(keeps);
-    let shader = spec.exact(&space, alpha);
+    let shader = effect(spec, &space, alpha);
     KEEPS_EXACTS.set(true);
     let shader = shader.expect("an effect");
     let made = EXACTS_MADE.get() > before;
@@ -1528,9 +1592,11 @@ fn a_pixel_on_a_stop_takes_the_colour_added_last() {
     );
     let side = SIDE as f32;
     // Pixel 31's centre is at 31.5, a stop at 31.5 / side of the way along
-    // a gradient the canvas's width; pixel 10 of row 48 lies at 180 degrees
-    // from a centre on that row's centre line, a sweep's half turn; and
-    // pixel 31 of row 0 lies 31.5 from a radial gradient's centre.
+    // a gradient the canvas's width, and halfway along one a pixel wide,
+    // where `t` moves as fast as the point does; pixel 10 of row 48 lies at
+    // 180 degrees from a centre on that row's centre line, a sweep's half
+    // turn; and pixel 31 of row 0 lies 31.5 from a radial gradient's
+    // centre.
     let on = 31.5 / side;
     let cases = [
         (
@@ -1539,6 +1605,14 @@ fn a_pixel_on_a_stop_takes_the_colour_added_last() {
                 end: Point::new(side, 0.0),
             },
             on,
+            31,
+        ),
+        (
+            Geometry::Linear {
+                start: Point::new(31.0, 0.0),
+                end: Point::new(32.0, 0.0),
+            },
+            0.5,
             31,
         ),
         (
@@ -1578,9 +1652,12 @@ fn a_pixel_on_a_stop_takes_the_colour_added_last() {
             vec![0, 0, 255, 255],
             "{geometry:?}: the CPU takes the colour added last"
         );
-        let exact = spec
-            .exact(&page.to_skia_color_space().expect("the page's space"), 1.0)
-            .expect("an effect");
+        let exact = effect(
+            &spec,
+            &page.to_skia_color_space().expect("the page's space"),
+            1.0,
+        )
+        .expect("an effect");
         let Some(gpu) = drawn(true, page, &exact, 1.0) else {
             return;
         };
@@ -2440,8 +2517,10 @@ fn assert_parts_only_on_ties(
 }
 
 /// A GPU canvas drawn with `drawCanvas` into another under a transform
-/// other than a whole pixel's translation parts from the CPU only on ties:
-/// the bound `tests/gpu_gradient.rs` allows there, proven.
+/// parts from the CPU only on ties: the bound `tests/gpu_gradient.rs`
+/// allows there, proven. A whole pixel's translation draws the effect
+/// itself onto the canvas, its pixels the page's moved -- see
+/// `layer::drawn_with_effect` -- and the others take the CPU's route.
 #[test]
 fn a_canvas_drawn_under_a_transform_parts_only_on_ties() {
     const SIDE_PX: usize = 128;
@@ -2451,7 +2530,12 @@ fn a_canvas_drawn_under_a_transform_parts_only_on_ties() {
     let spec = swept.gradient.as_deref().expect("a description").clone();
     // Each applied through the context, and as the matrix it makes.
     type Transform<'a> = (&'a str, Matrix, &'a dyn Fn(&mut Context2D));
-    let transforms: [Transform; 4] = [
+    let transforms: [Transform; 5] = [
+        (
+            "moved by whole pixels",
+            Matrix::translate((7.0, 5.0)),
+            &|ctx| ctx.translate(7.0, 5.0),
+        ),
         ("scaled by 2", Matrix::scale((2.0, 2.0)), &|ctx| {
             ctx.scale(2.0, 2.0)
         }),
@@ -2507,6 +2591,99 @@ fn a_canvas_drawn_under_a_transform_parts_only_on_ties() {
         );
     }
     eprintln!("{judged} channels apart under the transforms, each a tie");
+}
+
+/// A gradient filled under a perspective -- `Context2D::set_projection` --
+/// takes the effect, placed under the CPU's perspective matrix, and parts
+/// from the CPU only on ties, the division's noise counted in -- see
+/// [`RECIPROCAL_ULPS`]. A sweep and a linear gradient, since a sweep's
+/// angle is the same whatever the point is divided by.
+#[test]
+fn a_gradient_under_a_perspective_parts_only_on_ties() {
+    let page = PixelColorSpace::Srgb.to_skia_color_space().expect("sRGB");
+    let side = SIDE as f32;
+    let stop = |position: f32, (r, g, b): (u8, u8, u8)| GradientStop {
+        position,
+        color: RgbaLinear::from_srgb8(r, g, b, 1.0),
+    };
+    let stops: Vec<GradientStop> = (0..8)
+        .flat_map(|k| {
+            let k = k as f32;
+            [
+                stop(k / 8.0, (250, 200, 0)),
+                stop((k + 0.5) / 8.0, (0, 60, 200)),
+            ]
+        })
+        .chain([stop(1.0, (250, 200, 0))])
+        .collect();
+    let linear = CanvasShader::linear_gradient(
+        CanvasPoint { x: 3.25, y: 7.5 },
+        CanvasPoint {
+            x: side - 5.75,
+            y: side - 11.0,
+        },
+        &stops,
+        GradientColorSpace::Destination,
+    )
+    .expect("a gradient");
+    let shaders = [
+        (
+            "a sweep",
+            sweep_turned(CanvasPoint { x: 48.25, y: 40.75 }, 10.0),
+        ),
+        ("a linear gradient", linear),
+    ];
+    let corner = |x: f32, y: f32| CanvasPoint { x, y };
+    let quad = [
+        corner(6.0, 10.0),
+        corner(side - 4.0, 2.0),
+        corner(side - 12.0, side - 6.0),
+        corner(14.0, side - 18.0),
+    ];
+    for (name, shader) in shaders {
+        let spec = shader.gradient.as_deref().expect("a description").clone();
+        let mut projection = None;
+        let mut drawn = |gpu: bool| {
+            let mut canvas = Canvas::new(side, side);
+            canvas.set_gpu(gpu);
+            if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                return None;
+            }
+            let ctx = canvas.context();
+            let made = ctx.create_projection(quad, None).expect("a projection");
+            ctx.set_projection(&made);
+            projection = Some(made);
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, side, side);
+            Some(pixels(&mut canvas))
+        };
+        let cpu = drawn(false).expect("a CPU canvas");
+        let before = PLACED_IN_PERSPECTIVE.get();
+        let Some(gpu) = drawn(true) else {
+            return;
+        };
+        assert!(
+            PLACED_IN_PERSPECTIVE.get() > before,
+            "{name}: the effect was not placed under the perspective"
+        );
+        let v: [f32; 9] = projection.expect("a projection").values;
+        let matrix = Matrix::new_all(
+            v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8],
+        );
+        assert!(matrix.has_perspective(), "the projection has a perspective");
+        let moved = under(&spec, &matrix);
+        let judged = assert_parts_only_on_ties(
+            name,
+            &cpu,
+            &gpu,
+            SIDE,
+            &page,
+            &|_, _| moved.clone(),
+        );
+        eprintln!(
+            "{name}: {judged} channels apart under a perspective, each a tie"
+        );
+    }
 }
 
 /// A run of many gradient draws, which takes the effect's images from one

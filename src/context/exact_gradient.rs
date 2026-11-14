@@ -23,15 +23,19 @@
 //! which the half-precision fragment output carries to an eight-bit target
 //! unchanged.
 //!
-//! The effect computes them from the coordinates Ganesh hands it, which are
-//! each pixel centre's only for an aliased rectangle on whole pixels; so a
-//! draw fills its shape with an image of the effect over the pixels it
-//! reaches, sampled nearest -- see [`GradientSpec::sampled`].
+//! The effect is drawn at its target's identity and takes the coordinate
+//! Ganesh hands it to that pixel's centre, which it then maps to the
+//! gradient's space as the CPU does, by the one matrix the CPU composes --
+//! see [`Exact::placed`]. That coordinate is a pixel's own only where the
+//! effect fills an aliased rectangle on whole pixels, so a draw fills its
+//! shape with an image of the effect over the pixels it reaches, sampled
+//! nearest -- see [`GradientSpec::sampled`].
 //!
-//! What is left is float noise: Skia composes the gradient's matrix with the
-//! device's into one before applying it, and the effect applies the two in
-//! turn, so `t` can part from the CPU's in its last bits, and a pixel whose
-//! value lies within that of a half level can round the other way.
+//! What is left is float noise: a GPU may fuse a product into the sum that
+//! follows it where the CPU rounds the two apart, in the matrix and in the
+//! formula for `t`, so `t` can part from the CPU's in its last bits, and a
+//! pixel whose value lies within that of a half level, or whose `t` lies
+//! within that of a stop, can round the other way.
 //!
 //! A gradient interpolated in a space other than the page's -- linear sRGB,
 //! sRGB, Display P3, A98 RGB or ProPhoto RGB -- is taken to the page as the
@@ -56,13 +60,13 @@
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::Arc};
 
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorSpacePrimaries, ColorSpaceTransferFn,
-    ColorType, Data, FilterMode, IRect, ImageInfo, Matrix, MipmapMode, Paint,
-    PictureRecorder, Pixmap, Point, Rect, RuntimeEffect, SamplingOptions,
-    Shader, TileMode,
+    ColorType, Data, FilterMode, IPoint, IRect, ImageInfo, Matrix, MipmapMode,
+    Paint, PictureRecorder, Pixmap, Point, Rect, RuntimeEffect,
+    SamplingOptions, Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
         interpolation::{
@@ -70,7 +74,9 @@ use skia_safe::{
         },
         shaders as gradient_shaders,
     },
-    images, named_primaries, named_transfer_fn,
+    images,
+    matrix::TypeMask,
+    named_primaries, named_transfer_fn,
 };
 
 use crate::{
@@ -175,9 +181,10 @@ impl GradientSpec {
     /// at each pixel's centre. `None` where the effect cannot reproduce the
     /// CPU, or `matrix` cannot be inverted.
     ///
-    /// The effect computes the CPU's bytes from the local coordinates
-    /// Ganesh hands it, which it derives exactly for an aliased rectangle
-    /// on whole pixels and only nearly elsewhere: through a path renderer,
+    /// The effect computes the CPU's bytes from the coordinates Ganesh
+    /// hands it, taken to their pixel's centre -- see [`Exact::placed`] --
+    /// which are that pixel's for an aliased rectangle on whole pixels and
+    /// not always elsewhere: through a path renderer,
     /// or an anti-aliased rectangle whose edges fall inside pixels, it
     /// extrapolates them from geometry outset past the shape, and a
     /// page-covering triangle drew 0.5% of its pixels a level off, a
@@ -198,11 +205,10 @@ impl GradientSpec {
         matrix: &Matrix,
         area: IRect,
     ) -> Option<Shader> {
-        let to_area = Matrix::translate((-area.left as f32, -area.top as f32));
         let from_device = matrix.invert()?;
         let effect = self
             .exact(page, alpha)?
-            .with_local_matrix(&Matrix::concat(&to_area, matrix));
+            .placed(matrix, IPoint::new(area.left, area.top))?;
         let size = Rect::from_wh(area.width() as f32, area.height() as f32);
         let mut recorder = PictureRecorder::new();
         let mut paint = Paint::default();
@@ -229,12 +235,13 @@ impl GradientSpec {
         )
     }
 
-    /// The shader that draws this on the GPU in the bytes the CPU stores,
+    /// The effect that draws this on the GPU in the bytes the CPU stores,
     /// on an eight-bit page in `page`, at `alpha` -- the paint's, which the
-    /// shader takes and the paint drawing it then leaves at 1. `None` where
-    /// the effect cannot reproduce the CPU -- see the module's notes. Exact
-    /// only where Ganesh draws it as an aliased rectangle on whole pixels --
-    /// see [`Self::sampled`].
+    /// shader takes and the paint drawing it then leaves at 1 -- to be
+    /// placed where a draw puts it: see [`Exact::placed`]. `None` where the
+    /// effect cannot reproduce the CPU -- see the module's notes. Exact only
+    /// where Ganesh draws it as an aliased rectangle on whole pixels -- see
+    /// [`Self::sampled`].
     ///
     /// The answer is the one this thread last made for a gradient whose
     /// every number is the same to the bit, on the same page at the same
@@ -242,7 +249,7 @@ impl GradientSpec {
     /// makes each of its gradients afresh, as a Canvas API caller makes a
     /// new `CanvasGradient` for every draw, and making one reads its stops
     /// through a colour conversion and uploads its uniforms.
-    pub fn exact(&self, page: &ColorSpace, alpha: f32) -> Option<Shader> {
+    pub fn exact(&self, page: &ColorSpace, alpha: f32) -> Option<Exact> {
         #[cfg(test)]
         EXACTS_ASKED.set(EXACTS_ASKED.get() + 1);
         let alpha = alpha.to_bits();
@@ -269,7 +276,7 @@ impl GradientSpec {
     }
 
     /// [`Self::exact`], made afresh.
-    fn made(&self, page: &ColorSpace, alpha: f32) -> Option<Shader> {
+    fn made(&self, page: &ColorSpace, alpha: f32) -> Option<Exact> {
         #[cfg(test)]
         EXACTS_MADE.set(EXACTS_MADE.get() + 1);
         let layout = Layout::of(self)?;
@@ -284,20 +291,20 @@ impl GradientSpec {
         if highp && (!ramp.opaque || alpha < 1.0) {
             return None;
         }
-        let local = match &self.local {
-            Some(local) => Matrix::concat(local, &layout.from_unit),
-            None => layout.from_unit,
-        };
         EFFECTS.with(|effects| {
-            let (size, effect, offsets) = effects
+            let (size, _, offsets) = effects
                 .as_ref()?
                 .iter()
                 .find(|(size, ..)| ramp.ts.len() <= *size)?;
-            effect.make_shader(
-                uniforms(offsets, *size, &layout, &ramp, alpha, highp),
-                &[],
-                Some(&local),
-            )
+            Some(Exact {
+                size: *size,
+                uniforms: uniforms(
+                    offsets, *size, &layout, &ramp, alpha, highp,
+                )
+                .into(),
+                to_unit: layout.to_unit,
+                local: self.local,
+            })
         })
     }
 
@@ -358,6 +365,142 @@ impl GradientSpec {
     }
 }
 
+/// The effect for a gradient on a page at an alpha, made and kept but not
+/// yet placed on the page: [`Exact::placed`] gives the shader that draws it
+/// where a draw puts it.
+#[derive(Clone)]
+pub(crate) struct Exact {
+    /// The length of the effect's arrays, which picks it from [`EFFECTS`].
+    size: usize,
+    /// Its uniforms but the placement's.
+    uniforms: Arc<[u8]>,
+    /// The gradient's own matrix -- see [`Layout::to_unit`].
+    to_unit: Matrix,
+    /// The shader's local matrix -- see [`GradientSpec::local`].
+    local: Option<Matrix>,
+}
+
+impl Exact {
+    /// The shader that draws the gradient onto a target whose device pixel
+    /// `(x, y)` is the page's `(x + offset.x, y + offset.y)`, as the page
+    /// draws it under `matrix`, drawn at the target's identity: `None`
+    /// where the CPU's matrix has no inverse.
+    ///
+    /// The effect takes the coordinate it is handed to its pixel's centre,
+    /// `floor(p) + 0.5`, which is the target's pixel centre wherever the
+    /// coordinate is off it by under half a pixel: an NVIDIA GPU hands a
+    /// runtime effect an `x` a little below each centre, and a pixel whose
+    /// `t` the CPU finds exactly on a stop then took the colour before it.
+    /// It adds `offset`, which is the page's pixel centre exactly, as
+    /// `seed_shader` makes it, and maps it to the gradient's space by the
+    /// one matrix the CPU maps it by, `SkShaders::MatrixRec::apply`'s
+    /// `Concat(fPtsToUnit, inverse(Concat(CTM, localMatrix)))`, made here
+    /// with Skia's own `SkMatrix::Concat` and `invert`, in the form
+    /// `appendMatrix` picks for it: a translation, a scale and a
+    /// translation, a 2x3, or a perspective, each in its stage's order of
+    /// operations. `matrix_perspective` multiplies by `rcp_precise` of the
+    /// third coordinate, a hardware estimate refined -- twice on NEON, once
+    /// on SSE -- which the effect cannot reproduce to the bit and takes as
+    /// the quotient: a perspective's `t` parts from the CPU's in its last
+    /// bits there too.
+    pub fn placed(&self, matrix: &Matrix, offset: IPoint) -> Option<Shader> {
+        let to_unit = self.unit_matrix(matrix)?;
+        #[cfg(test)]
+        if to_unit.has_perspective() {
+            PLACED_IN_PERSPECTIVE.set(PLACED_IN_PERSPECTIVE.get() + 1);
+        }
+        EFFECTS.with(|effects| {
+            let (_, effect, offsets) = effects
+                .as_ref()?
+                .iter()
+                .find(|(size, ..)| *size == self.size)?;
+            let mut data = self.uniforms.to_vec();
+            placement(&mut data, offsets, &to_unit, offset);
+            effect.make_shader(Data::new_copy(&data), &[], None)
+        })
+    }
+}
+
+impl Exact {
+    /// Whether the effect can be placed under `matrix` -- see
+    /// [`Self::placed`].
+    pub fn places(&self, matrix: &Matrix) -> bool {
+        self.unit_matrix(matrix).is_some()
+    }
+
+    /// The CPU's matrix from the page's pixels to the gradient's space,
+    /// for a draw under `matrix` -- see [`Self::placed`].
+    fn unit_matrix(&self, matrix: &Matrix) -> Option<Matrix> {
+        let total = match &self.local {
+            Some(local) => Matrix::concat(matrix, local),
+            None => *matrix,
+        };
+        Some(Matrix::concat(&self.to_unit, &total.invert()?))
+    }
+}
+
+/// `matrix`'s form, as `appendMatrix` picks the stage that applies it.
+fn matrix_form(matrix: &Matrix) -> i32 {
+    let kind = matrix.get_type();
+    if matrix.has_perspective() {
+        MatrixForm::PERSPECTIVE
+    } else if kind.is_empty() {
+        MatrixForm::IDENTITY
+    } else if kind == TypeMask::TRANSLATE {
+        MatrixForm::TRANSLATE
+    } else if (kind - (TypeMask::SCALE | TypeMask::TRANSLATE)).is_empty() {
+        MatrixForm::SCALE_TRANSLATE
+    } else {
+        MatrixForm::AFFINE
+    }
+}
+
+/// The stage `appendMatrix` applies a matrix through, as the effect's
+/// `matrixForm` uniform names it.
+struct MatrixForm;
+
+impl MatrixForm {
+    /// `matrix_2x3`.
+    const AFFINE: i32 = 3;
+    /// None: the identity is left out.
+    const IDENTITY: i32 = 0;
+    /// `matrix_perspective`.
+    const PERSPECTIVE: i32 = 4;
+    /// `matrix_scale_translate`.
+    const SCALE_TRANSLATE: i32 = 2;
+    /// `matrix_translate`.
+    const TRANSLATE: i32 = 1;
+}
+
+/// `data`, an effect's uniforms, placed by `to_unit` and `offset` -- see
+/// [`Exact::placed`].
+fn placement(
+    data: &mut [u8],
+    offsets: &Offsets,
+    to_unit: &Matrix,
+    offset: IPoint,
+) {
+    let mut put = |at: usize, bytes: [u8; 4]| {
+        data[at..at + 4].copy_from_slice(&bytes);
+    };
+    put(offsets.matrix_form, matrix_form(to_unit).to_ne_bytes());
+    // `get9`'s order: `scaleX, skewX, transX`, then `skewY, scaleY,
+    // transY`, then the perspective's three, a row each.
+    let mut nine = [0.0; 9];
+    to_unit.get_9(&mut nine);
+    for (at, row) in [
+        (offsets.m_row0, &nine[..3]),
+        (offsets.m_row1, &nine[3..6]),
+        (offsets.m_row2, &nine[6..]),
+    ] {
+        for (k, v) in row.iter().enumerate() {
+            put(at + 4 * k, v.to_ne_bytes());
+        }
+    }
+    put(offsets.offset, (offset.x as f32).to_ne_bytes());
+    put(offsets.offset + 4, (offset.y as f32).to_ne_bytes());
+}
+
 /// How many sets of shaders [`GradientSpec::exact`] keeps on a thread, and
 /// how many a set holds: 256 shaders, chosen for a page of a few dozen
 /// distinct gradients redrawn every frame -- 50 in the scene it was sized
@@ -408,7 +551,7 @@ fn exact_hash(spec: &GradientSpec, page: &ColorSpace, alpha: u32) -> u64 {
 
 /// The shaders [`GradientSpec::exact`] has made, each `None` where it could
 /// make none, filed by [`exact_hash`].
-type Exacts = KeptSets<ExactKey, Option<Shader>, EXACT_SETS, EXACT_WAYS>;
+type Exacts = KeptSets<ExactKey, Option<Exact>, EXACT_SETS, EXACT_WAYS>;
 
 thread_local! {
     /// The shaders [`GradientSpec::exact`] has made on this thread.
@@ -423,6 +566,10 @@ thread_local! {
     /// How many times [`GradientSpec::exact`] has been asked on this thread,
     /// made or found.
     pub(crate) static EXACTS_ASKED: Cell<usize> = const { Cell::new(0) };
+    /// How many shaders [`Exact::placed`] has given under a perspective on
+    /// this thread.
+    pub(crate) static PLACED_IN_PERSPECTIVE: Cell<usize> =
+        const { Cell::new(0) };
     /// Whether [`GradientSpec::exact`] takes a shader kept: off, every
     /// shader is made afresh, the reference the kept ones are held to.
     pub(crate) static KEEPS_EXACTS: Cell<bool> = const { Cell::new(true) };
@@ -432,9 +579,9 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq)]
 struct Layout {
     kind: Kind,
-    /// The inverse of the gradient's own matrix, which maps the space `kind`
-    /// computes `t` in to the shader's.
-    from_unit: Matrix,
+    /// The gradient's own matrix, `fPtsToUnit`, which maps the shader's
+    /// space to the one `kind` computes `t` in.
+    to_unit: Matrix,
     /// A matrix applied to `t` after `kind` -- a partial sweep's range, a
     /// concentric conical gradient's start radius -- as `t * scale + bias`.
     t_scale: f32,
@@ -488,10 +635,13 @@ impl Layout {
         i32::from(self.flags & flag != 0).to_ne_bytes()
     }
 
+    /// `None` where `to_unit` has no inverse, which Skia's factories refuse
+    /// as degenerate.
     fn plain(kind: Kind, to_unit: Matrix) -> Option<Layout> {
+        to_unit.invert()?;
         Some(Layout {
             kind,
-            from_unit: to_unit.invert()?,
+            to_unit,
             t_scale: 1.0,
             t_bias: 0.0,
             p0: 0.0,
@@ -1638,6 +1788,11 @@ struct Offsets {
     lab_b: usize,
     ok_in: [usize; 3],
     ok_out: [usize; 3],
+    matrix_form: usize,
+    m_row0: usize,
+    m_row1: usize,
+    m_row2: usize,
+    offset: usize,
     polar: usize,
     sinq: usize,
     hsl_k: usize,
@@ -1688,6 +1843,11 @@ impl Offsets {
             lab_b: at("labB")?,
             ok_in: [at("okIn0")?, at("okIn1")?, at("okIn2")?],
             ok_out: [at("okOut0")?, at("okOut1")?, at("okOut2")?],
+            matrix_form: at("matrixForm")?,
+            m_row0: at("mRow0")?,
+            m_row1: at("mRow1")?,
+            m_row2: at("mRow2")?,
+            offset: at("offset")?,
             polar: at("polar")?,
             sinq: at("sinq")?,
             hsl_k: at("hslK")?,
@@ -1736,6 +1896,11 @@ uniform float3 okIn2;
 uniform float3 okOut0;
 uniform float3 okOut1;
 uniform float3 okOut2;
+uniform int matrixForm;
+uniform float3 mRow0;
+uniform float3 mRow1;
+uniform float3 mRow2;
+uniform float2 offset;
 uniform float2 polar;
 uniform float3 sinq;
 uniform float4 hslK;
@@ -1880,9 +2045,26 @@ float3 hwb_to_srgb(float3 c) {{
     return (w + b) >= 1.0 ? float3(gray) : rgb;
 }}
 
-half4 main(float2 p) {{
+half4 main(float2 q) {{
+    // The pixel's centre on the page, as `seed_shader` makes it, mapped by
+    // the CPU's matrix as `appendMatrix`'s stage for it maps it.
+    float2 p = (floor(q) + 0.5) + offset;
     float x = p.x;
     float y = p.y;
+    if (matrixForm == 1) {{
+        x = p.x + mRow0.z;
+        y = p.y + mRow1.z;
+    }} else if (matrixForm == 2) {{
+        x = p.x * mRow0.x + mRow0.z;
+        y = p.y * mRow1.y + mRow1.z;
+    }} else if (matrixForm == 3) {{
+        x = p.x * mRow0.x + (p.y * mRow0.y + mRow0.z);
+        y = p.x * mRow1.x + (p.y * mRow1.y + mRow1.z);
+    }} else if (matrixForm == 4) {{
+        float r = 1.0 / (p.x * mRow2.x + (p.y * mRow2.y + mRow2.z));
+        x = (p.x * mRow0.x + (p.y * mRow0.y + mRow0.z)) * r;
+        y = (p.x * mRow1.x + (p.y * mRow1.y + mRow1.z)) * r;
+    }}
     float t;
     bool masked = false;
     if (kind == 0) {{
@@ -2004,7 +2186,7 @@ fn uniforms(
     ramp: &Ramp,
     alpha: f32,
     highp: bool,
-) -> Data {
+) -> Vec<u8> {
     // `from_float`: the paint's alpha as the level the pipeline scales by.
     let alpha8 = (alpha * 255.0 + 0.5).trunc();
     let mut data = vec![0u8; offsets.size];
@@ -2103,7 +2285,7 @@ fn uniforms(
             }
         }
     }
-    Data::new_copy(&data)
+    data
 }
 
 /// Whether the CPU's `div255` rounds to the nearest level, as NEON
