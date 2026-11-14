@@ -2458,6 +2458,13 @@ impl PageRecorder {
                 clip: clip.map(Path::serialize),
             };
             self.file_entry(Layer::Gradient(Arc::new(op)), features);
+            // Resumed as `flush` resumes after an isolated layer, framed
+            // again before the next draw, so that an entry filed under the
+            // clip after the op -- a kept run, a tile -- is a piece of the
+            // frame's run, as it is after the layer. `flush` returns before
+            // resuming where nothing was recorded, as here.
+            self.framed = false;
+            self.reframe();
             self.gradient_filtered = 0;
             self.gradient_run =
                 (!fills_with_filtered(features, &mut self.gradient_filtered))
