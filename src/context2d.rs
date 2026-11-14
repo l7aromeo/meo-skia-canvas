@@ -4889,9 +4889,9 @@ mod recorded_count_tests {
         shader::{GradientColorSpace, GradientInterpolation, GradientStop},
     };
 
-    /// Registers the face the colour glyph scenes draw in, once on each
-    /// thread: a face another test thread registered is not found on this
-    /// one.
+    /// Registers the faces the scenes of runs recorded later draw in, once
+    /// on each thread: a face another test thread registered is not found
+    /// on this one.
     fn register() {
         thread_local! {
             static REGISTERED: std::cell::Cell<bool> =
@@ -4900,23 +4900,45 @@ mod recorded_count_tests {
         if REGISTERED.replace(true) {
             return;
         }
-        crate::font::FontLibrary::new()
-            .register_font_from_path(
+        let fonts = crate::font::FontLibrary::new();
+        for (family, path) in [
+            (
+                "CountedOswald",
+                "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            ),
+            (
                 "CountedPalettes",
                 "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
-            )
-            .expect("a bundled face registers");
+            ),
+        ] {
+            fonts
+                .register_font_from_path(family, path)
+                .expect("a bundled face registers");
+        }
     }
 
-    /// A CPU canvas of a run of colour glyphs, whose recording for a
-    /// document is made when a target first plays it -- see
-    /// `layer::ReplayedText`.
-    fn colour_page() -> Canvas {
+    /// A CPU canvas of a run kept whole, whose pictures are recorded when a
+    /// target first plays it -- see `layer::ReplayedText`: a run of colour
+    /// glyphs, or, where `kept`, a run of overlapping glyphs under
+    /// `multiply`.
+    fn later_page(kept: bool) -> Canvas {
         let mut canvas = Canvas::new(320.0, 160.0);
         canvas.set_gpu(false);
         let ctx = canvas.context();
-        assert!(ctx.set_font_css("40px CountedPalettes"));
-        ctx.fill_text("Abcdef", 10.0, 60.0, None);
+        match kept {
+            false => {
+                assert!(ctx.set_font_css("40px CountedPalettes"));
+                ctx.fill_text("Abcdef", 10.0, 60.0, None);
+            }
+            true => {
+                assert!(ctx.set_font_css("16px CountedOswald"));
+                ctx.set_letter_spacing(-12.0);
+                ctx.set_global_composite_operation(BlendMode::Multiply);
+                ctx.set_fill_style_css("rgba(40,90,160,0.8)")
+                    .expect("a colour");
+                ctx.fill_text("Hello Wq", 10.0, 20.0, None);
+            }
+        }
         canvas
     }
 
@@ -4924,15 +4946,19 @@ mod recorded_count_tests {
     /// through a canvas drawn in once or twice, counts it once for each
     /// time it holds it once it is recorded, as a walk of its entries does:
     /// a run of colour glyphs, whose document picture a PDF of the page
-    /// records, after which the page drawn into another holds its count to
-    /// its walk -- see `page::PageRecorder::recorded_bytes`. Counted for the
-    /// first page that filed it alone, the page drawn into fell short of its
-    /// walk.
+    /// records, and a kept run, whose pictures the PDF and the page drawn
+    /// into another record, after which the page drawn into holds its count
+    /// to its walk -- see `page::PageRecorder::recorded_bytes`. Counted for
+    /// the first page that filed it alone, the page drawn into fell short of
+    /// its walk.
     #[test]
     fn a_picture_recorded_later_counts_in_every_page_holding_it() {
         register();
-        for times in [1, 2] {
-            let mut inner = colour_page();
+        for (kept, times) in [false, true]
+            .into_iter()
+            .flat_map(|kept| [1, 2].map(|times| (kept, times)))
+        {
+            let mut inner = later_page(kept);
             let mut middle = Canvas::new(320.0, 160.0);
             middle.set_gpu(false);
             for _ in 0..times {
@@ -4948,7 +4974,7 @@ mod recorded_count_tests {
             middle.context().inner.with_recorder(|recorder| {
                 bytes = recorder.recorded_bytes();
             });
-            assert!(bytes > 0, "drawn in {times}: counted");
+            assert!(bytes > 0, "kept {kept}, drawn in {times}: counted");
         }
     }
 
@@ -4961,7 +4987,7 @@ mod recorded_count_tests {
         /// The frames, each a canvas drawn into and dropped.
         const FRAMES: usize = 50;
         register();
-        let mut inner = colour_page();
+        let mut inner = later_page(false);
         let text = inner
             .context()
             .inner
