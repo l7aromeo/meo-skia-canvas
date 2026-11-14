@@ -6828,6 +6828,19 @@ mod overlapping_glyph_tests {
         );
     }
 
+    /// The sample count the GPU canvas is read at where a scene is played
+    /// inside a layer, as a control: multisampled, Ganesh copies the
+    /// destination once for each draw on every backend, so that a run's
+    /// overlapping glyphs blend over what lay under the run rather than over
+    /// one another. Single-sampled on Vulkan it reads the destination as an
+    /// input attachment instead, `GrVkCaps::onGetDstSampleFlagsForProxy`,
+    /// and in what order a draw's overlapping fragments see one another is
+    /// the driver's: lavapipe blends them one after another, as the CPU
+    /// does, and inside the layer landed the CPU page's bytes under
+    /// `color-dodge`, `color-burn`, `soft-light` and `hue`, and under
+    /// `multiply` with the runs dyed by a pattern.
+    const CONTROL_SAMPLES: usize = 4;
+
     /// What a page drawn into another holds besides its fills: runs of
     /// overlapping glyphs under a blend read in the shader, each plain,
     /// casting a shadow, dyed by a canvas pattern, or inside a layer of the
@@ -6994,9 +7007,9 @@ mod overlapping_glyph_tests {
     /// its entries on a surface of their own -- see
     /// `layer::played_on_a_root` -- where its runs are drawn on the CPU over
     /// one read back, as on a page. Played inside the group's layer, which
-    /// cannot be read back, its runs are drawn by the GPU and land a level or
-    /// two off, which the scene is held to as well, so that it cannot pass
-    /// without the surface.
+    /// cannot be read back, its runs are drawn by the GPU and land elsewhere
+    /// -- read at [`CONTROL_SAMPLES`] -- which the scene is held to as well,
+    /// so that it cannot pass without the surface.
     #[test]
     fn a_page_drawn_into_a_gpu_canvas_lands_the_cpu_pages_bytes() {
         use crate::context::layer::OWN_ROOTS;
@@ -7057,7 +7070,7 @@ mod overlapping_glyph_tests {
                 &mut nested_page(blend, false, Nested::Plain),
                 true,
                 Into::default(),
-                None,
+                Some(CONTROL_SAMPLES),
             );
             OWN_ROOTS.set(true);
             let (cpu, ..) = drawn_into(
@@ -7091,8 +7104,9 @@ mod overlapping_glyph_tests {
     /// whatever is drawn. Skia clips nothing inside a layer by the clip it
     /// opened under and applies that clip where the layer is drawn back, so
     /// the clip shapes the surface's copy once, at its edge as inside it.
-    /// Played inside the layer instead, each case lands elsewhere, so that
-    /// none can pass without the surface.
+    /// Played inside the layer instead, each case lands elsewhere -- read at
+    /// [`CONTROL_SAMPLES`], against its reference read the same way -- so
+    /// that none can pass without the surface.
     #[test]
     fn a_page_drawn_into_a_gpu_canvas_lands_the_cpu_pages_bytes_however_drawn()
     {
@@ -7160,9 +7174,14 @@ mod overlapping_glyph_tests {
                     ctx.set_fill_style_css("white").expect("a colour");
                     ctx.fill_rect(0.0, 0.0, W, H);
                 }
-                let (expected, ..) =
-                    drawn_into(&mut reference, composited, into, None);
-                let lands = |bytes: &[u8]| bytes == expected;
+                let samples = |roots: bool| match roots {
+                    true => None,
+                    false => Some(CONTROL_SAMPLES),
+                };
+                let expected = [true, false].map(|roots| {
+                    drawn_into(&mut reference, composited, into, samples(roots))
+                        .0
+                });
                 for roots in [true, false] {
                     OWN_ROOTS.set(roots);
                     NO_DEVICE_LAYERS.set(memory);
@@ -7170,14 +7189,16 @@ mod overlapping_glyph_tests {
                         &mut nested_page(blend, false, nested),
                         true,
                         into,
-                        None,
+                        samples(roots),
                     );
                     NO_DEVICE_LAYERS.set(false);
                     OWN_ROOTS.set(true);
+                    let expected = &expected[usize::from(!roots)];
+                    let lands = |bytes: &[u8]| bytes == expected.as_slice();
                     match roots {
                         true if !lands(&gpu) => wrong.push(format!(
                             "{blend:?} {name}: {} levels off",
-                            most_apart(&gpu, &expected)
+                            most_apart(&gpu, expected)
                         )),
                         true if (played, reads) != counts => {
                             wrong.push(format!(
@@ -7199,10 +7220,14 @@ mod overlapping_glyph_tests {
     /// Runs inside a layer on a GPU page land the CPU page's bytes, under
     /// each of the 14 blends: the layer's entries play on a root of their
     /// own -- see `layer::played_on_a_root` -- as a page drawn in does.
-    /// Played inside the layer, the runs land elsewhere.
+    /// Played inside the layer, the runs land elsewhere, read at
+    /// [`CONTROL_SAMPLES`].
     #[test]
     fn runs_in_a_layer_on_a_gpu_page_land_the_cpu_pages_bytes() {
-        use crate::context::layer::{BACKDROPS_READ, OWN_ROOTS, ROOTS_PLAYED};
+        use crate::{
+            context::layer::{BACKDROPS_READ, OWN_ROOTS, ROOTS_PLAYED},
+            pixels::{ImageDataExport, PixelExportOptions},
+        };
         if !RenderingEngine::GPU.selectable() {
             eprintln!("skipped: no GPU");
             return;
@@ -7211,12 +7236,16 @@ mod overlapping_glyph_tests {
         for blend in READ_IN_THE_SHADER {
             register();
             forget_laid_out();
-            let read = |gpu: bool| {
+            let read = |gpu: bool, msaa: Option<usize>| {
                 let mut canvas = nested_page(blend, gpu, Nested::Layered);
                 let counted = (ROOTS_PLAYED.get(), BACKDROPS_READ.get());
+                let export = ImageDataExport {
+                    pixels: PixelExportOptions::default(),
+                    msaa,
+                    ..ImageDataExport::default()
+                };
                 let bytes = canvas
-                    .context()
-                    .get_image_data(0.0, 0.0, W, H)
+                    .to_image_data(None, &export)
                     .expect("the canvas reads back")
                     .pixels()
                     .to_vec();
@@ -7232,10 +7261,10 @@ mod overlapping_glyph_tests {
                 );
                 (bytes, counts)
             };
-            let (cpu, _) = read(false);
-            let (gpu, counts) = read(true);
+            let (cpu, _) = read(false, None);
+            let (gpu, counts) = read(true, None);
             OWN_ROOTS.set(false);
-            let (inside, _) = read(true);
+            let (inside, _) = read(true, Some(CONTROL_SAMPLES));
             OWN_ROOTS.set(true);
             if gpu != cpu {
                 wrong.push(format!(
