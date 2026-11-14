@@ -2576,11 +2576,19 @@ impl Context2D {
                                 picture,
                                 exact: colour,
                                 alpha: paint.alpha_f(),
-                                // Kept for the coverage route alone, which
-                                // a cast shadow does not take.
+                                // Kept for the coverage route and for a
+                                // shadow cast from the copy -- see
+                                // `layer::CoverageRun`.
                                 kept: text
                                     .filter(|_| {
-                                        matches!(steps[..], [Step::Blur(_)])
+                                        matches!(
+                                            steps[..],
+                                            [Step::Blur(_)]
+                                                | [Step::Shadow {
+                                                    shadow_only: false,
+                                                    ..
+                                                }]
+                                        )
                                     })
                                     .and_then(|text| {
                                         Kept::new(

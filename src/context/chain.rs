@@ -43,6 +43,7 @@ use crate::{
         keeps_two_recordings,
         kept::ChainInput,
         layer::ExactColour,
+        run_mask::Kept,
     },
     gpu::{RenderingEngine, engine_of},
     node::utils::color_in_canvas_space,
@@ -469,38 +470,31 @@ pub(crate) fn run(
 
 /// [`run`] for a chain whose one step casts a shadow from something other
 /// than what it draws: `draw` draws what the shadow lies under, and `cast`
-/// what the shadow is cast from, whose alpha the shadow takes at `alpha` --
-/// see [`Cast`]. Each is drawn into a layer of its own.
-#[allow(clippy::too_many_arguments)]
+/// says what the shadow is cast from -- see [`Cast`]. Each is drawn into a
+/// layer of its own, the cast's only where no result kept for it is taken.
 pub(crate) fn run_cast(
     canvas: &SkCanvas,
     steps: &[Step],
     content: Option<Rect>,
     depth: Depth,
     paint: &Paint,
-    alpha: f32,
     draw: impl Fn(&SkCanvas),
-    cast: impl Fn(&SkCanvas),
+    cast: Cast<'_>,
 ) -> Option<Outcome> {
     let plan = plan(canvas, steps, content, depth)?;
     let mut drawn =
         Drawn::new(canvas, &[&plan], |_, offscreen| draw(offscreen))?;
-    let from = Drawn::new(canvas, &[&plan], |_, offscreen| cast(offscreen))?;
-    drawn.finish_cast(
-        &plan,
-        steps,
-        paint,
-        Some(Cast {
-            drawn: &from,
-            alpha,
-        }),
-    )
+    drawn.finish_cast(&plan, steps, paint, Some(cast))
 }
 
 /// What a chain's shadow is cast from where that is not what the chain
-/// draws: `drawn`, a layer holding a run of text drawn opaque, the shadow
-/// taking its alpha at `alpha`, the alpha the run is drawn at -- see
-/// `layer::CoverageRun`.
+/// draws: a run of text drawn opaque, which `draw` draws onto a layer under
+/// the chain's transform on `canvas`, the shadow taking its alpha at
+/// `alpha`, the alpha the run is drawn at -- see `layer::CoverageRun`.
+/// `run` is the kept run the copy draws and the transform from its picture
+/// into the canvas's pixels, where the run is kept: a result kept for the
+/// chain is then filed under where the run lies -- see
+/// `run_mask::CastKey` -- and taken without the copy being drawn.
 ///
 /// The shadow of a run drawn translucent is the blur of the run's coverage
 /// times its alpha. Cast from the run as an eight-bit layer holds it, that
@@ -511,8 +505,19 @@ pub(crate) fn run_cast(
 /// linear in the alpha, since the run is composited over it, so the alpha
 /// cannot be taken as one gain on the whole, as `blur()` takes it.
 pub(crate) struct Cast<'a> {
-    drawn: &'a Drawn,
-    alpha: f32,
+    pub(crate) canvas: &'a SkCanvas,
+    pub(crate) draw: &'a dyn Fn(&SkCanvas),
+    pub(crate) alpha: f32,
+    pub(crate) run: Option<(&'a Kept, Matrix)>,
+}
+
+impl Cast<'_> {
+    /// The layer of `plan` the cast is drawn into.
+    fn drawn(&self, plan: &Plan) -> Option<Drawn> {
+        #[cfg(test)]
+        CAST_LAYERS.with(|layers| layers.set(layers.get() + 1));
+        Drawn::new(self.canvas, &[plan], |_, offscreen| (self.draw)(offscreen))
+    }
 }
 
 /// Where a chain's layer lies, settled before anything is drawn into it.
@@ -729,17 +734,43 @@ impl Drawn {
             rest,
             region,
             worked,
+            drawn,
             ..
         } = *plan;
         let read = self.read(region);
-        let context = &mut self.context;
         let scale = (layer.scale_x().abs(), layer.scale_y().abs());
+        #[cfg(test)]
+        if cast.is_some() {
+            CAST_REGION.with(|cast| cast.set(Some(region)));
+        }
+        // A cast from a kept run is filed under where the run lies in the
+        // layer, which decides its pixels -- see `run_mask::CastKey` -- and
+        // its layer is drawn only where no kept result is taken. The layer
+        // starts at `drawn`, or at `region` where that layer is refused --
+        // see [`Drawn::new`].
+        let placed =
+            cast.as_ref()
+                .filter(|_| self.context.is_none())
+                .and_then(|cast| {
+                    let (kept, to_canvas) = cast.run?;
+                    kept.cast_key(
+                        &Matrix::concat(&layer, &to_canvas),
+                        region,
+                        drawn,
+                    )
+                });
+        let mut from = match (&cast, &placed) {
+            (Some(cast), None) => Some(cast.drawn(plan)?),
+            _ => None,
+        };
+        let context = &mut self.context;
         // On the CPU a chain handed an input it has run on before takes the
         // result it left, once the input is that one to the byte -- see
         // `kept`. The input is judged by the region where it lies in the
         // layer, before it is copied out and padded, which a result found
-        // never needs; a shadow cast from another layer, by the alphas of
-        // that layer's region as well, which are all the shadow reads of it.
+        // never needs; a shadow cast from another layer, by where the run it
+        // is drawn from lies, or else by the alphas of that layer's region,
+        // which are all the shadow reads of it.
         let input = match context.is_none() {
             true => ChainInput::of_region(
                 &self.snapshot,
@@ -750,27 +781,36 @@ impl Drawn {
                 Vector::new(scale.0, scale.1),
                 paint.alpha_f(),
             )
-            .and_then(|input| match &cast {
-                Some(cast) => input.cast_from(
-                    &cast.drawn.snapshot,
-                    cast.drawn.read(region),
-                    cast.alpha,
-                ),
-                None => Some(input),
+            .and_then(|input| match (&cast, placed) {
+                (Some(cast), Some(key)) => {
+                    Some(input.cast_placed(key, cast.alpha))
+                }
+                (Some(cast), None) => {
+                    let from = from.as_ref()?;
+                    input.cast_from(
+                        &from.snapshot,
+                        from.read(region),
+                        cast.alpha,
+                    )
+                }
+                (None, _) => Some(input),
             }),
             false => None,
         };
         if let Some(kept) = input.as_ref().and_then(ChainInput::kept) {
             return Some(Outcome::whole(kept, worked, rest));
         }
+        if let (Some(cast), None) = (&cast, &from) {
+            from = Some(cast.drawn(plan)?);
+        }
         let mut image =
             region_of(&self.snapshot, self.at, context.as_mut(), plan)?;
-        let cast = match cast {
-            Some(Cast { drawn, alpha }) => Some((
-                region_of(&drawn.snapshot, drawn.at, context.as_mut(), plan)?,
-                alpha,
+        let cast = match (cast, &from) {
+            (Some(cast), Some(from)) => Some((
+                region_of(&from.snapshot, from.at, context.as_mut(), plan)?,
+                cast.alpha,
             )),
-            None => None,
+            _ => None,
         };
 
         let last = steps.len().saturating_sub(1);
@@ -1165,6 +1205,15 @@ thread_local! {
     /// How many layers [`Drawn::new`] has made on this thread, which the
     /// tests of chains sharing a layer count by.
     pub(crate) static SHARED_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// How many layers a [`Cast`] has been drawn into on this thread, which
+    /// the tests of a cast's kept results count by.
+    pub(crate) static CAST_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// The region of the last chain run with a [`Cast`] on this thread, for
+    /// the tests of a cast's kept results to tell inputs of one size apart
+    /// from inputs of another.
+    pub(crate) static CAST_REGION: std::cell::Cell<Option<IRect>> = const { std::cell::Cell::new(None) };
 
     /// How many layer surfaces [`layer_surface`] has made on this thread
     /// rather than taken from [`pool`], which the tests of kept layers count
@@ -2697,10 +2746,10 @@ mod tests {
     };
 
     use super::{
-        Depth, Outcome, REFUSE_PLACED, Step, TRIMMED, TRIMS_COMPOSITE, apply,
-        blurred_alpha, blurred_on_cpu, exact_blur, filtered, offset_tint,
-        rounded_once, run_cast, shadow_composed, shadowed, tint, tint_colour,
-        tinted_alpha, worked_on,
+        Cast, Depth, Outcome, REFUSE_PLACED, Step, TRIMMED, TRIMS_COMPOSITE,
+        apply, blurred_alpha, blurred_on_cpu, exact_blur, filtered,
+        offset_tint, rounded_once, run_cast, shadow_composed, shadowed, tint,
+        tint_colour, tinted_alpha, worked_on,
     };
     #[cfg(all(meo_graphite, feature = "metal"))]
     use crate::{context::page::ExportOptions, gpu::graphite};
@@ -3193,24 +3242,26 @@ mod tests {
                 space: ColorSpace::new_srgb(),
                 shadow_only: false,
             };
+            let opaquely = |layer: &SkCanvas| {
+                layer.draw_rect(Rect::from_xywh(x, 20.0, 30.0, 30.0), &opaque);
+            };
             if let Some(outcome) = run_cast(
                 canvas,
                 &[shadow],
                 Some(Rect::from_xywh(10.0, 10.0, 80.0, 50.0)),
                 Depth::Floats,
                 &Paint::default(),
-                0.6,
                 |layer| {
                     layer.draw_rect(
                         Rect::from_xywh(20.0, 20.0, 30.0, 30.0),
                         &translucent,
                     );
                 },
-                |layer| {
-                    layer.draw_rect(
-                        Rect::from_xywh(x, 20.0, 30.0, 30.0),
-                        &opaque,
-                    );
+                Cast {
+                    canvas,
+                    draw: &opaquely,
+                    alpha: 0.6,
+                    run: None,
                 },
             ) {
                 outcome.composite(surface.canvas(), &Paint::default());

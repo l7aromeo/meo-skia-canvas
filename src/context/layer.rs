@@ -3284,9 +3284,9 @@ pub struct CoverageRun {
     /// The alpha the run was drawn at.
     pub alpha: f32,
     /// The kept run this draws and where, for the run's blur to be kept --
-    /// see [`run_mask`]. `None` the first time a run is drawn, which is not
-    /// kept, and for a run whose shadow is cast from this copy, which takes
-    /// no blur from a kept run.
+    /// see [`run_mask`] -- or for a shadow cast from this copy to be kept by
+    /// where the run lies -- see [`chain::Cast`]. `None` the first time a
+    /// run is drawn, which is not kept.
     pub kept: Option<Kept>,
 }
 
@@ -3891,14 +3891,14 @@ impl Group {
                 let opaque = coverage
                     .as_deref()
                     .filter(|_| eight_bits_on_cpu(canvas))
-                    .and_then(|run| Some((run.alpha, run.picture.picture()?)));
+                    .and_then(|run| Some((run, run.picture.picture()?)));
                 let opaquely = |picture: &Picture, layer: &SkCanvas| {
                     self.draw_chained_as(layer, target, &back, |layer| {
                         layer.draw_picture(picture, None, None);
                     })
                 };
                 let outcome = match opaque {
-                    Some((alpha, picture))
+                    Some((run, picture))
                         if matches!(
                             steps,
                             [Step::Shadow {
@@ -3909,22 +3909,41 @@ impl Group {
                     {
                         #[cfg(test)]
                         CAST_RUNS.with(|runs| runs.set(runs.get() + 1));
+                        // A kept run is found by where its picture is played
+                        // in the canvas's pixels, as the coverage route finds
+                        // it -- see `run_mask::Placed` -- the chain's layer
+                        // scale applied after; but not under a destination,
+                        // which `confine` cuts the layer by where the run
+                        // lies, so that where it lies no longer decides the
+                        // cast's pixels.
+                        let to_canvas =
+                            Matrix::concat(&back, &self.contents_matrix);
                         chain::run_cast(
                             canvas,
                             steps,
                             content,
                             Depth::Floats,
                             &paint,
-                            byte_alpha(alpha),
                             |layer| self.draw_chained(layer, target, &back),
-                            |layer| opaquely(picture, layer),
+                            chain::Cast {
+                                canvas,
+                                draw: &|layer| opaquely(picture, layer),
+                                alpha: byte_alpha(run.alpha),
+                                run: run
+                                    .kept
+                                    .as_ref()
+                                    .filter(|_| self.within.is_none())
+                                    .map(|kept| (kept, to_canvas)),
+                            },
                         )
                     }
-                    Some((alpha, picture))
+                    Some((run, picture))
                         if matches!(steps, [Step::Blur(_)]) =>
                     {
                         let mut gained = paint.clone();
-                        gained.set_alpha_f(paint.alpha_f() * byte_alpha(alpha));
+                        gained.set_alpha_f(
+                            paint.alpha_f() * byte_alpha(run.alpha),
+                        );
                         chain::run(
                             canvas,
                             steps,
@@ -7622,6 +7641,8 @@ mod shadow_run_tests {
 
     use std::ops::Range;
 
+    use skia_safe::IRect;
+
     use super::CAST_RUNS;
     use crate::{context::exact_blur, pixels::PixelDepth, prelude::*};
 
@@ -7946,6 +7967,552 @@ mod shadow_run_tests {
         ];
         for (case, expected, run) in cases {
             assert_eq!(played(&run).1, expected, "{case}");
+        }
+    }
+
+    /// One page of [`pages`]: `text` in `font` filled with `fill` at `at`.
+    #[derive(Clone, Copy)]
+    struct Page<'a> {
+        text: &'a str,
+        font: &'a str,
+        fill: &'a str,
+        at: (f32, f32),
+    }
+
+    /// The font every page is drawn in unless it says otherwise: 60px
+    /// Oswald, registered as [`OSWALD`].
+    const SIXTY: &str = "60px ShadowRunOswald";
+
+    const HAMBURGEFONSTIV: Page = Page {
+        text: "Hamburgefonstiv",
+        font: SIXTY,
+        fill: TRANSLUCENT.fill,
+        at: AT,
+    };
+
+    /// What a page of [`pages`] drew: its premultiplied pixels, how many
+    /// layers a shadow was cast into, how many kept results it took, and
+    /// how many bytes of casts' alphas it kept.
+    struct Paged {
+        pixels: Vec<u8>,
+        cast_layers: usize,
+        taken: usize,
+        cast_bytes: usize,
+        /// The region the page's cast chain ran on, where it ran one.
+        region: Option<IRect>,
+    }
+
+    /// `pages` drawn in turn through `filter` on one eight-bit CPU page of
+    /// [`PAGE`], cleared before each, kept results taken where `kept` says.
+    /// One page, its font set only where a page's differs from the one
+    /// before, because a run is kept by the canvas state it is laid out
+    /// under -- see `node::typography::LaidOutKey`.
+    fn pages(pages: &[Page], filter: &str, kept: bool) -> Vec<Paged> {
+        use crate::context::{
+            chain::{CAST_LAYERS, CAST_REGION},
+            kept::{CAST_BYTES, FOUND, KEPT},
+        };
+        FontLibrary::new()
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        KEPT.set(kept);
+        let mut canvas = Canvas::with_options(
+            PAGE.0 as f32,
+            PAGE.1 as f32,
+            CanvasOptions {
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        canvas.context().set_filter_css(filter).expect("a filter");
+        let mut font = "";
+        let drawn = pages
+            .iter()
+            .map(|page| {
+                let ctx = canvas.context();
+                if page.font != font {
+                    assert!(ctx.set_font_css(page.font));
+                    font = page.font;
+                }
+                ctx.clear_rect(0.0, 0.0, PAGE.0 as f32, PAGE.1 as f32);
+                ctx.set_fill_style_css(page.fill).expect("a colour");
+                let (layers, taken, bytes) =
+                    (CAST_LAYERS.get(), FOUND.get().taken, CAST_BYTES.get());
+                CAST_REGION.set(None);
+                ctx.fill_text(page.text, page.at.0, page.at.1, None);
+                let pixels = canvas
+                    .to_image_data(
+                        None,
+                        &ImageDataExport {
+                            pixels: PixelExportOptions {
+                                premultiplied: true,
+                                ..PixelExportOptions::default()
+                            },
+                            ..ImageDataExport::default()
+                        },
+                    )
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec();
+                Paged {
+                    pixels,
+                    cast_layers: CAST_LAYERS.get() - layers,
+                    taken: FOUND.get().taken - taken,
+                    cast_bytes: CAST_BYTES.get() - bytes,
+                    region: CAST_REGION.get(),
+                }
+            })
+            .collect();
+        KEPT.set(true);
+        drawn
+    }
+
+    /// `page` drawn through `filter` on a page of its own, nothing kept
+    /// taken: what any page drawing it has to land.
+    fn alone(page: Page, filter: &str) -> Vec<u8> {
+        pages(&[page], filter, false).remove(0).pixels
+    }
+
+    #[test]
+    fn a_shadow_cast_from_a_kept_run_is_taken_without_drawing_its_cast() {
+        // A run is kept from its second draw -- see `Typesetter::laid_out`
+        // -- and a result from its key's second sighting -- see
+        // `kept::Seen` -- so the fourth page is the first that can take one.
+        // The first, whose run is not yet kept, casts by its copy's alphas,
+        // and keeps them where the page drawn alone sighted them before.
+        let filter = TRANSLUCENT.filter;
+        let reference = alone(HAMBURGEFONSTIV, filter);
+        let drawn = pages(&[HAMBURGEFONSTIV; 5], filter, true);
+        for (i, page) in drawn.iter().enumerate() {
+            assert!(page.pixels == reference, "page {i} parts from its own");
+        }
+        assert!(drawn[0].cast_layers > 0, "the control: no cast was drawn");
+        for page in &drawn[1..] {
+            assert_eq!(page.cast_bytes, 0, "a cast's alphas were kept");
+        }
+        for page in &drawn[3..] {
+            assert_eq!(page.taken, 1, "nothing kept was taken");
+            assert_eq!(page.cast_layers, 0, "the cast was drawn");
+        }
+    }
+
+    #[test]
+    fn a_shadow_cast_from_a_run_moved_by_whole_pixels_takes_its_result() {
+        // Moved by whole pixels, a run's glyphs lie in the classes they did,
+        // so its copy blits the same masks, moved -- see
+        // `run_mask::CastKey` -- and its input is the same to the byte.
+        let filter = TRANSLUCENT.filter;
+        let moved = |dx: f32, dy: f32| Page {
+            at: (AT.0 + dx, AT.1 + dy),
+            ..HAMBURGEFONSTIV
+        };
+        let places = [moved(1.0, 0.0), moved(0.0, 1.0), moved(-7.0, 3.0)];
+        let mut drawn = vec![HAMBURGEFONSTIV; 4];
+        drawn.extend(places);
+        let drawn = pages(&drawn, filter, true);
+        for (page, paged) in places.iter().zip(&drawn[4..]) {
+            assert!(
+                paged.pixels == alone(*page, filter),
+                "{:?} parts from its own",
+                page.at
+            );
+            assert_eq!(paged.taken, 1, "{:?} took nothing kept", page.at);
+            assert_eq!(paged.cast_layers, 0, "{:?} drew its cast", page.at);
+        }
+    }
+
+    #[test]
+    fn a_shadow_cast_from_a_run_moved_into_another_placement_misses() {
+        // A run whose alpha is a byte of 1 lands that byte where its
+        // coverage is whole and nothing elsewhere, so two placements alike
+        // in their whole pixels draw the same input; their copies, whose
+        // edges part, are told apart by where the run lies alone. "I" at
+        // 30.3 lies 242.4 eighths of a pixel in, short of 243, an odd eighth
+        // its placement turns at: 30.33 lies in its class, 30.4 past it in
+        // the next -- see `run_mask::PLACEMENT_STEPS`.
+        let filter = TRANSLUCENT.filter;
+        let at = |x: f32| Page {
+            text: "I",
+            font: SIXTY,
+            fill: "rgba(200, 80, 30, 0.004)",
+            at: (x, AT.1),
+        };
+        let (within, across) = (at(30.33), at(30.4));
+        let opaque = |page: Page<'static>| -> Page<'static> {
+            Page {
+                fill: "rgb(200, 80, 30)",
+                ..page
+            }
+        };
+        assert!(
+            alone(at(30.3), "none") == alone(across, "none"),
+            "the control: the two placements' inputs part"
+        );
+        assert!(
+            alone(opaque(at(30.3)), "none") != alone(opaque(across), "none"),
+            "the control: the two placements' copies are alike"
+        );
+        let mut drawn = vec![at(30.3); 4];
+        drawn.extend([across, within]);
+        let drawn = pages(&drawn, filter, true);
+        assert_eq!(drawn[3].taken, 1, "the control: nothing kept was taken");
+        let (moved, inside) = (&drawn[4], &drawn[5]);
+        assert!(moved.pixels == alone(across, filter), "moved parts");
+        assert_eq!(moved.taken, 0, "taken across a placement");
+        assert!(moved.cast_layers > 0, "the cast moved was not drawn");
+        assert!(inside.pixels == alone(within, filter), "within parts");
+        assert_eq!(inside.taken, 1, "nothing kept was taken within a class");
+    }
+
+    /// Whether a position `step` eighths of a pixel in is one Skia's
+    /// placement of a glyph's mask turns at: an odd eighth or a half -- see
+    /// `run_mask::turns_at`, which this restates for the test to choose
+    /// positions by.
+    fn turns(step: i64) -> bool {
+        let within = step.rem_euclid(8);
+        within == 4 || within % 2 == 1
+    }
+
+    /// Whether moving a glyph at `x` by `by` takes it past a step its
+    /// placement turns at, and how near either place lies to one, in
+    /// eighths.
+    fn moved_across(x: f64, by: f64) -> (bool, f64) {
+        let near = |x: f64| {
+            let steps = x * 8.0;
+            let below = steps.floor() as i64;
+            let fraction = steps - steps.floor();
+            [(below, fraction), (below + 1, 1.0 - fraction)]
+                .into_iter()
+                .filter(|(step, _)| turns(*step))
+                .map(|(_, distance)| distance)
+                .fold(1.0, f64::min)
+        };
+        let (from, to) =
+            ((x * 8.0).floor() as i64, ((x + by) * 8.0).floor() as i64);
+        ((from + 1..=to).any(turns), near(x).min(near(x + by)))
+    }
+
+    #[test]
+    fn a_shadow_cast_from_a_run_whose_glyphs_part_in_placement_misses() {
+        // "II" moved so that its first glyph stays in its placement class
+        // and its second crosses into the next: a key that classed the
+        // run's origin alone would take the result, the second glyph's
+        // edges cast otherwise. The alpha a byte of 1, as in
+        // `a_shadow_cast_from_a_run_moved_into_another_placement_misses`,
+        // so that only where the run lies tells the two apart.
+        use crate::context::run_mask::{RULE, Rule};
+        let filter = TRANSLUCENT.filter;
+        let advance = {
+            FontLibrary::new()
+                .use_paths(
+                    Some(OSWALD),
+                    ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+                )
+                .expect("registers");
+            let mut canvas = Canvas::new(10.0, 10.0);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(&format!("60px {OSWALD}")));
+            f64::from(ctx.measure_text("I", None).width)
+        };
+        let at = |x: f64| Page {
+            text: "II",
+            font: SIXTY,
+            fill: "rgba(200, 80, 30, 0.004)",
+            at: (x as f32, AT.1),
+        };
+        // Clear of every turning step by a fifth of an eighth, and drawing
+        // the same input where it lands: the first such move found.
+        let margin = 0.2;
+        let (x, by) = (0..256)
+            .flat_map(|i| {
+                (1..16).map(move |j| {
+                    (30.0 + f64::from(i) / 256.0, f64::from(j) / 64.0)
+                })
+            })
+            .filter(|&(x, by)| {
+                let (first, near_first) = moved_across(x, by);
+                let (second, near_second) = moved_across(x + advance, by);
+                !first && second && near_first > margin && near_second > margin
+            })
+            .find(|&(x, by)| alone(at(x), "none") == alone(at(x + by), "none"))
+            .expect("a move that parts the glyphs and not the input");
+        let moved = at(x + by);
+        let mut drawn = vec![at(x); 4];
+        drawn.push(moved);
+        let paged = pages(&drawn, filter, true);
+        assert_eq!(paged[3].taken, 1, "the control: nothing kept was taken");
+        assert!(paged[4].pixels == alone(moved, filter), "moved parts");
+        assert_eq!(paged[4].taken, 0, "taken with a glyph in another class");
+        // The control: classed by its origin alone, the run is taken.
+        RULE.set(Rule::OriginOnly);
+        let origin_only = pages(&drawn, filter, true);
+        RULE.set(Rule::Exact);
+        assert_eq!(
+            origin_only[4].taken, 1,
+            "the control: a key of the origin alone misses too"
+        );
+    }
+
+    #[test]
+    fn a_shadow_cast_from_a_run_on_a_placement_step_is_taken_only_where_drawn()
+    {
+        // A run drawn from whole pixels can lay a glyph on a step its
+        // placement turns at, which no class can be trusted for: its cast is
+        // filed by exactly where the run lies -- see
+        // `run_mask::CastLies::Exactly` -- and taken on a page drawn alike,
+        // but not moved by a whole pixel, which the classes would allow.
+        use crate::context::run_mask::CAST_EXACTLY;
+        let filter = TRANSLUCENT.filter;
+        let at = |x: f32| Page {
+            at: (x, 86.0),
+            ..HAMBURGEFONSTIV
+        };
+        let x = (20..60)
+            .map(|x| x as f32)
+            .find(|&x| {
+                let before = CAST_EXACTLY.get();
+                pages(&[at(x); 2], filter, false);
+                CAST_EXACTLY.get() > before
+            })
+            .expect("a whole-pixel origin that lays a glyph on a step");
+        let moved = at(x + 1.0);
+        let mut drawn = vec![at(x); 5];
+        drawn.push(moved);
+        let drawn = pages(&drawn, filter, true);
+        let reference = alone(at(x), filter);
+        for page in &drawn[3..5] {
+            assert!(page.pixels == reference, "a page alike parts");
+            assert_eq!(page.taken, 1, "nothing kept was taken");
+            assert_eq!(page.cast_layers, 0, "the cast was drawn");
+        }
+        let last = &drawn[5];
+        assert!(last.pixels == alone(moved, filter), "moved parts");
+        assert_eq!(last.taken, 0, "taken moved off where it was drawn");
+        assert!(last.cast_layers > 0, "the cast moved was not drawn");
+    }
+
+    /// The alpha of each of `pixels`, premultiplied RGBA.
+    fn alphas(pixels: &[u8]) -> Vec<u8> {
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3])
+            .collect()
+    }
+
+    /// The first of `others` -- each a page and its copy drawn opaque --
+    /// whose input is `first`'s to the byte while its copy's alphas, all a
+    /// cast is read for, are not: a page only the cast's key tells apart
+    /// from `first`. `None` where no page is.
+    fn alike_but_cast_otherwise<'a>(
+        first: (Page<'a>, Page<'a>),
+        others: impl IntoIterator<Item = (Page<'a>, Page<'a>)>,
+    ) -> Option<Page<'a>> {
+        let input = alone(first.0, "none");
+        let cast = alphas(&alone(first.1, "none"));
+        others
+            .into_iter()
+            .find(|(page, opaque)| {
+                alone(*page, "none") == input
+                    && alphas(&alone(*opaque, "none")) != cast
+            })
+            .map(|(page, _)| page)
+    }
+
+    /// Whether `other`, drawn twice after `first` four times through
+    /// `filter`, takes a kept result on its second draw -- the first that
+    /// can be filed by its run -- and whether it lands what it does drawn
+    /// alone.
+    fn taken_after(first: Page, other: Page, filter: &str) -> (bool, bool) {
+        let mut drawn = vec![first; 4];
+        drawn.extend([other; 2]);
+        let drawn = pages(&drawn, filter, true);
+        assert_eq!(drawn[3].taken, 1, "the control: nothing kept was taken");
+        let last = &drawn[5];
+        (last.taken > 0, last.pixels == alone(other, filter))
+    }
+
+    #[test]
+    fn a_shadow_cast_from_a_run_on_a_placement_step_misses_moved_within_a_pixel()
+     {
+        // "I" laid on one step its placement turns at and moved to another
+        // in the same pixel: both filed by exactly where the run lies --
+        // see `run_mask::CastLies::Exactly` -- the stem's whole pixels, all
+        // an alpha of a byte of 1 lands, as they were and its edges moved.
+        // Only where the run lies tells the two casts apart.
+        use crate::context::run_mask::{CAST_EXACTLY, PLACEMENT_STEPS};
+        let at = |x: f32, fill| Page {
+            text: "I",
+            font: SIXTY,
+            fill,
+            at: (x, AT.1),
+        };
+        let (translucent, opaque) =
+            ("rgba(200, 80, 30, 0.004)", "rgb(200, 80, 30)");
+        let steps = (0..PLACEMENT_STEPS as u8)
+            .map(|step| 20.0 + f32::from(step) / PLACEMENT_STEPS as f32)
+            .filter(|&x| {
+                let before = CAST_EXACTLY.get();
+                pages(&[at(x, translucent); 2], TRANSLUCENT.filter, false);
+                CAST_EXACTLY.get() > before
+            })
+            .collect::<Vec<_>>();
+        // The chain's input is compared to the byte, its size with it, so
+        // only a step whose region is the first's tells anything of the key.
+        let region = |x: f32| {
+            pages(&[at(x, translucent)], TRANSLUCENT.filter, false)[0].region
+        };
+        let (x, moved) = steps
+            .iter()
+            .find_map(|&x| {
+                let others = steps
+                    .iter()
+                    .filter(|&&moved| moved != x && region(moved) == region(x))
+                    .map(|&moved| (at(moved, translucent), at(moved, opaque)));
+                alike_but_cast_otherwise((at(x, translucent), at(x, opaque)), others)
+                    .map(|moved| (x, moved))
+            })
+            .expect("two steps alike in their input and region and not in their cast");
+        let (taken, alike) =
+            taken_after(at(x, translucent), moved, TRANSLUCENT.filter);
+        assert!(alike, "moved to {} parts from its own", moved.at.0);
+        assert!(
+            !taken,
+            "moved to {} took the result where it was",
+            moved.at.0
+        );
+    }
+
+    #[test]
+    fn a_shadow_cast_from_another_run_with_the_same_input_misses() {
+        // "I" in Oswald at another weight: another run, its stem's edges
+        // elsewhere, its whole pixels -- all an alpha of a byte of 1 lands
+        // -- the same. Only the run in the cast's key tells them apart.
+        fn at<'a>(font: &'a str, fill: &'a str) -> Page<'a> {
+            Page {
+                text: "I",
+                font,
+                fill,
+                at: AT,
+            }
+        }
+        let (translucent, opaque) =
+            ("rgba(200, 80, 30, 0.004)", "rgb(200, 80, 30)");
+        let weights: Vec<String> = (41..=60)
+            .map(|weight| format!("{} 60px {OSWALD}", weight * 10))
+            .collect();
+        let other = alike_but_cast_otherwise(
+            (at(SIXTY, translucent), at(SIXTY, opaque)),
+            weights
+                .iter()
+                .map(|font| (at(font, translucent), at(font, opaque))),
+        )
+        .expect("a weight alike in its input and not in its cast");
+        let (taken, alike) =
+            taken_after(at(SIXTY, translucent), other, TRANSLUCENT.filter);
+        assert!(alike, "{} parts from its own", other.font);
+        assert!(!taken, "{} took the other run's result", other.font);
+    }
+
+    #[test]
+    fn a_shadow_cast_in_another_colour_with_the_same_input_misses() {
+        // Two greys that an alpha of a byte of 1 lands alike, premultiplied,
+        // but whose masks Skia blends by their luminance otherwise -- see
+        // `CoverageRun` -- so that their copies cover otherwise. Only the
+        // paint in the cast's key tells them apart.
+        let fills: Vec<(String, String)> = (128..=255)
+            .step_by(4)
+            .map(|level| {
+                (
+                    format!("rgba({level}, {level}, {level}, 0.004)"),
+                    format!("rgb({level}, {level}, {level})"),
+                )
+            })
+            .collect();
+        let at = |fill| Page {
+            text: "Hamburgefonstiv",
+            font: SIXTY,
+            fill,
+            at: AT,
+        };
+        let mut pairs =
+            fills.iter().map(|(fill, opaque)| (at(fill), at(opaque)));
+        let first = pairs.next().expect("a grey");
+        let other = alike_but_cast_otherwise(first, pairs)
+            .expect("a grey alike in its input and not in its cast");
+        let first = first.0;
+        let (taken, alike) = taken_after(first, other, TRANSLUCENT.filter);
+        assert!(alike, "{} parts from its own", other.fill);
+        assert!(!taken, "{} took the other colour's result", other.fill);
+    }
+
+    #[test]
+    fn a_shadow_cast_at_another_alpha_with_the_same_input_misses() {
+        // Text so small that no pixel is covered by half lands nothing at
+        // an alpha of a byte of 1 or 2 -- `(a * (c + 1)) >> 8` is 0 for a
+        // coverage `c` under 127 -- so the two draw the same input from the
+        // same cast. Their shadows, rounded once from the coverage times
+        // the alpha, are a level apart where the coverage is near half:
+        // only the alpha in the cast's key tells them apart.
+        let filter = "drop-shadow(3px 2px 1px black)";
+        let at = |fill| Page {
+            text: "iiiiiiii",
+            font: "3px ShadowRunOswald",
+            fill,
+            at: AT,
+        };
+        // Black, whose copy is drawn in the same colour at either alpha: a
+        // colour drawn at an alpha this small comes back from its byte
+        // otherwise, and the paint in the key would part them first.
+        let (one, two) =
+            (at("rgba(0, 0, 0, 0.004)"), at("rgba(0, 0, 0, 0.008)"));
+        assert!(
+            alone(one, "none") == alone(two, "none"),
+            "the control: the two alphas' inputs part"
+        );
+        assert!(
+            alone(one, filter) != alone(two, filter),
+            "the control: the two alphas' shadows are alike"
+        );
+        let (taken, alike) = taken_after(one, two, filter);
+        assert!(alike, "parts from its own");
+        assert!(!taken, "took the other alpha's result");
+    }
+
+    #[test]
+    fn a_shadow_cast_from_another_run_or_at_another_alpha_misses() {
+        let filter = TRANSLUCENT.filter;
+        let others = [
+            Page {
+                text: "Hamburgefonstiw",
+                ..HAMBURGEFONSTIV
+            },
+            Page {
+                fill: "rgba(200, 80, 30, 0.5)",
+                ..HAMBURGEFONSTIV
+            },
+            Page {
+                fill: "rgba(20, 60, 200, 0.6)",
+                ..HAMBURGEFONSTIV
+            },
+        ];
+        let mut drawn = vec![HAMBURGEFONSTIV; 4];
+        drawn.extend(others);
+        let drawn = pages(&drawn, filter, true);
+        assert_eq!(drawn[3].taken, 1, "the control: nothing kept was taken");
+        for (page, paged) in others.iter().zip(&drawn[4..]) {
+            assert!(
+                paged.pixels == alone(*page, filter),
+                "{} in {} parts from its own",
+                page.text,
+                page.fill
+            );
+            assert_eq!(paged.taken, 0, "{} in {} took", page.text, page.fill);
         }
     }
 }

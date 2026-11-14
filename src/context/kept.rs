@@ -30,7 +30,10 @@ use skia_safe::{
 use crate::{
     cache_map::{CacheHasher, KeptSets},
     cache_store::{Budget, Store, StoreKey, Stored},
-    context::chain::{Outcome, Step, coverage::Coverage},
+    context::{
+        chain::{Outcome, Step, coverage::Coverage},
+        run_mask::CastKey,
+    },
 };
 
 /// The bytes of chain results kept, across every thread: as many as the
@@ -84,6 +87,10 @@ thread_local! {
     /// Whether every input digested on this thread shares one digest, for
     /// a test to file different inputs under one key.
     pub(crate) static SHARED: Cell<bool> = const { Cell::new(false) };
+    /// How many bytes of casts' alphas [`ChainInput::keep`] has kept on
+    /// this thread, for a test to hold a cast filed by its run to keeping
+    /// none.
+    pub(crate) static CAST_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// How the results looked for on a thread fared: taken; refused, because
@@ -292,6 +299,19 @@ fn kind_of(info: &ImageInfo) -> (i32, i32, Option<(u32, u32)>) {
     )
 }
 
+/// What a shadow is cast from where that is not a chain's input -- see
+/// `chain::Cast` -- as the chain's result is filed under it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CastFrom {
+    /// The digest of the alpha of the cast's region, which is kept beside
+    /// the result and compared to the byte -- see [`ChainInput::cast_from`].
+    Alphas(u64),
+    /// The run the cast is drawn from and where -- see [`CastKey`] -- which
+    /// decides its pixels without them being drawn, so nothing of them is
+    /// kept.
+    Run(CastKey),
+}
+
 /// What a chain's result on the CPU is filed under: the digest of its
 /// input's pixels, the input's size and kind, every step, the scale the
 /// layer was drawn at, the alpha the last step takes, and what a shadow is
@@ -307,10 +327,10 @@ pub(crate) struct ChainKey {
     steps: Arc<[StepKey]>,
     scale: [u32; 2],
     gain: u32,
-    /// The digest of the alpha of what the chain's shadow is cast from,
-    /// where that is not its input, and the alpha the shadow takes it at --
-    /// see [`ChainInput::cast_from`].
-    cast: Option<(u64, u32)>,
+    /// What the chain's shadow is cast from, where that is not its input,
+    /// and the alpha the shadow takes it at -- see [`ChainInput::cast_from`]
+    /// and [`ChainInput::cast_placed`].
+    cast: Option<(CastFrom, u32)>,
 }
 
 impl StoreKey for ChainKey {
@@ -325,7 +345,7 @@ impl StoreKey for ChainKey {
 pub(crate) struct KeptChain {
     input: Arc<[u8]>,
     /// The alpha of what its shadow was cast from, where that was not its
-    /// input.
+    /// input and was filed by its pixels -- see [`CastFrom`].
     cast: Option<Arc<[u8]>>,
     output: Image,
 }
@@ -353,7 +373,8 @@ pub(crate) struct ChainInput {
     key: ChainKey,
     input: Pixels,
     /// The alpha of what the chain's shadow is cast from, where that is not
-    /// `input`, copied out once to be digested, compared and kept.
+    /// `input` and is filed by its pixels, copied out once to be digested,
+    /// compared and kept.
     cast: Option<Arc<[u8]>>,
 }
 
@@ -428,9 +449,20 @@ impl ChainInput {
             image: image.clone(),
             rect: read,
         })?;
-        self.key.cast = Some((digest(&cast), alpha.to_bits()));
+        self.key.cast =
+            Some((CastFrom::Alphas(digest(&cast)), alpha.to_bits()));
         self.cast = Some(cast);
         Some(self)
+    }
+
+    /// This input, its chain's shadow cast at `alpha` from the run `key`
+    /// names, drawn where it says, rather than from the input itself -- see
+    /// `chain::Cast`. The key decides the cast's pixels, so they are neither
+    /// drawn to be judged nor kept: the result is as large as one cast from
+    /// the input.
+    pub(crate) fn cast_placed(mut self, key: CastKey, alpha: f32) -> Self {
+        self.key.cast = Some((CastFrom::Run(key), alpha.to_bits()));
+        self
     }
 
     /// The result kept for this input, where the input it was made from is
@@ -462,6 +494,10 @@ impl ChainInput {
         let Some(input) = rows_copied(&self.input) else {
             return;
         };
+        #[cfg(test)]
+        CAST_BYTES.set(
+            CAST_BYTES.get() + self.cast.as_ref().map_or(0, |cast| cast.len()),
+        );
         CHAINS.lock().put(
             self.key,
             KeptChain {
