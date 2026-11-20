@@ -1599,8 +1599,12 @@ under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
 for -- inside a layer a group opens, where the pixels cannot be read back and
 the CPU's raster is composited instead, a level apart wherever its two
 roundings differ from the CPU's one (9,792 of 16,384 pixels on a translucent
-radial over a fill, measured by compositing at the page); a GPU canvas drawn with `drawCanvas` into another under a
-transform other than a whole pixel's translation, where the image would be
+radial over a fill, measured by compositing at the page), unless the layer
+also holds a run of text drawn over a read back, whose entries then play on a
+surface of their own, where the gradient is drawn as on the page
+(`layer::played_on_a_root`); a GPU canvas drawn with `drawCanvas` into
+another under a transform other than a whole pixel's translation, where the
+image would be
 resampled and the draw is made on the CPU at the destination's pixels instead,
 inside the layer the source is drawn through and composited through the draw's
 blend -- exact inside an opaque `source-over` sweep scaled by 2 or 0.5, moved

@@ -191,6 +191,20 @@ impl Drop for PlaneScope {
     }
 }
 
+/// The samples a pixel of `canvas`'s surface has, where a [`LayerScope`] is
+/// open for it: what a scope opened for a surface made by its device -- see
+/// `chain::layer_surface` -- names, since that surface takes the count.
+pub(crate) fn samples(canvas: &SkCanvas) -> Option<usize> {
+    let at = address(canvas);
+    POOL.with_borrow(|pool| {
+        pool.scopes
+            .iter()
+            .rev()
+            .find(|(scope, _)| *scope == at)
+            .map(|(_, samples)| *samples)
+    })
+}
+
 fn address(canvas: &SkCanvas) -> usize {
     std::ptr::from_ref(canvas).addr()
 }
@@ -211,14 +225,7 @@ pub(crate) fn key(canvas: &SkCanvas, info: &ImageInfo) -> Option<Key> {
     }
     #[cfg(any(feature = "metal", feature = "vulkan"))]
     {
-        let at = address(canvas);
-        let samples = POOL.with_borrow(|pool| {
-            pool.scopes
-                .iter()
-                .rev()
-                .find(|(scope, _)| *scope == at)
-                .map(|(_, samples)| *samples)
-        })?;
+        let samples = samples(canvas)?;
         Some(Key {
             context: canvas.direct_context()?.id(),
             samples,

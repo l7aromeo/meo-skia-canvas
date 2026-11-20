@@ -144,4 +144,49 @@ describe("Glyphs drawn into one another under a blend that reads the page", () =
         }
     assert.deepEqual(apart, []);
   });
+
+  test("a page drawn into a GPU canvas lands the bytes the CPU page does", (t) => {
+    if (new Canvas(1, 1).engine.renderer != "GPU") return t.skip("no GPU here");
+    // drawCanvas files a page holding a blend as a group drawn through a
+    // layer of its own, whose pixels cannot be read back; the group plays
+    // its entries on a surface of their own instead, where its runs are
+    // drawn as on a page. Played inside the layer, the page stood 1 to 2
+    // levels from the CPU's under every one of the 14 blends.
+    const page = (blend, gpu) => {
+      const canvas = new Canvas(320, 160);
+      canvas.gpu = gpu;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "rgb(220 180 60)";
+      ctx.fillRect(0, 0, 160, 160);
+      ctx.fillStyle = "rgb(30 120 90)";
+      ctx.fillRect(160, 0, 160, 160);
+      ctx.font = "16px OverlapOswald";
+      ctx.letterSpacing = "-12px";
+      ctx.globalCompositeOperation = blend;
+      ctx.fillStyle = "rgb(40 90 160 / 0.8)";
+      for (let line = 0; line < 4; line++)
+        ctx.fillText("Hello Wq", 10, 16 + line * 18);
+      return canvas;
+    };
+    const into = (source, gpu) => {
+      const canvas = new Canvas(320, 160);
+      canvas.gpu = gpu;
+      const ctx = canvas.getContext("2d");
+      ctx.drawCanvas(source, 0, 0);
+      return { data: ctx.getImageData(0, 0, 320, 160).data, canvas };
+    };
+    const apart = [];
+    for (const blend of READ_IN_THE_SHADER)
+      for (const source of [false, true]) {
+        const cpu = into(page(blend, false), false).data;
+        const gpu = into(page(blend, source), true);
+        assert.equal(gpu.canvas.engine.renderer, "GPU", "drawn into the GPU");
+        let most = 0;
+        for (let i = 0; i < cpu.length; i++)
+          most = Math.max(most, Math.abs(cpu[i] - gpu.data[i]));
+        if (most > 0)
+          apart.push(`${blend}, source on the GPU ${source}: ${most} levels`);
+      }
+    assert.deepEqual(apart, []);
+  });
 });

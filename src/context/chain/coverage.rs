@@ -32,7 +32,6 @@ use super::{
 use crate::{
     context::{blur_mask::baked_image, exact_blur},
     gpu::{RenderingEngine, engine_of},
-    started,
 };
 
 /// A draw's coverage, blurred, before it is coloured: one float a pixel of
@@ -383,6 +382,21 @@ pub(crate) struct Coverage {
     sigma: (f32, f32),
 }
 
+/// A [`Plane::Drawn`] for `canvas` over `drawn`: the device's, or one in
+/// memory where the device makes none -- either under the canvas's surface
+/// properties, so that text drawn on it is covered under the page's
+/// contrast and gamma -- see `super::raster_layer`.
+fn drawn_plane(canvas: &SkCanvas, drawn: IRect) -> Option<Surface> {
+    let info = plane_info(canvas, Plane::Drawn, drawn);
+    #[cfg(test)]
+    if super::NO_DEVICE_LAYERS.get() {
+        return super::raster_layer(canvas, &info);
+    }
+    canvas
+        .new_surface(&info, None)
+        .or_else(|| super::raster_layer(canvas, &info))
+}
+
 impl Coverage {
     /// The coverage of what `draw` draws onto `canvas`, on the plane
     /// [`run`](super::run) would make its layer for a blur of `sigma`: placed
@@ -410,12 +424,7 @@ impl Coverage {
         } = Placement::of(canvas, sigma, content)?;
         let surface = |drawn: IRect| {
             let surface = match plane {
-                Plane::Drawn => {
-                    let info = plane_info(canvas, plane, drawn);
-                    canvas
-                        .new_surface(&info, None)
-                        .or_else(|| started::raster(&info, None, None))
-                }
+                Plane::Drawn => drawn_plane(canvas, drawn),
                 // On the CPU, where no layer is kept: see `pool::key`.
                 Plane::Alpha => layer_surface(canvas, Depth::Bytes, drawn)
                     .map(|(surface, _)| surface),
@@ -1382,6 +1391,31 @@ mod tests {
     /// Props no canvas has by default, told apart by their pixel geometry.
     fn props(geometry: PixelGeometry) -> SurfaceProps {
         SurfaceProps::new(SurfacePropsFlags::default(), geometry)
+    }
+
+    #[test]
+    fn a_drawn_plane_in_memory_takes_the_canvas_s_text_contrast_and_gamma() {
+        // A drawn plane the device does not make is made in memory, apart
+        // from the canvas, and takes the canvas's surface properties all the
+        // same, so that a run's coverage is drawn under the page's contrast
+        // and gamma. Neither value here is a default on any platform.
+        let info = ImageInfo::new_n32_premul((40, 30), None);
+        let props = SurfaceProps::new_with_text_properties(
+            SurfacePropsFlags::default(),
+            PixelGeometry::Unknown,
+            0.7,
+            2.0,
+        );
+        let mut page =
+            started::raster(&info, None, Some(&props)).expect("a page");
+        for memory in [false, true] {
+            super::super::NO_DEVICE_LAYERS.set(memory);
+            let plane =
+                super::drawn_plane(page.canvas(), IRect::from_wh(20, 10));
+            super::super::NO_DEVICE_LAYERS.set(false);
+            let plane = plane.expect("a plane");
+            assert_eq!(plane.props(), &props, "made in memory: {memory}");
+        }
     }
 
     #[test]
