@@ -135,15 +135,15 @@ const REQUIRE_GPU: &str = "MEO_SKIA_CANVAS_REQUIRE_GPU";
 /// whose GPU engine broke. Fails as well where [`REQUIRE_GPU`] names a device
 /// the engine is not on.
 ///
-/// Ignored, saying why, where the Skia compiled lacks the atlas cap --
-/// `cfg(meo_atlas_size)`, from `build.rs`.
+/// Ignored, saying why, where the Skia compiled lacks the atlas placement --
+/// `cfg(meo_atlas_placement)`, from `build.rs`.
 #[test]
 #[cfg_attr(
-    not(meo_atlas_size),
-    ignore = "crates.io's Skia, without containers/skia-atlas-size.patch, \
-              moves a path's coverage at an atlas row of 512 or more, for a \
-              reason not known and at pixels that vary by device, so there is \
-              no figure to hold it to"
+    not(meo_atlas_placement),
+    ignore = "crates.io's Skia, without containers/skia-atlas-placement.patch, \
+              moves a path's coverage with where the flush packs it in the \
+              atlas, at pixels that vary by device, so there is no figure to \
+              hold it to"
 )]
 fn a_path_over_a_blurred_one_keeps_its_coverage() -> Result<(), Error> {
     let draws: Vec<Value> =

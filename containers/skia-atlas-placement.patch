@@ -1,0 +1,422 @@
+--- a/skia-bindings/skia/src/gpu/tessellate/Tessellation.h
++++ b/skia-bindings/skia/src/gpu/tessellate/Tessellation.h
+@@ -28,6 +28,12 @@
+ // Don't allow linearized segments to be off by more than 1/4th of a pixel from the true curve.
+ constexpr static float kPrecision = 4;
+ 
++// The grid, in steps per pixel, that a path's points are rounded to before a whole-pixel offset
++// moves them to their place in a path atlas. Atlas coordinates are under 2048, where a float's
++// spacing is 2^-12 or finer, so a point on this grid plus a whole number is exact: the path lands
++// on the same fractions of a pixel, and covers the same samples, wherever the atlas places it.
++constexpr static float kAtlasGrid = 4096;
++
+ // This is the maximum number of subdivisions of a Bezier curve that can be represented in the fixed
+ // count vertex and index buffers. If rendering a curve that requires more subdivisions, it must be
+ // chopped.
+--- a/skia-bindings/skia/src/gpu/tessellate/AffineMatrix.h
++++ b/skia-bindings/skia/src/gpu/tessellate/AffineMatrix.h
+@@ -13,6 +13,7 @@
+ #include "include/core/SkTypes.h"
+ #include "src/core/SkUtils.h"
+ #include "src/core/SkVx.h"
++#include "src/gpu/tessellate/Tessellation.h"
+ 
+ namespace skgpu::tess {
+ 
+@@ -21,6 +22,11 @@
+ //
+ // This class stores redundant data, so it is best used only as a stack-allocated object at the
+ // point of use.
++// Rounds `p` to kAtlasGrid and moves it by the whole-pixel `offset`, exactly: see kAtlasGrid.
++SK_ALWAYS_INLINE skvx::float2 SnapToAtlasGrid(skvx::float2 p, skvx::float2 offset) {
++    return skvx::floor(p * kAtlasGrid + 0.5f) * (1 / kAtlasGrid) + offset;
++}
++
+ class AffineMatrix {
+ public:
+     AffineMatrix() = default;
+--- a/skia-bindings/skia/src/gpu/tessellate/PatchWriter.h
++++ b/skia-bindings/skia/src/gpu/tessellate/PatchWriter.h
+@@ -18,6 +18,7 @@
+ #include "src/core/SkUtils.h"
+ #include "src/core/SkVx.h"
+ #include "src/gpu/BufferWriter.h"
++#include "src/gpu/tessellate/AffineMatrix.h"
+ #include "src/gpu/tessellate/LinearTolerances.h"
+ #include "src/gpu/tessellate/MiddleOutPolygonTriangulator.h"
+ #include "src/gpu/tessellate/Tessellation.h"
+@@ -27,6 +28,7 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <math.h>
++#include <optional>
+ #include <tuple>
+ #include <type_traits>
+ #include <utility>
+@@ -454,7 +456,22 @@
+     // fan around).
+     ENABLE_IF(FanPointAttrib::kEnabled) updateFanPointAttrib(SkPoint fanPoint) {
+         SkASSERT(fAttribs & PatchAttribs::kFanPoint);
++        if (fAtlasOffset) {
++            fanPoint = sk_bit_cast<SkPoint>(
++                    SnapToAtlasGrid(sk_bit_cast<float2>(fanPoint), *fAtlasOffset));
++        }
+         fFanPoint = fanPoint;
++    }
++
++    // Takes the points written from here on as relative to a path's place in a path atlas, and
++    // writes each rounded to kAtlasGrid and moved by `offset`; or, with no offset, as they come.
++    // Curves are chopped and measured before the move, so neither depends on the offset. For
++    // fills: a stroke's circles and squares are written as they come.
++    void setAtlasOffset(std::optional<SkIPoint> offset) {
++        fAtlasOffset.reset();
++        if (offset) {
++            fAtlasOffset = float2(static_cast<float>(offset->x()), static_cast<float>(offset->y()));
++        }
+     }
+ 
+     // Updates the stroke params that are written out with each patch.
+@@ -668,6 +685,15 @@
+     }
+ 
+     AI void writePatch(float2 p0, float2 p1, float2 p2, float2 p3, float explicitCurveType) {
++        if (fAtlasOffset) {
++            p0 = SnapToAtlasGrid(p0, *fAtlasOffset);
++            p1 = SnapToAtlasGrid(p1, *fAtlasOffset);
++            p2 = SnapToAtlasGrid(p2, *fAtlasOffset);
++            // A conic's and a triangle's p3 holds its weight and markers, not a point.
++            if (explicitCurveType == kCubicCurveType) {
++                p3 = SnapToAtlasGrid(p3, *fAtlasOffset);
++            }
++        }
+         if constexpr (kTrackJoinControlPoints) {
+             // Store this even if we don't write a patch to remember we should add caps
+             fDeferredPatch.fCurveType = explicitCurveType;
+@@ -898,6 +924,8 @@
+     JoinAttrib     fJoin;
+     FanPointAttrib fFanPoint;
+     StrokeAttrib   fStrokeParams;
++    // See setAtlasOffset().
++    std::optional<float2> fAtlasOffset;
+     ColorAttrib    fColor;
+     DepthAttrib    fDepth;
+ 
+--- a/skia-bindings/skia/src/gpu/ganesh/tessellate/PathTessellator.h
++++ b/skia-bindings/skia/src/gpu/ganesh/tessellate/PathTessellator.h
+@@ -18,6 +18,7 @@
+ #include "src/gpu/ganesh/geometry/GrInnerFanTriangulator.h"
+ #include "src/gpu/tessellate/Tessellation.h"
+ 
++#include <optional>
+ #include <tuple>
+ 
+ class GrMeshDrawTarget;
+@@ -35,13 +36,21 @@
+         PathDrawList(const SkMatrix& pathMatrix,
+                      const SkPath& path,
+                      const SkPMColor4f& color,
+-                     PathDrawList* next = nullptr)
+-                : fPathMatrix(pathMatrix), fPath(path), fColor(color), fNext(next) {}
++                     PathDrawList* next = nullptr,
++                     std::optional<SkIPoint> atlasOffset = std::nullopt)
++                : fPathMatrix(pathMatrix)
++                , fPath(path)
++                , fColor(color)
++                , fNext(next)
++                , fAtlasOffset(atlasOffset) {}
+ 
+         SkMatrix fPathMatrix;
+         SkPath fPath;
+         SkPMColor4f fColor;
+         PathDrawList* fNext;
++        // Where a path drawn into a path atlas goes: fPathMatrix maps it relative to that place,
++        // and each point is rounded to tess::kAtlasGrid and moved by this whole-pixel offset.
++        std::optional<SkIPoint> fAtlasOffset;
+ 
+         struct Iter {
+             void operator++() { fHead = fHead->fNext; }
+--- a/skia-bindings/skia/src/gpu/ganesh/tessellate/PathTessellator.cpp
++++ b/skia-bindings/skia/src/gpu/ganesh/tessellate/PathTessellator.cpp
+@@ -47,8 +47,11 @@
+                          const SkMatrix& shaderMatrix,
+                          const PathTessellator::PathDrawList& pathDrawList) {
+     patchWriter.setShaderTransform(wangs_formula::VectorXform{shaderMatrix});
+-    for (auto [pathMatrix, path, color] : pathDrawList) {
+-        AffineMatrix m(pathMatrix);
++    for (const PathTessellator::PathDrawList* draw = &pathDrawList; draw; draw = draw->fNext) {
++        const SkPath& path = draw->fPath;
++        const SkPMColor4f& color = draw->fColor;
++        AffineMatrix m(draw->fPathMatrix);
++        patchWriter.setAtlasOffset(draw->fAtlasOffset);
+         if (patchWriter.attribs() & PatchAttribs::kColor) {
+             patchWriter.updateColorAttrib(color);
+         }
+@@ -94,8 +97,11 @@
+                          const SkMatrix& shaderMatrix,
+                          const PathTessellator::PathDrawList& pathDrawList) {
+     patchWriter.setShaderTransform(wangs_formula::VectorXform{shaderMatrix});
+-    for (auto [pathMatrix, path, color] : pathDrawList) {
+-        AffineMatrix m(pathMatrix);
++    for (const PathTessellator::PathDrawList* draw = &pathDrawList; draw; draw = draw->fNext) {
++        const SkPath& path = draw->fPath;
++        const SkPMColor4f& color = draw->fColor;
++        AffineMatrix m(draw->fPathMatrix);
++        patchWriter.setAtlasOffset(draw->fAtlasOffset);
+         if (patchWriter.attribs() & PatchAttribs::kColor) {
+             patchWriter.updateColorAttrib(color);
+         }
+--- a/skia-bindings/skia/src/gpu/ganesh/tessellate/GrPathTessellationShader.h
++++ b/skia-bindings/skia/src/gpu/ganesh/tessellate/GrPathTessellationShader.h
+@@ -56,11 +56,16 @@
+     //
+     // If PatchAttribs::kFanPoint is set, an additional triangle is added, connecting the base of
+     // the curve to the fan point.
++    //
++    // `inAtlas` draws patches written for a path atlas (see PatchWriter::setAtlasOffset): each
++    // curve is evaluated relative to its first point, rounded to tess::kAtlasGrid and moved back,
++    // so that its vertices do not depend on where in the atlas it lies.
+     static GrPathTessellationShader* Make(const GrShaderCaps&,
+                                           SkArenaAlloc*,
+                                           const SkMatrix& viewMatrix,
+                                           const SkPMColor4f&,
+-                                          PatchAttribs);
++                                          PatchAttribs,
++                                          bool inAtlas = false);
+ 
+     // Returns the stencil settings to use for a standard Redbook "stencil" pass.
+     static const GrUserStencilSettings* StencilPathSettings(GrFillRule fillRule) {
+--- a/skia-bindings/skia/src/gpu/ganesh/tessellate/GrPathTessellationShader.cpp
++++ b/skia-bindings/skia/src/gpu/ganesh/tessellate/GrPathTessellationShader.cpp
+@@ -88,9 +88,10 @@
+ class MiddleOutShader : public GrPathTessellationShader {
+ public:
+     MiddleOutShader(const GrShaderCaps& shaderCaps, const SkMatrix& viewMatrix,
+-                    const SkPMColor4f& color, PatchAttribs attribs)
++                    const SkPMColor4f& color, PatchAttribs attribs, bool inAtlas)
+             : GrPathTessellationShader(kTessellate_MiddleOutShader_ClassID,
+-                                       GrPrimitiveType::kTriangles, viewMatrix, color, attribs) {
++                                       GrPrimitiveType::kTriangles, viewMatrix, color, attribs)
++            , fInAtlas(inAtlas) {
+         fInstanceAttribs.emplace_back("p01", kFloat4_GrVertexAttribType, SkSLType::kFloat4);
+         fInstanceAttribs.emplace_back("p23", kFloat4_GrVertexAttribType, SkSLType::kFloat4);
+         if (fAttribs & PatchAttribs::kFanPoint) {
+@@ -130,11 +131,14 @@
+         // GrGeometryProcessor::getAttributeKey().
+         // Either way, we get the correct key by ignoring .
+         b->add32((uint32_t)(fAttribs & ~PatchAttribs::kWideColorIfEnabled));
++        b->addBool(fInAtlas, "inAtlas");
+     }
+     std::unique_ptr<ProgramImpl> makeProgramImpl(const GrShaderCaps&) const final;
+ 
+     constexpr static int kMaxInstanceAttribCount = 5;
+     STArray<kMaxInstanceAttribCount, Attribute> fInstanceAttribs;
++    // See GrPathTessellationShader::Make().
++    const bool fInAtlas;
+ };
+ 
+ std::unique_ptr<GrGeometryProcessor::ProgramImpl> MiddleOutShader::makeProgramImpl(
+@@ -147,6 +151,12 @@
+                             GrGPArgs* gpArgs) override {
+             const MiddleOutShader& middleOutShader = shader.cast<MiddleOutShader>();
+             v->defineConstant("PRECISION", skgpu::tess::kPrecision);
++            if (middleOutShader.fInAtlas) {
++                v->defineConstant("ATLAS_GRID", skgpu::tess::kAtlasGrid);
++                // Written as a quotient, which "%f" would not keep: a power of two, so
++                // multiplying by it is exact where a division need not be.
++                v->defineConstantf("float", "ATLAS_STEP", "1.0 / %.1f", skgpu::tess::kAtlasGrid);
++            }
+             v->defineConstant("MAX_FIXED_RESOLVE_LEVEL",
+                               (float)skgpu::tess::kMaxResolveLevel);
+             v->defineConstant("MAX_FIXED_SEGMENTS",
+@@ -197,7 +207,19 @@
+                                                       ": p01.xy;"
+             "} else {"
+                 "float2 p0=p01.xy, p1=p01.zw, p2=p23.xy, p3=p23.zw;"
+-                "float w = -1;"  // w < 0 tells us to treat the instance as an integral cubic.
++                "float w = -1;");  // w < 0 tells us to treat the instance as an integral cubic.
++            if (middleOutShader.fInAtlas) {
++                // The points are on the atlas grid, so these differences are exact, and the curve
++                // is evaluated the same wherever in the atlas it lies. A conic's p3 holds its
++                // weight, not a point.
++                v->codeAppend(
++                "float2 origin = p0;"
++                "p0 = float2(0);"
++                "p1 -= origin;"
++                "p2 -= origin;"
++                "if (!is_conic_curve()) { p3 -= origin; }");
++            }
++            v->codeAppend(
+                 "float maxResolveLevel;"
+                 "if (is_conic_curve()) {"
+                     // Conics are 3 points, with the weight in p3.
+@@ -241,10 +263,20 @@
+                     "float v = w + 1 - u;"  // == mix(w, 1, T)
+                     "float uv = mix(u, v, T);"
+ 
+-                    "localcoord = (w < 0) ?" /*cubic*/ "abcd:" /*conic*/ "abc/uv;"
++                    "localcoord = (w < 0) ?" /*cubic*/ "abcd:" /*conic*/ "abc/uv;");
++            if (middleOutShader.fInAtlas) {
++                // Back on the grid, so that adding the origin is exact.
++                v->codeAppend(
++                    "localcoord = floor(localcoord * ATLAS_GRID + 0.5) * ATLAS_STEP;");
++            }
++            v->codeAppend(
+                 "} else {"
+                     "localcoord = (fixedVertexID == 0) ? p0.xy : p3.xy;"
+-                "}"
++                "}");
++            if (middleOutShader.fInAtlas) {
++                v->codeAppend("localcoord += origin;");
++            }
++            v->codeAppend(
+             "}"
+             "float2 vertexpos = AFFINE_MATRIX * localcoord + TRANSLATE;");
+             gpArgs->fLocalCoordVar.set(SkSLType::kFloat2, "localcoord");
+@@ -268,11 +300,12 @@
+                                                          SkArenaAlloc* arena,
+                                                          const SkMatrix& viewMatrix,
+                                                          const SkPMColor4f& color,
+-                                                         PatchAttribs attribs) {
++                                                         PatchAttribs attribs,
++                                                         bool inAtlas) {
+     // We should use explicit curve type when, and only when, there isn't infinity support.
+     // Otherwise the GPU can infer curve type based on infinity.
+     SkASSERT(shaderCaps.fInfinitySupport != (attribs & PatchAttribs::kExplicitCurveType));
+-    return arena->make<MiddleOutShader>(shaderCaps, viewMatrix, color, attribs);
++    return arena->make<MiddleOutShader>(shaderCaps, viewMatrix, color, attribs, inAtlas);
+ }
+ 
+ GrPathTessellationShader* GrPathTessellationShader::MakeSimpleTriangleShader(
+--- a/skia-bindings/skia/src/gpu/ganesh/ops/PathStencilCoverOp.cpp
++++ b/skia-bindings/skia/src/gpu/ganesh/ops/PathStencilCoverOp.cpp
+@@ -197,11 +197,14 @@
+         fTessellator = PathWedgeTessellator::Make(args.fArena,
+                                                   args.fCaps->shaderCaps()->fInfinitySupport);
+     }
++    // A path atlas's paths all carry their place in it; see PathDrawList::fAtlasOffset.
++    const bool inAtlas = fPathDrawList->fAtlasOffset.has_value();
+     auto* tessShader = GrPathTessellationShader::Make(*args.fCaps->shaderCaps(),
+                                                       args.fArena,
+                                                       shaderMatrix,
+                                                       SK_PMColor4fTRANSPARENT,
+-                                                      fTessellator->patchAttribs());
++                                                      fTessellator->patchAttribs(),
++                                                      inAtlas);
+     fStencilPathProgram = GrTessellationShader::MakeProgram(args,
+                                                             tessShader,
+                                                             stencilPipeline,
+@@ -286,11 +289,19 @@
+         int fanTriangleCount = 0;
+         if (VertexWriter triangleVertexWriter =
+                     vertexAlloc.lockWriter(sizeof(SkPoint), 3 * maxTrianglesInFans)) {
+-            for (auto [pathMatrix, path, color] : *fPathDrawList) {
+-                tess::AffineMatrix m(pathMatrix);
+-                for (tess::PathMiddleOutFanIter it(path); !it.done();) {
++            for (const PathDrawList* draw = fPathDrawList; draw; draw = draw->fNext) {
++                tess::AffineMatrix m(draw->fPathMatrix);
++                for (tess::PathMiddleOutFanIter it(draw->fPath); !it.done();) {
+                     for (auto [p0, p1, p2] : it.nextStack()) {
+-                        triangleVertexWriter << m.map2Points(p0, p1) << m.mapPoint(p2);
++                        skvx::float4 p0p1 = m.map2Points(p0, p1);
++                        skvx::float2 q2 = sk_bit_cast<skvx::float2>(m.mapPoint(p2));
++                        if (draw->fAtlasOffset) {
++                            skvx::float2 offset(draw->fAtlasOffset->x(), draw->fAtlasOffset->y());
++                            p0p1 = skvx::join(tess::SnapToAtlasGrid(p0p1.lo, offset),
++                                              tess::SnapToAtlasGrid(p0p1.hi, offset));
++                            q2 = tess::SnapToAtlasGrid(q2, offset);
++                        }
++                        triangleVertexWriter << p0p1 << q2;
+                         ++fanTriangleCount;
+                     }
+                 }
+--- a/skia-bindings/skia/src/gpu/ganesh/ops/AtlasRenderTask.h
++++ b/skia-bindings/skia/src/gpu/ganesh/ops/AtlasRenderTask.h
+@@ -89,10 +89,12 @@
+ 
+     class AtlasPathList : SkNoncopyable {
+     public:
+-        void add(PathDrawAllocator* alloc, const SkMatrix& pathMatrix, const SkPath& path) {
++        // `pathMatrix` maps the path relative to its place in the atlas, `locationInAtlas`.
++        void add(PathDrawAllocator* alloc, const SkMatrix& pathMatrix, const SkPath& path,
++                 SkIPoint locationInAtlas) {
+             SkASSERT(this->canAdd(path));
+             fPathDrawList = &alloc->emplace_back(pathMatrix, path, SK_PMColor4fTRANSPARENT,
+-                                                 fPathDrawList);
++                                                 fPathDrawList, locationInAtlas);
+             if (path.isInverseFillType()) {
+                 // The atlas never has inverse paths. The inversion happens later.
+                 fPathDrawList->fPath.toggleInverseFillType();
+--- a/skia-bindings/skia/src/gpu/ganesh/ops/AtlasRenderTask.cpp
++++ b/skia-bindings/skia/src/gpu/ganesh/ops/AtlasRenderTask.cpp
+@@ -16,6 +16,7 @@
+ #include "include/private/SkDebug.h"
+ #include "include/private/gpu/ganesh/GrTypesPriv.h"
+ #include "src/core/SkIPoint16.h"
++#include "src/core/SkMathPriv.h"
+ #include "src/gpu/ganesh/GrGpu.h"
+ #include "src/gpu/ganesh/GrNativeRect.h"
+ #include "src/gpu/ganesh/GrOpFlushState.h"
+@@ -69,22 +70,26 @@
+         return false;
+     }
+ 
++    // The matrix maps the path relative to its device bounds' top-left, which does not depend on
++    // where the atlas puts it. The tessellation rounds each point to tess::kAtlasGrid and then adds
++    // the whole-pixel location, so the path covers the same samples in every location; adding the
++    // location to this matrix's translate instead rounds each point at the location's magnitude.
+     SkMatrix pathToAtlasMatrix = viewMatrix;
+     if (transposedInAtlas) {
+         std::swap(pathToAtlasMatrix[0], pathToAtlasMatrix[3]);
+         std::swap(pathToAtlasMatrix[1], pathToAtlasMatrix[4]);
+         float tx=pathToAtlasMatrix.getTranslateX(), ty=pathToAtlasMatrix.getTranslateY();
+-        pathToAtlasMatrix.setTranslateX(ty - pathDevTopLeft.y() + locationInAtlas->x());
+-        pathToAtlasMatrix.setTranslateY(tx - pathDevTopLeft.x() + locationInAtlas->y());
++        pathToAtlasMatrix.setTranslateX(ty - pathDevTopLeft.y());
++        pathToAtlasMatrix.setTranslateY(tx - pathDevTopLeft.x());
+     } else {
+-        pathToAtlasMatrix.postTranslate(locationInAtlas->x() - pathDevTopLeft.x(),
+-                                        locationInAtlas->y() - pathDevTopLeft.y());
++        pathToAtlasMatrix.postTranslate(-pathDevTopLeft.x(), -pathDevTopLeft.y());
+     }
++    const SkIPoint location = SkIPoint::Make(locationInAtlas->x(), locationInAtlas->y());
+ 
+     if (GrFillRuleForSkPath(path) == GrFillRule::kNonzero) {
+-        fWindingPathList.add(&fPathDrawAllocator, pathToAtlasMatrix, path);
++        fWindingPathList.add(&fPathDrawAllocator, pathToAtlasMatrix, path, location);
+     } else {
+-        fEvenOddPathList.add(&fPathDrawAllocator, pathToAtlasMatrix, path);
++        fEvenOddPathList.add(&fPathDrawAllocator, pathToAtlasMatrix, path, location);
+     }
+     return true;
+ }
+@@ -98,7 +103,15 @@
+     const GrCaps& caps = *rContext->priv().caps();
+ 
+     // Set our dimensions now. OpsTask will need them when we add our ops.
+-    this->target(0)->priv().setLazyDimensions(fDynamicAtlas->drawBounds());
++    //
++    // Each side is a power of two. The vertex stage maps atlas coordinates to
++    // normalized device coordinates as x * 2 / size - 1, and the rasterizer
++    // maps them back; with a power-of-two size both steps are exact for the
++    // kAtlasGrid-aligned coordinates PatchWriter emits, so a path's coverage
++    // does not depend on how large the rest of the flush made the atlas.
++    const SkISize drawBounds = fDynamicAtlas->drawBounds();
++    this->target(0)->priv().setLazyDimensions(
++            {SkNextPow2(drawBounds.width()), SkNextPow2(drawBounds.height())});
+     this->target(0)->asRenderTargetProxy()->setNeedsStencil();
+     SkRect drawRect = target(0)->getBoundsRect();
+ 
+--- a/skia-bindings/skia/src/gpu/ganesh/GrDynamicAtlas.cpp
++++ b/skia-bindings/skia/src/gpu/ganesh/GrDynamicAtlas.cpp
+@@ -212,7 +212,10 @@
+         // knows we only intend to write out a smaller sub-rectangle of the backing texture.
+         fTextureProxy->priv().setLazyDimensions(fDrawBounds);
+     }
+-    SkASSERT(fTextureProxy->dimensions() == fDrawBounds);
++    // AtlasRenderTask sizes its target to powers of two that hold the draw
++    // bounds.
++    SkASSERT(fTextureProxy->width() >= fDrawBounds.width() &&
++             fTextureProxy->height() >= fDrawBounds.height());
+ 
+     if (backingTexture) {
+ #ifdef SK_DEBUG

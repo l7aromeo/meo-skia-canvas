@@ -9,13 +9,15 @@
 //! for every `k`. Its own pixels are compared with a flush that holds it
 //! alone.
 //!
-//! Drawn by a Skia without containers/skia-atlas-placement.patch, a copy
-//! placed with its atlas columns at 256 or more read one pixel's alpha a
-//! sample lower: 128 rather than 171 at (284, 192), where its device rows
-//! are under 256. A path whose atlas coordinates are of a higher power of
-//! two than its device coordinates is drawn at the coarser float precision
-//! of that band. The patch keeps each path's atlas location within the
-//! power-of-two band of its device location in each axis.
+//! Drawn by a Skia without containers/skia-atlas-placement.patch, the
+//! rectangle read alphas a sample off after 1, 2, 3, 6 and 7 copies, the
+//! first 128 rather than 64 at (284, 192): Ganesh adds a path's atlas
+//! location into the matrix that maps it, so float rounding at the
+//! location's magnitude decides where its edges land. The patch maps each
+//! path relative to its own device top-left, rounds its points to a grid
+//! fine enough that adding the whole-pixel location is exact, evaluates
+//! curves on the GPU relative to their first point, and sizes the atlas to
+//! powers of two so that its mapping to device coordinates is exact too.
 
 use std::{env, ops::Range};
 

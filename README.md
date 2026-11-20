@@ -84,7 +84,7 @@ meo-skia-canvas = { version = "0.17", default-features = false, features = ["vul
 ```toml
 # .cargo/config.toml
 [env]
-SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-3f566dd7198c/skia-binaries-{key}.tar.gz"
+SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-9abc40fe47d6/skia-binaries-{key}.tar.gz"
 ```
 
 ```rust

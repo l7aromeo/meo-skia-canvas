@@ -81,11 +81,12 @@ missing -- a transparent export, a dropped blend -- with nothing reported but a
 line on stderr. `containers/skia-metal-untimed-compile.patch` asks the OS
 version at run time instead, which is what upstream Skia's check does.
 
-The same tree carries `containers/skia-atlas-size.patch`, as Linux's does,
-which caps Ganesh's atlas path renderer at a 512-by-512 atlas: on Metal and on
-Vulkan, a path the renderer places at an atlas row of 512 or more can have a
-pixel's coverage moved a step up or down. The UPSTREAM note beside it in `PATCHES` says what is and
-is not known.
+The same tree carries `containers/skia-atlas-placement.patch`, as Linux's
+does, which makes a path's coverage in Ganesh's path atlas independent of where
+the atlas places it or how large the flush makes it: on Metal and on Vulkan,
+float rounding at the magnitude of the atlas location, and in the mapping of an
+atlas whose size is not a power of two, moved a pixel's coverage with what else
+the flush had drawn. The UPSTREAM note beside it in `PATCHES` says how.
 
 Both also carry `containers/skia-triangulation-tolerance.patch`, which makes
 Ganesh's triangulating path renderer reuse a cached triangulation only at the
@@ -138,8 +139,8 @@ Skia's SVG text synthesise the slant a `font-style` asks a family with no
 slanted face for, as canvas text does, and parse `oblique <angle>`. Its
 UPSTREAM note in `scripts/skia-source.mjs` says how.
 
-Windows binaries are built from a patched source too, carrying the atlas-size
-cap, the triangulation tolerance, the Graphite bindings and
+Windows binaries are built from a patched source too, carrying the atlas
+placement, the triangulation tolerance, the Graphite bindings and
 `containers/skia-dwrite-oblique.patch`. The last makes Skia's DirectWrite port
 read `OS/2` `fsSelection` bit 9 as its FreeType port does: DirectWrite reports
 a face flagged oblique only by that bit as upright, so the family's upright
@@ -155,10 +156,10 @@ change nothing it builds.
 `scripts/skia-source.mjs env`, sets `SKIA_SOURCE_DIR` for every recipe, and
 `ensure-deps` prepares the tree it names: rust-skia at the Cargo.lock tag,
 Skia's DEPS and gn, and the platform's patches from `PATCHES` applied with
-`-F0` -- on macOS the Metal timeout, the atlas-size cap, the triangulation
+`-F0` -- on macOS the Metal timeout, the atlas placement, the triangulation
 tolerance, the Graphite bindings, the transfer buffer and the SVG slant; on
 Linux `containers/skia-brotli-sources.patch` and the last five of those; and on
-Windows the atlas-size cap, the triangulation tolerance, the Graphite bindings,
+Windows the atlas placement, the triangulation tolerance, the Graphite bindings,
 the DirectWrite oblique patch and the SVG slant. `env`
 single-quotes a directory holding a backslash, a space, a quote or `$`, which
 just's dotenv reader would otherwise take as an escape or the value's end; a

@@ -71,21 +71,34 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * skia-bindings as it always has, and `env` names no tree there.
  */
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-// Re-check: cargo test a_path_covers_a_crowded_flush_as_it_covers_a_small_one -- --include-ignored against crates.io's Skia, where it is ignored for this; pixels read a step off a small flush of the same stars, 28 on Metal and 6 on lavapipe (Mesa 25.0.7, arm64)
+// Re-check: cargo test a_path_covers_its_pixels_wherever_the_atlas_places_it -- --include-ignored against crates.io's Skia, where it is ignored for this; the rounded rectangle reads alphas a step off a flush holding it alone after 1, 2, 3, 6 and 7 copies on Metal
 //
-// A path Ganesh's atlas path renderer places at an atlas row of 512 or more
-// can have a pixel's coverage moved a step up or down -- about 50 of 255
-// levels of alpha -- and which ones do depends on the atlas's layout. On a
-// page of 2000 small stars, 28 pixels read 51 levels above or below what a
-// flush of the stars reaching them draws, 19 above and 9 below; an eyelash
-// drawn after blurred shapes whose masks were rasterised in the same flush
-// lost its tip. Seen on Metal (an Apple GPU), and the eyelash on Vulkan too
-// (lavapipe, CI's Linux runner), so it is the renderer's and not a driver's.
-// Why row 512 is unknown. The patch caps the atlas at 512 by 512 so no path
-// is placed past it; a full atlas starts another sharing its texture, and a
-// path with a side past 512 pixels goes to the next path renderer rather than
-// the atlas.
-const ATLAS_SIZE = join("containers", "skia-atlas-size.patch");
+// Ganesh's atlas path renderer maps a path's points into atlas space with
+// the path's atlas location added into the matrix's translate, and evaluates
+// its curves on the GPU in those coordinates. Float rounding at the
+// magnitude of the atlas location then decides where a vertex lands, so a
+// path's coverage moved a step -- about 50 of 255 levels of alpha -- with
+// where the flush packed it: on a page of 2000 small stars, 28 pixels read
+// above or below what a flush of the stars reaching them draws, and an
+// eyelash drawn after blurred shapes lost its tip. Seen on Metal and on
+// lavapipe (Mesa 25.0.7, arm64), so it is the renderer's and not a
+// driver's. The patch maps each path relative to its own device top-left,
+// rounds every point it writes to a 2^-12 pixel grid, and only then adds
+// the whole-pixel location; the shader evaluates curves relative to their
+// first point and rounds the same way. Every atlas coordinate is under 2048,
+// so the sums are exact and a path's vertices are the same at every
+// location. The atlas's own size mattered too: its vertex stage maps to
+// normalized device coordinates as x * 2 / size - 1, inexact for a size that
+// is not a power of two, so on lavapipe (Mesa 26.0.8, x86_64) a crowded flush
+// and a small one, whose atlases differ in size, read 10 pixels apart with
+// the rounding and 2 without. The patch sizes each side of the atlas to a
+// power of two, and they read the same. Each part is the one that matters
+// on one driver: without the rounding Metal reads the crowded page 28 pixels
+// off, and power-of-two sides on the unpatched mapping changed nothing
+// there; lavapipe passes it with power-of-two sides alone. The atlas's
+// backing store is already rounded up past 1024 to 1536 or 2048, so only a
+// side between 1025 and 1536 grows, to 2048: at worst 1.78 times the pixels.
+const ATLAS_PLACEMENT = join("containers", "skia-atlas-placement.patch");
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 // Re-check: cargo test a_curve_after_a_larger_draw_of_it_draws_alike_where_skia_is_patched against crates.io's Skia, as the crates.io publish runs it; it holds that build to moving bytes, 416 by up to 128 levels on lavapipe, and fails there once Skia reuses a triangulation only at its own tolerance
 //
@@ -278,7 +291,7 @@ const PATCH_MARKER = join("containers", "skia-patch-marker.patch");
 export const PATCHES = {
   darwin: [
     METAL_UNTIMED_COMPILE,
-    ATLAS_SIZE,
+    ATLAS_PLACEMENT,
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
@@ -288,23 +301,10 @@ export const PATCHES = {
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
     PATCH_MARKER,
-    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
-    // Re-check: cargo test a_blurred_mask_in_the_same_flush_moves_another_by_a_level with `metal`; it pins the defect and fails once the caustic stops moving
-    //
-    // The same renderer, with the cap above in place: a blurred fill moves
-    // by one level at a few dozen pixels where another shape's blurred mask
-    // is computed in the same flush, and not where that mask is already
-    // cached, so a frame can read a level apart with what the GPU drew
-    // before it. Shown with the atlas renderer declining every path, which
-    // makes it go; ruled out are the shared stencil attachment's loads,
-    // atlas texture sharing, atlas growth, path-mask caching and scratch
-    // textures. The cause is not known. Declining the atlas would fix it at
-    // a cost in every page's anti-aliasing against the CPU engine's, which is
-    // why it is not taken. Seen on Metal only; not looked for elsewhere.
   ],
   linux: [
     BROTLI_SOURCES,
-    ATLAS_SIZE,
+    ATLAS_PLACEMENT,
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
@@ -319,7 +319,7 @@ export const PATCHES = {
   // nothing links brotli, and a `freetype` build here takes build.rs's own
   // fix for it as one outside this script does.
   win32: [
-    ATLAS_SIZE,
+    ATLAS_PLACEMENT,
     TRIANGULATION,
     GRAPHITE_BINDINGS,
     DWRITE_OBLIQUE,
