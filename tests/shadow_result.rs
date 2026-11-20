@@ -48,6 +48,37 @@ fn filled_triangle(ctx: &mut Context2D) {
     ctx.fill(FillRule::NonZero);
 }
 
+/// [`WIDE`] filled with a sweep gradient whose hard stop it crosses. A GPU
+/// canvas draws a path dyed by a gradient with the effect, through the CPU's
+/// coverage of the path -- see `layer::GradientPath` -- as the chain that
+/// casts its shadow makes it on the CPU. Drawn through Ganesh's coverage,
+/// the triangle's edge was not the one its shadow was cast from, and the
+/// shadow stood 14.5 levels from the Gaussian of the draw at a `shadowBlur`
+/// of 2.
+fn gradient_triangle(ctx: &mut Context2D) {
+    let stop = |position, (r, g, b)| GradientStop {
+        position,
+        color: RgbaLinear::opaque(r, g, b),
+    };
+    let (yellow, green) = ((1.0, 1.0, 0.0), (0.0, 0.5, 0.0));
+    let shader = Shader::sweep_gradient(
+        Point { x: 80.0, y: 50.0 },
+        0.0,
+        360.0,
+        &[
+            stop(0.0, yellow),
+            stop(0.5, yellow),
+            stop(0.5, green),
+            stop(1.0, green),
+        ],
+        GradientColorSpace::Srgb,
+    )
+    .expect("a sweep gradient");
+    triangle(ctx);
+    ctx.set_fill_shader(&shader);
+    ctx.fill(FillRule::NonZero);
+}
+
 fn stroked_triangle(ctx: &mut Context2D) {
     triangle(ctx);
     ctx.set_line_width(3.0);
@@ -153,8 +184,9 @@ fn drawn_canvas(ctx: &mut Context2D) {
 }
 
 /// Every source a shadow is cast from, by name.
-const SOURCES: [(&str, Draw); 9] = [
+const SOURCES: [(&str, Draw); 10] = [
     ("filled triangle", filled_triangle),
+    ("gradient triangle", gradient_triangle),
     ("stroked triangle", stroked_triangle),
     ("rectangle", rectangle),
     ("text", text),

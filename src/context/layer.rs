@@ -33,9 +33,9 @@ use std::{
 
 use parking_lot::Mutex;
 use skia_safe::{
-    AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color4f,
-    ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode, IPoint,
-    IRect, ISize, Image, ImageFilter, ImageInfo, MaskFilter, Matrix,
+    AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color,
+    Color4f, ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode,
+    IPoint, IRect, ISize, Image, ImageFilter, ImageInfo, MaskFilter, Matrix,
     MipmapMode, Paint, PaintCap, PaintJoin, PaintStyle, Path, PathDirection,
     Picture, PictureRecorder, Point, Rect, RoundOut, RuntimeEffect,
     SamplingOptions, Shader, Surface, TileMode, Vector, canvas::SaveLayerRec,
@@ -2569,9 +2569,10 @@ impl OnGpu {
 }
 
 /// A path filled or stroked with a gradient, as a GPU canvas draws it in the
-/// CPU's bytes: `path` under `matrix`, through `paint` with the effect that
-/// computes them as its shader -- see
-/// [`GradientSpec::exact`](super::exact_gradient::GradientSpec::exact).
+/// CPU's bytes: the effect that computes them -- see
+/// [`GradientSpec::exact`](super::exact_gradient::GradientSpec::exact) --
+/// through the CPU's coverage of `path` under `matrix` and `paint` -- see
+/// [`drawn_with_effect`].
 #[derive(Debug)]
 pub struct GradientPath {
     /// The path, behind a lock: a `Path` can be sent between threads but not
@@ -2583,7 +2584,9 @@ pub struct GradientPath {
     /// The page's transform the path was drawn under.
     pub matrix: Matrix,
     /// The draw's paint with no shader and an alpha of 1, the effect
-    /// carrying the draw's alpha; aliased where `whole_pixels`.
+    /// carrying the draw's alpha; aliased where `whole_pixels`. Its style,
+    /// its stroke and its anti-aliasing are what the coverage is drawn
+    /// with.
     pub paint: Paint,
     /// The paint the page's pixels recording draws the path with, from
     /// which a draw made on the CPU is recorded with `SrcOver`.
@@ -2593,8 +2596,8 @@ pub struct GradientPath {
     pub page: ColorSpace,
     /// The draw's alpha, its `globalAlpha` included.
     pub alpha: f32,
-    /// The device pixels the draw reaches, which an image of the effect
-    /// covers.
+    /// The device pixels the draw reaches, which an image of the effect and
+    /// one of the coverage cover.
     pub area: IRect,
     /// Whether the path is a rectangle on whole device pixels, which takes
     /// the effect itself -- see [`GradientDye`](super::GradientDye).
@@ -2606,13 +2609,18 @@ pub struct GradientPath {
 }
 
 /// Where an image of a [`GradientPath`]'s effect lies in an atlas: `at`, in
-/// `image`, holds the device pixel one up and one left of the path's
-/// `area`, so that a pixel the path's edge reaches just outside `area`
-/// still finds the effect rather than another path's.
+/// `image` and in `mask`, holds the device pixel one up and one left of the
+/// path's `area`, so that a pixel the path's edge reaches just outside
+/// `area` still finds the effect and the coverage rather than another
+/// path's.
 #[derive(Clone)]
 struct Slot {
     image: Image,
     at: IPoint,
+    /// The CPU's coverage of each path in the atlas, at the same slots as
+    /// `image` -- see [`draw_coverage`]. `None` where it could not be made,
+    /// and the path then makes its own -- see [`coverage_image`].
+    mask: Option<Image>,
 }
 
 /// What a run's [`atlas`] found for a [`GradientPath`], asked once for the
@@ -2635,15 +2643,15 @@ const SLOT_MARGIN_PX: i32 = 1;
 const ATLAS_WIDTH_PX: i32 = 2048;
 
 /// One image holding the effect of each of `draws` that needs one, drawn in
-/// one pass onto a surface made from `canvas`; and, by index, what was
-/// found for each path: its effect, and where its image is -- none for one
-/// that takes the effect itself, or that does not fit, which then makes an
-/// image of its own -- see [`GradientSpec::sampled`]. `None` for a draw
-/// that is no path. With an
-/// image of its own for each draw, 2000 small gradient fills cost about
-/// eight times what Ganesh's own gradient did.
-///
-/// [`GradientSpec::sampled`]: super::exact_gradient::GradientSpec::sampled
+/// one pass onto a surface made from `canvas`, and one of the CPU's
+/// coverage of each at the same place, drawn on the CPU and uploaded once;
+/// and, by index, what was found for each path: its effect, and where its
+/// images are -- none for one on whole pixels, which takes the effect
+/// itself, or for one that does not fit, which takes the effect itself
+/// through a coverage image of its own -- see [`drawn_with_effect`].
+/// `None` for a draw that is no path. With an image of its own for each
+/// draw, 2000 small gradient fills cost about eight times what Ganesh's own
+/// gradient did.
 fn atlas(
     canvas: &SkCanvas,
     draws: &[Option<&GradientPath>],
@@ -2728,6 +2736,24 @@ fn atlas(
         }
         Some(surface.image_snapshot())
     });
+    // The CPU's coverage of each path the atlas holds, at the same slots.
+    let mask = made.as_ref().and_then(|_| {
+        let mut surface =
+            started::raster(&coverage_info((width, height)), None, None)?;
+        let target = surface.canvas();
+        target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        for (draw, at) in draws.iter().zip(&slots) {
+            let (Some(draw), Some(at)) = (draw, at) else {
+                continue;
+            };
+            let origin = IPoint::new(
+                draw.area.left - SLOT_MARGIN_PX,
+                draw.area.top - SLOT_MARGIN_PX,
+            );
+            draw_coverage(target, draw, *at, origin);
+        }
+        Some(surface.image_snapshot())
+    });
     draws
         .iter()
         .zip(effects)
@@ -2739,6 +2765,7 @@ fn atlas(
                     Some(Slot {
                         image: made.clone()?,
                         at,
+                        mask: mask.clone(),
                     })
                 }),
             })
@@ -2761,77 +2788,171 @@ fn max_texture_size(_canvas: &SkCanvas) -> i32 {
 }
 
 /// Draws `draw` with the effect onto `canvas`, which maps the recording's
-/// device pixels onto its own whole: the effect itself for a rectangle on
-/// whole pixels, and otherwise an image of it, in an atlas or one of its
-/// own, sampled nearest at each pixel's centre -- what the run's atlas
-/// `found` for the draw where it was made. `false`, having drawn nothing,
-/// where no effect can be made.
+/// device pixels onto its own whole -- what the run's atlas `found` for the
+/// draw where it was made. `false`, having drawn nothing, where no effect
+/// can be made.
+///
+/// A rectangle on whole pixels is the effect itself. Any other path is an
+/// aliased rectangle over the pixels it reaches, its effect -- the atlas's
+/// image of it, or the effect itself for one the atlas does not hold --
+/// masked by the CPU's coverage of the path -- see [`draw_coverage`] -- so
+/// that its edge is the CPU canvas's, as its shadow and its blur already
+/// are, made on the CPU -- see `Context2D::chain_input`. Drawn through the
+/// path, it took Ganesh's anti-aliasing instead, up to 125 levels from the
+/// CPU canvas along a hard-stop conic's edge.
 fn drawn_with_effect(
     canvas: &SkCanvas,
     draw: &GradientPath,
     found: Option<&Found>,
 ) -> bool {
+    let effect = match found {
+        Some(found) => found.effect.clone(),
+        None => draw.spec.exact(&draw.page, draw.alpha),
+    };
+    let Some(effect) = effect else {
+        return false;
+    };
     let outer = canvas.local_to_device_as_3x3();
-    let slot = found.and_then(|found| found.slot.as_ref());
-    // Drawn onto `canvas`'s pixels, a whole-pixel translation of the
-    // page's, at the canvas's identity: its local matrix undoes the
-    // canvas's, so that the effect is handed each device pixel.
-    let on_page = || {
-        let device = Matrix::concat(&outer, &draw.matrix).invert()?;
-        let effect = match found {
-            Some(found) => found.effect.clone()?,
-            None => draw.spec.exact(&draw.page, draw.alpha)?,
+    // The canvas's whole-pixel offset from the page's device pixels.
+    let shift =
+        IPoint::new(outer.translate_x() as i32, outer.translate_y() as i32);
+    if draw.whole_pixels {
+        // Drawn through the rectangle under the page's transform, at the
+        // canvas's identity: its local matrix undoes the canvas's, so that
+        // the effect is handed each device pixel.
+        let Some(shader) = Matrix::concat(&outer, &draw.matrix)
+            .invert()
+            .and_then(|device| {
+                Some(
+                    effect
+                        .placed(&draw.matrix, -shift)?
+                        .with_local_matrix(&device),
+                )
+            })
+        else {
+            return false;
         };
-        let offset = IPoint::new(
-            -outer.translate_x() as i32,
-            -outer.translate_y() as i32,
-        );
-        Some(
-            effect
-                .placed(&draw.matrix, offset)?
-                .with_local_matrix(&device),
-        )
-    };
-    let shader = match (draw.whole_pixels, found, slot) {
-        (_, Some(Found { effect: None, .. }), _) => None,
-        (true, ..) => on_page(),
-        (false, _, Some(slot)) => {
-            let origin = (
-                draw.area.left - SLOT_MARGIN_PX,
-                draw.area.top - SLOT_MARGIN_PX,
-            );
-            let to_device = Matrix::translate((
-                (origin.0 - slot.at.x) as f32 + outer.translate_x(),
-                (origin.1 - slot.at.y) as f32 + outer.translate_y(),
+        let mut paint = draw.paint.clone();
+        paint.set_shader(shader);
+        canvas.save();
+        canvas.concat(&draw.matrix);
+        canvas.draw_path(&draw.path.lock(), &paint);
+        canvas.restore();
+        return true;
+    }
+    let reach = draw.area.with_outset((SLOT_MARGIN_PX, SLOT_MARGIN_PX));
+    let on_canvas = reach.with_offset(shift);
+    let layers = match found.and_then(|found| found.slot.as_ref()) {
+        // The atlas's slot `at` holds the page's pixel `reach`'s corner.
+        Some(Slot {
+            image,
+            at,
+            mask: Some(mask),
+        }) => {
+            let local = Matrix::translate((
+                (on_canvas.left - at.x) as f32,
+                (on_canvas.top - at.y) as f32,
             ));
-            Matrix::concat(&outer, &draw.matrix)
-                .invert()
-                .and_then(|from| {
-                    slot.image.to_shader(
-                        (TileMode::Decal, TileMode::Decal),
-                        SamplingOptions::new(
-                            FilterMode::Nearest,
-                            MipmapMode::None,
-                        ),
-                        Some(&Matrix::concat(&from, &to_device)),
-                    )
-                })
+            image
+                .to_shader(DECAL, nearest(), Some(&local))
+                .zip(mask.to_shader(DECAL, nearest(), Some(&local)))
         }
-        (false, _, None) => {
-            draw.spec
-                .sampled(&draw.page, draw.alpha, &draw.matrix, draw.area)
-        }
+        _ => coverage_image(draw, reach).and_then(|mask| {
+            let local = Matrix::translate((
+                on_canvas.left as f32,
+                on_canvas.top as f32,
+            ));
+            effect.placed(&draw.matrix, -shift).zip(mask.to_shader(
+                DECAL,
+                nearest(),
+                Some(&local),
+            ))
+        }),
     };
-    let Some(shader) = shader else {
+    let Some((effect, coverage)) = layers else {
         return false;
     };
     let mut paint = draw.paint.clone();
-    paint.set_shader(shader);
+    paint
+        .set_shader(shaders::blend(BlendMode::DstIn, effect, coverage))
+        .set_anti_alias(false)
+        .set_style(PaintStyle::Fill)
+        .set_path_effect(None);
     canvas.save();
-    canvas.concat(&draw.matrix);
-    canvas.draw_path(&draw.path.lock(), &paint);
+    canvas.reset_matrix();
+    canvas.draw_irect(on_canvas, &paint);
     canvas.restore();
     true
+}
+
+/// Sampling the effect's image and the coverage take: each pixel's own
+/// texel, the two being laid out on the page's device pixels.
+fn nearest() -> SamplingOptions {
+    SamplingOptions::new(FilterMode::Nearest, MipmapMode::None)
+}
+
+/// How the effect's image and the coverage are tiled: transparent outside.
+const DECAL: (TileMode, TileMode) = (TileMode::Decal, TileMode::Decal);
+
+/// Draws the CPU's coverage of `draw`'s path onto `target`, an alpha
+/// surface whose pixel `at` is the page's device pixel `origin`: the path
+/// under the draw's own paint -- its style, its stroke and its
+/// anti-aliasing -- in opaque white, which leaves at each pixel the
+/// coverage the CPU canvas's scan conversion hands its blend.
+///
+/// Clipped to the draw's `area`, which ends where the page does, so that a
+/// path crossing the page's edge is cut where the CPU canvas cuts it and
+/// nowhere else. Skia's analytic anti-aliasing cuts a path's edges at its
+/// clip's bounds and snaps the new ends to a quarter pixel, which moves
+/// the coverage along the whole edge: cut at the reach, a pixel past the
+/// page, a triangle crossing the page's right edge stood up to 52 levels
+/// from the CPU canvas, and unclipped in the atlas a path spilled into the
+/// slot beside it.
+fn draw_coverage(
+    target: &SkCanvas,
+    draw: &GradientPath,
+    at: IPoint,
+    origin: IPoint,
+) {
+    let mut paint = draw.paint.clone();
+    paint
+        .set_shader(None)
+        .set_color(Color::WHITE)
+        .set_blend_mode(BlendMode::SrcOver);
+    let shift = (at.x - origin.x, at.y - origin.y);
+    target.save();
+    target.clip_irect(draw.area.with_offset(shift), ClipOp::Intersect);
+    target.set_matrix(
+        &Matrix::concat(
+            &Matrix::translate((shift.0 as f32, shift.1 as f32)),
+            &draw.matrix,
+        )
+        .into(),
+    );
+    target.draw_path(&draw.path.lock(), &paint);
+    target.restore();
+}
+
+/// The CPU's coverage of `draw`'s path over `reach`, the page's device
+/// pixels, as an alpha image of its own: for a draw the run's atlas does
+/// not hold -- see [`atlas`].
+fn coverage_image(draw: &GradientPath, reach: IRect) -> Option<Image> {
+    let mut surface =
+        started::raster(&coverage_info(reach.size()), None, None)?;
+    let target = surface.canvas();
+    target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+    draw_coverage(
+        target,
+        draw,
+        IPoint::new(0, 0),
+        IPoint::new(reach.left, reach.top),
+    );
+    Some(surface.image_snapshot())
+}
+
+/// An alpha image `size` pixels, which coverage is drawn into.
+fn coverage_info(size: impl Into<ISize>) -> ImageInfo {
+    ImageInfo::new(size, ColorType::Alpha8, AlphaType::Premul, None)
 }
 
 /// Plays `pixels`, a draw dyed by a gradient as the page's pixels recording

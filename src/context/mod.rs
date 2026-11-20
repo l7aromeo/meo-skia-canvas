@@ -5551,9 +5551,10 @@ pub struct GradientDye<'a> {
     /// Whether the draw fills a rectangle whose edges lie on whole device
     /// pixels, under no clip -- see [`fills_whole_pixels`]. Drawn aliased,
     /// which covers the same pixels whole, it is the one shape Ganesh hands
-    /// the effect each pixel centre's coordinates for exactly, so a GPU
-    /// canvas draws it with the effect itself and needs no image of it --
-    /// see [`GradientSpec::sampled`].
+    /// the effect each pixel centre's coordinates for exactly and the one
+    /// with no edge to cover in part, so a GPU canvas draws it with the
+    /// effect itself and needs neither an image of it nor the CPU's
+    /// coverage -- see `layer::GradientPath`.
     pub whole_pixels: bool,
 }
 
