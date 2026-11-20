@@ -3857,7 +3857,10 @@ describe("Text that ends in whitespace", () => {
 
   // A paragraph's lines reach the spaces each line ends in too, a wrapped
   // line's and a right-to-left line's included, for the box the spaces are
-  // in: Chrome's columns, line by line.
+  // in: Chrome's columns, line by line. On the CPU and, where there is one,
+  // the GPU, so that a page with either engine is held to them: a background
+  // ends at its exact fraction on both, and a CPU fill that rounded its ends
+  // would stop a column short where a line covers half a column or less.
   test("a paragraph's decorations and backgrounds reach every space", () => {
     const { TextDecoration } = require("../../lib");
     const LINE = 48;
@@ -3866,57 +3869,62 @@ describe("Text that ends in whitespace", () => {
       overline: TextDecoration.Overline,
     };
     const wrong = [];
-    for (const { name, width, dir, pieces, lines } of cases.paragraphs.cases) {
-      const [W, H] = [width + 80, LINE * (lines.length + 1)];
-      /** The paragraph's pixels, its pieces styled or not. */
-      const drawn = (styled) => {
-        const base = {
-          fontFamilies: ["Oswald"],
-          fontSize: 16,
-          color: "black",
-          heightMultiplier: LINE / 16,
-          halfLeading: true,
-        };
-        const pb = ParagraphBuilder.Make({
-          textStyle: base,
-          textDirection: dir,
-        });
-        for (const [text, { line, bg }] of pieces) {
-          pb.pushStyle({
-            ...base,
-            ...(styled && line ? { decoration: LINES[line] } : {}),
-            ...(styled && bg ? { backgroundColor: bg } : {}),
+    for (const onGpu of gpu ? [false, true] : [false])
+      for (const { name, width, dir, pieces, lines } of cases.paragraphs
+        .cases) {
+        const [W, H] = [width + 80, LINE * (lines.length + 1)];
+        /** The paragraph's pixels, its pieces styled or not. */
+        const drawn = (styled) => {
+          const base = {
+            fontFamilies: ["Oswald"],
+            fontSize: 16,
+            color: "black",
+            heightMultiplier: LINE / 16,
+            halfLeading: true,
+          };
+          const pb = ParagraphBuilder.Make({
+            textStyle: base,
+            textDirection: dir,
           });
-          pb.addText(text);
-          pb.pop();
-        }
-        const paragraph = pb.build();
-        paragraph.layout(width);
-        const ctx = new Canvas(W, H).getContext("2d");
-        ctx.fillStyle = "white";
-        ctx.fillRect(0, 0, W, H);
-        ctx.drawParagraph(paragraph, 40, 0);
-        return ctx.getImageData(0, 0, W, H).data;
-      };
-      const [plain, styled] = [drawn(false), drawn(true)];
-      const got = lines.map((_, line) => {
-        const columns = [...Array(W).keys()].filter((x) => {
-          for (let y = line * LINE; y < (line + 1) * LINE; y++)
-            for (let k = 0; k < 3; k++) {
-              const at = (y * W + x) * 4 + k;
-              if (Math.abs(plain[at] - styled[at]) > SAME) return true;
-            }
-          return false;
+          for (const [text, { line, bg }] of pieces) {
+            pb.pushStyle({
+              ...base,
+              ...(styled && line ? { decoration: LINES[line] } : {}),
+              ...(styled && bg ? { backgroundColor: bg } : {}),
+            });
+            pb.addText(text);
+            pb.pop();
+          }
+          const paragraph = pb.build();
+          paragraph.layout(width);
+          const canvas = new Canvas(W, H);
+          canvas.gpu = onGpu;
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "white";
+          ctx.fillRect(0, 0, W, H);
+          ctx.drawParagraph(paragraph, 40, 0);
+          return ctx.getImageData(0, 0, W, H).data;
+        };
+        const [plain, styled] = [drawn(false), drawn(true)];
+        const got = lines.map((_, line) => {
+          const columns = [...Array(W).keys()].filter((x) => {
+            for (let y = line * LINE; y < (line + 1) * LINE; y++)
+              for (let k = 0; k < 3; k++) {
+                const at = (y * W + x) * 4 + k;
+                if (Math.abs(plain[at] - styled[at]) > SAME) return true;
+              }
+            return false;
+          });
+          return columns.length
+            ? [columns[0] - 40, columns.at(-1) + 1 - 40]
+            : null;
         });
-        return columns.length
-          ? [columns[0] - 40, columns.at(-1) + 1 - 40]
-          : null;
-      });
-      if (JSON.stringify(got) !== JSON.stringify(lines))
-        wrong.push(
-          `${name}: ${JSON.stringify(got)} for ${JSON.stringify(lines)}`,
-        );
-    }
+        if (JSON.stringify(got) !== JSON.stringify(lines))
+          wrong.push(
+            `${onGpu ? "GPU" : "CPU"}, ${name}: ` +
+              `${JSON.stringify(got)} for ${JSON.stringify(lines)}`,
+          );
+      }
     assert.deepEqual(wrong, []);
   });
 

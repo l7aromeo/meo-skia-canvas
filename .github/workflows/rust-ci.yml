@@ -563,6 +563,29 @@ jobs:
         run: |
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
             node --test --test-timeout=60000 --test-force-exit
+      # The same suite with Vulkan hidden, so every canvas takes the CPU, as
+      # on build.yml's Linux and Windows legs, which have no GPU device. In
+      # the step above lavapipe gives each canvas the GPU, so a test drawing
+      # on the default engine never reaches the CPU there: a paragraph
+      # background stopping a column short on the CPU was seen only by
+      # build.yml, which pull requests do not run (#792). The first command
+      # refuses a run in which a canvas still took the GPU, which would make
+      # this step a second copy of the one above. Without `xvfb-run` and
+      # `MEO_SKIA_CANVAS_REQUIRE_WINDOWING`: a window needs the GPU, and the
+      # `gui` suite ran above.
+      - name: Test rendering on the CPU against the fresh build
+        env:
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
+          # A driver list naming no file: the Vulkan loader finds no device.
+          VK_DRIVER_FILES: /nonexistent/vulkan-driver.json
+          VK_ICD_FILENAMES: /nonexistent/vulkan-driver.json
+        run: |
+          node -e '
+            const { Canvas } = require("./lib");
+            const { renderer } = new Canvas(1, 1).engine;
+            if (renderer !== "CPU") throw new Error("a canvas took the " + renderer);
+          '
+          node --test --test-timeout=60000 --test-force-exit
 
   # `rust-version` is a promise to every consumer and nothing checked it. It
   # said 1.85 through a published release while the crate used let-chains in 33

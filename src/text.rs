@@ -2623,7 +2623,6 @@ fn fill_text_style(
         let mut background = SkPaint::default();
         background
             .set_color4f(rgba_linear_to_unpremul_color4f(behind), Some(&cs));
-        background.set_anti_alias(true);
         sk_style.set_background_paint(&background);
     }
 
