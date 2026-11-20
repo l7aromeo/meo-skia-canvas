@@ -2426,7 +2426,7 @@ impl Context2D {
         let reached = text.map(|text| text.reached);
         let lines = text.is_some_and(|text| text.lines);
         // A draw whose paint blurs what it draws, through an image filter --
-        // a pattern, a cpu_bytes, a run of text -- has no `BlurOp`; one whose
+        // a pattern, a gradient, a run of text -- has no `BlurOp`; one whose
         // paint blurs its coverage, through a mask filter, keeps it, which
         // the chain's recording would blur a second time.
         let unblurrable = reached.is_some()
