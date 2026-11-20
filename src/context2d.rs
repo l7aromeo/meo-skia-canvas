@@ -4428,6 +4428,10 @@ struct Captured {
     /// draw through a paint holds the page as recorded -- see
     /// `Inner::draw_picture_costing`.
     entries: Option<Entries>,
+    /// Whether the source page holds what a GPU canvas replaying it draws
+    /// in other bytes than a CPU canvas, which pixels drawn from it then
+    /// keep -- see `Inner::draw_source_image`.
+    apart: bool,
 }
 
 /// A source canvas's page as [`capture`] hands it over: as pixels, or as the
@@ -4470,6 +4474,7 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
             cost,
             picture: context.inner.picture(),
             entries: None,
+            apart: context.inner.plays_apart_on_gpu(),
         }),
         false => Some(Captured {
             content: Captive::Page(context.inner.page()),
@@ -4478,6 +4483,9 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
             cost,
             picture: None,
             entries: Some(context.inner.entries()),
+            // A picture played into the page through its own entries, which
+            // choose for themselves.
+            apart: false,
         }),
     }
 }
@@ -4495,6 +4503,7 @@ fn place_capture(
         cost,
         picture,
         entries,
+        apart,
         ..
     } = captured;
     let (features, cost) = (*features, *cost);
@@ -4512,7 +4521,7 @@ fn place_capture(
         // show. Charged as well, because the destination now carries it.
         Captive::Bitmap(image) => {
             ctx.charge_replay(cost.max(1));
-            ctx.draw_nested_image(image, picture.as_ref(), src, dst)
+            ctx.draw_nested_image(image, picture.as_ref(), src, dst, *apart)
         }
     }
 }

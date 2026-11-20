@@ -108,8 +108,9 @@ pub enum Layer {
     /// A run of text holding colour glyphs, drawn again where it is played
     /// back on pixels -- see [`ReplayedText`].
     ReplayedText(Arc<ReplayedText>),
-    /// A run of draws dyed by gradients, drawn on a GPU canvas in the bytes
-    /// the CPU draws them in -- see [`GradientDraw`].
+    /// A run of draws dyed by gradients, or of canvases drawn as images that
+    /// hold such draws, drawn on a GPU canvas in the bytes the CPU draws them
+    /// in -- see [`GradientDraw`].
     Gradient(Arc<GradientDraw>),
 }
 
@@ -135,6 +136,35 @@ impl Layer {
             }
             Layer::ReplayedText(text) => text.playback(canvas, target),
             Layer::Gradient(op) => op.playback(canvas, target),
+        }
+    }
+
+    /// Whether a GPU canvas replaying a recording of this entry draws other
+    /// bytes than a CPU canvas does: what holds colour glyphs or draws dyed
+    /// by gradients, which choose where they are played how a GPU canvas
+    /// draws them in the CPU's bytes -- see [`ReplayedText`] and
+    /// [`GradientDraw`] -- and have no such choice inside a recording, which
+    /// does not know the canvas it will be played onto. A canvas whose page
+    /// holds one is drawn as an image through that choice too -- see
+    /// `Context2D::draw_source_image`.
+    pub(crate) fn plays_apart_on_gpu(&self) -> bool {
+        match self {
+            Layer::ReplayedText(_) => true,
+            Layer::Gradient(op) => op
+                .draws
+                .iter()
+                .any(|piece| !matches!(piece.gpu, OnGpu::Native)),
+            Layer::Group(group) => group
+                .contents
+                .iter()
+                .any(|(entry, _)| entry.plays_apart_on_gpu()),
+            Layer::Clipped(piece) => piece.entry().plays_apart_on_gpu(),
+            Layer::Picture(_)
+            | Layer::Blur(_)
+            | Layer::Targeted(_)
+            | Layer::Cut(_)
+            | Layer::Pattern(_)
+            | Layer::Deferred(_) => false,
         }
     }
 
@@ -2321,6 +2351,13 @@ fn drawn_on_its_backdrop(
 /// Chosen where the page is played back, not where it is drawn, so that a
 /// canvas drawn on the CPU and switched to the GPU draws its gradients
 /// exactly as one drawn on the GPU throughout.
+///
+/// A canvas drawn as an image whose page holds such a draw, or colour
+/// glyphs, is kept here as well (#703), always made on the CPU on a GPU
+/// canvas -- see [`OnGpu::Raster`]: its image is backed by its page's
+/// picture, which Ganesh would replay as Skia's own draws, and only a
+/// raster made on the CPU plays that picture in the CPU's bytes -- see
+/// [`Layer::plays_apart_on_gpu`].
 #[derive(Clone, Debug)]
 pub struct GradientDraw {
     pub draws: Vec<GradientPiece>,

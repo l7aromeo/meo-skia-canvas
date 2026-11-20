@@ -520,3 +520,37 @@ fn a_run_drawn_on_the_cpu_over_the_gpus_pixels_stores_the_cpus_bytes() {
     };
     assert_cpus_bytes(96.0, 96.0, &scene);
 }
+
+/// A canvas holding a canvas drawn into it is rasterized where it is drawn
+/// in turn, and its gradients with it: drawn into a GPU canvas, that raster
+/// is made and composited on the CPU, at the destination's pixels, as the
+/// draw a GPU canvas makes of the gradients themselves is (#703). Ganesh
+/// drawing the raster put 4,800 bytes of this one apart from the CPU's.
+#[test]
+fn a_canvas_holding_one_drawn_into_a_gpu_canvas_stores_the_cpus_bytes() {
+    if !has_gpu() {
+        return;
+    }
+    let mut source = Canvas::new(64.0, 64.0);
+    {
+        let ctx = source.context();
+        ctx.set_fill_shader(&stripes());
+        ctx.fill_rect(0.0, 0.0, 64.0, 64.0);
+    }
+    let mut holder = Canvas::new(64.0, 64.0);
+    holder.context().draw_canvas(&mut source, 0.0, 0.0);
+    let mut draw = |gpu: bool| {
+        let mut canvas = Canvas::new(96.0, 96.0);
+        canvas.set_gpu(gpu);
+        {
+            let ctx = canvas.context();
+            over_a_fill(ctx, 96.0);
+            ctx.set_global_alpha(0.7);
+            ctx.draw_canvas_sized(&mut holder, 0.0, 0.0, 96.0, 96.0);
+        }
+        pixels(&mut canvas)
+    };
+    let (cpu, gpu) = (draw(false), draw(true));
+    let apart = cpu.iter().zip(&gpu).filter(|(a, b)| a != b).count();
+    assert_eq!(apart, 0, "{apart} bytes apart from the CPU canvas's");
+}

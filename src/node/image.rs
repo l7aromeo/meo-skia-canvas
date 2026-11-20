@@ -171,6 +171,11 @@ pub struct Source {
     /// for a canvas with nothing nested in it, which travels as a picture
     /// already. See `Context2D::draw_nested_image`.
     pub picture: Option<Picture>,
+    /// Whether the source is a canvas whose page holds what a GPU canvas
+    /// replaying it draws in other bytes than a CPU canvas, which the
+    /// destination then draws through a route of its own -- see
+    /// `Context2D::draw_source_image`. `false` for every other source.
+    pub plays_apart_on_gpu: bool,
 }
 
 impl Clone for Content {
@@ -203,6 +208,7 @@ impl Source {
                 replay_cost: 0,
                 nested: false,
                 picture: None,
+                plays_apart_on_gpu: false,
             });
         }
         if let Ok(context) = value.downcast::<BoxedContext2D, _>(cx) {
@@ -233,6 +239,8 @@ impl Source {
                 nested: cost > 0,
                 // Only the nested arm replays it, and only that arm asks.
                 picture: (cost > 0).then(|| ctx.picture()).flatten(),
+                // Asked after the image, whose page files what was drawn.
+                plays_apart_on_gpu: ctx.plays_apart_on_gpu(),
             });
         }
         None
