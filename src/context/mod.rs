@@ -1005,13 +1005,14 @@ impl Context2D {
     /// The paint a page's pixels recording draws text in `paint` with, where
     /// the page keeps one, its CanvasKit colour filter built for those
     /// pixels -- see [`Self::pixels_paint`]: on an eight-bit sRGB page the
-    /// colour nearest its own that stores the exact product -- see
-    /// [`ExactColour::nearest_text_paint`] -- on any other eight-bit page the
-    /// placed colour as a plain paint colour where Skia lands it and the
-    /// glyph contrast stays -- see [`ExactColour::verified_text_paint`] --
-    /// and otherwise `paint` over a colour shader of its own colour, opaque,
-    /// with [`ExactColour::dye`] replacing that colour -- or, before a
-    /// colour filter `paint` already carries,
+    /// colour nearest its own that stores the exact product, drawn through a
+    /// filter keeping its own glyph contrast where that colour's differs --
+    /// see [`ExactColour::nearest_text_paint`] -- on any other eight-bit page
+    /// the placed colour as a plain paint colour where Skia lands it and
+    /// the glyph contrast stays -- see [`ExactColour::verified_text_paint`]
+    /// -- and otherwise `paint` over a colour shader of its own colour,
+    /// opaque, with [`ExactColour::dye`] replacing that colour -- or,
+    /// before a colour filter `paint` already carries,
     /// [`ExactColour::dye_keeping_plain_luminance`]. Without a shader Skia
     /// folds a colour filter into the paint's colour, through the
     /// conversion the dye exists to avoid; and a colour shader answers the

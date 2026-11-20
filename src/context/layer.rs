@@ -1263,6 +1263,75 @@ thread_local! {
     /// [`PLAIN_UNCONVERTED_SKSL`] compiled, once per thread.
     static PLAIN_UNCONVERTED: Option<RuntimeEffect> =
         RuntimeEffect::make_for_color_filter(PLAIN_UNCONVERTED_SKSL, None).ok();
+    /// [`PLAIN_WHERE_OPAQUE_SKSL`] compiled, once per thread.
+    static PLAIN_WHERE_OPAQUE: Option<RuntimeEffect> =
+        RuntimeEffect::make_for_color_filter(PLAIN_WHERE_OPAQUE_SKSL, None).ok();
+    /// The filters [`plain_where_opaque`] has made on this thread, kept for
+    /// the reason [`PLAIN_SHADERS`] keeps its shaders: a kept run keeps its
+    /// blobs for a paint only while the next draw's compares equal to it.
+    static PLAIN_WHERE_OPAQUE_KEPT:
+        RefCell<KeptSets<[u32; 6], Option<ColorFilter>, DYE_SETS, DYE_WAYS>> =
+        const { RefCell::new(KeptSets::new()) };
+}
+
+/// The SkSL of [`plain_where_opaque`]: `plain` where the colour handed in
+/// is opaque, and the premultiplied `product` at the colour's alpha
+/// otherwise, premultiplied in and out as a runtime colour filter's colour
+/// is. Skia asks a paint's colour filter for the colour a glyph mask's
+/// contrast is set from with its colour shader's colour made opaque --
+/// `SkShaderBase::asLuminanceColor` from `SkPaintPriv::ComputeLuminanceColor`
+/// -- and draws the shader's colour through it times the paint's alpha --
+/// `SkColorFilterShader`.
+///
+/// The product is handed over on its bytes rather than as a colour to
+/// multiply by the alpha here: the GPU carries a shader's output unrounded,
+/// so a colour placed at the edge of the span storing the product -- grey
+/// 127.09 at 77 levels, 38.375 -- stood 0.375 of a level off the byte 38 a
+/// fill stores, and partial coverage of it crossed a rounding boundary on
+/// 632 of 8,484 pixels of a 44px Oswald run.
+const PLAIN_WHERE_OPAQUE_SKSL: &str = "uniform float3 plain; \
+    uniform float3 product; \
+    float4 main(float4 c) { \
+        return c.a == 1 ? float4(plain, 1) : float4(product, c.a); }";
+
+/// A colour filter painting `product`, premultiplied, for a translucent
+/// draw over a colour shader, and answering `plain` when Skia asks it for
+/// the colour a glyph mask's contrast is set from -- see
+/// [`PLAIN_WHERE_OPAQUE_SKSL`]. Kept per thread, as [`plain_colour_shader`]
+/// keeps its shaders.
+fn plain_where_opaque(
+    plain: [f32; 3],
+    product: [f32; 3],
+) -> Option<ColorFilter> {
+    let key = [
+        plain[0], plain[1], plain[2], product[0], product[1], product[2],
+    ]
+    .map(f32::to_bits);
+    let hash = key
+        .iter()
+        .enumerate()
+        .fold(0u64, |hash, (i, bits)| {
+            hash ^ u64::from(*bits).rotate_left(11 * i as u32)
+        })
+        .wrapping_mul(GOLDEN_RATIO_64);
+    if let Some(filter) = PLAIN_WHERE_OPAQUE_KEPT
+        .with_borrow(|kept| kept.get(hash, &key).cloned())
+    {
+        return filter;
+    }
+    let uniforms: Vec<u8> = plain
+        .into_iter()
+        .chain(product)
+        .flat_map(f32::to_ne_bytes)
+        .collect();
+    let filter = PLAIN_WHERE_OPAQUE.with(|effect| {
+        let effect = effect.as_ref()?;
+        (effect.uniform_size() == uniforms.len()).then_some(())?;
+        effect.make_color_filter(Data::new_copy(&uniforms), None)
+    });
+    PLAIN_WHERE_OPAQUE_KEPT
+        .with_borrow_mut(|kept| kept.file(hash, key, filter.clone()));
+    filter
 }
 
 impl ExactColour {
@@ -1410,14 +1479,28 @@ impl ExactColour {
     /// bucket wherever one of them is in it. Over 65,025 greys and alphas
     /// off the byte grid, `(c + 0.37) / 255` at `(a + 0.61) / 255`,
     /// [`Self::at`]'s colour left the bucket for 2,710 and this one for
-    /// 637, 456 of them at an alpha under 32 levels: there the glyph's
-    /// interior stores the exact product and its edges take the contrast of
-    /// the next bucket.
+    /// 637, 456 of them at an alpha under 32 levels.
     ///
-    /// The colour is handed over as it is, as [`Self::verified_paint`] hands
-    /// its own over on such a page: Skia lands an sRGB paint colour on an
-    /// sRGB page unconverted -- see [`unconverted`]. `None` on any other
-    /// page, and for a paint with a colour filter of its own.
+    /// Where it leaves the bucket, the paint is a colour shader of the plain
+    /// colour, opaque, at the paint's alpha, through [`plain_where_opaque`]:
+    /// Skia asks the filter for the contrast colour with the shader's colour
+    /// opaque, and draws the shader's colour through it at the alpha, so the
+    /// glyph takes the plain colour's contrast and stores the product's
+    /// bytes. The filter tells the two apart by alpha, not by whether Skia
+    /// converts a uniform as [`Self::keeping_plain_luminance`]'s does:
+    /// onto sRGB Skia leaves the uniform unconverted for the draw as well,
+    /// and that filter would paint the plain colour. On 44px Oswald in grey
+    /// 128 at 0.3, a GPU page stores 48 of 8,484 covered pixels a level off
+    /// the exact product through the filter, 47 of them in alpha, which the
+    /// GPU carries in half precision -- see [`GPU_HALF_ROUNDING_LEVELS`];
+    /// the placed colour as the paint's own stored 2,822 off, by up to 8
+    /// levels.
+    ///
+    /// Elsewhere the colour is handed over as it is, as
+    /// [`Self::verified_paint`] hands its own over on such a page: Skia
+    /// lands an sRGB paint colour on an sRGB page unconverted -- see
+    /// [`unconverted`]. `None` on any other page, and for a paint with a
+    /// colour filter of its own.
     pub fn nearest_text_paint(&self, paint: &Paint) -> Option<Paint> {
         if !self.bytes
             || self.pixels != PixelColorSpace::Srgb
@@ -1431,12 +1514,31 @@ impl ExactColour {
         if stored == 0.0 {
             return self.verified_paint(paint);
         }
-        let [r, g, b] = [0, 1, 2].map(|i| {
-            let product = (f64::from(placed.rgb[i]) * stored).round();
+        let products =
+            [0, 1, 2].map(|i| (f64::from(placed.rgb[i]) * stored).round());
+        let rgb = [0, 1, 2].map(|i| {
             let plain = f64::from(self.rgb[i]) * levels;
-            (nearest_storing(plain, product, stored) / levels) as f32
+            (nearest_storing(plain, products[i], stored) / levels) as f32
         });
         let mut paint = paint.clone();
+        let named = paint.color4f();
+        let plain = [named.r, named.g, named.b];
+        // Where none of the colours storing the product is in the plain
+        // colour's bucket, the run is drawn over a colour shader of the
+        // plain colour, through a filter that paints the product and
+        // answers the plain colour when Skia asks for the glyph contrast.
+        if stored < levels && contrast_bucket(rgb) != contrast_bucket(plain) {
+            let product = products.map(|p| (p / levels) as f32);
+            let filter = plain_where_opaque(plain, product)?;
+            paint
+                .set_shader(plain_colour_shader(Color4f::new(
+                    named.r, named.g, named.b, 1.0,
+                )))
+                .set_color_filter(filter)
+                .set_alpha_f(alpha);
+            return Some(paint);
+        }
+        let [r, g, b] = rgb;
         paint.set_color4f(Color4f::new(r, g, b, alpha), &self.space);
         Some(paint)
     }

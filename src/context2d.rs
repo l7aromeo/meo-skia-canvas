@@ -8867,8 +8867,9 @@ mod translucent_text_tests {
     const H: f32 = 120.0;
 
     /// The colours drawn: the issue's two, and a grey, whose colour placed
-    /// for the page's bytes at 0.3 Skia pre-blends through another of its
-    /// tables than the grey named -- see `layer::FlatRun`.
+    /// for the page's bytes at 0.3 sits in another of Skia's contrast
+    /// buckets than the grey named -- see
+    /// `layer::ExactColour::nearest_text_paint`.
     const COLOURS: [[u8; 3]; 3] =
         [[20, 60, 200], [200, 80, 30], [128, 128, 128]];
 
@@ -9314,6 +9315,11 @@ mod translucent_text_tests {
     fn without_the_route_translucent_text_lands_skias_shifted_product() {
         // The control: the same scenes, the route off, land the product
         // Skia's blit does on every pixel, and stand off the exact one.
+        // Grey at 0.3 is the exception: its paint is a colour shader of the
+        // grey through the filter `layer::ExactColour::nearest_text_paint`
+        // keeps its glyph contrast with, which Skia blits through its
+        // raster pipeline rather than the shifted legacy blit, and which
+        // lands the exact product without the route.
         COVERAGE_ROUTE.set(false);
         for rgb in COLOURS {
             let scene = plain(0.3);
@@ -9323,13 +9329,18 @@ mod translucent_text_tests {
             let (shifted_off, _) = alpha_off(&opaque, &translucent, a, shifted);
             let (exact_off, covered) =
                 alpha_off(&opaque, &translucent, a, product);
-            assert!(exact_off > 100, "{rgb:?}: {exact_off} of {covered}");
-            // Grey at 0.3 is drawn in the colour placed for the page's
-            // bytes, which Skia pre-blends through another table than the
-            // grey named, so its coverage is not the opaque run's either --
-            // see `layer::FlatRun`.
-            if rgb != [128, 128, 128] {
-                assert_eq!(shifted_off, 0, "{rgb:?}");
+            match rgb == [128, 128, 128] {
+                true => {
+                    assert_eq!(exact_off, 0, "{rgb:?}: of {covered}");
+                    assert!(shifted_off > 100, "{rgb:?}: {shifted_off}");
+                }
+                false => {
+                    assert!(
+                        exact_off > 100,
+                        "{rgb:?}: {exact_off} of {covered}"
+                    );
+                    assert_eq!(shifted_off, 0, "{rgb:?}");
+                }
             }
         }
         COVERAGE_ROUTE.set(true);
@@ -9494,12 +9505,11 @@ mod translucent_text_tests {
             true => UNMEASURED_LEVELS,
             false => METAL_LEVELS,
         };
-        // Grey, whose GPU draw covers the run otherwise than the grey named
-        // -- see `layer::FlatRun` -- is left out, as are strokes and
-        // clips, whose edges the GPU covers otherwise than the CPU, by up to
-        // 15 and 19 levels on Metal with the route or without it.
+        // Strokes and clips are left out: the GPU covers their edges
+        // otherwise than the CPU, by up to 15 and 19 levels on Metal with
+        // the route or without it.
         let mut problems = vec![];
-        for rgb in [COLOURS[0], COLOURS[1]] {
+        for rgb in COLOURS {
             for (scene, background) in [plain(0.3), plain(0.6)]
                 .into_iter()
                 .flat_map(|scene| [(scene, false), (scene, true)])
@@ -9518,12 +9528,76 @@ mod translucent_text_tests {
                     apart(&drawn_on(false, rgb, scene, false, background));
                 COVERAGE_ROUTE.set(true);
                 // Measured on Metal: Skia's blit stood off the GPU on 3,573
-                // to 21,682 bytes, the route on 4 to 3,247.
-                let closer = llvmpipe || route.0 < main.0;
+                // to 21,682 bytes, the route on 4 to 3,247. Grey at 0.3 is
+                // drawn over a colour shader of the grey on both, through
+                // the filter `layer::ExactColour::nearest_text_paint` keeps
+                // its glyph contrast with, and Skia's blit of that paint
+                // stands nearer the GPU than the route -- 47 bytes against
+                // 48 over a clear page, 356 against 2,281 over two colours
+                // -- so it is held by its bound alone.
+                let shared_paint = rgb == [128, 128, 128] && scene.alpha < 0.5;
+                let closer = llvmpipe || shared_paint || route.0 < main.0;
                 if route.1 > bound || !closer {
                     problems.push(format!(
                         "{rgb:?} {scene:?} over a page {background}: \
                          {route:?} apart, Skia's blit {main:?}"
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// The share of a run's covered pixels a GPU canvas on Metal may store
+    /// off the exact product at all. Measured there at 0.3 and 0.6: blue
+    /// and orange, drawn in a plain paint colour, stood off on 1.5% at most
+    /// (orange at 0.6, 124 of 8,484 pixels), and grey through its filter on
+    /// 0.6%, where the filter's product multiplied by the alpha in the
+    /// shader, unrounded, stood off on 7.7%.
+    const METAL_OFF_SHARE: f64 = 0.03;
+
+    #[test]
+    fn translucent_text_on_the_gpu_lands_the_exact_product_to_a_level_or_two() {
+        if !RenderingEngine::GPU.selectable() {
+            if cfg!(all(target_os = "macos", feature = "metal")) {
+                panic!("no GPU on macOS");
+            }
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let bound = match on_llvmpipe() {
+            true => UNMEASURED_LEVELS,
+            false => METAL_LEVELS,
+        };
+        // Grey at 0.3 among them, whose colour placed for the page's bytes
+        // sits in another contrast bucket from the grey named. Through the
+        // filter `layer::ExactColour::nearest_text_paint` draws it with,
+        // 48 of 8,484 pixels are a level off the product on Metal, 47 of
+        // them in alpha, which the GPU carries in half precision; drawn in
+        // the placed colour itself, 2,822 were, by up to 8 levels.
+        let mut problems = vec![];
+        for rgb in COLOURS {
+            for scene in [plain(0.3), plain(0.6)] {
+                let opaque = drawn_on(true, rgb, scene, true, false);
+                let translucent = drawn_on(true, rgb, scene, false, false);
+                let apart = apart(&opaque, &translucent, filled(rgb, scene));
+                let most = apart.iter().flatten().max().copied().unwrap_or(0);
+                let covered = apart.iter().flatten().count();
+                assert!(covered > 3000, "{rgb:?} {scene:?}: {covered} covered");
+                if most > u32::from(bound) {
+                    problems.push(format!(
+                        "{rgb:?} at {}: {most} levels off the product",
+                        scene.alpha
+                    ));
+                }
+                let off = apart.iter().flatten().filter(|&&d| d > 0).count();
+                // Not held on llvmpipe, where the share was not measured.
+                if !on_llvmpipe()
+                    && off as f64 > METAL_OFF_SHARE * covered as f64
+                {
+                    problems.push(format!(
+                        "{rgb:?} at {}: {off} of {covered} off the product",
+                        scene.alpha
                     ));
                 }
             }

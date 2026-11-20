@@ -88,11 +88,13 @@ the exact product. Each channel is drawn in the colour nearest the one named
 of those that store it on either engine -- see
 `ExactColour::nearest_text_paint` -- which keeps the named colour's contrast
 for all but 637 of the 65,025 pairs above, 456 of them at an alpha under 32
-levels. Those store the exact product inside the glyph, and their edges take
-the contrast of the bucket next to the named colour's. On an eight-bit canvas
-on the CPU a translucent run in one flat colour takes its coverage from the
-named colour itself -- see the entry on translucent text below -- and a GPU
-canvas still from the colour placed for it.
+levels. Those are drawn over a colour shader of the named colour, through a
+colour filter that paints the exact product's bytes and answers the named
+colour where Skia asks for the colour it sets the contrast from, so they
+store the exact product inside the glyph and keep the named colour's edges.
+On an eight-bit canvas on the CPU a translucent run in one flat colour takes
+its coverage from the named colour itself -- see the entry on translucent text
+below.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS
@@ -237,10 +239,11 @@ those pixels. And the coverage is the named colour's: Skia sets a glyph
 mask's contrast from the paint's colour, and the colour placed for the
 page's bytes can fall in another bucket -- grey 128 at 0.3, which left
 2,815 of 8,484 pixels of a 44px Oswald run off the product Skia's own blit
-makes of the named grey's coverage -- and a GPU canvas still draws in that
-bucket. A run under a `drop-shadow()`, or casting a `shadowColor` shadow,
-is drawn the same way above its shadow, and one under `blur()` is blurred
-from its coverage times its alpha. A run in a gradient or a pattern, under a
+makes of the named grey's coverage -- and a GPU canvas draws such a run
+through the colour filter above, which keeps the named colour's bucket. A run
+under a `drop-shadow()`, or casting a `shadowColor` shadow, is drawn the same
+way above its shadow, and one under `blur()` is blurred from its coverage
+times its alpha. A run in a gradient or a pattern, under a
 blend that covers beyond the draw such as `copy`, dithered, holding colour
 glyphs, naming a line colour of its own, or under a filter the library
 leaves to Skia, such as `brightness()` alone, is blitted as Skia blits it,
