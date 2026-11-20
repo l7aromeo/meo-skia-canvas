@@ -1305,6 +1305,13 @@ impl StyleBackground {
     /// Inline 3 -- which is the first available font's ascent and descent
     /// and nothing of the line height, so the face is that font, at the
     /// style's size and axes -- see [`FaceLines::first_available`].
+    ///
+    /// The paint is anti-aliased whatever the style's was, because a
+    /// background ends at the exact fraction its text's advance does, the
+    /// last column covered for the part of it the text reaches. A raster
+    /// fill without anti-aliasing keeps a column only where the rectangle
+    /// covers its centre, so an end reaching half a column or less would
+    /// stop a column short on the CPU.
     fn take(
         style: &mut TextStyle,
         collection: &mut FontCollection,
@@ -1314,7 +1321,8 @@ impl StyleBackground {
         if !style.has_background() {
             return None;
         }
-        let paint = style.background();
+        let mut paint = style.background();
+        paint.set_anti_alias(true);
         style.clear_background_color();
         let families = style.font_families();
         let families: Vec<&str> = families.iter().collect();
