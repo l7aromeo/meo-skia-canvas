@@ -386,6 +386,18 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   scale._ The Chrome mapping this ports, and why one unconditional cubic is
   wrong twice over, are documented on `ScalingOperation` and
   `SamplingFilter::sampling_for` in `src/node/filter.rs`.
+- _An image drawn larger with smoothing stores the nearest level of its
+  bilinear interpolation, where Chrome truncates it._ Chrome 159's software
+  canvas, drawing a 16px canvas at 64px over an opaque page, read back the
+  floor of the exact interpolation on all 12,288 colour channels, a level
+  under it on the 1,558 whose fraction is half or more; here those 1,558
+  store the nearest level. Over them Chrome stands 1,180.69 levels from the
+  exact values in sum and this library 377.31, which is why this differs.
+  Off the pixel grid, at 3.7 times, Chrome fits neither: of 3,481 alpha
+  channels 2,334 are the nearest level and 2,431 the floor. A GPU canvas
+  stands further off, up to 1.018 levels on Metal, because its texture unit
+  weights a sample at its own sub-texel precision; `tests/image_smoothing.rs`
+  derives the bound.
 - _Solid colours keep float alpha_ rather than being truncated to `u8` before
   painting, so `globalAlpha = 0.5` yields an alpha byte of 128 where truncation
   gives 127.
