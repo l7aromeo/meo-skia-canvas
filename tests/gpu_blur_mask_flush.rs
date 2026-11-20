@@ -1,20 +1,19 @@
-//! Pins a defect: on Metal, a blurred fill moves by a level where another
+//! A blurred fill on the GPU covers its pixels alike whether or not another
 //! blurred mask is computed in the same flush.
 //!
 //! Two blurred ellipses of `examples/node/animated-eye.js`'s first frame: a
 //! large shading blob at the left, and a small "caustic" in the iris at the
 //! right, far outside the blob's reach. The caustic's pixels ought not to
-//! depend on whether the blob is drawn too. On Metal they do: with the blob's
-//! mask computed in the same flush, Skia's atlas path renderer moves the
-//! caustic's alpha by one level at a few dozen pixels, and a mask already
-//! cached from an earlier draw does not -- which is how a frame came to read
-//! differently with what the GPU had drawn before it. The cause is not known
-//! and nothing here works around it.
+//! depend on whether the blob is drawn too. Drawn by a Skia without
+//! containers/skia-atlas-placement.patch, on Metal they did: with the blob's
+//! mask computed in the same flush, the atlas path renderer packed the
+//! caustic elsewhere in its atlas and moved its alpha by one level at 25
+//! pixels, where a mask already cached from an earlier draw did not -- which
+//! is how a frame came to read differently with what the GPU had drawn
+//! before it.
 //!
-//! This test asserts the defect as it stands, so that it fails, as the sign
-//! to look again, the day the caustic stops moving. Its own file because the
-//! other GPU tests draw the same blob, and a mask they left cached would hide
-//! the defect.
+//! Its own file because the other GPU tests draw the same blob, and a mask
+//! they left cached would hide the difference.
 
 use meo_skia_canvas::prelude::*;
 
@@ -43,10 +42,9 @@ const BLOB: Blurred = Blurred {
 ///
 /// Its centre's x is the `f32` the example's `350.37464871341285` rounds to,
 /// `350.374_63` naming the same one, and that precision is load-bearing: one
-/// `f32` step to the right, `350.374_664`, and the caustic does not move at
-/// all. So the defect is a matter of where the path falls, and this test can
-/// flip on a Skia change that only shifts it -- which is still the sign to
-/// look again.
+/// `f32` step to the right, `350.374_664`, and an unpatched Skia's caustic
+/// does not move at all, so where the path falls decides whether this test
+/// can see the defect.
 const CAUSTIC: Blurred = Blurred {
     ellipse: [350.374_63, 302.72, 44.0, 26.4, 0.5, 0.0, 7.0],
     sigma: 9.0,
@@ -114,11 +112,20 @@ fn has_metal_device() -> bool {
     false
 }
 
-/// Skips where there is no GPU and the defect has nowhere to show, and fails
-/// where Metal has a device but the engine did not start on it.
+/// Skips where there is no GPU, and fails where Metal has a device but the
+/// engine did not start on it.
+///
+/// Ignored, saying why, where the Skia compiled lacks the atlas placement --
+/// `cfg(meo_atlas_placement)`, from `build.rs`.
 #[test]
-fn a_blurred_mask_in_the_same_flush_moves_another_by_a_level()
--> Result<(), Error> {
+#[cfg_attr(
+    not(meo_atlas_placement),
+    ignore = "crates.io's Skia, without containers/skia-atlas-placement.patch, \
+              moves the caustic's coverage with where the flush packs it in \
+              the atlas"
+)]
+fn a_blurred_mask_in_the_same_flush_leaves_another_alone() -> Result<(), Error>
+{
     let mut probe = Canvas::new(1.0, 1.0);
     probe.set_gpu(true);
     if probe.engine_kind() != EngineKind::Gpu {
@@ -126,10 +133,6 @@ fn a_blurred_mask_in_the_same_flush_moves_another_by_a_level()
             !has_metal_device(),
             "Metal has a device, but the GPU engine did not start on it"
         );
-        return Ok(());
-    }
-    // Only on Metal: the defect has not been seen on Vulkan.
-    if !has_metal_device() {
         return Ok(());
     }
 
@@ -143,13 +146,11 @@ fn a_blurred_mask_in_the_same_flush_moves_another_by_a_level()
         "the caustic alone does not lie over itself a pixel further on"
     );
 
-    // Measured on M156: 25 pixels, each one level apart.
     let moved = parted(&both, &alone, 1);
     assert!(
-        !moved.is_empty() && moved.iter().all(|&level| level == 1),
-        "the caustic beside the blob now reads {} pixels apart from the \
-         caustic alone, by up to {} levels: the defect this pins has changed, \
-         so look again at the UPSTREAM note in scripts/skia-source.mjs",
+        moved.is_empty(),
+        "the caustic beside the blob reads {} pixels apart from the caustic \
+         alone, by up to {} levels",
         moved.len(),
         moved.iter().max().copied().unwrap_or(0),
     );

@@ -215,7 +215,7 @@ mod tests {
     fn manifest() -> Manifest {
         parse_manifest(&format!(
             "# generated\nrelease skia-binaries-0.156.0-0123456789ab\nurl {URL}\n\n\
-             target aarch64-apple-darwin skia-0.156.0-918bd4ffa80d meo_atlas_size meo_exact_blend_division\n\
+             target aarch64-apple-darwin skia-0.156.0-918bd4ffa80d meo_atlas_placement meo_exact_blend_division\n\
              target x86_64-unknown-linux-gnu skia-0.156.0-732ea61409ba meo_exact_blend_division\n"
         ))
         .expect("the manifest parses")
@@ -240,7 +240,7 @@ mod tests {
                         triple: "aarch64-apple-darwin".into(),
                         tree: "skia-0.156.0-918bd4ffa80d".into(),
                         cfgs: vec![
-                            "meo_atlas_size".into(),
+                            "meo_atlas_placement".into(),
                             "meo_exact_blend_division".into()
                         ],
                     },
@@ -310,7 +310,7 @@ mod tests {
             Mode::Binaries {
                 tree: "skia-0.156.0-918bd4ffa80d".into(),
                 cfgs: vec![
-                    "meo_atlas_size".into(),
+                    "meo_atlas_placement".into(),
                     "meo_exact_blend_division".into()
                 ],
             }

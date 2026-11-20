@@ -785,7 +785,7 @@ function cases(scratch) {
   const fellBack =
     'TRYING TO DOWNLOAD AND INSTALL SKIA BINARIES: 0.156.0/k\nDOWNLOAD AND INSTALL FAILED: curl error code: "22"\nSTARTING A FULL BUILD\n';
   const patchedCrate =
-    "cargo:rustc-check-cfg=cfg(meo_skia_marker)\ncargo:rustc-cfg=meo_atlas_size\ncargo:rustc-cfg=meo_skia_marker\n";
+    "cargo:rustc-check-cfg=cfg(meo_skia_marker)\ncargo:rustc-cfg=meo_atlas_placement\ncargo:rustc-cfg=meo_skia_marker\n";
   const stockCrate = "cargo:rustc-check-cfg=cfg(meo_skia_marker)\n";
   const consumerIs = (bindings, crate, mode, expected) => () => {
     const got = consumerRefusal(bindings, crate, mode);
@@ -826,7 +826,7 @@ function cases(scratch) {
     [
       "a stock consumer build with a patch cfg",
       true,
-      consumerIs([downloaded], [patchedCrate], "stock", "meo_atlas_size"),
+      consumerIs([downloaded], [patchedCrate], "stock", "meo_atlas_placement"),
     ],
     [
       "a consumer target with no skia-bindings build",
