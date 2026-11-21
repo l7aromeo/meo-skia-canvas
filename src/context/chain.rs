@@ -626,6 +626,9 @@ pub(crate) struct Drawn {
     context: Option<Gpu>,
     /// The layer itself and what it is kept under, where it is kept.
     kept: Option<(pool::Key, Surface)>,
+    /// The layer of the page's size the chains' input within the page was
+    /// drawn in again, where it was and is kept -- see [`draw_as_the_page`].
+    page_kept: Option<(pool::Key, Surface)>,
 }
 
 impl Drop for Drawn {
@@ -633,7 +636,10 @@ impl Drop for Drawn {
     // next draw onto the layer only the surface holds it, so Skia drops the
     // snapshot rather than copying the layer to keep it.
     fn drop(&mut self) {
-        if let Some((key, surface)) = self.kept.take() {
+        for (key, surface) in [self.kept.take(), self.page_kept.take()]
+            .into_iter()
+            .flatten()
+        {
             pool::keep(key, surface);
         }
     }
@@ -646,7 +652,9 @@ impl Drawn {
     /// of its own, after every plan's region has been cleared -- and, for a
     /// layer in main memory that starts before the device's origin, once
     /// more for each onto the layer's own pixels from the origin on, see
-    /// [`draw_from_the_origin`]. `None` where no layer could be made.
+    /// [`draw_from_the_origin`], and for a GPU layer that is not the page's
+    /// size, once more for each onto one that is, see
+    /// [`draw_as_the_page`]. `None` where no layer could be made.
     ///
     /// A single plan's layer falls back to its region alone where Skia
     /// refuses the one [`placed`] asks for, as `placed` says. Plans sharing a
@@ -697,14 +705,19 @@ impl Drawn {
             draw(i, offscreen);
             offscreen.restore();
         }
-        if zeroed {
-            draw_from_the_origin(plans, at, offscreen, &mut draw);
-        }
+        let page_kept = match zeroed {
+            true => {
+                draw_from_the_origin(plans, at, offscreen, &mut draw);
+                None
+            }
+            false => draw_as_the_page(canvas, plans, at, offscreen, &mut draw),
+        };
         Some(Self {
             snapshot: surface.image_snapshot(),
             at,
             context,
             kept: key.map(|key| (key, surface)),
+            page_kept,
         })
     }
 
@@ -1704,6 +1717,70 @@ fn draw_from_the_origin(
         draw(i, canvas);
         canvas.restore();
     }
+}
+
+/// Draws again, in a GPU layer of the page's own size, what `plans`' chains
+/// draw onto `offscreen`, a layer at `at` that is not the page's size, and
+/// copies each chain's region within the page from it over `offscreen`'s: so
+/// that a chain whose region runs past the page's edge draws its input
+/// within the page as the page does. An edge rounds against the size of the
+/// target it is drawn onto -- see [`placed`] -- and a layer of the page and
+/// the region together drew a rounded rectangle crossing a 2000 by 1500
+/// page's right edge 209 bytes from the page, where one of the page's size
+/// draws it as the page does. What lies past the page has no page to match,
+/// and keeps `offscreen`'s pixels.
+///
+/// The copy is a draw of the layer's pixels at a whole-pixel offset, in
+/// `Src` and with no filtering, so each lands as it is; the two layers share
+/// a colour type, a space and a sample count. Returns the layer and the key
+/// it goes back to [`pool`] under, where it is kept, so that the chain's run
+/// holds it as it holds its own layer. Nothing is done for a layer the
+/// page's size, or one the rest of the transform maps onto the device, which
+/// is not in the device's pixels.
+fn draw_as_the_page(
+    canvas: &SkCanvas,
+    plans: &[&Plan],
+    at: IRect,
+    offscreen: &SkCanvas,
+    draw: &mut impl FnMut(usize, &SkCanvas),
+) -> Option<(pool::Key, Surface)> {
+    let first = plans.first()?;
+    let page = IRect::from_size(canvas.base_layer_size());
+    if at == page || !plans.iter().all(|plan| plan.rest.is_identity()) {
+        return None;
+    }
+    let inside: Vec<IRect> = plans
+        .iter()
+        .filter_map(|plan| IRect::intersect(&plan.region, &page))
+        .collect();
+    if inside.is_empty() {
+        return None;
+    }
+    let (mut layer, key) = layer_surface(canvas, first.depth, page)?;
+    let again = layer.canvas();
+    for area in &inside {
+        again.save();
+        again.clip_irect(area, None);
+        again.clear(Color::TRANSPARENT);
+        again.restore();
+    }
+    for (i, plan) in plans.iter().enumerate() {
+        again.save();
+        again.set_matrix(&plan.layer.into());
+        draw(i, again);
+        again.restore();
+    }
+    let drawn = layer.image_snapshot();
+    let mut copy = Paint::default();
+    copy.set_blend_mode(BlendMode::Src);
+    let origin = (-at.left as f32, -at.top as f32);
+    for area in &inside {
+        offscreen.save();
+        offscreen.clip_irect(area.with_offset((-at.left, -at.top)), None);
+        offscreen.draw_image(&drawn, origin, Some(&copy));
+        offscreen.restore();
+    }
+    key.map(|key| (key, layer))
 }
 
 /// A layer of `drawn`'s size for `canvas`, made by the canvas's own device
@@ -5495,6 +5572,149 @@ mod origin_tests {
                 "#{k} makes one layer"
             );
         }
+    }
+}
+
+/// A chain on the GPU whose region crosses the page's edge, held to drawing
+/// its input within the page as the page draws it.
+#[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
+mod edge_tests {
+    use skia_safe::{
+        AlphaType, Canvas as SkCanvas, Color, ColorSpace, ColorType, IRect,
+        ImageInfo, Paint, RRect, Rect, Surface, image::CachingHint,
+    };
+
+    use super::{Depth, Drawn, Step, plan};
+    use crate::{context::page::ExportOptions, gpu::RenderingEngine};
+
+    /// The pages the shapes are drawn on: neither side a power of two, so
+    /// that a target of another size maps device coordinates otherwise.
+    const PAGES: [(i32, i32); 2] = [(1200, 900), (2000, 1500)];
+
+    /// The sigma whose reach, 3 of it, takes a region past the edge.
+    const BLUR: f32 = 12.0;
+
+    /// The `k`th shape of a sweep that crosses the right edge of a page
+    /// `(pw, ph)`, its bottom, its left or its top, by 5 to 59 pixels and a
+    /// fraction, at a place along the edge that varies.
+    fn crossing(k: usize, (pw, ph): (i32, i32)) -> Rect {
+        let (pw, ph) = (pw as f32, ph as f32);
+        let fraction = (k as f32 * 0.137) % 1.0;
+        let (w, h) =
+            (120.0 + (k % 3) as f32 * 17.3, 70.0 + (k % 5) as f32 * 9.1);
+        let along = ((k * 7919) % 1000) as f32 / 1000.0;
+        let over = 5.0 + (k % 7) as f32 * 9.0 + fraction;
+        match k % 4 {
+            0 => Rect::from_xywh(pw - w + over, along * (ph - h), w, h),
+            1 => Rect::from_xywh(along * (pw - w), ph - h + over, w, h),
+            2 => Rect::from_xywh(-over, along * (ph - h), w, h),
+            _ => Rect::from_xywh(along * (pw - w), -over, w, h),
+        }
+    }
+
+    /// The `k`th shape's draw: a filled rounded rectangle or a filled oval,
+    /// anti-aliased.
+    fn draw(canvas: &SkCanvas, rect: Rect, k: usize) {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(255, 20, 60, 200));
+        match k % 2 {
+            0 => {
+                canvas.draw_rrect(RRect::new_rect_xy(rect, 10.0, 10.0), &paint);
+            }
+            _ => {
+                canvas.draw_oval(rect, &paint);
+            }
+        }
+    }
+
+    /// The bytes of `surface` within `area`.
+    fn surface_bytes(surface: &mut Surface, area: IRect) -> Vec<u8> {
+        let info = surface.image_info().with_dimensions(area.size());
+        let mut pixels = vec![0u8; info.compute_min_byte_size()];
+        assert!(surface.read_pixels(
+            &info,
+            &mut pixels,
+            info.min_row_bytes(),
+            (area.left, area.top),
+        ));
+        pixels
+    }
+
+    /// A chain on the GPU whose region runs past the page's edge draws its
+    /// input, within the page, in the bytes the page draws it in: an edge
+    /// rounds against the size of the target it is drawn onto, so the input
+    /// drawn into a layer of the page and the region together alone lands
+    /// otherwise. Over curves and corners crossing each edge, on two pages.
+    #[test]
+    fn a_gpu_chain_past_the_page_draws_its_input_as_the_page_does() {
+        let (mut crossed, mut apart) = (0, Vec::new());
+        for size in PAGES {
+            let info = ImageInfo::new(
+                size,
+                ColorType::N32,
+                AlphaType::Premul,
+                ColorSpace::new_srgb(),
+            );
+            let Ok(mut page) = RenderingEngine::GPU
+                .make_surface(&info, &ExportOptions::default())
+            else {
+                eprintln!("skipped: no GPU");
+                return;
+            };
+            let bounds = IRect::from_size(size);
+            for k in 0..160 {
+                let rect = crossing(k, size);
+                let steps = [Step::Blur(BLUR)];
+                let Some(plan) =
+                    plan(page.canvas(), &steps, Some(rect), Depth::Bytes)
+                else {
+                    continue;
+                };
+                if plan.drawn == bounds {
+                    continue;
+                }
+                crossed += 1;
+                let Some(inside) = IRect::intersect(&plan.region, &bounds)
+                else {
+                    continue;
+                };
+                page.canvas().clear(Color::TRANSPARENT);
+                draw(page.canvas(), rect, k);
+                let want = surface_bytes(&mut page, inside);
+                let mut drawn =
+                    Drawn::new(page.canvas(), &[&plan], |_, layer| {
+                        draw(layer, rect, k)
+                    })
+                    .expect("a layer");
+                let read = inside.with_offset((-drawn.at.left, -drawn.at.top));
+                let layer =
+                    drawn.snapshot.image_info().with_dimensions(read.size());
+                let mut got = vec![0u8; layer.compute_min_byte_size()];
+                let mut direct = drawn
+                    .context
+                    .as_mut()
+                    .and_then(|context| context.as_direct_context());
+                assert!(drawn.snapshot.read_pixels_with_context(
+                    direct.as_mut(),
+                    &layer,
+                    &mut got,
+                    layer.min_row_bytes(),
+                    (read.left, read.top),
+                    CachingHint::Disallow,
+                ));
+                let differ =
+                    got.iter().zip(&want).filter(|(a, b)| a != b).count();
+                if differ > 0 {
+                    apart.push(format!(
+                        "{size:?} #{k} at {:?}: {differ} bytes",
+                        plan.drawn
+                    ));
+                }
+            }
+        }
+        assert!(crossed > 200, "only {crossed} plans crossed an edge");
+        assert!(apart.is_empty(), "apart from the page: {apart:#?}");
     }
 }
 
