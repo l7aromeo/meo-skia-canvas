@@ -100,8 +100,12 @@ probe="$temp/stl-probe.cpp"
 printf '#include <cstddef>\n' > "$probe"
 
 # Compiles the probe with one clang-cl, syntax only, printing what it said.
+# Its options in their dash spelling, which clang-cl takes as it takes the
+# slash one: MSYS rewrites an argument starting with a slash into a path
+# under Git's install, so `/Zs` reached clang-cl as `C:/Program Files/Git/Zs`
+# and the link step it never meant to run failed on that file.
 accepted() {
-    "$1" /nologo /Zs /TP "$(cygpath -w "$probe")" 2>&1
+    "$1" -nologo -Zs -TP "$(cygpath -w "$probe")" 2>&1
 }
 
 image_clang_cl='/c/Program Files/LLVM/bin/clang-cl.exe'
