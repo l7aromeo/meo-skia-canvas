@@ -139,6 +139,14 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         run: choco install ninja nasm
 
+      # clang-cl and libclang, as build.yml's Windows job gives skia-bindings.
+      - name: Use LLVM (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/use-llvm.sh
+
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
