@@ -1300,18 +1300,13 @@ impl Context2D {
             (Recording::Pixels, Some(exact)) => exact,
             _ => paint,
         };
-        // A run holding colour glyphs casts its shadow where it is filed --
-        // see `Self::files_as_replayed_text`.
-        let colour_run =
-            text.as_ref().is_some_and(|text| text.colour.is_some());
-        let cast_apart = !colour_run
-            && self.files_shadow_through_chain(
-                paint,
-                features,
-                text.as_ref(),
-                cpu_bytes.is_some(),
-                &f,
-            );
+        let cast_apart = self.files_shadow_through_chain(
+            paint,
+            features,
+            text.as_ref(),
+            cpu_bytes.is_some(),
+            &f,
+        );
         // A draw under a filter of its own whose shadow is filed apart is
         // run through the filter's chain, as it is casting none.
         if cast_apart
@@ -1664,6 +1659,49 @@ impl Context2D {
         };
         let Some((entry, reach)) = entry else {
             return false;
+        };
+        // A run holding colour glyphs is cast from where the chain plays
+        // it, its colour glyphs made for those pixels -- see
+        // `layer::ReplayedText` -- in the paint it casts in. Recorded into the
+        // chain's picture, they were images made at the scale the run was
+        // drawn at.
+        let entry = match (text.and_then(|text| text.colour.as_ref()), entry) {
+            (Some(run), entry) => {
+                let (recorded, document) = match entry {
+                    Layer::Targeted(pair) => {
+                        let (pixels, document) = Arc::unwrap_or_clone(pair);
+                        (pixels, Some(document))
+                    }
+                    Layer::Picture(picture) => (picture, None),
+                    _ => return false,
+                };
+                let mut drawn = pixels_cast.paint.clone();
+                drawn
+                    .set_image_filter(None)
+                    .set_blend_mode(BlendMode::SrcOver);
+                let replay = match pixels_cast.pass {
+                    Pass::Draw => run.clone(),
+                    Pass::AlphaInShadow => run.opaque(),
+                };
+                Layer::ReplayedText(Arc::new(layer::ReplayedText {
+                    matrix: self.state.matrix,
+                    replay: Some(replay),
+                    paint: drawn,
+                    inked: Rect::new_empty(),
+                    shadow: None,
+                    shadow_alone: false,
+                    blend: None,
+                    recording: LazyPicture::from(Some(recorded)),
+                    whole: LazyPicture::default(),
+                    bounds,
+                    document: document.map(layer::ReplayedRecording::recorded),
+                    clip: None,
+                    cast_before: false,
+                    #[cfg(test)]
+                    watch: None,
+                }))
+            }
+            (None, entry) => entry,
         };
         let entry = self.chain_input(cpu_bytes, entry);
         // The group composites through the blend, and a document through

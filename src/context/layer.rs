@@ -2004,6 +2004,48 @@ pub struct ReplayedShadow {
     pub offset: Vector,
 }
 
+impl ReplayedShadow {
+    /// Draws the shadow onto `canvas`, the run under `matrix`, the transform
+    /// it was drawn under: cast once from the whole run, as a run of plain
+    /// glyphs casts it. The run's pieces -- each colour glyph, and the plain
+    /// glyphs between them -- are drawn `source-over` into one layer, which
+    /// the shadow's filter casts from and its blend composites. Drawn piece
+    /// by piece in the shadow's paint, each piece cast a shadow of its own,
+    /// and where a colour glyph overlapped a plain one the two shadows
+    /// composited one over the other, 36 levels darker than one.
+    ///
+    /// The layer is bounded by what the pieces ink on `canvas`, widened by
+    /// [`HINTED_INK_DRIFT`] for the reason [`ReplayedText::ink_under`]
+    /// gives: unbounded, a layer for a filter takes in the whole clip, every
+    /// pixel of the page under a shadow a word wide.
+    fn draw(&self, canvas: &SkCanvas, matrix: &Matrix) {
+        let Some(clip) = canvas.device_clip_bounds() else {
+            return;
+        };
+        let mut inside = self.paint.clone();
+        inside
+            .set_image_filter(None)
+            .set_blend_mode(BlendMode::SrcOver);
+        let mut cast = Paint::default();
+        cast.set_anti_alias(true)
+            .set_image_filter(self.paint.image_filter())
+            .set_blend_mode(self.paint.blend_mode_or(BlendMode::SrcOver));
+        canvas.save();
+        canvas.translate(self.offset);
+        let device = canvas.local_to_device_as_3x3();
+        let inked = inked_by(Rect::from(clip), &device, |canvas| {
+            self.replay.draw(canvas, matrix, &inside);
+        })
+        .with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT));
+        canvas.reset_matrix();
+        canvas.save_layer(&SaveLayerRec::default().bounds(&inked).paint(&cast));
+        canvas.set_matrix(&device.into());
+        self.replay.draw(canvas, matrix, &inside);
+        canvas.restore();
+        canvas.restore();
+    }
+}
+
 impl ReplayedText {
     /// Whether the run's draw reads the page in the shader: its paint's
     /// blend, or the blend a layer holding it composites through, past the
@@ -2038,10 +2080,7 @@ impl ReplayedText {
         let _whole = WholeRuns::hold();
         let inked = inked_by(Rect::from(clip), device, |canvas| {
             if let Some(shadow) = &self.shadow {
-                canvas.save();
-                canvas.translate(shadow.offset);
-                shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
-                canvas.restore();
+                shadow.draw(canvas, &self.matrix);
             }
             if !self.shadow_alone {
                 replay.draw(canvas, &self.matrix, &self.paint);
@@ -2081,10 +2120,7 @@ impl ReplayedText {
                     canvas.save_layer(&SaveLayerRec::default().paint(&through));
                 }
                 if let Some(shadow) = &self.shadow {
-                    canvas.save();
-                    canvas.translate(shadow.offset);
-                    shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
-                    canvas.restore();
+                    shadow.draw(canvas, &self.matrix);
                 }
                 if let Some(replay) =
                     self.replay.as_ref().filter(|_| !self.shadow_alone)
@@ -2170,9 +2206,9 @@ impl ReplayedText {
         let inked_only = INKED_ONLY.replace(false);
         let record_run = |canvas: &SkCanvas| {
             if let Some(shadow) = shadow {
+                shadow.draw(canvas, &self.matrix);
                 canvas.save();
                 canvas.translate(shadow.offset);
-                shadow.replay.draw(canvas, &self.matrix, &shadow.paint);
                 reach_the_clip(canvas);
                 canvas.restore();
             }
