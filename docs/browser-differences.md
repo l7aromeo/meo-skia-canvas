@@ -1532,7 +1532,11 @@ a conic gradient's hard stops apart from the CPU's (#667), and the test glyphs
 stood up to 255 levels from the CPU canvas. The image is made where the page
 is played back, at the scale and in the pixel format it is played onto, so
 that an export at a density, a canvas drawn into another and a canvas pattern
-draw the glyph as drawing it there would. A shadow's filter is applied to
+draw the glyph as drawing it there would. A canvas holding colour glyphs,
+drawn with `drawImage` into a GPU canvas, is drawn on the CPU over the GPU's
+pixels and lands on the CPU canvas's bytes (#703). Ganesh replaying the
+picture behind the image draws the glyphs' gradients itself: 284 pixels of two
+test glyphs up to 81 levels off. A shadow's filter is applied to
 the glyph image on the CPU, as the CPU canvas applied it to the glyph's layer
 (`layer::ReplayedText`). On the GPU canvas the four test glyphs, standing
 apart, are the CPU canvas's bytes under a shadow, a blur filter,
@@ -1578,19 +1582,44 @@ centre's coordinates exactly: drawn directly through a path, or as a rectangle
 whose edges fall inside pixels, it put 0.5% and 16% of its pixels a level off.
 Over 600 generated gradients drawn as a rectangle, a rectangle off whole
 pixels, a triangle and a polygon, the GPU canvas parted from the CPU on 582
-pixels, every one within float noise of a half level or a stop. What stays
-apart: those ties; a shape's anti-aliased edge, which is Ganesh's coverage as
-for a flat colour; a gradient the CPU draws in floats -- a translucent
-two-point conical one, one interpolated in a space other than the page's, one
-under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
+pixels, every one within float noise of a half level or a stop. A path's
+anti-aliased edge is the CPU's too: the effect is masked by the CPU's coverage
+of the path, made for the draws that follow one another in one image at the
+same places as the effect's, so that a gradient fill's shadow and blur, which
+a chain makes from the CPU's edge, are those of the edge the canvas draws
+(#766). That coverage is cut where the page ends, as the CPU canvas's is, so
+a gradient path the page's edge cuts moves inside the page as it does on the
+CPU engine -- see the entry on a fill the page's edge cuts. Through
+Ganesh's coverage, a hard stop's edge stood up to 125 levels from the CPU
+canvas's. A canvas holding such a draw, drawn with `drawImage` into a GPU
+canvas, is drawn on the CPU over the GPU's pixels as well (#703), and lands on
+the CPU canvas's bytes under a scale, a rotation, a `globalAlpha`, `multiply`,
+`copy` and a shadow, the shadow cast from the CPU's draw and standing within a
+level of the CPU canvas's: Metal composites any shadow at half precision, a
+level off near a tie, and an x86 CPU canvas composites one up to a level off
+the exact composite the GPU makes on Vulkan.
+The image of a canvas is backed by its page's picture, and Ganesh replaying
+that picture draws the hard stops as its own gradient. What stays apart:
+those ties; along a path's edge, a byte Metal's half-precision composite
+rounds the other way, within 0.15 of a tie, and a byte llvmpipe's or NVIDIA's
+eight-bit composite rounds in two terms, within a level of the exact
+composite at any distance from a tie -- see the llvmpipe and NVIDIA entries;
+under `multiply` or a `globalAlpha`, a byte along the edge a level from the
+CPU's, whose eight-bit pipeline rounds the blend before it scales it by the
+coverage where the GPU rounds once -- matching that order takes a blend
+reading the destination, #736's case; text's anti-aliased edge, which is
+Ganesh's coverage as for a flat colour; a gradient the CPU draws in floats --
+a translucent two-point conical one, one interpolated in a space other than
+the page's, one under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
 for -- inside a layer a group opens, where the pixels cannot be read back and
 the CPU's raster is composited instead, a level apart wherever its two
 roundings differ from the CPU's one (9,792 of 16,384 pixels on a translucent
-radial over a fill, measured by compositing at the page); a canvas drawn with
-`drawImage` into a GPU canvas, whose picture Ganesh rasterizes itself (2,064
-pixels, up to 203 levels, on the conic above), where `drawCanvas` keeps the
-choice (#703); a GPU canvas drawn with `drawCanvas` into another under a
-transform other than a whole pixel's translation, where the image would be
+radial over a fill, measured by compositing at the page), unless the layer
+also holds a run of text drawn over a read back, whose entries then play on a
+surface of their own, where the gradient is drawn as on the page
+(`layer::played_on_a_root`); a GPU canvas drawn with `drawCanvas` into
+another under a transform other than a whole pixel's translation, where the
+image would be
 resampled and the draw is made on the CPU at the destination's pixels instead,
 inside the layer the source is drawn through and composited through the draw's
 blend -- exact inside an opaque `source-over` sweep scaled by 2 or 0.5, moved
@@ -1636,6 +1665,42 @@ at full alpha. Overlapping images under `exclusion`
 stand up to three levels from the CPU canvas there, where Metal stands two,
 for COLR glyphs and plain images alike. llvmpipe is a software rasterizer
 used for testing, and Chrome was not compared on it.
+
+How it rounds a `source-over` composite: the source's term and the
+destination's each to the nearest byte, then added -- `round(s * a) +
+round(d * (1 - a))`, `s` the source's byte, `d` the destination's, `a` the
+alpha the source is drawn at. The CPU canvas scales an anti-aliased edge's
+colour by its coverage in one step and rounds once. So along a gradient
+path's edge, whose effect is masked by the CPU's coverage (#766), a source
+byte of 128 under a coverage of 41/255 over a backdrop of 220 has an exact
+composite of 205.21: the CPU canvas stores 205, and llvmpipe 21 + 185 = 206,
+20.58 and 184.63 rounded apart. Every one of the 85,762 edge bytes the
+edge tests in `tests/gpu_gradient.rs` draw under `source-over`, where the
+gradient's own byte is the CPU's, is that formula. It is
+the driver's and not that route's: a plain draw on whole pixels at an alpha
+of `a / 255` -- an image at a `globalAlpha`, a flat fill at a `globalAlpha`,
+a fill of an `rgba()` colour -- stores it too, on all 540 bytes where it
+and the composite rounded once differ, and so did each on the commit before
+#766.
+
+**On an NVIDIA GPU a GPU canvas blends `source-over` at eight bits too, and
+cuts the source's term short first.** Measured on a GeForce GTX 1050 Ti,
+driver 580.178.04, through Vulkan: the fixed-function stage keeps twelve
+bits of fraction of the source's term, cuts off the rest, rounds what is
+left to a byte with a tie going down, and adds the destination's term
+rounded on its own. Every one of 30,340 distinct edge inputs of
+`tests/gpu_gradient.rs` fits that, and no width from ten to sixteen bits
+fits them all. A source byte of 128 under a coverage of 3/255 over a
+backdrop of 220 has an exact composite of 218.92: the CPU canvas and
+llvmpipe store 219, and NVIDIA 218, the source's term 1.506 cut to 1.494.
+An image drawn on whole pixels at a `globalAlpha` shows the same, on all 540
+bytes where it and llvmpipe's formula differ, and did on the commit before
+#766. A flat fill does not: it gives the blend its product already placed
+on a byte -- see the first entry -- which loses nothing to the cut, and it
+stores llvmpipe's formula. So a
+channel lies within a level of the exact composite there too. `multiply`,
+done in the shader, rounds once. Other NVIDIA parts and drivers were not
+measured, and Chrome was not compared.
 
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
 `luminosity` divide exactly on the CPU, the same bytes on every machine, and

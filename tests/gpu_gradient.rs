@@ -175,8 +175,8 @@ fn a_gradient_interpolated_in_oklab_stores_the_cpus_bytes() {
 }
 
 /// How many pixels of `gpu` part from `cpu` among those `cpu` inks whole,
-/// with all eight neighbours: the edge of a shape is the GPU's own coverage,
-/// as it is for a flat colour, and is not counted.
+/// with all eight neighbours: the edge of a shape is not counted -- see
+/// [`interior`].
 fn interior_apart(cpu: &[u8], gpu: &[u8], side: usize) -> usize {
     assert_eq!(cpu.len(), gpu.len(), "the two reads are the same size");
     interior(cpu, side)
@@ -195,8 +195,9 @@ fn interior_most_apart(cpu: &[u8], gpu: &[u8], side: usize) -> u8 {
 }
 
 /// The pixels of `cpu`, `side` pixels square, it inks whole, with all eight
-/// neighbours: the edge of a shape is the GPU's own coverage, as it is for
-/// a flat colour.
+/// neighbours. The edge of a path is held apart -- see [`edge_misses`] --
+/// and the edge of a glyph is the GPU's own coverage, as it is for a flat
+/// colour.
 fn interior(cpu: &[u8], side: usize) -> impl Iterator<Item = usize> + '_ {
     let whole = move |x: isize, y: isize| {
         (0..side as isize).contains(&x)
@@ -519,4 +520,394 @@ fn a_run_drawn_on_the_cpu_over_the_gpus_pixels_stores_the_cpus_bytes() {
         }
     };
     assert_cpus_bytes(96.0, 96.0, &scene);
+}
+
+/// A canvas holding a canvas drawn into it is rasterized where it is drawn
+/// in turn, and its gradients with it: drawn into a GPU canvas, that raster
+/// is made and composited on the CPU, at the destination's pixels, as the
+/// draw a GPU canvas makes of the gradients themselves is (#703). Ganesh
+/// drawing the raster put 4,800 bytes of this one apart from the CPU's.
+#[test]
+fn a_canvas_holding_one_drawn_into_a_gpu_canvas_stores_the_cpus_bytes() {
+    if !has_gpu() {
+        return;
+    }
+    let mut source = Canvas::new(64.0, 64.0);
+    {
+        let ctx = source.context();
+        ctx.set_fill_shader(&stripes());
+        ctx.fill_rect(0.0, 0.0, 64.0, 64.0);
+    }
+    let mut holder = Canvas::new(64.0, 64.0);
+    holder.context().draw_canvas(&mut source, 0.0, 0.0);
+    let mut draw = |gpu: bool| {
+        let mut canvas = Canvas::new(96.0, 96.0);
+        canvas.set_gpu(gpu);
+        {
+            let ctx = canvas.context();
+            over_a_fill(ctx, 96.0);
+            ctx.set_global_alpha(0.7);
+            ctx.draw_canvas_sized(&mut holder, 0.0, 0.0, 96.0, 96.0);
+        }
+        pixels(&mut canvas)
+    };
+    let (cpu, gpu) = (draw(false), draw(true));
+    let apart = cpu.iter().zip(&gpu).filter(|(a, b)| a != b).count();
+    assert_eq!(apart, 0, "{apart} bytes apart from the CPU canvas's");
+}
+
+/// The spacing of a half float between 128 and 256, in levels: 2^(7 - 10),
+/// a half float carrying ten bits of fraction. Metal composites at half
+/// precision, so a byte the GPU rounds the other way from the exact
+/// composite lies near a half level, by at most half this spacing for each
+/// rounding the composite takes.
+const HALF_FLOAT_SPACING_ABOVE_128: f64 = 1.0 / (1u32 << (10 - 7)) as f64;
+
+/// How many times a source-over composite through the coverage mask rounds
+/// to half precision: the source's product with the coverage, `1 - a`,
+/// `d * (1 - a)` and the sum. Measured, a byte the GPU rounds the other way
+/// lies 0.147 of a level from a tie at most for source-over and 0.143 for
+/// multiply, inside the bound these give for both.
+const BLEND_ROUNDINGS: u32 = 4;
+
+/// How many bits of fraction NVIDIA's fixed-function stage keeps of a
+/// `source-over` composite's source term before it rounds that term to a
+/// byte, cutting the rest off. Measured, not chosen: on a GeForce GTX 1050
+/// Ti under driver 580, every one of 30,340 distinct edge inputs fits
+/// twelve bits truncated, and no other width from ten to sixteen fits them
+/// all.
+const NVIDIA_SOURCE_FRACTION_BITS: u32 = 12;
+
+/// How a GPU's fixed-function stage rounds a `source-over` composite at
+/// eight bits, on the GPUs that do not blend it in floats as Metal does.
+/// The CPU rounds the composite once, so on these an edge byte stands
+/// within a level of the exact composite at any distance from a tie -- see
+/// the llvmpipe and NVIDIA entries in `docs/browser-differences.md`. A blend
+/// the shader does, such as `multiply`, rounds once on both.
+#[derive(Clone, Copy)]
+enum EightBitBlend {
+    /// Mesa's llvmpipe, the software Vulkan the Linux binding job draws on:
+    /// the source's term and the destination's each rounded to the nearest
+    /// byte, then added. A source byte of 128 under a coverage of 41 over a
+    /// backdrop of 220 has an exact composite of 205.21, which the CPU
+    /// stores as 205; llvmpipe stores 128 * 41 / 255 = 20.58 and
+    /// 220 * 214 / 255 = 184.63 rounded apart, 21 + 185 = 206.
+    TermsApart,
+    /// NVIDIA's: as [`Self::TermsApart`], but the source's term is first
+    /// cut to [`NVIDIA_SOURCE_FRACTION_BITS`] of fraction and its tie rounds
+    /// down. A source byte of 128 under a coverage of 3 over 220 has an
+    /// exact composite of 218.92, which the CPU stores as 219; the source's
+    /// term 1.506, cut to twelve bits, is 1.494, so NVIDIA stores
+    /// 1 + 217 = 218.
+    SourceCut,
+}
+
+impl EightBitBlend {
+    /// This machine's, or `None` where its GPU composites in floats.
+    fn here() -> Option<Self> {
+        let device = BackendInfo::query().device?;
+        if device.contains("llvmpipe") {
+            Some(Self::TermsApart)
+        } else if device.contains("NVIDIA") {
+            Some(Self::SourceCut)
+        } else {
+            None
+        }
+    }
+
+    /// The byte stored for a source term `source` and a destination term
+    /// `destination`, each in levels. Neither term as drawn falls on a tie
+    /// -- each is a byte times `k / 255`, and 255 is odd -- so the tie rule
+    /// of `f64::round` is never taken. A term cut to twelve bits can, and
+    /// its tie goes down.
+    fn composite(self, source: f64, destination: f64) -> f64 {
+        let source = match self {
+            Self::TermsApart => source.round(),
+            Self::SourceCut => {
+                let scale = f64::from(1u32 << NVIDIA_SOURCE_FRACTION_BITS);
+                let cut = (source / 255.0 * scale).floor() / scale * 255.0;
+                (cut - 0.5).ceil()
+            }
+        };
+        source + destination.round()
+    }
+}
+
+/// The backdrop [`edge_misses`] draws over.
+const BACKDROP: [u8; 3] = [200, 220, 240];
+
+/// A sweep about `center` with a hard stop, opaque.
+fn hard_stop(center: Point) -> Shader {
+    Shader::sweep_gradient(
+        center,
+        0.0,
+        360.0,
+        &[
+            stop(0.0, 255, 255, 0, 1.0),
+            stop(0.5, 255, 255, 0, 1.0),
+            stop(0.5, 0, 128, 0, 1.0),
+            stop(1.0, 0, 128, 0, 1.0),
+        ],
+        GradientColorSpace::Destination,
+    )
+    .expect("a sweep")
+}
+
+/// A linear ramp across `width` pixels, opaque.
+fn ramp(width: f32) -> Shader {
+    Shader::linear_gradient(
+        Point { x: 10.0, y: 0.0 },
+        Point {
+            x: width - 10.0,
+            y: 0.0,
+        },
+        &[stop(0.0, 250, 200, 0, 1.0), stop(1.0, 0, 60, 200, 1.0)],
+        GradientColorSpace::Destination,
+    )
+    .expect("a ramp")
+}
+
+/// The bytes a GPU canvas stores for `draw`, dyed by `shader` through
+/// `blend` over [`BACKDROP`] on a `width` by `height` page, that are neither
+/// the CPU canvas's nor explained: each as (pixel, CPU, GPU, exact).
+///
+/// A byte is explained where the exact composite `d + c * (blend(s, d) -
+/// d)` -- `s` the gradient's own bytes, `c` the CPU's coverage -- lies
+/// within the GPU's blend noise of a half level, or where the gradient's
+/// own byte already parts from the CPU's, which
+/// `every_shape_stores_the_cpus_bytes_inside_it` holds. Under a blend the
+/// CPU rounds before it takes the coverage, so a byte the GPU stores as the
+/// exact composite rounded once may stand a level from the CPU's: that is
+/// the CPU's eight-bit order of rounding, #736's case, and is explained too.
+///
+/// On llvmpipe and NVIDIA a `source-over` byte is explained where it is the
+/// byte that GPU's eight-bit composite stores -- see [`EightBitBlend`] --
+/// whatever its distance from a tie, and only that byte.
+fn edge_misses(
+    (width, height): (f32, f32),
+    draw: &dyn Fn(&mut Context2D),
+    shader: &dyn Fn() -> Shader,
+    blend: BlendMode,
+) -> Vec<(usize, u8, u8, f64)> {
+    let page =
+        |gpu, scene: &dyn Fn(&mut Context2D)| drawn(gpu, width, height, scene);
+    // The CPU's coverage of the shape, and the gradient's own bytes, the
+    // page covered, on each engine.
+    let coverage = page(false, draw);
+    let whole = |ctx: &mut Context2D| {
+        ctx.set_fill_shader(&shader());
+        ctx.fill_rect(0.0, 0.0, width, height);
+    };
+    let (cpu_source, gpu_source) = (page(false, &whole), page(true, &whole));
+    let scene = |ctx: &mut Context2D| {
+        let [r, g, b] = BACKDROP;
+        ctx.set_fill_style(RgbaLinear::from_srgb8(r, g, b, 1.0));
+        ctx.fill_rect(0.0, 0.0, width, height);
+        ctx.set_global_composite_operation(blend);
+        ctx.set_fill_shader(&shader());
+        ctx.set_stroke_shader(&shader());
+        draw(ctx);
+    };
+    let (cpu, gpu) = (page(false, &scene), page(true, &scene));
+    let exact = |i: usize| {
+        let c = f64::from(coverage[i | 3]) / 255.0;
+        let d = f64::from(BACKDROP[i % 4]);
+        let s = f64::from(cpu_source[i]);
+        let sa = f64::from(cpu_source[i | 3]) / 255.0;
+        let blended = match blend {
+            BlendMode::Multiply => s * d / 255.0 + d * (1.0 - sa),
+            _ => s + d * (1.0 - sa),
+        };
+        d + c * (blended - d)
+    };
+    let eight_bit =
+        EightBitBlend::here().filter(|_| blend == BlendMode::SourceOver);
+    let eight_bit_byte = |rounding: EightBitBlend, i: usize| {
+        let c = f64::from(coverage[i | 3]) / 255.0;
+        let alpha = (f64::from(cpu_source[i | 3]) * c).round();
+        let d = f64::from(BACKDROP[i % 4]);
+        rounding.composite(
+            f64::from(cpu_source[i]) * c,
+            d * (255.0 - alpha) / 255.0,
+        )
+    };
+    let noise = BLEND_ROUNDINGS as f64 * HALF_FLOAT_SPACING_ABOVE_128 / 2.0;
+    (0..cpu.len())
+        .filter(|&i| i % 4 != 3 && cpu[i] != gpu[i])
+        .filter(|&i| cpu_source[i] == gpu_source[i])
+        .filter(|&i| {
+            eight_bit.is_none_or(|rounding| {
+                f64::from(gpu[i]) != eight_bit_byte(rounding, i)
+            })
+        })
+        .map(|i| (i / 4, cpu[i], gpu[i], exact(i)))
+        .filter(|&(_, cpu, gpu, exact)| {
+            let rounded_once =
+                f64::from(gpu) == exact.round() && cpu.abs_diff(gpu) == 1;
+            let tie = (exact.fract() - 0.5).abs() < noise;
+            !(rounded_once
+                || tie && (f64::from(gpu) - exact).abs() < 0.5 + noise)
+        })
+        .collect()
+}
+
+/// `edge_misses` for each blend, asserted empty, and the coverage itself
+/// held to the CPU's byte for byte: on a transparent page an opaque
+/// gradient's alpha is its coverage, which no blend rounds.
+fn assert_cpus_edge(
+    size: (f32, f32),
+    name: &str,
+    draw: &dyn Fn(&mut Context2D),
+    shader: &dyn Fn() -> Shader,
+) {
+    let alone = |gpu| {
+        drawn(gpu, size.0, size.1, &|ctx: &mut Context2D| {
+            ctx.set_fill_shader(&shader());
+            ctx.set_stroke_shader(&shader());
+            draw(ctx);
+        })
+    };
+    let (cpu, gpu) = (alone(false), alone(true));
+    let apart = (3..cpu.len())
+        .step_by(4)
+        .filter(|&i| cpu[i] != gpu[i])
+        .map(|i| (i / 4, cpu[i], gpu[i]))
+        .collect::<Vec<_>>();
+    assert!(
+        apart.is_empty(),
+        "{name}: {} pixels' coverage off the CPU canvas's, the first \
+         (pixel, CPU, GPU) {:?}",
+        apart.len(),
+        apart.first(),
+    );
+    for blend in [BlendMode::SourceOver, BlendMode::Multiply] {
+        let misses = edge_misses(size, draw, shader, blend);
+        assert!(
+            misses.is_empty(),
+            "{name}, {blend:?}: {} bytes off the CPU canvas's away from a \
+             tie, the first (pixel, CPU, GPU, exact) {:?}",
+            misses.len(),
+            misses.first(),
+        );
+    }
+}
+
+/// A path dyed by a gradient, drawn on a GPU canvas, takes the CPU's coverage
+/// of its edge, so that its shadow and its blur, which a chain makes on the
+/// CPU, are cast from the edge it draws (#766) -- see [`edge_misses`] for
+/// what is held. Drawn through Ganesh's coverage, the triangle under a hard
+/// stop parted from the CPU's coverage on 506 pixels.
+#[test]
+fn a_gradient_paths_edge_is_the_cpus() {
+    if !has_gpu() {
+        return;
+    }
+    let shapes: [Named; 7] = [
+        ("a triangle", &|ctx| {
+            ctx.begin_path();
+            ctx.move_to(20.0, 140.0);
+            ctx.line_to(100.0, 15.25);
+            ctx.line_to(180.5, 145.0);
+            ctx.fill(FillRule::NonZero);
+        }),
+        // Cut where the page ends, as the CPU canvas cuts it -- see
+        // `layer::draw_coverage`.
+        ("a triangle past every edge", &|ctx| {
+            ctx.begin_path();
+            ctx.move_to(-40.5, 190.0);
+            ctx.line_to(100.25, -30.7);
+            ctx.line_to(250.4, 140.2);
+            ctx.fill(FillRule::NonZero);
+        }),
+        // A run whose paths share the atlas, each held to its own slot. They
+        // lie apart, so that each composites over the backdrop alone.
+        ("a run past the edges", &|ctx| {
+            for i in 0..6u8 {
+                let (x, y) = (
+                    f32::from(i % 3) * 80.0 - 25.3,
+                    f32::from(i / 3) * 115.0 - 30.6,
+                );
+                ctx.begin_path();
+                ctx.move_to(x, y + 85.0);
+                ctx.line_to(x + 30.25, y + 0.7);
+                ctx.line_to(x + 70.4, y + 80.2);
+                ctx.fill(FillRule::NonZero);
+            }
+        }),
+        ("a disc", &|ctx| {
+            ctx.begin_path();
+            ctx.arc(100.3, 80.6, 60.2, 0.0, std::f32::consts::TAU, false)
+                .expect("a positive radius");
+            ctx.fill(FillRule::NonZero);
+        }),
+        ("a rectangle off whole pixels", &|ctx| {
+            ctx.fill_rect(20.3, 15.6, 150.4, 120.2);
+        }),
+        // Turned by its corners rather than by the transform, so that the
+        // gradient lies on the page as it does for the page-covering fill
+        // its own bytes are read from.
+        ("a turned rectangle", &|ctx| {
+            let (sin, cos) = 0.3f32.sin_cos();
+            let corner = |x: f32, y: f32| {
+                (100.0 + x * cos - y * sin, 80.0 + x * sin + y * cos)
+            };
+            let corners = [
+                corner(-60.0, -40.0),
+                corner(60.0, -40.0),
+                corner(60.0, 40.0),
+                corner(-60.0, 40.0),
+            ];
+            ctx.begin_path();
+            ctx.move_to(corners[0].0, corners[0].1);
+            for (x, y) in &corners[1..] {
+                ctx.line_to(*x, *y);
+            }
+            ctx.fill(FillRule::NonZero);
+        }),
+        ("a stroke", &|ctx| {
+            ctx.set_line_width(7.5);
+            ctx.begin_path();
+            ctx.move_to(20.0, 140.0);
+            ctx.bezier_curve_to(40.0, 0.0, 160.0, 0.0, 180.0, 140.0);
+            ctx.stroke();
+        }),
+    ];
+    let size = (200.0, 160.0);
+    let hard = || hard_stop(Point { x: 100.0, y: 80.0 });
+    let smooth = || ramp(size.0);
+    for (shape, draw) in shapes {
+        assert_cpus_edge(size, &format!("{shape}, a hard stop"), draw, &hard);
+        assert_cpus_edge(size, &format!("{shape}, a ramp"), draw, &smooth);
+    }
+}
+
+/// A path wider than a run's atlas -- see `layer::atlas` -- takes an image
+/// of its own coverage, and the CPU's edge as well, cut where the page ends
+/// for one that crosses it.
+#[test]
+fn a_gradient_path_past_the_atlas_takes_the_cpus_edge() {
+    if !has_gpu() {
+        return;
+    }
+    let size = (2600.0, 80.0);
+    let triangle = |ctx: &mut Context2D| {
+        ctx.begin_path();
+        ctx.move_to(10.5, 75.0);
+        ctx.line_to(1300.25, 4.7);
+        ctx.line_to(2590.4, 72.2);
+        ctx.fill(FillRule::NonZero);
+    };
+    let past = |ctx: &mut Context2D| {
+        ctx.begin_path();
+        ctx.move_to(10.5, 75.0);
+        ctx.line_to(1300.25, 4.7);
+        ctx.line_to(2900.4, 60.2);
+        ctx.fill(FillRule::NonZero);
+    };
+    let hard = || hard_stop(Point { x: 1300.0, y: 40.0 });
+    let smooth = || ramp(size.0);
+    assert_cpus_edge(size, "a hard stop", &triangle, &hard);
+    assert_cpus_edge(size, "a ramp", &triangle, &smooth);
+    assert_cpus_edge(size, "past the edge, a hard stop", &past, &hard);
+    assert_cpus_edge(size, "past the edge, a ramp", &past, &smooth);
 }

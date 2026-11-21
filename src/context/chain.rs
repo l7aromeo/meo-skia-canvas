@@ -1474,6 +1474,12 @@ thread_local! {
     /// by.
     pub(crate) static MADE_LAYERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 
+    /// Whether the canvas's device makes no layer for [`layer_surface`], nor
+    /// a coverage's drawn plane, on this thread, as where
+    /// `SkCanvas::makeSurface` returns null, so that a test can hold what is
+    /// drawn on the memory it falls back to.
+    pub(crate) static NO_DEVICE_LAYERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// The most pixels a chain [`plan`] on this thread has worked on, which
     /// the tests of a chain's layer size count by.
     pub(crate) static LARGEST_REGION: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
@@ -1706,7 +1712,11 @@ fn draw_from_the_origin(
 /// kept: its chains take the CPU's route, whose steps read the layer where it
 /// lies. A layer the page made would be a Graphite texture, which nothing on
 /// that route reads.
-fn layer_surface(
+///
+/// Every layer takes the canvas's surface properties, so that text drawn on
+/// it takes the page's contrast and gamma: the device's carry them over, and
+/// one in memory is given them -- see [`raster_layer`].
+pub(crate) fn layer_surface(
     canvas: &SkCanvas,
     depth: Depth,
     drawn: IRect,
@@ -1714,10 +1724,13 @@ fn layer_surface(
     let info = layer_info(canvas, depth, drawn);
     match engine_of(canvas) {
         RenderingEngine::Graphite => {
-            return started::raster(&info, None, None)
-                .map(|raster| (raster, None));
+            return raster_layer(canvas, &info).map(|raster| (raster, None));
         }
         RenderingEngine::GPU | RenderingEngine::CPU => {}
+    }
+    #[cfg(test)]
+    if NO_DEVICE_LAYERS.get() {
+        return raster_layer(canvas, &info).map(|raster| (raster, None));
     }
     let key = pool::key(canvas, &info);
     if let Some(mut kept) = key.as_ref().and_then(pool::take) {
@@ -1731,8 +1744,20 @@ fn layer_surface(
     MADE_LAYERS.with(|made| made.set(made.get() + 1));
     match canvas.new_surface(&info, None) {
         Some(surface) => Some((surface, key)),
-        None => started::raster(&info, None, None).map(|raster| (raster, None)),
+        None => raster_layer(canvas, &info).map(|raster| (raster, None)),
     }
+}
+
+/// A layer, or a coverage's plane, in memory for `canvas`, under its
+/// surface properties.
+///
+/// `SkCanvas::makeSurface` gives a layer the canvas's own properties where
+/// it is passed none; a raster made apart from the canvas takes Skia's
+/// defaults instead, whose text gamma on Linux is 1.2 where the page's is
+/// its own -- a run drawn on one under `multiply` stood 13 levels from the
+/// same run drawn on the page.
+fn raster_layer(canvas: &SkCanvas, info: &ImageInfo) -> Option<Surface> {
+    started::raster(info, None, canvas.props().as_ref())
 }
 
 /// The rectangle `region` takes as painted, in the layer's pixels:
@@ -3149,6 +3174,47 @@ mod tests {
                 .expect("a layer");
         assert!(layer.peek_pixels().is_some(), "a layer in main memory");
         assert!(key.is_none(), "a layer in main memory is never kept");
+        assert_eq!(
+            Some(layer.props()),
+            canvas.props().as_ref(),
+            "the page's text contrast and gamma"
+        );
+    }
+
+    #[test]
+    fn a_layer_in_memory_takes_the_canvas_s_text_contrast_and_gamma() {
+        // A layer the device does not make is made in memory, apart from
+        // the canvas, and takes the canvas's surface properties all the
+        // same, so that text drawn on it is rasterized under the page's
+        // contrast and gamma rather than under Skia's defaults. Neither
+        // value here is a default on any platform.
+        use skia_safe::{PixelGeometry, SurfaceProps, SurfacePropsFlags};
+        let info = ImageInfo::new(
+            (16, 16),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let props = SurfaceProps::new_with_text_properties(
+            SurfacePropsFlags::default(),
+            PixelGeometry::Unknown,
+            0.7,
+            2.0,
+        );
+        let mut page =
+            started::raster(&info, None, Some(&props)).expect("a page");
+        for memory in [false, true] {
+            super::NO_DEVICE_LAYERS.set(memory);
+            let layer = super::layer_surface(
+                page.canvas(),
+                Depth::Bytes,
+                IRect::from_wh(8, 8),
+            );
+            super::NO_DEVICE_LAYERS.set(false);
+            let (mut layer, _) = layer.expect("a layer");
+            assert!(layer.peek_pixels().is_some(), "a layer in main memory");
+            assert_eq!(layer.props(), &props, "made in memory: {memory}");
+        }
     }
 
     #[test]
