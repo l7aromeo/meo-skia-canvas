@@ -24,11 +24,11 @@ use skia_safe::{
     ColorSpace, ColorType, Contains, FilterMode, IPoint, IRect, Image,
     ImageFilter, ImageInfo, Matrix, MipmapMode, Paint, Rect, RoundOut,
     SamplingOptions, Shader, Surface, Vector,
-    canvas::SrcRectConstraint,
+    canvas::{SrcRectConstraint, TopLayerPixels},
     color_filters,
     image::{CachingHint, RequiredProperties},
     image_filter::MapDirection,
-    image_filters,
+    image_filters, surfaces,
 };
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -645,7 +645,7 @@ impl Drawn {
     /// index in turn, onto a canvas under that plan's transform, in a save
     /// of its own, after every plan's region has been cleared -- and, for a
     /// layer in main memory that starts before the device's origin, once
-    /// more for each onto a layer that starts at it, see
+    /// more for each onto the layer's own pixels from the origin on, see
     /// [`draw_from_the_origin`]. `None` where no layer could be made.
     ///
     /// A single plan's layer falls back to its region alone where Skia
@@ -698,7 +698,7 @@ impl Drawn {
             offscreen.restore();
         }
         if zeroed {
-            draw_from_the_origin(canvas, plans, at, offscreen, &mut draw);
+            draw_from_the_origin(plans, at, offscreen, &mut draw);
         }
         Some(Self {
             snapshot: surface.image_snapshot(),
@@ -1531,12 +1531,12 @@ fn split(base: &Matrix) -> Option<(Matrix, Matrix)> {
 ///   So the layer starts at the device's origin, as the page does, or at the
 ///   region's where that lies before it, and the chain runs on the region
 ///   alone. One that starts before the origin draws what lies from the origin
-///   on again in a layer that starts at it, which the chain takes that part
-///   from -- see [`draw_from_the_origin`]. Only the region is written, and
-///   memory nothing writes is never mapped, so the layer costs the pages its
-///   rows touch: a page or more a row, which for a narrow region far into a
-///   wide page is most of its cost -- 8.5 MB for 518 rows of 16 KB pages, where
-///   the region alone is 0.3 MB.
+///   on again, into its own pixels through a surface that starts at the origin
+///   -- see [`draw_from_the_origin`]. Only the region is written, and memory
+///   nothing writes is never mapped, so the layer costs the pages its rows
+///   touch: a page or more a row, which for a narrow region far into a wide
+///   page is most of its cost -- 8.5 MB for 518 rows of 16 KB pages, where the
+///   region alone is 0.3 MB.
 /// - Where Skia refuses a layer that large -- one past the `i32::MAX` bytes it
 ///   allows a raster surface, which an F32 layer for a picture being recorded
 ///   can pass when the picture's own pixels would not -- the layer is the
@@ -1624,30 +1624,38 @@ pub(crate) fn clear_unless_zeroed(surface: &mut Surface) {
     }
 }
 
-/// Draws again, in a layer in main memory starting at the device's origin,
-/// what `plans`' chains draw onto `offscreen`, one at `at` that starts
-/// before it, and copies the rows of each chain's region from the origin on
-/// from it over `offscreen`'s: so that a chain whose region crosses the page's
-/// top or left edge draws its input there as a chain inside the page does.
-/// Skia's anti-aliasing covers a curve by where on the raster it lies, whole
-/// pixels included -- see [`placed`] -- and Times New Roman's 96px "Ag",
-/// stroked 40 wide, drew 25 levels apart in a layer starting 54 pixels before
-/// the origin. The layer's size does not decide it on the CPU: one from the
-/// origin to the region's far corner draws as the page does. What lies before
-/// the origin has no page to match, and keeps `offscreen`'s pixels. Nothing
-/// is done for a layer starting at the origin or past it, or one the rest of
-/// the transform maps onto the device, which is not in the device's pixels.
+/// Draws again, into `offscreen`'s own pixels from the device's origin on,
+/// what `plans`' chains draw onto it, one at `at` that starts before the
+/// origin: so that a chain whose region crosses the page's top or left edge
+/// draws its input there as a chain inside the page does. Skia's
+/// anti-aliasing covers a curve by where on the raster it lies, whole pixels
+/// included -- see [`placed`] -- and Times New Roman's 96px "Ag", stroked 40
+/// wide, drew 25 levels apart in a layer starting 54 pixels before the
+/// origin. The layer's size does not decide it on the CPU: one from the
+/// origin to the region's far corner draws as the page does, and a raster
+/// surface wrapped round `offscreen`'s pixels from the origin on is one.
+/// Each chain's region there is cleared first, so that what it reads is the
+/// second draw alone; pixels no chain reads keep both. What lies before the
+/// origin has no page to match, and keeps the first draw.
+///
+/// Nothing is made or copied: a layer of its own for the second draw, and a
+/// copy of its rows back, were most of what the second draw cost.
+///
+/// Nothing is done for a layer starting at the origin or past it, one the
+/// rest of the transform maps onto the device, which is not in the device's
+/// pixels, or one that does not hold the origin -- the region alone, where
+/// Skia refuses the layer [`placed`] asks for, which `placed` says draws a
+/// curve otherwise.
 fn draw_from_the_origin(
-    canvas: &SkCanvas,
     plans: &[&Plan],
     at: IRect,
     offscreen: &SkCanvas,
     draw: &mut impl FnMut(usize, &SkCanvas),
 ) {
-    let Some(first) = plans.first() else {
-        return;
-    };
-    if (at.left >= 0 && at.top >= 0)
+    let before = at.left < 0 || at.top < 0;
+    let holds_origin = at.left <= 0 && at.top <= 0;
+    if !before
+        || !holds_origin
         || !plans.iter().all(|plan| plan.rest.is_identity())
     {
         return;
@@ -1660,36 +1668,41 @@ fn draw_from_the_origin(
     if inside.is_empty() {
         return;
     }
-    let Some((mut layer, _)) = layer_surface(canvas, first.depth, from_origin)
+    let props = offscreen.props();
+    let Some(TopLayerPixels {
+        pixels,
+        info,
+        row_bytes,
+        ..
+    }) = offscreen.access_top_layer_pixels()
     else {
         return;
     };
-    // Made just before in main memory, so zeros already -- see
-    // [`clear_unless_zeroed`].
-    for (i, plan) in plans.iter().enumerate() {
-        layer.canvas().save();
-        layer.canvas().set_matrix(&plan.layer.into());
-        draw(i, layer.canvas());
-        layer.canvas().restore();
-    }
-    // The rows are copied as they lie: the two layers share a colour type
-    // and space, so a write is a copy of bytes. A draw in `Src` does the same
-    // through Skia's raster pipeline, and took most of this function's time.
-    let Some(drawn) = layer.peek_pixels() else {
+    // The layer holds the origin, `-at.left` columns and `-at.top` rows in.
+    let start = (-at.top) as usize * row_bytes
+        + (-at.left) as usize * info.bytes_per_pixel();
+    let origin = surfaces::wrap_pixels(
+        &info.with_dimensions(from_origin.size()),
+        &mut pixels[start..],
+        row_bytes,
+        props.as_ref(),
+    );
+    debug_assert!(origin.is_some(), "a layer wraps from the origin on");
+    let Some(mut origin) = origin else {
         return;
     };
+    let canvas = origin.canvas();
     for area in &inside {
-        let written = drawn.extract_subset(area).is_some_and(|rows| {
-            rows.bytes().is_some_and(|bytes| {
-                offscreen.write_pixels(
-                    rows.info(),
-                    bytes,
-                    rows.row_bytes(),
-                    (area.left - at.left, area.top - at.top),
-                )
-            })
-        });
-        debug_assert!(written, "a layer in main memory takes its own rows");
+        canvas.save();
+        canvas.clip_irect(area, None);
+        canvas.clear(Color::TRANSPARENT);
+        canvas.restore();
+    }
+    for (i, plan) in plans.iter().enumerate() {
+        canvas.save();
+        canvas.set_matrix(&plan.layer.into());
+        draw(i, canvas);
+        canvas.restore();
     }
 }
 
@@ -5278,13 +5291,27 @@ mod tests {
 /// held to drawing its input within the page as a chain inside it does.
 #[cfg(test)]
 mod origin_tests {
+    use std::{cell::Cell, fs, sync::LazyLock};
+
     use skia_safe::{
-        AlphaType, Canvas as SkCanvas, Color, ColorType, IRect, Image,
-        ImageInfo, Paint, PaintStyle, RRect, Rect, image::CachingHint,
+        AlphaType, Canvas as SkCanvas, Color, ColorType, Data, Font, FontMgr,
+        IRect, Image, ImageInfo, Paint, PaintStyle, RRect, Rect, Typeface,
+        image::CachingHint,
     };
 
-    use super::{Depth, Drawn, Step, layer_info, plan};
+    use super::{Depth, Drawn, MADE_LAYERS, Step, layer_info, plan};
     use crate::started;
+
+    /// The face the text among the shapes is set in, the same on every
+    /// machine.
+    static OSWALD: LazyLock<Typeface> = LazyLock::new(|| {
+        let file =
+            fs::read("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf")
+                .expect("the Oswald test font");
+        FontMgr::new()
+            .new_from_data(Data::new_copy(&file), None)
+            .expect("Oswald loads")
+    });
 
     /// The page every scene is drawn on.
     const PAGE: (i32, i32) = (600, 400);
@@ -5310,8 +5337,8 @@ mod origin_tests {
         }
     }
 
-    /// The `k`th shape's draw: a filled rounded rectangle, a filled oval, or
-    /// a stroked oval, anti-aliased.
+    /// The `k`th shape's draw: a filled rounded rectangle, a filled oval, a
+    /// stroked oval, or text stroked 2 wide, anti-aliased.
     fn draw(canvas: &SkCanvas, rect: Rect, k: usize) {
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
@@ -5323,9 +5350,15 @@ mod origin_tests {
             1 => {
                 canvas.draw_oval(rect, &paint);
             }
-            _ => {
+            2 => {
                 paint.set_style(PaintStyle::Stroke).set_stroke_width(9.3);
                 canvas.draw_oval(rect, &paint);
+            }
+            _ => {
+                paint.set_style(PaintStyle::Stroke).set_stroke_width(2.0);
+                let font = Font::from_typeface(OSWALD.clone(), 60.0);
+                let origin = (rect.left + 4.0, rect.top + 58.0);
+                canvas.draw_str("Ag", origin, &font, &paint);
             }
         }
     }
@@ -5426,6 +5459,42 @@ mod origin_tests {
         }
         assert!(crossed > 100, "only {crossed} plans crossed an edge");
         assert!(apart.is_empty(), "apart from the page: {apart:#?}");
+    }
+
+    /// The input a chain past the top left draws again from the device's
+    /// origin on is drawn into the layer the chain reads, and no second
+    /// layer is made for it. A layer from the origin to the region's far
+    /// corner, made and freed for each such chain, was most of what the
+    /// second draw cost besides drawing.
+    #[test]
+    fn a_chain_past_the_top_left_draws_again_in_its_own_layer() {
+        let mut page =
+            started::raster(&ImageInfo::new_n32_premul(PAGE, None), None, None)
+                .expect("a page");
+        let canvas = page.canvas();
+        for k in 0..3 {
+            let rect = crossing(k);
+            let plan =
+                plan(canvas, &[Step::Blur(BLUR)], Some(rect), Depth::Bytes)
+                    .expect("a plan");
+            assert!(
+                plan.drawn.left < 0 || plan.drawn.top < 0,
+                "#{k} starts before the origin"
+            );
+            let made = MADE_LAYERS.with(Cell::get);
+            let draws = Cell::new(0);
+            Drawn::new(canvas, &[&plan], |_, layer| {
+                draws.set(draws.get() + 1);
+                draw(layer, rect, k);
+            })
+            .expect("a layer");
+            assert_eq!(draws.get(), 2, "#{k} is drawn twice");
+            assert_eq!(
+                MADE_LAYERS.with(Cell::get) - made,
+                1,
+                "#{k} makes one layer"
+            );
+        }
     }
 }
 
