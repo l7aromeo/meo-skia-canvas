@@ -7398,15 +7398,14 @@ mod overlapping_glyph_tests {
     }
 
     /// A translucent gradient interpolated in Oklab, which the CPU draws in
-    /// floats, inside a layer on a GPU page that also holds a run drawn over
-    /// a read back, lands the CPU page's bytes: the layer's entries play on a
-    /// root of their own, where the gradient is drawn over a read back too,
-    /// as on the page. The same layer without the run plays inside the
-    /// layer, where the gradient is composited from a raster of its own a
-    /// level apart, as `docs/browser-differences.md` says; and played inside
-    /// the layer, the layer with the run lands apart as well.
+    /// floats, inside a layer on a GPU page lands the CPU page's bytes, with
+    /// a run drawn over a read back beside it or without one: the layer's
+    /// entries play on a root of their own, where the gradient is drawn over
+    /// a read back, as on the page. Played inside the layer instead, the
+    /// gradient is composited from a raster of its own, a level apart where
+    /// the two roundings part from the CPU's one, with the run and without.
     #[test]
-    fn a_gradient_in_a_layer_holding_a_run_is_drawn_as_on_the_page() {
+    fn a_gradient_in_a_layer_is_drawn_as_on_the_page() {
         use crate::{
             color::RgbaLinear,
             context::layer::{BACKDROPS_READ, OWN_ROOTS, ROOTS_PLAYED},
@@ -7480,12 +7479,241 @@ mod overlapping_glyph_tests {
             inside != cpu,
             "inside the layer, the run's page lands apart"
         );
-        // Without it: no root, and the gradient composited a level apart.
+        // Without it: the gradient alone takes the root and one read back.
         let (cpu, _) = page(false, false);
         let (gpu, counts) = page(true, false);
-        assert_eq!(counts, (0, 0), "no root without a run");
-        assert!(gpu != cpu, "the gradient composited inside the layer");
-        assert!(most_apart(&gpu, &cpu) <= 1, "a level apart at most");
+        assert!(gpu == cpu, "{} levels from the CPU", most_apart(&gpu, &cpu));
+        assert_eq!(counts, (1, 1), "roots and read backs without a run");
+        OWN_ROOTS.set(false);
+        let (inside, _) = page(true, false);
+        OWN_ROOTS.set(true);
+        assert!(inside != cpu, "the gradient composited inside the layer");
+        assert!(most_apart(&inside, &cpu) <= 1, "a level apart at most");
+    }
+
+    /// A layer holding a gradient whose bytes a GPU canvas computes with an
+    /// effect of its own -- opaque, interpolated in the page's space,
+    /// filling a rectangle and a path with an edge -- takes no root on whole
+    /// pixels, and lands the bytes the same draws land on the GPU page
+    /// without the layer: those part from the CPU's along the path's edge by
+    /// Metal's half-precision composite, which `docs/browser-differences.md`
+    /// lists, and the layer adds nothing to that. Drawn into a GPU canvas
+    /// under a scale, where the effect's image would be resampled, the
+    /// draws are made over a read back, and land the CPU canvas's bytes.
+    #[test]
+    fn a_gradient_the_gpu_draws_exactly_takes_a_root_only_off_whole_pixels() {
+        use crate::{
+            color::RgbaLinear,
+            context::layer::{BACKDROPS_READ, ROOTS_PLAYED},
+            geometry::Point,
+            shader::{GradientInterpolation, GradientStop},
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let page = |gpu: bool, layer: bool| {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            if layer {
+                ctx.save_layer();
+            }
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            let stops = [
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::from_srgb8(200, 40, 90, 1.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::from_srgb8(30, 120, 200, 1.0),
+                },
+            ];
+            let gradient = Shader::linear_gradient(
+                Point::new(20.0, 0.0),
+                Point::new(300.0, 0.0),
+                &stops,
+                GradientInterpolation::default(),
+            )
+            .expect("a gradient");
+            ctx.set_fill_shader(&gradient);
+            ctx.fill_rect(20.0, 20.0, 120.0, 100.0);
+            ctx.begin_path();
+            ctx.move_to(160.0, 30.0);
+            ctx.line_to(300.0, 60.0);
+            ctx.line_to(190.0, 180.0);
+            ctx.close_path();
+            ctx.fill(FillRule::NonZero);
+            if layer {
+                ctx.restore();
+            }
+            canvas
+        };
+        let read = |canvas: &mut Canvas| {
+            let bytes = canvas
+                .context()
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            (bytes, canvas.engine_kind())
+        };
+        let (direct, _) = read(&mut page(true, false));
+        let counted = (ROOTS_PLAYED.get(), BACKDROPS_READ.get());
+        let (layered, engine) = read(&mut page(true, true));
+        let counts = (
+            ROOTS_PLAYED.get() - counted.0,
+            BACKDROPS_READ.get() - counted.1,
+        );
+        assert_eq!(engine, EngineKind::Gpu, "a GPU page");
+        assert_eq!(counts, (0, 0), "roots and read backs on whole pixels");
+        assert!(
+            layered == direct,
+            "{} levels from the page without the layer",
+            most_apart(&layered, &direct)
+        );
+        // Two roots, as for runs in a layer of the page's own: one for the
+        // group the canvas is drawn through, one for the layer within it.
+        let scaled = Into {
+            scale: Some(1.5),
+            ..Into::default()
+        };
+        let (cpu, _, _) =
+            drawn_into(&mut page(false, true), false, scaled, None);
+        let (gpu, roots, reads) =
+            drawn_into(&mut page(false, true), true, scaled, None);
+        assert_eq!((roots, reads), (2, 2), "roots and read backs, scaled");
+        assert!(gpu == cpu, "{} levels from the CPU", most_apart(&gpu, &cpu));
+    }
+
+    /// A layer on a GPU page holding a fill and, over it, a translucent
+    /// gradient interpolated in Oklab cast with a shadow, a canvas holding
+    /// such a gradient drawn in with `drawCanvas`, or a run of text filled
+    /// with it -- each of which a GPU canvas draws on the CPU over a read
+    /// back -- plays on a root of its own and
+    /// lands what the same draws land on the page without the layer, which
+    /// the layer, opaque, then composites unchanged. That is the CPU page's
+    /// bytes for the canvas drawn in. The shadow stands within a level of
+    /// the CPU's on the page itself, where Metal composites it at half
+    /// precision, as `docs/browser-differences.md` says, and the layer adds
+    /// nothing to that. Played inside the layer, both land apart from the
+    /// page.
+    #[test]
+    fn a_layer_holding_a_gradient_drawn_over_a_read_back_lands_as_the_page() {
+        use crate::{
+            color::RgbaLinear,
+            context::layer::{OWN_ROOTS, ROOTS_PLAYED},
+            geometry::Point,
+            shader::{GradientColorSpace, GradientInterpolation, GradientStop},
+        };
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let gradient = || {
+            let stops = [
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::from_srgb8(200, 40, 90, 0.6),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::from_srgb8(30, 120, 200, 0.4),
+                },
+            ];
+            Shader::radial_gradient(
+                Point::new(200.0, 80.0),
+                60.0,
+                &stops,
+                GradientInterpolation::new(GradientColorSpace::Oklab),
+            )
+            .expect("a gradient")
+        };
+        let source = || {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(false);
+            let ctx = canvas.context();
+            ctx.set_fill_shader(&gradient());
+            ctx.fill_rect(140.0, 20.0, 120.0, 120.0);
+            canvas
+        };
+        /// What the layer holds over its fill.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Draw {
+            /// The gradient filling a rectangle, cast with a shadow: a path
+            /// whose effect cannot be made.
+            Shadowed,
+            /// A canvas holding the gradient drawn in.
+            DrawnIn,
+            /// A run of text filled with the gradient, which the GPU canvas
+            /// draws on the CPU outright -- see `layer::OnGpu::Raster`.
+            Text,
+        }
+        register();
+        forget_laid_out();
+        let page = |gpu: bool, layer: bool, draw: Draw| {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let mut from = source();
+            let ctx = canvas.context();
+            if layer {
+                ctx.save_layer();
+            }
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W, H);
+            match draw {
+                Draw::DrawnIn => ctx.draw_canvas(&mut from, 0.0, 0.0),
+                Draw::Shadowed => {
+                    ctx.set_shadow_color_css("rgba(10,10,10,0.6)")
+                        .expect("a colour");
+                    ctx.set_shadow_blur(3.0);
+                    ctx.set_shadow_offset(2.0, 3.0);
+                    ctx.set_fill_shader(&gradient());
+                    ctx.fill_rect(140.0, 20.0, 120.0, 120.0);
+                }
+                Draw::Text => {
+                    assert!(ctx.set_font_css("64px OverlapOswald"));
+                    ctx.set_fill_shader(&gradient());
+                    ctx.fill_text(OSWALD.1, 120.0, 110.0, None);
+                }
+            }
+            if layer {
+                ctx.restore();
+            }
+            let roots = ROOTS_PLAYED.get();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, W, H)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            let engine = canvas.engine_kind();
+            assert_eq!(engine == EngineKind::Gpu, gpu, "read on {engine:?}");
+            (bytes, ROOTS_PLAYED.get() - roots)
+        };
+        for draw in [Draw::Shadowed, Draw::DrawnIn, Draw::Text] {
+            let (direct, _) = page(true, false, draw);
+            let (layered, roots) = page(true, true, draw);
+            assert_eq!(roots, 1, "{draw:?}: a root");
+            assert!(
+                layered == direct,
+                "{draw:?}: {} levels from the page without the layer",
+                most_apart(&layered, &direct)
+            );
+            if draw == Draw::DrawnIn {
+                let (cpu, _) = page(false, true, draw);
+                assert!(
+                    layered == cpu,
+                    "{draw:?}: {} levels from the CPU",
+                    most_apart(&layered, &cpu)
+                );
+            }
+            OWN_ROOTS.set(false);
+            let (inside, _) = page(true, true, draw);
+            OWN_ROOTS.set(true);
+            assert!(inside != direct, "{draw:?}: inside the layer lands apart");
+        }
     }
 
     /// A page holding a blend but nothing drawn over a read back, a page

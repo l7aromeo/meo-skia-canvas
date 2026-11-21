@@ -364,11 +364,11 @@ describe("a gradient on a GPU canvas", () => {
               most = Math.max(most, Math.abs(cpu[i + k] - gpu[i + k]));
           assert.ok(most <= 1, `${most} levels apart`);
         }
-        // Through another blend, inside the layer the source is drawn
-        // through, the draw made on the CPU over transparent is composited
-        // through the blend by the GPU: a level apart where its rounding and
-        // the CPU's differ. `source-atop` inks nothing over transparent, so
-        // the draw is made there with `source-over`.
+        // Through another blend as well: the layer the source is drawn
+        // through plays on a surface of its own, where the draw is made on
+        // the CPU over the pixels it blends with, as on the page, rather than
+        // over transparent and composited through the blend by the GPU,
+        // which rounds twice. Bounded as the draw above, by the two origins.
         for (const blend of ["multiply", "source-atop"]) {
           const blended = (gpu) =>
             drawn(gpu, 128, 128, (ctx) => {
@@ -469,6 +469,26 @@ describe("a gradient on a GPU canvas", () => {
         }
       },
     );
+
+  test("inside a layer, as drawn on the CPU", { skip }, () => {
+    // A translucent Oklab radial is made on the CPU over the pixels it lands
+    // on. Inside a layer, whose pixels cannot be read back, it was made over
+    // transparent and composited into the layer, rounding twice where the
+    // CPU rounds once; the layer now plays on a surface of its own, where
+    // the draw is made as on the page.
+    const scene = (ctx) => {
+      ctx.saveLayer(1);
+      ctx.fillStyle = "rgb(20 40 200)";
+      ctx.fillRect(0, 0, 128, 128);
+      ctx.fillStyle = radial(ctx, "oklab");
+      ctx.fillRect(10, 10, 108, 108);
+      ctx.restore();
+    };
+    assert.equal(
+      apart(drawn(false, 128, 128, scene), drawn(true, 128, 128, scene)),
+      0,
+    );
+  });
 
   for (const into of [false, true])
     test(

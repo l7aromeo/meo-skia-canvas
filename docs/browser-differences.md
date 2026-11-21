@@ -1646,7 +1646,15 @@ the CPU canvas's bytes under a scale, a rotation, a `globalAlpha`, `multiply`,
 `copy` and a shadow, the shadow cast from the CPU's draw and standing within a
 level of the CPU canvas's: Metal composites any shadow at half precision, a
 level off near a tie, and an x86 CPU canvas composites one up to a level off
-the exact composite the GPU makes on Vulkan.
+the exact composite the GPU makes on Vulkan. A GPU canvas drawn with
+`drawCanvas` into another under a transform other than a whole pixel's
+translation, where the effect's image would be resampled, has the draw made on
+the CPU at the destination's pixels instead, in the layer the source is drawn
+through, which plays on a surface of its own: a sweep over a fill lands on the
+CPU canvas's bytes inside its edges scaled by 2 or 0.5, moved part of a pixel
+or rotated, through `source-over`, `multiply` and `color-dodge`, where
+Ganesh's own gradient parted 5,301 pixels by up to 35 levels under `multiply`
+at a scale of 2 and 5,766 by up to 66 under `color-dodge`.
 The image of a canvas is backed by its page's picture, and Ganesh replaying
 that picture draws the hard stops as its own gradient. What stays apart:
 those ties; along a path's edge, a byte Metal's half-precision composite
@@ -1660,25 +1668,13 @@ reading the destination, #736's case; text's anti-aliased edge, which is
 Ganesh's coverage as for a flat colour; a gradient the CPU draws in floats --
 a translucent two-point conical one, one interpolated in a space other than
 the page's, one under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
-for -- inside a layer a group opens, where the pixels cannot be read back and
-the CPU's raster is composited instead, a level apart wherever its two
-roundings differ from the CPU's one (9,792 of 16,384 pixels on a translucent
-radial over a fill, measured by compositing at the page), unless the layer
-also holds a run of text drawn over a read back, whose entries then play on a
-surface of their own, where the gradient is drawn as on the page
-(`layer::played_on_a_root`); a GPU canvas drawn with `drawCanvas` into
-another under a transform other than a whole pixel's translation, where the
-image would be
-resampled and the draw is made on the CPU at the destination's pixels instead,
-inside the layer the source is drawn through and composited through the draw's
-blend -- exact inside an opaque `source-over` sweep scaled by 2 or 0.5, moved
-part of a pixel or rotated; within a level through a blend the CPU makes in
-eight bits (`multiply` on 365 of 16,384 pixels at a scale of 2, where Ganesh's
-own gradient parted 5,301 by up to 35); and through `color-dodge`, which the
-CPU makes in floats from a gradient it never rounds, the composite's rounding
-of it multiplied by the dodge's division (7,091 pixels up to 29 levels at a
-scale of 2, where Ganesh's own gradient parted 5,766 by up to 66); and what a
-GPU canvas does with any colour -- `multiply` a level apart on 97 of 4,096
+for -- inside a layer whose own paint carries a filter or which a backdrop
+seeds, where the pixels cannot be read back and the CPU's raster is
+composited instead, a level apart wherever its two roundings differ from the
+CPU's one (9,792 of 16,384 pixels on a translucent radial over a fill,
+measured with the layer played inside itself); any other layer holding such a gradient plays its entries on a
+surface of its own, where the gradient is drawn as on the page
+(`layer::played_on_a_root`); and what a GPU canvas does with any colour -- `multiply` a level apart on 97 of 4,096
 pixels of the sweep, as for an image of the same pixels. Chrome's GPU canvas
 was not measured: headless Chrome drew it on SwiftShader.
 

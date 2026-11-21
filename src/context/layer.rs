@@ -2760,8 +2760,9 @@ pub enum OnGpu {
     /// other mapping than onto whole pixels -- a canvas drawn into another
     /// under a scale, say -- the image would be resampled, so the draw is
     /// made on the CPU instead: over the GPU's pixels, `beyond` saying as
-    /// for [`OnGpu::Raster`] what it composites over, or, inside a layer,
-    /// whose pixels cannot be read, over transparent and composited through
+    /// for [`OnGpu::Raster`] what it composites over, or, inside a layer
+    /// whose pixels cannot be read -- one not played on a root of its own,
+    /// see [`played_on_a_root`] -- over transparent and composited through
     /// `blend` -- `over`, the draw recorded with `SrcOver`, where `blend` is
     /// another.
     Effect {
@@ -3325,7 +3326,12 @@ fn recorded_over(draw: &GradientPath, cull: Rect) -> Option<Picture> {
 /// by a translation of whole pixels, under which an image sampled at its
 /// texels' centres lands on the pixels it was made for.
 fn on_whole_pixels(canvas: &SkCanvas) -> bool {
-    let device = canvas.local_to_device_as_3x3();
+    maps_whole_pixels(&canvas.local_to_device_as_3x3())
+}
+
+/// Whether `device` is a translation of whole pixels -- see
+/// [`on_whole_pixels`].
+fn maps_whole_pixels(device: &Matrix) -> bool {
     device.is_translate()
         && [device.translate_x(), device.translate_y()]
             .iter()
@@ -3444,6 +3450,24 @@ impl GradientDraw {
             index += 1;
         }
         canvas.restore();
+    }
+
+    /// Whether a GPU canvas playing the run under `device` draws any of it
+    /// on the CPU over the pixels it reads -- see [`played_on_gpu`]: a draw
+    /// made on the CPU always; a path whose effect cannot be made; and,
+    /// where `device` does not map the recording's device pixels onto whole
+    /// ones, a path or a draw recorded with an image of the effect, which
+    /// would be resampled there.
+    pub(crate) fn reads_the_page(&self, device: &Matrix) -> bool {
+        let whole = maps_whole_pixels(device);
+        self.draws.iter().any(|piece| match &piece.gpu {
+            OnGpu::Raster { .. } => true,
+            OnGpu::Path(draw) => {
+                !whole || draw.spec.exact(&draw.page, draw.alpha).is_none()
+            }
+            OnGpu::Effect { .. } => !whole,
+            OnGpu::Alone | OnGpu::Native => false,
+        })
     }
 
     /// What the run reaches, under the transform it is played back under:
@@ -4703,12 +4727,15 @@ impl Group {
 }
 
 /// Plays `contents` into the layer open on `canvas` by way of a surface of
-/// their own, where they hold a run drawn on the CPU over the pixels it
-/// reads -- see [`replayed_on_their_backdrop`] -- which inside the layer
-/// could not read them: `SkCanvas::readPixels` reads the canvas's root
-/// device, never an open layer, and the run would be drawn by the GPU
-/// itself, its overlapping glyphs blended as one. Whether it played them;
-/// where it did not, nothing was drawn.
+/// their own, where they hold a draw made on the CPU over the pixels it
+/// reads -- see [`reads_the_page`] -- which inside the layer could not
+/// read them: `SkCanvas::readPixels` reads the canvas's root device, never
+/// an open layer. A run would then be drawn by the GPU itself, its
+/// overlapping glyphs blended as one -- see [`replayed_on_their_backdrop`]
+/// -- and a draw dyed by a gradient made on the CPU over transparent and
+/// composited into the layer, rounding twice where the page rounds once --
+/// see [`drawn_on_their_backdrop`]. Whether it played them; where it did
+/// not, nothing was drawn.
 ///
 /// The surface covers the layer's bounds -- the canvas's device clip
 /// bounds while the layer is open -- in the canvas's colour type and space,
@@ -4726,12 +4753,13 @@ impl Group {
 /// anti-aliased path's included, shapes the copy as it shaped the entries.
 ///
 /// What it costs past the layer: the surface, a copy of the layer's size,
-/// and the read backs its runs take, which a page drawn directly pays as
+/// and the read backs its draws take, which a page drawn directly pays as
 /// well. Where the device makes no surface, the surface is memory, and the
 /// entries play there as on a CPU page, the copy then uploading it.
 ///
-/// Only on the GPU, which alone draws such a run over a read back, and not
-/// under a perspective, where it is not read back either.
+/// Only on the GPU, which alone makes such a draw over a read back, and not
+/// under a perspective, under which the page reads none back either -- see
+/// [`drawn_on_their_backdrop`] and [`replayed_on_their_backdrop`].
 fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
     #[cfg(test)]
     if !OWN_ROOTS.get() {
@@ -4740,7 +4768,7 @@ fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
     let device = canvas.local_to_device_as_3x3();
     if !blur_mask::on_gpu(canvas)
         || device.has_perspective()
-        || !reads_the_page(&contents.layers)
+        || !reads_the_page(&contents.layers, &device)
     {
         return false;
     }
@@ -4785,12 +4813,22 @@ fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
     true
 }
 
-/// Whether `entries` hold a run drawn on the CPU over the pixels it reads --
-/// see [`read_on_the_cpu`] -- themselves or in a group they hold, whose layer
-/// [`played_on_a_root`] plays in turn.
-fn reads_the_page(entries: &[Layer]) -> bool {
+/// Whether `entries`, played under `device`, hold a draw a GPU canvas makes
+/// on the CPU over the pixels it reads, themselves or in a group they hold,
+/// whose entries play under the group's own transform: a run -- see
+/// [`read_on_the_cpu`] -- or a draw dyed by a gradient -- see
+/// [`GradientDraw::reads_the_page`].
+fn reads_the_page(entries: &[Layer], device: &Matrix) -> bool {
     entries.iter().any(|entry| match entry {
-        Layer::Group(group) => reads_the_page(&group.contents.layers),
+        Layer::Group(group) => reads_the_page(
+            &group.contents.layers,
+            &Matrix::concat(device, &group.contents_matrix),
+        ),
+        Layer::Gradient(draw) => draw.reads_the_page(device),
+        Layer::Clipped(piece) => match piece.entry() {
+            Layer::Gradient(draw) => draw.reads_the_page(device),
+            _ => read_on_the_cpu(entry).is_some(),
+        },
         entry => read_on_the_cpu(entry).is_some(),
     })
 }
