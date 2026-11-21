@@ -35,7 +35,7 @@
 use std::{
     cell::{Cell, RefCell},
     error::Error,
-    f32::consts::PI,
+    f32::consts::{FRAC_PI_2, PI},
     path::{Path, PathBuf},
     process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -207,6 +207,39 @@ fn curves(ctx: &mut Context2D, count: usize) -> Result<()> {
         ctx.stroke();
     }
     Ok(())
+}
+
+/// A five-pointed star in a 24-pixel box, its points 12 and 5 from the
+/// centre: the star tests/gpu_crowded_flush.rs draws.
+fn star() -> Path2D {
+    let mut builder = PathBuilder::new();
+    for k in 0..10 {
+        let radius = if k % 2 == 1 { 5.0 } else { 12.0 };
+        let angle = k as f32 * PI / 5.0 - FRAC_PI_2;
+        let (x, y) = (12.0 + radius * angle.cos(), 12.0 + radius * angle.sin());
+        match k {
+            0 => builder.move_to(x, y),
+            _ => builder.line_to(x, y),
+        };
+    }
+    builder.close_path();
+    builder.build(FillRule::NonZero)
+}
+
+/// A heart in an `s`-pixel box at `(x, y)`: two cubics meeting in a notch at
+/// the top, so that no fill of it is convex.
+fn heart(ctx: &mut Context2D, x: f32, y: f32, s: f32) {
+    ctx.begin_path();
+    ctx.move_to(x + s * 0.5, y + s * 0.3);
+    ctx.bezier_curve_to(x + s * 0.1, y, x, y + s * 0.6, x + s * 0.5, y + s);
+    ctx.bezier_curve_to(
+        x + s,
+        y + s * 0.6,
+        x + s * 0.9,
+        y,
+        x + s * 0.5,
+        y + s * 0.3,
+    );
 }
 
 fn panels(ctx: &mut Context2D, shadow: bool) -> Result<()> {
@@ -529,7 +562,7 @@ type Paint = fn(&mut Context2D, &Fixtures) -> Result<()>;
 /// opposite directions on a float page -- blending translucent layers against
 /// filling opaque ones -- so a single "float costs Nx" figure would be false
 /// either way.
-const DRAWS: [(&str, Paint); 17] = [
+const DRAWS: [(&str, Paint); 19] = [
     ("scene", |ctx, _| scene(ctx)),
     ("curves", |ctx, _| curves(ctx, 300)),
     ("dashes", |ctx, _| {
@@ -681,6 +714,50 @@ const DRAWS: [(&str, Paint); 17] = [
             })?;
             ctx.fill_rect(0.0, 1.0, WIDTH, HEIGHT - 1.0);
         }
+        Ok(())
+    }),
+    // Two thousand small translucent stars, each moved by a transform: the
+    // crowded page tests/gpu_crowded_flush.rs checks. A non-convex fill under
+    // MSAA is drawn from Ganesh's path atlas, so on the GPU one flush packs
+    // every star into it, and this row is what the atlas costs. The whole
+    // page is read, because the pixel `rasterize` reads composites only the
+    // tile it lands in, and the crowded flush is the page's.
+    ("stars", |ctx, _| {
+        let shape = star();
+        for i in 0..2000 {
+            ctx.set_fill_style_css(&format!(
+                "hsl({} 70% 50% / 0.8)",
+                (i * 37) % 360
+            ))?;
+            ctx.set_transform(Affine::translation(
+                scatter(i, 53, WIDTH - 24.0) + (i % 7) as f32 * 0.3,
+                scatter(i, 97, HEIGHT - 24.0) + (i % 5) as f32 * 0.2,
+            ));
+            ctx.fill_path(&shape, FillRule::NonZero);
+        }
+        ctx.get_image_data(0.0, 0.0, WIDTH, HEIGHT)?;
+        Ok(())
+    }),
+    // Non-convex fills from 8 to 399 pixels across in one flush. Under MSAA
+    // Ganesh's path atlas takes a path of up to 128 by 128 pixels' area and
+    // the larger are drawn without it, so on the GPU this row is the atlas
+    // beside what draws the paths it refuses. Read whole, as `stars` is.
+    ("paths", |ctx, _| {
+        for i in 0..240 {
+            let s = (8 + (i * 29) % 392) as f32;
+            ctx.set_fill_style_css(&format!(
+                "hsl({} 65% 55% / 0.85)",
+                (i * 23) % 360
+            ))?;
+            heart(
+                ctx,
+                scatter(i, 37, WIDTH - s),
+                scatter(i, 53, HEIGHT - s),
+                s,
+            );
+            ctx.fill(FillRule::NonZero);
+        }
+        ctx.get_image_data(0.0, 0.0, WIDTH, HEIGHT)?;
         Ok(())
     }),
 ];
