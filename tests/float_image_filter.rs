@@ -7,6 +7,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const SIDE: f32 = 200.0;
 
 /// An alpha no eight-bit layer holds: 0.765 of a level.
@@ -27,7 +29,7 @@ fn canvas(depth: PixelDepth, gpu: bool) -> Option<Canvas> {
         },
     )
     .expect("a canvas");
-    (!gpu || canvas.engine_kind() == EngineKind::Gpu).then_some(canvas)
+    (!gpu || common::on_gpu(&canvas)).then_some(canvas)
 }
 
 /// The strongest premultiplied alpha on the page, read back as F32.
@@ -131,7 +133,7 @@ const DRAWS: [(&str, Draw); 5] = [
 fn a_skia_image_filter_on_a_float_page_keeps_its_floats() {
     for (depth, step) in [(PixelDepth::F16, F16_STEP), (PixelDepth::F32, 1e-6)]
     {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for (name, draw) in DRAWS {
                 let Some(mut canvas) = canvas(depth, gpu) else {
                     continue;
@@ -155,7 +157,7 @@ fn a_skia_image_filter_on_a_float_page_moves_a_draw_into_a_clip() {
     // The square lies wholly outside the clip and the filter moves it
     // wholly inside: what it is made from has to be read from past the
     // clip by as far as the filter carries it.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas(PixelDepth::F32, gpu) else {
             continue;
         };
@@ -185,7 +187,7 @@ fn a_skia_image_filter_moves_a_draw_off_the_page_onto_it_as_it_is_scaled() {
     // square drawn 100 pixels off the page lands on it: the draw is kept
     // as far off the page as the filter carries it on the page, not in its
     // own units.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas(PixelDepth::F32, gpu) else {
             continue;
         };

@@ -8,8 +8,7 @@
 
 use meo_skia_canvas::prelude::*;
 
-/// Both engines.
-const ENGINES: [bool; 2] = [false, true];
+mod common;
 
 /// CSS Color 4's `gam_sRGB`, in `f64`, mirrored for a negative value as
 /// extended sRGB is: the encoding a fill should read back as.
@@ -70,7 +69,7 @@ fn reds(i: i32) -> f32 {
 /// Each red read back as its exact encoding.
 #[test]
 fn an_srgb_float_fill_reads_back_as_its_encoding() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let missed: Vec<_> = (0..=400)
             .map(reds)
             .filter_map(|red| {
@@ -113,7 +112,7 @@ fn a_linear_float_fill_takes_the_closer_route() {
 /// a fill does.
 #[test]
 fn a_matte_on_an_srgb_float_canvas_reads_back_as_its_encoding() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let missed: Vec<_> = (0..=400)
             .map(reds)
             .filter_map(|red| {

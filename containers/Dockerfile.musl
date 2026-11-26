@@ -6,11 +6,18 @@ ENV RUSTFLAGS="-C target-feature=-crt-static" \
     CXX="clang++" \
     GN_EXE="gn" \
     SKIA_GN_COMMAND="/usr/bin/gn" \
-    SKIA_NINJA_COMMAND="/usr/bin/ninja"
+    SKIA_NINJA_COMMAND="/usr/lib/ninja-build/bin/ninja"
 
 RUN apk update && apk add --update --no-cache \
     bash curl git git-lfs python3 perl build-base g++ linux-headers ttf-dejavu \
     musl-dev openssl-dev gn ninja-build nasm
+
+# Skia is built with ninja, as the glibc image builds it. Alpine's `ninja-build` installs its
+# ninja at /usr/lib/ninja-build/bin/ninja; /usr/bin/ninja is samurai, which `gn` depends on and
+# which has no `deps` tool -- the record scripts/notices.mjs reads what a build compiled from. So
+# the command is named by its path and refused here unless it is a ninja that keeps that record.
+RUN "$SKIA_NINJA_COMMAND" -t list | grep -qw deps && \
+    echo "skia builds with ninja $("$SKIA_NINJA_COMMAND" --version) at $SKIA_NINJA_COMMAND"
 
 # nasm comes from the line above. libaom 3.15's `test_nasm` reads `nasm -hO` for `-Ox`, where
 # nasm 3.x moved it from `-hf`; libaom before 3.13.2 read `-hf` and so refused nasm 3.

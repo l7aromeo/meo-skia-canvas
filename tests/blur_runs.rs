@@ -5,6 +5,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 fn pixels(canvas: &mut Canvas) -> Vec<u8> {
     canvas
         .to_image_data(None, &ImageDataExport::default())
@@ -48,7 +50,7 @@ const BREAKS: [Break; 9] = [
 fn draw(gpu: bool, change: Break, apart: bool) -> Option<Canvas> {
     let mut canvas = Canvas::new(200.0, 150.0);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -115,7 +117,7 @@ fn draw(gpu: bool, change: Break, apart: bool) -> Option<Canvas> {
 
 #[test]
 fn a_run_of_blurred_rectangles_ends_where_the_drawing_changes() {
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for change in BREAKS {
             let (Some(mut run), Some(mut apart)) =
                 (draw(gpu, change, false), draw(gpu, change, true))
@@ -134,7 +136,7 @@ fn a_run_of_blurred_rectangles_ends_where_the_drawing_changes() {
 fn a_run_read_part_way_does_not_grow_behind_the_read() {
     // A page read while a run is open is cached; rectangles drawn after it
     // have to reach the next read rather than join a layer already drawn.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let more = |canvas: &mut Canvas| {
             let ctx = canvas.context();
             for i in 0..4 {

@@ -7,19 +7,14 @@
 //! Each test skips where there is no GPU, which is every CI runner, and says
 //! so through `engine_kind` rather than assuming.
 
-use meo_skia_canvas::{canvas::EngineKind, prelude::*};
+use meo_skia_canvas::prelude::*;
+
+mod common;
 
 fn pixels(canvas: &mut Canvas) -> Vec<u8> {
     canvas
         .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
         .expect("raw export")
-}
-
-/// Whether this machine draws a canvas asking for the GPU on it.
-fn has_gpu() -> bool {
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    probe.engine_kind() == EngineKind::Gpu
 }
 
 fn stop(position: f32, r: u8, g: u8, b: u8, alpha: f32) -> GradientStop {
@@ -130,7 +125,7 @@ fn over_a_fill(ctx: &mut Context2D, side: f32) {
 
 #[test]
 fn a_smooth_sweep_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     assert_cpus_bytes(64.0, 64.0, &|ctx| {
@@ -141,7 +136,7 @@ fn a_smooth_sweep_stores_the_cpus_bytes() {
 
 #[test]
 fn hard_stops_past_128_colours_store_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     assert_cpus_bytes(1024.0, 2.0, &|ctx| {
@@ -152,7 +147,7 @@ fn hard_stops_past_128_colours_store_the_cpus_bytes() {
 
 #[test]
 fn a_translucent_two_point_conical_gradient_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     assert_cpus_bytes(96.0, 96.0, &|ctx| {
@@ -164,7 +159,7 @@ fn a_translucent_two_point_conical_gradient_stores_the_cpus_bytes() {
 
 #[test]
 fn a_gradient_interpolated_in_oklab_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     assert_cpus_bytes(96.0, 96.0, &|ctx| {
@@ -234,7 +229,7 @@ fn triangle(ctx: &mut Context2D) {
 /// a path, a fill and a stroke the clip cuts, and glyphs.
 #[test]
 fn every_shape_stores_the_cpus_bytes_inside_it() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let shapes: [Named; 5] = [
@@ -287,7 +282,7 @@ fn premultiplied(pixels: &[u8]) -> Vec<u8> {
 /// the effect, the run took mid grey's edges, 24 levels off under `xor`.
 #[test]
 fn text_dyed_by_a_gradient_stores_the_cpus_bytes_at_its_edges() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let dye = Shader::linear_gradient(
@@ -315,7 +310,7 @@ fn text_dyed_by_a_gradient_stores_the_cpus_bytes_at_its_edges() {
 
 #[test]
 fn a_canvas_drawn_on_the_cpu_and_read_on_the_gpu_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let scene = |ctx: &mut Context2D| {
@@ -332,7 +327,7 @@ fn a_canvas_drawn_on_the_cpu_and_read_on_the_gpu_stores_the_cpus_bytes() {
 
 #[test]
 fn a_gpu_canvas_drawn_into_another_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let scene = |ctx: &mut Context2D| {
@@ -340,7 +335,7 @@ fn a_gpu_canvas_drawn_into_another_stores_the_cpus_bytes() {
         ctx.fill_rect(0.0, 0.0, 64.0, 64.0);
     };
     let expected = drawn(false, 64.0, 64.0, &scene);
-    for into_gpu in [false, true] {
+    for into_gpu in common::engines() {
         let mut source = Canvas::new(64.0, 64.0);
         source.set_gpu(true);
         scene(source.context());
@@ -358,7 +353,7 @@ fn a_gpu_canvas_drawn_into_another_stores_the_cpus_bytes() {
 #[test]
 fn a_canvas_drawn_into_a_gpu_canvas_under_a_transform_stores_the_cpus_bytes_inside()
  {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     const SIDE_PX: usize = 128;
@@ -425,7 +420,7 @@ fn a_canvas_drawn_into_a_gpu_canvas_under_a_transform_stores_the_cpus_bytes_insi
 /// `OnGpu::Effect`.
 #[test]
 fn a_gpu_canvas_read_at_a_density_stores_the_cpus_bytes_inside() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     // Through a blend, or translucent, the draw made over transparent and
@@ -482,7 +477,7 @@ fn a_gpu_canvas_read_at_a_density_stores_the_cpus_bytes_inside() {
 /// sample its own slot, in rows the atlas packs them into.
 #[test]
 fn a_run_of_many_gradient_draws_stores_the_cpus_bytes_inside() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     const SIDE_PX: usize = 256;
@@ -520,7 +515,7 @@ fn a_run_of_many_gradient_draws_stores_the_cpus_bytes_inside() {
 /// does: every byte, not only those inside.
 #[test]
 fn a_gradient_through_a_blend_beyond_the_draw_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     for blend in [BlendMode::Copy, BlendMode::SourceIn] {
@@ -554,7 +549,7 @@ fn a_gradient_through_a_blend_beyond_the_draw_stores_the_cpus_bytes() {
 /// bytes, every one.
 #[test]
 fn a_run_drawn_on_the_cpu_over_the_gpus_pixels_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let scene = |ctx: &mut Context2D| {
@@ -576,7 +571,7 @@ fn a_run_drawn_on_the_cpu_over_the_gpus_pixels_stores_the_cpus_bytes() {
 /// drawing the raster put 4,800 bytes of this one apart from the CPU's.
 #[test]
 fn a_canvas_holding_one_drawn_into_a_gpu_canvas_stores_the_cpus_bytes() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let mut source = Canvas::new(64.0, 64.0);
@@ -846,7 +841,7 @@ fn assert_cpus_edge(
 /// stop parted from the CPU's coverage on 506 pixels.
 #[test]
 fn a_gradient_paths_edge_is_the_cpus() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let shapes: [Named; 7] = [
@@ -933,7 +928,7 @@ fn a_gradient_paths_edge_is_the_cpus() {
 /// for one that crosses it.
 #[test]
 fn a_gradient_path_past_the_atlas_takes_the_cpus_edge() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let size = (2600.0, 80.0);

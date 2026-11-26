@@ -10,6 +10,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const SIZE: (f32, f32) = (240.0, 80.0);
 
 /// Where the paragraph is drawn.
@@ -28,11 +30,45 @@ fn shadow(rgb: (u8, u8, u8), dx: f32, dy: f32, sigma: f32) -> TextShadow {
     }
 }
 
-/// A style of 24px sans-serif, its text transparent so that only its
+/// The family every style here is set in: Raleway, bundled, so that a scene
+/// lays out in the same glyphs wherever the test runs. A generic family
+/// resolves to whatever face the machine has -- Noto Sans on one Linux
+/// machine -- and a scene sized against one face can miss in another.
+const FACE: &str = "ShadowRaleway";
+
+/// The faces [`paragraph`] lays out in, each registered under its family
+/// from `tests/assets/fonts`. A [`FontLibrary`] is a registry of its own, so
+/// a face registered in another one never reaches these paragraphs.
+fn fonts() -> FontLibrary {
+    let library = FontLibrary::new();
+    for (family, file) in [
+        (FACE, "Raleway/Raleway-VariableFont_wght.ttf"),
+        ("ShadowSplitOswald", "Oswald/Oswald-VariableFont_wght.ttf"),
+        (
+            "ShadowSplitRaleway",
+            "Raleway/Raleway-VariableFont_wght.ttf",
+        ),
+    ] {
+        library
+            .register_font_from_path(
+                family,
+                format!("tests/assets/fonts/{file}"),
+            )
+            .expect("a bundled face registers");
+    }
+    library
+}
+
+thread_local! {
+    /// [`fonts`], built once for each test's thread.
+    static FONTS: FontLibrary = fonts();
+}
+
+/// A style of `size` in [`FACE`], its text transparent so that only its
 /// shadows are drawn.
 fn style(size: f32, shadows: Vec<TextShadow>) -> TextStyle {
     TextStyle {
-        font_families: vec!["sans-serif".into()],
+        font_families: vec![FACE.into()],
         font_size: size,
         color: RgbaLinear::from_srgb8(0, 0, 0, 0.0),
         shadows,
@@ -40,17 +76,19 @@ fn style(size: f32, shadows: Vec<TextShadow>) -> TextStyle {
     }
 }
 
-/// A paragraph of `spans`, each its text in its own style.
+/// A paragraph of `spans`, each its text in its own style, laid out in
+/// [`FONTS`].
 fn paragraph(spans: &[(&str, TextStyle)]) -> Paragraph {
-    let library = FontLibrary::new();
-    let engine = TextEngine::new(&library);
-    let mut builder = engine.paragraph_builder(&spans[0].1);
-    for (text, style) in spans {
-        builder.push_style(style);
-        builder.add_text(text);
-        builder.pop();
-    }
-    builder.build(1000.0)
+    FONTS.with(|library| {
+        let engine = TextEngine::new(library);
+        let mut builder = engine.paragraph_builder(&spans[0].1);
+        for (text, style) in spans {
+            builder.push_style(style);
+            builder.add_text(text);
+            builder.pop();
+        }
+        builder.build(1000.0)
+    })
 }
 
 /// `paragraph` drawn at [`AT`] on `gpu`'s engine, its pixels read back, or
@@ -58,7 +96,7 @@ fn paragraph(spans: &[(&str, TextStyle)]) -> Paragraph {
 fn drawn(gpu: bool, paragraph: &Paragraph) -> Option<Vec<[u8; 4]>> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     canvas.context().draw_paragraph(paragraph, AT.0, AT.1);
@@ -143,7 +181,7 @@ fn a_paragraph_shadow_is_the_exact_gaussian_of_its_sharp_shadow() {
             style(24.0, vec![shadow((0, 0, 0), 1.0, 0.0, sigma)]),
         )])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(sharp) = drawn(gpu, &shadowed(0.0)) else {
             continue;
         };
@@ -186,7 +224,7 @@ fn a_styles_first_listed_shadow_lies_on_top() {
     // the first on top, as `box-shadow` and `text-shadow` do in Chrome.
     let red = shadow(RED, 2.0, 1.0, 0.0);
     let blue = shadow(BLUE, 3.0, 1.0, 0.0);
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let one = |shadows| paragraph(&[("Hm", style(48.0, shadows))]);
         let (Some(both), Some(reds), Some(blues)) = (
             drawn(gpu, &one(vec![red, blue])),
@@ -196,7 +234,11 @@ fn a_styles_first_listed_shadow_lies_on_top() {
             continue;
         };
         let overlap = both_opaque(&reds, &blues);
-        assert!(overlap.len() > 50, "{} pixels overlap", overlap.len());
+        assert!(
+            overlap.len() > 50,
+            "gpu {gpu}: {} pixels overlap",
+            overlap.len()
+        );
         assert_eq!(not(&both, &overlap, RED), 0, "gpu {gpu}: red is on top");
     }
 }
@@ -204,13 +246,16 @@ fn a_styles_first_listed_shadow_lies_on_top() {
 #[test]
 fn a_later_spans_shadow_lies_over_an_earlier_spans() {
     // Document order: the second span's shadow over the first's, where the
-    // first's is cast across it.
+    // first's is cast across it -- by the first span's advance, so that it
+    // falls on the second span's glyphs whatever their face.
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm", style(48.0, first)), ("Hm", style(48.0, second))])
     };
-    let red = shadow(RED, 30.0, 0.0, 0.0);
+    let advance =
+        paragraph(&[("Hm", style(48.0, vec![]))]).max_intrinsic_width();
+    let red = shadow(RED, advance, 0.0, 0.0);
     let blue = shadow(BLUE, 1.0, 0.0, 0.0);
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let (Some(both), Some(reds), Some(blues)) = (
             drawn(gpu, &spans(vec![red], vec![blue])),
             drawn(gpu, &spans(vec![red], vec![])),
@@ -219,19 +264,26 @@ fn a_later_spans_shadow_lies_over_an_earlier_spans() {
             continue;
         };
         let overlap = both_opaque(&reds, &blues);
-        assert!(overlap.len() > 50, "{} pixels overlap", overlap.len());
+        assert!(
+            overlap.len() > 50,
+            "gpu {gpu}: {} pixels overlap",
+            overlap.len()
+        );
         assert_eq!(not(&both, &overlap, BLUE), 0, "gpu {gpu}: blue is on top");
     }
 }
 
 #[test]
 fn a_later_lines_shadow_lies_over_an_earlier_lines() {
+    // The first line's shadow is cast down by the distance between the two
+    // lines' baselines, so that it falls on the second line's glyphs.
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm\n", style(24.0, first)), ("Hm", style(24.0, second))])
     };
-    let red = shadow(RED, 0.0, 24.0, 0.0);
+    let lines = spans(vec![], vec![]).line_metrics();
+    let red = shadow(RED, 0.0, lines[1].baseline - lines[0].baseline, 0.0);
     let blue = shadow(BLUE, 0.0, 1.0, 0.0);
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let (Some(both), Some(reds), Some(blues)) = (
             drawn(gpu, &spans(vec![red], vec![blue])),
             drawn(gpu, &spans(vec![red], vec![])),
@@ -240,7 +292,11 @@ fn a_later_lines_shadow_lies_over_an_earlier_lines() {
             continue;
         };
         let overlap = both_opaque(&reds, &blues);
-        assert!(overlap.len() > 20, "{} pixels overlap", overlap.len());
+        assert!(
+            overlap.len() > 20,
+            "gpu {gpu}: {} pixels overlap",
+            overlap.len()
+        );
         assert_eq!(not(&both, &overlap, BLUE), 0, "gpu {gpu}: blue is on top");
     }
 }
@@ -263,7 +319,7 @@ fn drawn_float(gpu: bool, paragraph: &Paragraph) -> Option<Vec<f64>> {
         },
     )
     .expect("a canvas");
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     canvas.context().draw_paragraph(paragraph, AT.0, AT.1);
@@ -302,7 +358,7 @@ fn neighbouring_spans_blur_apart_and_composite_in_order() {
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm", style(24.0, first)), ("Hm", style(24.0, second))])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         // Each sharp in the colour its span casts in: under FreeType a
         // glyph's coverage follows its colour's luminance (Skia's mask
         // preblend), so a red mask is not the blue one the blur is of.
@@ -396,7 +452,7 @@ fn neighbouring_spans_composite_within_three_eight_bit_roundings() {
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm", style(24.0, first)), ("Hm", style(24.0, second))])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         // Each sharp in the colour its span casts in: under FreeType a
         // glyph's coverage follows its colour's luminance (Skia's mask
         // preblend), so a red mask is not the blue one the blur is of.
@@ -460,29 +516,14 @@ fn a_style_set_in_two_faces_casts_the_blur_of_the_whole_run() {
     // `a_style_set_in_two_faces_casts_one_shadow` holds that -- and its
     // shadow is the blur of all three, not three blurs laid over one
     // another, which lose ink where their tails meet. Both faces are
-    // bundled, so the split is the same wherever the test runs.
-    let library = FontLibrary::new();
-    for (family, file) in [
-        ("ShadowSplitOswald", "Oswald/Oswald-VariableFont_wght.ttf"),
-        (
-            "ShadowSplitRaleway",
-            "Raleway/Raleway-VariableFont_wght.ttf",
-        ),
-    ] {
-        library
-            .register_font_from_path(
-                family,
-                format!("tests/assets/fonts/{file}"),
-            )
-            .expect("a bundled face registers");
-    }
+    // bundled, in [`fonts`], so the split is the same wherever the test runs.
     let shadowed = |sigma: f32| {
         let mut style = style(36.0, vec![shadow((0, 0, 0), 1.0, 0.0, sigma)]);
         style.font_families =
             vec!["ShadowSplitOswald".into(), "ShadowSplitRaleway".into()];
         paragraph(&[("AbΩΩCd", style)])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(sharp) = drawn(gpu, &shadowed(0.0)) else {
             continue;
         };
@@ -512,7 +553,7 @@ fn a_blurred_shadow_keeps_to_the_clip() {
         style(24.0, vec![shadow(RED, 0.0, 0.0, 3.0)]),
     )]);
     let edge = 60.0;
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(free) = drawn(gpu, &text) else {
             continue;
         };

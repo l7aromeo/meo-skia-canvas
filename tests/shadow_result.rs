@@ -17,6 +17,8 @@ mod exact;
 use exact::{misses, profile, sampled};
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const SIZE: (f32, f32) = (160.0, 100.0);
 
 /// How far off the page a draw is moved, in device pixels, and how far its
@@ -270,7 +272,7 @@ fn varied_image() -> Image {
 fn page(gpu: bool) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    (!gpu || canvas.engine_kind() == EngineKind::Gpu).then_some(canvas)
+    (!gpu || common::on_gpu(&canvas)).then_some(canvas)
 }
 
 fn alpha(canvas: &mut Canvas) -> Vec<u8> {
@@ -377,7 +379,7 @@ fn reference(name: &str, drawn: &[f64], blur: f32, cast: Cast) -> Vec<f64> {
 /// the exact one, with how many pixels and the worst of them.
 fn off_the_gaussian(cast: Cast, blurs: &[f32]) -> Vec<String> {
     let mut wrong = vec![];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (name, draw) in SOURCES {
             let Some(drawn) = coverage(gpu, draw) else {
                 continue;
@@ -500,7 +502,7 @@ fn a_draw_casting_a_shadow_lands_the_bytes_it_does_casting_none() {
     // filter or a clip of its own the draw takes the route it takes casting
     // none: a `BlurOp`, a cut, a chain, each of which refuses a shadow.
     let mut wrong = vec![];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (name, draw) in SOURCES.iter().chain(&FILTERED) {
             for (paint, global_alpha) in [
                 ("rgb(250 200 20)", 1.0),
@@ -558,7 +560,7 @@ fn a_filtered_draw_casts_the_shadow_of_what_its_filter_makes() {
         ("drawn canvas", drawn_canvas),
     ];
     let mut wrong = vec![];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (name, draw) in sources {
             let Some(drawn) = coverage(gpu, draw) else {
                 continue;
@@ -639,7 +641,7 @@ fn a_shadow_is_cast_after_the_filter_and_is_not_filtered() {
     // blue copy of the shadow. Under a blend that composites the whole
     // canvas the shadow is Skia's, and the order is the same.
     let mut wrong = vec![];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(copy) =
             coverage(gpu, |ctx| under(DROP_SHADOW, ctx, filled_triangle))
         else {
