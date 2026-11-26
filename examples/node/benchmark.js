@@ -117,15 +117,16 @@ const value = (unit, v) => ({ unit, median: v, p10: null, p90: null, runs: 1 });
 // Reads one pixel back, which draws the recording into the one tile of the
 // page that holds it: a read inside one 256-pixel tile -- `TILE` in
 // src/context/page.rs -- is served from that tile alone, about a sixteenth of
-// a 1200 by 900 page. Without a read the timing measures how fast commands
-// are appended to a picture, not drawing; a row that times drawing the page
-// reads it whole.
+// a 1200 by 900 page. The memory rows read this way to hold one tile against
+// the page; a timed row reads the page whole, with `readPage`.
 const rasterize = (canvas) => canvas.getContext("2d").getImageData(0, 0, 1, 1);
 
-// Reads the whole page back, which composites all of it: what a row timing
-// drawing the page ends with, and what a caller exporting the page pays. It
-// adds the read's own cost to the row, the same for every scene on a page of
-// one size and format. `examples/rust/benchmark.rs` reads the same.
+// Reads the whole page back, which composites all of it. Without a read the
+// timing measures how fast commands are appended to a picture, not drawing.
+// The drawing, put and decode rows end with this, and it is what a caller
+// exporting the page pays. It adds the read's own cost to the row, the same
+// for every scene on a page of one size and format.
+// `examples/rust/benchmark.rs` reads the same.
 const readPage = (canvas) =>
   canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
 
@@ -623,7 +624,7 @@ for (const [engine, engineOptions] of ENGINES)
       const data = ctx.getImageData(0, 0, W, H);
       return time(() => {
         ctx.putImageData(data, 0, 0);
-        rasterize(canvas);
+        readPage(canvas);
       });
     });
   }
@@ -687,7 +688,7 @@ for (const [label, format, options, source] of DECODES)
     return {
       ...time(() => {
         ctx.drawImage(new Image(encoded), 0, 0);
-        rasterize(into);
+        readPage(into);
       }),
       bytes: encoded.length,
     };
@@ -705,7 +706,7 @@ for (const [format, options] of ANIMATIONS)
         const image = new Image(encoded);
         for (let f = 0; f < image.frames; f++) {
           ctx.drawImage(image.frame(f), 0, 0);
-          rasterize(into);
+          readPage(into);
         }
       }, LONG_RUNS),
       bytes: encoded.length,
@@ -724,7 +725,7 @@ for (const elements of [60, 2000])
     const ctx = into.getContext("2d");
     return time(() => {
       ctx.drawImage(new Image(source), 0, 0);
-      rasterize(into);
+      readPage(into);
     });
   });
 

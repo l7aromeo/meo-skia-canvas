@@ -157,19 +157,19 @@ fn value(unit: &'static str, median: f64) -> Measure {
 /// Reads one pixel back, which draws the recording into the one tile of the
 /// page that holds it: a read inside one 256-pixel tile -- `TILE` in
 /// src/context/page.rs -- is served from that tile alone, about a sixteenth
-/// of a 1200 by 900 page. Without a read the timing measures how fast
-/// commands are appended to a picture, not drawing; a row that times drawing
-/// the page reads it whole, with [`read_page`].
+/// of a 1200 by 900 page. The memory rows read this way to hold one tile
+/// against the page; a timed row reads the page whole, with [`read_page`].
 fn rasterize(canvas: &mut Canvas) -> Result<()> {
     canvas.context().get_image_data(0.0, 0.0, 1.0, 1.0)?;
     Ok(())
 }
 
-/// Reads the whole page back, which composites all of it: what a row
-/// timing drawing the page ends with, and what a caller exporting the page
-/// pays. It adds the read's own cost to the row, the same for every scene on
-/// a page of one size and format. `examples/node/benchmark.js` reads the
-/// same.
+/// Reads the whole page back, which composites all of it. Without a read the
+/// timing measures how fast commands are appended to a picture, not drawing.
+/// The drawing, put and decode rows end with this, and it is what a caller
+/// exporting the page pays. It adds the read's own cost to the row, the same
+/// for every scene on a page of one size and format.
+/// `examples/node/benchmark.js` reads the same.
 fn read_page(canvas: &mut Canvas) -> Result<()> {
     let (width, height) = (canvas.width(), canvas.height());
     canvas.context().get_image_data(0.0, 0.0, width, height)?;
@@ -971,7 +971,7 @@ fn cases<'a>(fixtures: &'a Fixtures, quick: bool) -> Vec<Case<'a>> {
                         .get_image_data(0.0, 0.0, WIDTH, HEIGHT)?;
                     time(quick, RUNS, || {
                         canvas.context().put_image_data(&data, 0.0, 0.0)?;
-                        rasterize(&mut canvas)
+                        read_page(&mut canvas)
                     })
                 }),
             );
@@ -1058,7 +1058,7 @@ fn cases<'a>(fixtures: &'a Fixtures, quick: bool) -> Vec<Case<'a>> {
                 let mut measure = time(quick, RUNS, || {
                     let image = Image::from_encoded(&encoded)?;
                     into.context().draw_image(&image, 0.0, 0.0);
-                    rasterize(&mut into)
+                    read_page(&mut into)
                 })?;
                 measure.bytes = Some(encoded.len());
                 Ok(measure)
@@ -1084,7 +1084,7 @@ fn cases<'a>(fixtures: &'a Fixtures, quick: bool) -> Vec<Case<'a>> {
                             0.0,
                             0.0,
                         );
-                        rasterize(&mut into)?;
+                        read_page(&mut into)?;
                     }
                     Ok(())
                 })?;
@@ -1108,7 +1108,7 @@ fn cases<'a>(fixtures: &'a Fixtures, quick: bool) -> Vec<Case<'a>> {
                 time(quick, RUNS, || {
                     let image = Image::from_svg_xml(&source, 1000, 800)?;
                     into.context().draw_image(&image, 0.0, 0.0);
-                    rasterize(&mut into)
+                    read_page(&mut into)
                 })
             }),
         );

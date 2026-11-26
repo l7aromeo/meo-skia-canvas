@@ -17,11 +17,12 @@ cases whose id starts with it. Figures are one machine — an Apple M4 Pro on Me
 macOS 27.2. Down to [What a release changed](#what-a-release-changed), which says where its own figures are from, the npm figures are the medians of five `just bench-npm` passes on c54ae873 (2026-11-06), binary md5 `8819fb77523b31a3df6639012d83f4f2`, and the crate's are one `just bench` pass on 22737b25, whose source is c54ae873's.
 **Treat the ratios as the transferable part and the milliseconds as local colour.**
 
-A drawing row ends by reading the whole page back, which composites all of it and adds the read's
-own cost to the row, the same for every scene on a page of one size and format. The drawing figures
-here, and the one in the README, were timed when a row read one pixel, which draws only the
-256-pixel tile holding it -- about a sixteenth of the page -- and are re-timed when the next
-release is prepared.
+A drawing, `pixels/put` or `decode/` row ends by reading the whole page back, which composites all
+of it and adds the read's own cost to the row, the same for every scene on a page of one size and
+format. Those rows' figures here, and the drawing one in the README, were timed when a row read one
+pixel, which composites only the 256-pixel tile holding it -- about a sixteenth of the page -- and
+are re-timed when the next release is prepared. A still image was decoded whole either way; what
+moves is its draw onto the page.
 
 Both build release first, which matters: run the script directly and it measures whatever
 `lib/skia.node` happens to be, and `just ci` ends by leaving a dev build there. The two differ by
