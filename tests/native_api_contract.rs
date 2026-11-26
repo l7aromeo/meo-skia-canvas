@@ -4274,13 +4274,11 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
 
 /// A clipped nested draw costs the region rather than the whole page.
 ///
-/// Rasterizing the visible region drew the source's deferred image into a
-/// region-sized surface, and Skia answers that by materializing the whole
-/// page and copying the sliver out -- so every op in the source ran however
-/// little of it showed. Replaying the picture into that surface lets Skia
-/// cull against its bounds instead. The crate reaches this by its own door,
-/// `capture`/`place_capture`, which handed over pixels without the picture
-/// beside them and so could not replay anything.
+/// A source carrying nesting is handed over as its own pixels, composited
+/// once for each state of its page and served again while it is unchanged
+/// -- see `PageRecorder::image` -- so drawing it again costs the clipped
+/// draw's work, not the source's. Rasterizing the source's picture for each
+/// draw ran every op in the source however little of it showed.
 ///
 /// So the claim is a comparison with the page itself: drawing a 180x24
 /// region of a 5000-op source costs a small fraction of drawing that source

@@ -244,21 +244,13 @@ through the colour filter above, which keeps the named colour's bucket. A run
 under a `drop-shadow()`, or casting a `shadowColor` shadow, is drawn the same
 way above its shadow, and one under `blur()` is blurred from its coverage
 times its alpha. A canvas holding such a run, drawn into another with
-`drawImage`, lands the bytes its own page holds under every blend: its
-recording draws the run's glyphs through an opaque colour shader in the named
-colour at the paint's alpha, which Skia's raster pipeline multiplies by the
-coverage rounded once, and which keeps the named colour's bucket. A run under
+`drawImage`, lands the bytes its own page holds under every blend: the image
+of a canvas is its own pixels, as `getImageData` reads them. A run under
 a blend that covers beyond the draw, such as `copy`, is drawn from its
 coverage into the layer the blend composites, which starts transparent. A run
 holding colour glyphs this library draws from a `COLR` table lands its plain
 glyphs the same way, each colour glyph composited in its place among them.
-One exception: on macOS, a canvas holding a run in a face CoreText reports
-as holding colour glyphs, drawn into another, lands within two levels of its
-page, because Skia draws every glyph of such a face, its plain ones too, as an
-image faded by the paint's alpha, which rounds an anti-aliased edge once more
-than the coverage does. A canvas's image is its recording played by Skia,
-which reaches none of this library's own drawing to draw it from the
-coverage. A run in a gradient or a pattern, dithered, holding colour glyphs the
+A run in a gradient or a pattern, dithered, holding colour glyphs the
 platform draws, such as emoji through CoreText, naming a line colour of its
 own, or under a filter the library leaves to Skia, such as `brightness()`
 alone, is blitted as Skia blits it, and so is every run on a float canvas,
@@ -1708,8 +1700,8 @@ CPU canvas's bytes inside its edges scaled by 2 or 0.5, moved part of a pixel
 or rotated, through `source-over`, `multiply` and `color-dodge`, where
 Ganesh's own gradient parted 5,301 pixels by up to 35 levels under `multiply`
 at a scale of 2 and 5,766 by up to 66 under `color-dodge`.
-The image of a canvas is backed by its page's picture, and Ganesh replaying
-that picture draws the hard stops as its own gradient. What stays apart:
+A canvas drawn as an image is its own pixels, which a GPU canvas composites
+on the CPU where its page holds such a draw (#703). What stays apart:
 those ties; along a path's edge, a byte Metal's half-precision composite
 rounds the other way, within 0.15 of a tie, and a byte llvmpipe's or NVIDIA's
 eight-bit composite rounds in two terms, within a level of the exact

@@ -13,7 +13,7 @@ use skia_safe::{
     PixelGeometry, Pixmap, Point, Rect, RoundOut, Size, Surface, SurfaceProps,
     SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
-    image::{BitDepth, CachingHint},
+    image::CachingHint,
     jpeg_encoder, pdf, png_encoder,
     svg::{self, canvas::Flags},
     webp_encoder,
@@ -494,6 +494,9 @@ pub struct PageRecorder {
     /// CPU canvas -- see [`Layer::plays_apart_on_gpu`]. Set as each entry is
     /// filed, so that asking costs nothing however many the page holds.
     plays_apart_on_gpu: bool,
+    /// The image of the page made last, served again while the page is as
+    /// it was -- see [`Self::image`].
+    own_image: Option<OwnImage>,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
     /// open `current` records the innermost one's contents, and what each
@@ -581,23 +584,6 @@ impl OpenLayer {
             && self.rec.footprint(Some(Rect::new_empty())).is_some()
             && self.clip.as_ref().is_none_or(whole_pixels)
             && !holds_a_cut(&self.entries)
-    }
-}
-
-/// The depth a deferred picture image can carry for a canvas of `color_type`.
-///
-/// [`BitDepth`] names only U8 and F16, so a canvas at `RGBAF32` is carried at
-/// F16 -- narrower than the surface it draws on, and the widest the
-/// deferred-image API offers. F16 holds values outside `[0, 1]`, which is
-/// what an extended-range canvas is for, and its exponent puts eight levels
-/// between two eight-bit steps near 1.0 and two thousand near 0.002, where a
-/// canvas built for low-alpha accumulation needs them.
-fn source_bit_depth(color_type: ColorType) -> BitDepth {
-    match color_type {
-        ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32 => {
-            BitDepth::F16
-        }
-        _ => BitDepth::U8,
     }
 }
 
@@ -1233,6 +1219,7 @@ impl PageRecorder {
             place: Place::new(),
             replay_cost: 0,
             plays_apart_on_gpu: false,
+            own_image: None,
             open: Vec::new(),
             recorded: RecordedCount::default(),
         }
@@ -3009,82 +2996,130 @@ impl PageRecorder {
         self.page()
     }
 
+    /// This page as an image for another canvas to draw: its own pixels, as
+    /// a read of the whole page composites them -- see [`Self::pixels_as`].
+    ///
+    /// What the Canvas standard draws for a canvas source is its bitmap, so
+    /// the image holds the bytes `getImageData` reads, whatever the page was
+    /// drawn with: a run this library composites itself -- see
+    /// [`ReplayedText`] -- lands in it as it lands on the page. An image of
+    /// the page's picture replayed by Skia did not: Skia drew such a run from
+    /// its recording, up to two levels off the page's bytes.
+    ///
+    /// The pixels are paid for here, once for each state of the page: an
+    /// image asked for again before anything is drawn is the one made last
+    /// -- see [`OwnImage`] -- so a source drawn many times holds one bitmap.
+    /// The read composites on the engine the canvas plays on, and leaves the
+    /// page keeping its surface or tiles as any read does.
+    ///
+    /// `color_type` is the canvas's. An eight-bit image is made in the
+    /// eight-bit type that is not [`ColorType::N32`] -- see
+    /// [`own_image_type`] -- and a float one in the canvas's own. `text`
+    /// is the canvas's text contrast and gamma, which the read rasterizes
+    /// glyphs under.
     pub fn image(
         &mut self,
         color_type: ColorType,
         space: &ColorSpace,
         text: (f32, f32),
     ) -> Option<SkImage> {
-        self.image_flattened(false, color_type, space, text)
-    }
-
-    /// This page as an image, optionally rasterized on the spot.
-    ///
-    /// The ordinary answer is deferred: an image backed by the page's
-    /// picture, which costs nothing to make and is replayed wherever it is
-    /// drawn. That is what makes a canvas cheap to use as a source, and it is
-    /// also what compounds -- a deferred image drawn into a second canvas
-    /// carries this page's whole picture with it, so copying a page into a
-    /// fresh canvas and drawing it back doubles the work of the eventual
-    /// rasterization each round while the recording grows by a constant.
-    ///
-    /// `flatten` pays for the pixels now instead. One replay, and what comes
-    /// back is a bitmap that costs the same wherever it is drawn however many
-    /// times it is copied again. `node::image::Source::of` asks for it on
-    /// any page that already carries a nested picture of its own.
-    ///
-    /// The image carries the canvas's own depth and color space. It is what
-    /// the picture is replayed into when it is finally drawn, so its format
-    /// bounds what the source can hand the destination: an eight-bit sRGB
-    /// image clips a `display-p3` canvas to the smaller gamut and puts an
-    /// `RGBAF32` canvas on the 1/255 grid, whatever either canvas is made
-    /// with. `ExportOptions::compositing_color_type` bounds the same two
-    /// properties for the surface a page draws into.
-    ///
-    /// The picture replays under `text`, the canvas's text contrast and gamma
-    /// -- see [`text_surface_props`] -- so its glyphs land with the edges the
-    /// canvas's own pixels have. Skia's defaults are not the page's on Linux,
-    /// nor on any canvas made with a contrast or gamma of its own.
-    pub fn image_flattened(
-        &mut self,
-        flatten: bool,
-        color_type: ColorType,
-        space: &ColorSpace,
-        text: (f32, f32),
-    ) -> Option<SkImage> {
-        let size = self.bounds.size().to_floor();
-        let deferred = self.page().picture(None).and_then(|pict| {
-            started::deferred_from_picture(
-                pict,
-                size,
-                None,
-                None,
-                source_bit_depth(color_type),
-                Some(space.clone()),
-                text_surface_props(text.0, text.1),
-            )
-        })?;
-        match flatten {
-            // `Allow`, so a source drawn more than once pays for its pixels
-            // once. The fallback hands back the deferred image, which draws
-            // the same pixels and goes on carrying its picture -- slow rather
-            // than wrong, and unreachable: `make_raster_image` on a picture
-            // image allocates its own raster canvas and replays into it,
-            // whatever the size. Asserted so that stops being folklore.
-            true => Some(
-                deferred
-                    .clone()
-                    .make_raster_image(None, CachingHint::Allow)
-                    .unwrap_or_else(|| {
-                        debug_assert!(
-                            false,
-                            "a picture-backed page must rasterize"
-                        );
-                        deferred
-                    }),
-            ),
-            false => Some(deferred),
+        let page = self.page();
+        let key = OwnImageKey {
+            page: page.id,
+            depth: page.layers.len(),
+            color_type,
+            space: space_key(space),
+            text,
+            gpu: self.plays_on_gpu,
+        };
+        if let Some(held) = &self.own_image
+            && held.key == key
+        {
+            return Some(held.image.clone());
         }
+        let size = self.bounds.size().to_floor();
+        let crop = IRect::from_size(size);
+        let held = own_image_type(color_type);
+        let opts = ExportOptions {
+            color_type: held,
+            color_space: space.clone(),
+            alpha_type: AlphaType::Premul,
+            surface_color_space: space.clone(),
+            surface_color_type: color_type,
+            density: 1.0,
+            text_contrast: text.0,
+            text_gamma: text.1,
+            ..ExportOptions::default()
+        };
+        let engine = match self.plays_on_gpu {
+            true => RenderingEngine::GPU,
+            false => RenderingEngine::CPU,
+        };
+        let pixels =
+            self.pixels_as(crop, opts, engine, AlphaType::Premul).ok()?;
+        let info =
+            ImageInfo::new(size, held, AlphaType::Premul, Some(space.clone()));
+        let row_bytes = info.min_row_bytes();
+        let image = started::raster_from_data(
+            &info,
+            Data::new_copy(&pixels),
+            row_bytes,
+        )?;
+        self.own_image = Some(OwnImage {
+            key,
+            image: image.clone(),
+        });
+        Some(image)
+    }
+}
+
+/// What [`PageRecorder::image`] made last, and the state of the page it was
+/// made from.
+pub(crate) struct OwnImage {
+    key: OwnImageKey,
+    image: SkImage,
+}
+
+/// The state of a page an image of it was made from: the page's identity
+/// and how many entries it held -- what tells a page surface it is current
+/// -- and how the image was asked for.
+///
+/// A page taken while a layer is open has an identity of its own each time
+/// -- see [`PageRecorder::page`] -- so an image of one is never served
+/// again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OwnImageKey {
+    page: usize,
+    depth: usize,
+    color_type: ColorType,
+    space: ColorSpaceKey,
+    text: (f32, f32),
+    gpu: bool,
+}
+
+/// The colour type [`PageRecorder::image`] makes an image of a page in:
+/// the canvas's own, but for an eight-bit one, which is made in the
+/// eight-bit type that is not [`ColorType::N32`].
+///
+/// Drawn source-over at a whole-pixel offset onto an `N32` page, an `N32`
+/// image takes Skia's sprite blitter, whose row rounds `d * (256 - sa) >> 8`
+/// on x86 -- 18,760 of the 65,536 pairs of destination and source alpha a
+/// level off the exact composite -- and is off on every CPU under an alpha.
+/// Any other pairing takes the raster pipeline, which lands the exact
+/// composite at full alpha everywhere. The test is the image's own colour
+/// type, which Skia does not fold away as it can a paint that changes
+/// nothing.
+// UPSTREAM: skia-safe 0.156.0 -- #828 -- worked around
+// Re-check: cargo test an_image_of_a_canvas_composites_exactly_over_a_page
+pub(crate) fn own_image_type(color_type: ColorType) -> ColorType {
+    match color_type {
+        ColorType::RGBA8888 | ColorType::BGRA8888 => {
+            match ColorType::N32 == ColorType::RGBA8888 {
+                true => ColorType::BGRA8888,
+                false => ColorType::RGBA8888,
+            }
+        }
+        other => other,
     }
 }
 

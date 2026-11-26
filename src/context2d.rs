@@ -43,7 +43,7 @@ use crate::{
         unpremul_color4f_to_rgba_linear,
     },
     context::{
-        Context2D as Inner, Dye, SourcePicture, initial_root_face,
+        Context2D as Inner, Dye, initial_root_face,
         layer::{Entries, reach_the_clip},
         page::{ExportOptions, Matte, Page},
     },
@@ -4430,38 +4430,31 @@ struct Captured {
     size: SkSize,
     features: VectorFeatures,
     cost: usize,
-    /// The source's own picture, with its text contrast and gamma, when it
-    /// was handed over as a [`Captive::Bitmap`], so the draw can replay just
-    /// the region it shows rather than materializing the whole page. `None`
-    /// for the other two.
-    picture: Option<SourcePicture>,
-    /// The source page's own entries where the content is its picture, so a
+    /// The source page's own entries where the content is the page, so a
     /// draw through a paint holds the page as recorded -- see
-    /// `Inner::draw_picture_costing`.
+    /// `Inner::draw_picture_costing`. `None` for its pixels.
     entries: Option<Entries>,
-    /// Whether the source page holds what a GPU canvas replaying it draws
-    /// in other bytes than a CPU canvas, which pixels drawn from it then
-    /// keep -- see `Inner::draw_source_image`.
+    /// Whether the source page holds what a GPU canvas draws in other bytes
+    /// than a CPU canvas, which pixels drawn from it then keep -- see
+    /// `Inner::draw_source_image`.
     apart: bool,
 }
 
-/// A source canvas's page as [`capture`] hands it over: as pixels, as an
-/// image of its picture, or as the page itself, recorded into a picture only
-/// where the draw needs one -- see `Inner::draw_picture_costing`.
+/// A source canvas's page as [`capture`] hands it over: as its own pixels,
+/// or as the page itself, recorded into a picture only where the draw needs
+/// one -- see `Inner::draw_picture_costing`.
 enum Captive {
-    /// A page carrying someone else's picture, rasterized at the draw -- see
-    /// `Inner::draw_nested_image`.
-    Bitmap(SkImage),
-    /// A page whose text the destination would rasterize under a contrast
-    /// or gamma other than the source's own, as an image of its picture
-    /// that replays under the source's -- see `Inner::source_image`.
-    Image(SkImage),
+    /// The source's own pixels -- see `Inner::source_image` -- for a page
+    /// carrying someone else's picture, or one whose text the destination
+    /// would rasterize under a contrast or gamma other than the source's.
+    Pixels(SkImage),
     /// A page played into the destination as itself, its text rasterized
     /// under the destination's contrast and gamma, which are the source's.
     Page(Page),
 }
 
-/// Closes a canvas's recording and hands back its page as vectors.
+/// Closes a canvas's recording and hands back its page, as vectors where it
+/// can.
 ///
 /// `None` only where a source handed over as pixels yields none -- the
 /// callers treat it as nothing to draw. A page handed over as itself is
@@ -4469,57 +4462,40 @@ enum Captive {
 ///
 /// `text` is the destination's text contrast and gamma. A page played into
 /// the destination as itself rasterizes its glyphs under those; where they
-/// are not the source's, it is handed over as an image that replays under
-/// the source's, so the copy's glyphs keep the edges the source's own pixels
-/// have. The binding hands every canvas over so.
+/// are not the source's, it is handed over as its own pixels, whose glyphs
+/// have the edges the source gives them. The binding hands every canvas over
+/// so.
 fn capture(source: &mut Canvas, text: (f32, f32)) -> Option<Captured> {
     let context = source.context();
     let size = context.inner.bounds.size();
     let features = context.inner.page().vector_features();
 
-    // The rule `node::image::Source::of` follows, applied to the same
-    // question asked through this API. A canvas is handed over as a picture
-    // so a vector backend can see through it, and a picture reached by two
-    // paths is replayed twice while being recorded once -- so a page drawn
-    // into a canvas and that canvas drawn back, round after round, doubles
-    // the eventual rasterization. A source already carrying someone else's
-    // picture pays for its pixels here instead.
-    //
-    // The rasterizing happens at the draw rather than here, for the same
-    // reason it does on the binding's path: only the destination knows how
-    // much of this source it can show, and taking a whole page to put a
-    // sliver of it on screen is most of what the flattening costs.
+    // The rule the binding's `drawCanvas` follows, applied to the same
+    // question asked through this API. A page is played into the destination
+    // as itself so a vector backend can see through it, and a page reached
+    // by two paths is replayed twice while being recorded once -- so a page
+    // drawn into a canvas and that canvas drawn back, round after round,
+    // doubles the eventual rasterization. A source already carrying someone
+    // else's page is handed over as its pixels instead, which the
+    // destination holds as any image's.
     let cost = context.inner.replay_cost();
 
-    match (cost > 0, context.inner.canvas_text == text) {
-        (true, _) => context.inner.source_image(false).map(|image| Captured {
-            content: Captive::Bitmap(image),
+    match cost == 0 && context.inner.canvas_text == text {
+        false => context.inner.source_image().map(|image| Captured {
+            content: Captive::Pixels(image),
             size,
             features,
             cost,
-            picture: context.inner.source_picture(),
             entries: None,
             apart: context.inner.plays_apart_on_gpu(),
         }),
-        (false, false) => {
-            context.inner.source_image(false).map(|image| Captured {
-                content: Captive::Image(image),
-                size,
-                features,
-                cost,
-                picture: None,
-                entries: None,
-                apart: context.inner.plays_apart_on_gpu(),
-            })
-        }
-        (false, true) => Some(Captured {
+        true => Some(Captured {
             content: Captive::Page(context.inner.page()),
             size,
             features,
             cost,
-            picture: None,
             entries: Some(context.inner.entries()),
-            // A picture played into the page through its own entries, which
+            // A page played into the page through its own entries, which
             // choose for themselves.
             apart: false,
         }),
@@ -4537,30 +4513,22 @@ fn place_capture(
         content,
         features,
         cost,
-        picture,
         entries,
         apart,
         ..
     } = captured;
-    let (features, cost) = (*features, *cost);
     match content {
         Captive::Page(page) => ctx.draw_picture_costing(
             &|| page.picture(None),
             entries.clone(),
             src,
             dst,
-            features,
-            cost.max(1),
+            *features,
+            (*cost).max(1),
         ),
-        // A bitmap here is a source that carries nesting and has yet to be
-        // rasterized; `draw_nested_image` takes only the part this draw can
-        // show. Charged as well, because the destination now carries it.
-        Captive::Bitmap(image) => {
-            ctx.charge_replay(cost.max(1));
-            ctx.draw_nested_image(image, picture.as_ref(), src, dst, *apart)
-        }
-        Captive::Image(image) => {
-            ctx.charge_replay(cost.max(1));
+        // Pixels replay nothing, so the destination is charged nothing for
+        // them: they draw as any image's.
+        Captive::Pixels(image) => {
             ctx.draw_source_image(image, src, dst, *apart)
         }
     }
@@ -9128,7 +9096,8 @@ mod translucent_text_tests {
         paint::BlendMode,
         path::FillRule,
         pixels::{
-            ImageDataExport, PixelColorSpace, PixelDepth, PixelExportOptions,
+            ImageData, ImageDataExport, PixelColorSpace, PixelDepth,
+            PixelExportOptions,
         },
     };
 
@@ -10254,24 +10223,13 @@ mod translucent_text_tests {
         assert_eq!(apart, 0, "bytes apart from the run unfiltered");
     }
 
-    /// How far a canvas holding a run in the `COLR` face, drawn into another
-    /// as the image of its page, stands from the bytes its page holds: on
-    /// macOS CoreText reports the face as holding colour glyphs, and Skia
-    /// then draws every glyph of it, its plain boxes too, as an image in the
-    /// paint's colour faded by its alpha (`SkTypeface_Mac::onFilterRec`),
-    /// rounding an anti-aliased edge once more than the page's coverage
-    /// does -- measured on macOS, at most 2 levels under `source-over` over a
-    /// page of two colours, at 0 and -12px of spacing, in the three colours.
-    /// A picture holds no coverage to draw them from. FreeType makes an
-    /// image only of a glyph with colour layers of its own, and a box drawn
-    /// as a mask lands the exact product, within this.
-    const COLR_RECORDED_LEVELS: u8 = 2;
-
     #[test]
-    fn a_canvas_holding_a_colour_run_draws_near_its_own_pixels() {
-        // Within `COLR_RECORDED_LEVELS` of the bytes the page holds. Drawn
-        // with the run's alpha in a colour shader, which such a glyph does
-        // not read, its plain boxes landed opaque, 102 levels off at 0.6.
+    fn a_canvas_holding_a_colour_run_draws_as_its_own_pixels() {
+        // The bytes the page holds, drawn as an image of them is. On macOS
+        // CoreText reports the `COLR` face as holding colour glyphs, and
+        // Skia then draws every glyph of it, its plain boxes too, as an
+        // image (`SkTypeface_Mac::onFilterRec`); played from the page's
+        // picture by Skia, such a run stood up to 2 levels off the page.
         let options = CanvasOptions {
             gpu: false,
             ..CanvasOptions::default()
@@ -10313,7 +10271,7 @@ mod translucent_text_tests {
                 )
                 .expect("the bytes make an image");
                 let image =
-                    run.context().inner.source_image(false).expect("an image");
+                    run.context().inner.source_image().expect("an image");
                 let expected =
                     page(&mut |ctx| ctx.draw_image(&pixels, 0.0, 0.0));
                 let whole = Rect::from_wh(W, H);
@@ -10324,7 +10282,7 @@ mod translucent_text_tests {
                     .map(|(a, b)| a.abs_diff(*b))
                     .max()
                     .unwrap_or(0);
-                if most > COLR_RECORDED_LEVELS {
+                if most > 0 {
                     problems.push(format!(
                         "{rgb:?} at spacing {spacing}: {most} levels off"
                     ));
@@ -10332,6 +10290,70 @@ mod translucent_text_tests {
             }
         }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
+    fn an_image_of_a_canvas_composites_exactly_over_a_page() {
+        // Every pair of a destination byte and a source alpha, the source
+        // drawn source-over at a whole-pixel offset: the exact composite,
+        // `s + round(d * (255 - sa) / 255)`. An image of a canvas in the
+        // platform's own colour type took Skia's sprite blitter, whose row
+        // on x86 lands 18,760 of these pairs a level off -- see
+        // `own_image_type`.
+        let options = CanvasOptions {
+            gpu: false,
+            ..CanvasOptions::default()
+        };
+        let side = 256.0;
+        let mut source = Canvas::with_options(side, side, options.clone())
+            .expect("a canvas");
+        let alphas: Vec<u8> = (0..256 * 256)
+            .flat_map(|i| {
+                let a = (i % 256) as u8;
+                [a / 2, a / 3, a, a]
+            })
+            .collect();
+        let premultiplied = PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        };
+        let put = |canvas: &mut Canvas, bytes: &[u8]| {
+            let data =
+                ImageData::from_pixels(256, 256, premultiplied, bytes.to_vec())
+                    .expect("an ImageData");
+            canvas
+                .context()
+                .put_image_data(&data, 0.0, 0.0)
+                .expect("the bytes are put");
+        };
+        put(&mut source, &alphas);
+        let image = source.context().inner.source_image().expect("an image");
+        let backdrop: Vec<u8> = (0..256 * 256)
+            .flat_map(|i| {
+                let d = (i / 256) as u8;
+                [d, 255 - d, d / 2, 255]
+            })
+            .collect();
+        let mut page =
+            Canvas::with_options(side, side, options).expect("a canvas");
+        put(&mut page, &backdrop);
+        let whole = Rect::from_wh(side, side);
+        page.context()
+            .inner
+            .draw_source_image(&image, &whole, &whole, false);
+        let drawn = bytes(&mut page, 1, PixelColorSpace::Srgb);
+        let exact = |s: u8, sa: u8, d: u8| {
+            let over = f64::from(d) * f64::from(255 - sa) / 255.0;
+            s + over.round() as u8
+        };
+        let apart = (0..256 * 256 * 4)
+            .filter(|&i| {
+                let (px, c) = (i / 4, i % 4);
+                let sa = alphas[px * 4 + 3];
+                drawn[i] != exact(alphas[i], sa, backdrop[px * 4 + c])
+            })
+            .count();
+        assert_eq!(apart, 0, "channels off the exact composite");
     }
 
     #[test]
@@ -10447,8 +10469,7 @@ mod translucent_text_tests {
             );
             // The image of its page `drawImage` is handed for a canvas --
             // see `node::image::Source::of`.
-            let image =
-                run.context().inner.source_image(false).expect("an image");
+            let image = run.context().inner.source_image().expect("an image");
             let whole = Rect::from_wh(W, H);
             for blend in blends {
                 let expected = into(blend, &mut |ctx| {

@@ -2503,9 +2503,8 @@ impl ReplayedText {
     /// table, its plain glyphs too (`SkTypeface_Mac::onFilterRec`). With the
     /// alpha in the shader such a run at 0.6 landed opaque, 102 levels off
     /// its own page; in the paint, where an anti-aliased edge of the image is
-    /// rounded once more than the coverage rounds it, within two levels --
-    /// see `COLR_RECORDED_LEVELS` in the tests -- and a glyph mask lands the
-    /// exact product either way.
+    /// rounded once more than the coverage rounds it, within two levels on
+    /// macOS, and a glyph mask lands the exact product either way.
     pub(crate) fn flat_paint(&self) -> Option<Paint> {
         let flat = self.flat.as_ref()?;
         let named = flat.opaque.color4f();
@@ -2802,9 +2801,9 @@ fn drawn_on_its_backdrop(
 ///
 /// A canvas drawn as an image whose page holds such a draw, or colour
 /// glyphs, is kept here as well (#703), always made on the CPU on a GPU
-/// canvas -- see [`OnGpu::Raster`]: its image is backed by its page's
-/// picture, which Ganesh would replay as Skia's own draws, and only a
-/// raster made on the CPU plays that picture in the CPU's bytes -- see
+/// canvas -- see [`OnGpu::Raster`]: its image is the page's own pixels,
+/// which Ganesh would composite in its own arithmetic, and only a raster
+/// made on the CPU composites them in the CPU's bytes -- see
 /// [`Layer::plays_apart_on_gpu`].
 #[derive(Clone, Debug)]
 pub struct GradientDraw {

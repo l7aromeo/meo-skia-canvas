@@ -70,14 +70,11 @@ impl CanvasPattern {
     /// rasterization each round -- 47, 122, 378, 1409 milliseconds at eight,
     /// twelve, fourteen and sixteen rounds. One that has only been drawn on
     /// does not pay, which is what keeps an ordinary pattern cheap and
-    /// leaves it vector. The same rule `node::image::Source::of` follows.
+    /// leaves it vector. The same rule the binding's `drawCanvas` follows.
     pub fn of_page(ctx: &Context2D, repeat: (TileMode, TileMode)) -> Self {
         let dims = ctx.bounds.size();
         let content = match ctx.replay_cost() > 0 {
-            true => ctx
-                .source_image(true)
-                .map(Content::Bitmap)
-                .unwrap_or_default(),
+            true => ctx.source_image().map(Content::Bitmap).unwrap_or_default(),
             false => ctx
                 .picture()
                 .map(|picture| Content::Vector(picture, dims))

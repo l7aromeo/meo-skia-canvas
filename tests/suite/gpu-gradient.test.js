@@ -674,12 +674,11 @@ describe("a gradient on a GPU canvas", () => {
 
 // A canvas drawn with `drawImage` into a GPU canvas draws its colour glyphs
 // and its gradients in the CPU canvas's bytes (#703). The image of a canvas
-// is backed by its page's picture, and Ganesh replaying that picture drew
-// both as Skia's own draws -- 284 pixels of the two colour glyphs below up
-// to 81 levels off, and the conic's hard stop 255 -- where drawn on the
-// canvas, or
-// into another with `drawCanvas`, they choose at playback how a GPU canvas
-// draws them in those bytes.
+// is its own pixels, and Ganesh composites an image in its own arithmetic:
+// the two colour glyphs below drawn in place landed 45 bytes off. Drawn on
+// the canvas, or into another with `drawCanvas`, they choose at playback how
+// a GPU canvas draws them in those bytes, and so does such a canvas drawn as
+// an image.
 describe("a canvas drawn as an image into a GPU canvas", () => {
   const onGpu = new Canvas(1, 1, { gpu: true }).engine?.renderer === "GPU";
   const skip = !onGpu && "no GPU engine";

@@ -12,7 +12,6 @@ use skia_safe::{
     canvas::SrcRectConstraint::Strict,
     color_filters, dash_path_effect,
     font_style::{FontStyle, Width},
-    image_filter::MapDirection,
     image_filters,
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
@@ -201,14 +200,14 @@ impl Finalize for Context2D {
 pub struct Context2D {
     pub bounds: Rect,
     /// The canvas's color space, fixed when the canvas is built. The page's
-    /// image is tagged with it -- see `Context2D::image`.
+    /// image is in it -- see `Context2D::source_image`.
     pub canvas_color_space: ColorSpace,
     /// The canvas's pixel format.
     ///
     /// Read when this page is handed to another canvas as a source, to pick
-    /// the depth that image carries -- see
-    /// `PageRecorder::image_flattened`. Fixed when the canvas is built;
-    /// there is no setter for it, so a copy here cannot go stale.
+    /// the format its image is made in -- see `PageRecorder::image`. Fixed
+    /// when the canvas is built; there is no setter for it, so a copy here
+    /// cannot go stale.
     pub canvas_color_type: ColorType,
     /// The text contrast and gamma the canvas rasterizes glyphs with, fixed
     /// when it is built: what an export or a readback of the page takes, and
@@ -254,98 +253,6 @@ pub struct Context2D {
     /// and handed to the recorder with it. `None` between draws, which the
     /// recorder takes as a cut over the clip.
     tile_reach: Option<TileReach>,
-}
-
-/// A picture-backed image with its pixels taken now.
-///
-/// The fallback hands back the deferred image, which is slow rather than
-/// wrong: it draws the same pixels and keeps carrying its picture. Nothing
-/// reaches it. `make_raster_image` on a picture image replays into a raster
-/// canvas it allocates itself and needs no context to do it, and no size
-/// refuses -- 1x1, 30000 square and 100000x8 all rasterize, and a zero
-/// dimension is rejected before a page exists. The assertion says so where a
-/// future reader would otherwise have to rediscover it.
-fn flatten_image(image: &Image) -> Image {
-    image
-        .make_raster_image(None, skia_safe::image::CachingHint::Allow)
-        .unwrap_or_else(|| {
-            debug_assert!(false, "a picture-backed image must rasterize");
-            image.clone()
-        })
-}
-
-/// One region of `image`, as pixels.
-///
-/// Drawn into a surface rather than asked for with `make_subset` and
-/// `make_raster_image`. Those answer `None` for a picture-backed image with no
-/// context to rasterize through, and the fallback then hands back the deferred
-/// image -- which is the one thing this must not do, because the whole point
-/// is to stop a picture travelling any further. Silently, too: every pixel
-/// still lands in the right place and only the clock says anything is wrong.
-///
-/// The surface takes the source image's own format, so a `display-p3` or
-/// float source keeps its gamut and depth through here. `raster_n32_premul`
-/// would narrow every source to eight-bit sRGB.
-///
-/// `picture` is replayed into that surface where there is one, and the
-/// deferred image is drawn only where there is not. Both put the same bytes
-/// in the surface -- hashes of the whole page match on a plain draw, a
-/// rotation, a scale and a blur -- but drawing the image goes through
-/// `SkBitmapDevice::drawImageRect`, which calls `getROPixels`, and that has
-/// no notion of a source rectangle: it materializes the *whole* page and the
-/// region is copied out of the result, so every op in the source runs
-/// however little of it shows. Replaying lets Skia cull against the surface
-/// bounds, which makes the cost the region's rather than the page's. On a
-/// 1400-square source behind a 180x24 clip, replaying holds 0.33ms at forty
-/// ops, 0.34 at two thousand and 0.38 at twenty thousand, where drawing the
-/// image climbs 0.68, 5.36, 45.26.
-///
-/// Both paths hold the same memory -- sixty draws grow the process by 84MB
-/// either way -- so the choice buys time and not footprint.
-///
-/// The picture replays under its canvas's text contrast and gamma, as that
-/// canvas's own pixels do, so the region's glyphs have their edges.
-fn rasterize_region(
-    image: &Image,
-    picture: Option<&SourcePicture>,
-    region: IRect,
-) -> Option<Image> {
-    let info = image.image_info().with_dimensions(region.size());
-    let props =
-        picture.map(|source| text_surface_props(source.text.0, source.text.1));
-    let mut surface = started::raster(&info, None, props.as_ref())?;
-
-    match picture {
-        Some(source) => {
-            let canvas = surface.canvas();
-            canvas.translate((-region.left as f32, -region.top as f32));
-            canvas.draw_picture(&source.picture, None, None);
-        }
-        // No picture to replay: a source reaching here by another door still
-        // has to be stopped from travelling as one.
-        None => {
-            surface.canvas().draw_image_rect(
-                image,
-                Some((
-                    &Rect::from(region),
-                    skia_safe::canvas::SrcRectConstraint::Fast,
-                )),
-                Rect::from_size(region.size()),
-                &Paint::default(),
-            );
-        }
-    }
-    Some(surface.image_snapshot())
-}
-
-/// A source canvas's picture, for a draw that rasterizes it -- see
-/// [`Context2D::draw_nested_image`] -- with what it is replayed under.
-#[derive(Clone, Debug)]
-pub struct SourcePicture {
-    pub picture: Picture,
-    /// The source canvas's text contrast and gamma, which its own pixels
-    /// rasterize glyphs under -- see [`text_surface_props`].
-    pub text: (f32, f32),
 }
 
 #[derive(Clone)]
@@ -4624,134 +4531,6 @@ impl Context2D {
         );
     }
 
-    /// Draws `image`, rasterizing only the part of it this draw can show.
-    ///
-    /// For a source that carries a nested picture and would otherwise be
-    /// rasterized whole. The subset is expanded to whatever a filter reads,
-    /// and both rectangles move with it, so the pixels that land on the page
-    /// are the ones that would have landed there anyway. `apart` as for
-    /// [`Self::draw_source_image`].
-    pub fn draw_nested_image(
-        &mut self,
-        image: &Image,
-        picture: Option<&SourcePicture>,
-        src_rect: &Rect,
-        dst_rect: &Rect,
-        apart: bool,
-    ) {
-        // A canvas drawn in, which may replay its recording into the page
-        // -- see `tile_cuts`.
-        let reach = TileReach::Cut(self.tile_cut(*dst_rect, None));
-        self.declaring(reach, |this| {
-            this.draw_nested_image_declared(
-                image, picture, src_rect, dst_rect, apart,
-            )
-        })
-    }
-
-    /// [`Self::draw_nested_image`], declared.
-    fn draw_nested_image_declared(
-        &mut self,
-        image: &Image,
-        picture: Option<&SourcePicture>,
-        src_rect: &Rect,
-        dst_rect: &Rect,
-        apart: bool,
-    ) {
-        let whole = |this: &mut Self| {
-            this.draw_source_image(
-                &flatten_image(image),
-                src_rect,
-                dst_rect,
-                apart,
-            );
-        };
-        let Some(subset) = self.visible_source_rect(src_rect, dst_rect) else {
-            return whole(self);
-        };
-
-        // The destination the subset covers, so the drawing does not move.
-        let Some(to_dst) = Matrix::rect_2_rect(src_rect, dst_rect, None) else {
-            return whole(self);
-        };
-        let sub = Rect::from(subset);
-        let dst = to_dst.map_rect(sub).0;
-
-        match rasterize_region(image, picture, subset) {
-            Some(part) => {
-                let src = Rect::from_wh(sub.width(), sub.height());
-                self.draw_source_image(&part, &src, &dst, apart)
-            }
-            // Whole rather than deferred: a picture that keeps travelling is
-            // the defect this exists to stop.
-            None => whole(self),
-        }
-    }
-
-    /// The part of a source image this draw can actually put on the page, or
-    /// `None` when that is most of it or cannot be worked out.
-    ///
-    /// Only asked when a source is about to be rasterized because it carries
-    /// nesting -- see `node::image::Source::of`. Rasterizing the whole page to
-    /// show a sliver of it is what this avoids: a 1200x1200 source clipped to
-    /// 200x20 produced 5.49 MB and used about 0.09 of it.
-    ///
-    /// The clip alone is not the answer. A filter reads outside the pixels it
-    /// writes, so cropping to the visible rectangle would starve a blur at its
-    /// edges and leave a seam. `filter_bounds` run backwards asks the filter
-    /// itself how far it reaches, which is the only source of that number that
-    /// stays right when the filter changes.
-    fn visible_source_rect(
-        &mut self,
-        src_rect: &Rect,
-        dst_rect: &Rect,
-    ) -> Option<IRect> {
-        let matrix = self.state.matrix;
-        let page = Rect::from_size(self.bounds.size());
-        // The clip is kept in device space, and its absence means the page.
-        let clip = self
-            .state
-            .clip
-            .as_ref()
-            .map_or(page, |path| path.bounds().to_owned());
-
-        let mut visible = matrix.map_rect(dst_rect).0;
-        if !visible.intersect(clip) || !visible.intersect(page) {
-            return None;
-        }
-
-        // What the filter needs read in, rather than what it writes out.
-        let paint = self.paint_for_image();
-        let wanted = match paint.image_filter() {
-            Some(filter) => filter.filter_bounds(
-                RoundOut::<IRect>::round_out(&visible),
-                &matrix,
-                MapDirection::Reverse,
-                None,
-            ),
-            None => RoundOut::<IRect>::round_out(&visible),
-        };
-
-        // Back to the image's own pixels: device -> user -> source.
-        let to_user = matrix.invert()?;
-        let to_source = Matrix::rect_2_rect(dst_rect, src_rect, None)?;
-        let mut needed =
-            to_source.map_rect(to_user.map_rect(Rect::from(wanted)).0).0;
-        if !needed.intersect(*src_rect) {
-            return None;
-        }
-        let needed = RoundOut::<IRect>::round_out(&needed);
-
-        // Only worth the subset when it saves most of the work. Below that the
-        // rasterization is the same size and the extra step is loss.
-        let whole = src_rect.width() * src_rect.height();
-        let part = needed.width() as f32 * needed.height() as f32;
-        match whole > 0.0 && part / whole < 0.5 {
-            true => Some(needed),
-            false => None,
-        }
-    }
-
     pub fn draw_image(
         &mut self,
         image: &Image,
@@ -4765,15 +4544,16 @@ impl Context2D {
     /// page holds what a GPU canvas replaying a recording of it draws in
     /// other bytes than a CPU canvas -- see `PageRecorder::plays_apart_on_gpu`.
     ///
-    /// The image of a canvas is backed by its page's picture, and a GPU
-    /// canvas replays that picture as Skia's own draws: two colour glyphs
-    /// there land up to 81 levels from the CPU's bytes and a conic's hard
-    /// stop 255, where drawn on the canvas itself, or drawn into this one
-    /// with `drawCanvas`, they choose at playback how a GPU canvas draws them
-    /// in those bytes. So where `apart`, the draw is filed as a draw a GPU
-    /// canvas makes on the CPU, at its own device pixels, and composites --
-    /// see `layer::OnGpu::Raster` -- and a CPU canvas and a document play it
-    /// as recorded, so that what either stores or writes for it is unchanged.
+    /// The image of a canvas is its own pixels -- see
+    /// [`Self::source_image`] -- and Ganesh composites an image in its own
+    /// arithmetic: the two colour glyphs of `gpu-gradient.test.js` drawn in
+    /// place landed 45 bytes from the CPU canvas's, where drawn on the
+    /// canvas itself, or drawn into this one with `drawCanvas`, they choose
+    /// at playback how a GPU canvas draws them in those bytes. So where
+    /// `apart`, the draw is filed as a draw a GPU canvas makes on the CPU, at
+    /// its own device pixels, and composites -- see `layer::OnGpu::Raster` --
+    /// and a CPU canvas and a document play it as recorded, so that what
+    /// either stores or writes for it is unchanged.
     pub fn draw_source_image(
         &mut self,
         image: &Image,
@@ -4978,19 +4758,10 @@ impl Context2D {
         self.recorder.borrow_mut().page_for_export(opts, engine)
     }
 
-    pub fn image(&self) -> Option<Image> {
+    /// This canvas's own pixels as an image for another canvas to draw --
+    /// see `PageRecorder::image`.
+    pub fn source_image(&self) -> Option<Image> {
         self.recorder.borrow_mut().image(
-            self.canvas_color_type,
-            &self.canvas_color_space,
-            self.canvas_text,
-        )
-    }
-
-    /// This canvas as an image for another canvas to draw, rasterized on the
-    /// spot when `flatten`. See `PageRecorder::image_flattened`.
-    pub fn source_image(&self, flatten: bool) -> Option<Image> {
-        self.recorder.borrow_mut().image_flattened(
-            flatten,
             self.canvas_color_type,
             &self.canvas_color_space,
             self.canvas_text,
@@ -5022,16 +4793,6 @@ impl Context2D {
     /// `source_image` beside this.
     pub fn picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().page().picture(None)
-    }
-
-    /// [`Self::picture`], with the text contrast and gamma this canvas
-    /// rasterizes glyphs under, for a draw that rasterizes it -- see
-    /// [`Self::draw_nested_image`].
-    pub fn source_picture(&self) -> Option<SourcePicture> {
-        self.picture().map(|picture| SourcePicture {
-            picture,
-            text: self.canvas_text,
-        })
     }
 
     /// The page's own list of entries, for another canvas to draw this one

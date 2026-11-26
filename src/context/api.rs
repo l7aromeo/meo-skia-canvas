@@ -1260,28 +1260,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
         return;
     };
 
-    // A source that carries a picture rather than pixels is replayed wherever
-    // this page is, so the page is charged what the source costs rather than
-    // for one draw. Zero for an ordinary image, and for a canvas that has
-    // already been flattened.
-    if source.replay_cost > 0 {
-        ctx.charge_replay(source.replay_cost);
-    }
-
     match &source.content {
-        // A source carrying someone else's picture is rasterized before it is
-        // drawn, and only as far as this draw can show -- see
-        // `Context2D::draw_nested_image`.
-        Content::Bitmap(image) if source.nested => {
-            let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_nested_image(
-                image,
-                source.picture.as_ref(),
-                &src,
-                &dst,
-                source.plays_apart_on_gpu,
-            );
-        }
         Content::Bitmap(image) => {
             // A crop reaching outside the image is clipped to it, and the
             // destination clipped in the same proportion, which is what the
@@ -1358,9 +1337,6 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 Err(_) => Content::default(),
             },
             autosized: false,
-            replay_cost: 0,
-            nested: false,
-            picture: None,
             plays_apart_on_gpu: false,
         },
     };
@@ -1399,10 +1375,11 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // recording grows by a constant. Twelve rounds took 3.5 seconds where
     // eleven took 1.8 and ten took 0.9.
     //
-    // Past the cap the source is rasterized instead, which costs one replay
-    // now and leaves the destination holding a bitmap that replays once
-    // however often it is copied again. Only nesting is counted, so a page
-    // with a hundred thousand ordinary draws on it never reaches this.
+    // Past the cap the source is drawn as its own pixels instead -- see
+    // `PageRecorder::image` -- which leaves the destination holding a bitmap
+    // that replays once however often it is copied again. Only nesting is
+    // counted, so a page with a hundred thousand ordinary draws on it never
+    // reaches this.
     let cost = context.borrow().replay_cost();
     if cost == 0 {
         // The page itself, recorded into a picture only where the draw needs
