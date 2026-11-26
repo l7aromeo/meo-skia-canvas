@@ -60,7 +60,8 @@ one with only a GPU leg, and `common::on_gpu(&canvas)` for a canvas whose
 options may send it to the CPU by design. Each fails instead of skipping
 where a GPU is required: on macOS with `metal` and a device, and wherever
 `MEO_SKIA_CANVAS_REQUIRE_GPU` names the device, as CI's lavapipe job does.
-`just check-gpu-legs` refuses a GPU leg that bypasses them.
+`just check-gpu-legs` refuses a GPU leg that bypasses them, and a probe or
+call of one of their names that does not go through `common::`.
 
 A test that pins one engine's output hides the other:
 cover the other engine with a property that holds on both, never by asserting

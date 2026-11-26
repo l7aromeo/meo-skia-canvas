@@ -9,7 +9,7 @@
 // cannot be told from one that drew on a GPU. The helpers skip such a leg
 // saying so, and fail it where a GPU is required.
 //
-// Two shapes are refused, line by line in each `tests/*.rs`:
+// Four shapes are refused, line by line in each `tests/*.rs`:
 //
 // - A GPU leg drawn over a literal pair, `for gpu in [false, true]` or a
 //   `const ENGINES: [bool; 2] = [false, true]`. `common::engines()` is the
@@ -17,11 +17,22 @@
 // - `gpu: true` or `set_gpu(true)` in a file that calls none of the helpers,
 //   unless a comment within the eight lines above says `GPU allowed on
 //   purpose` and why: a test whose claim holds on whichever engine answers.
+// - A probe of the file's own named `on_gpu`, `has_gpu` or `engines`. It
+//   skips without the `MEO_SKIA_CANVAS_REQUIRE_GPU` check the shared ones
+//   make, and in a file that also calls `common::` the rule above passes
+//   every request it gates.
+// - A call of one of those names not reached through `common::`, unless the
+//   file binds the name with `let`. Without a probe of the file's own it
+//   does not compile, and this says so before the tests are built: a test
+//   carried into a file whose own probe moved to `tests/common` is exactly
+//   this.
+//
+// The last two skip lines that open with `//`, where a name is prose.
 //
 // What it does not see: a file that calls a helper in one test and asks for
 // the GPU unchecked in another, and a request spelt some other way -- a
 // `CanvasOptions` built elsewhere, a `gpu` flag with another name. Its green
-// says these two shapes are absent, not that every GPU leg is gated.
+// says these four shapes are absent, not that every GPU leg is gated.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -39,6 +50,15 @@ const REQUEST = /\bgpu:\s*true\b|\bset_gpu\(\s*true\s*\)/;
 /** A call of a helper in `tests/common/mod.rs` that says where it drew. */
 const HELPER = /\bcommon::(?:on_gpu|has_gpu|engines)\b/;
 
+/** A probe of the file's own under a helper's name. */
+const LOCAL_PROBE = /\bfn\s+(on_gpu|has_gpu|engines)\b/;
+
+/** A helper's name called with no path before it. */
+const BARE_CALL = /(?<![\w:.])(on_gpu|has_gpu|engines)\s*\(/;
+
+/** A name the file binds itself, which a bare call may then mean. */
+const LET_BINDING = /\blet\s+(?:mut\s+)?(on_gpu|has_gpu|engines)\b/g;
+
 /** The marker that lets a request stand outside the helpers, and how far above it may sit. */
 const ON_PURPOSE = "GPU allowed on purpose";
 const ON_PURPOSE_REACH = 8;
@@ -47,9 +67,21 @@ const ON_PURPOSE_REACH = 8;
 export function check(text) {
   const lines = text.split("\n");
   const gated = HELPER.test(text);
+  const bound = new Set([...text.matchAll(LET_BINDING)].map((m) => m[1]));
   const problems = [];
   lines.forEach((line, index) => {
     const at = `line ${index + 1}`;
+    const code = line.trimStart().startsWith("//") ? "" : line;
+    const probe = LOCAL_PROBE.exec(code);
+    if (probe) {
+      problems.push(
+        `${at}: a GPU probe of the file's own; use common::${probe[1]}`,
+      );
+    }
+    const bare = BARE_CALL.exec(code);
+    if (bare && !probe && !bound.has(bare[1])) {
+      problems.push(`${at}: calls ${bare[1]} bare; use common::${bare[1]}`);
+    }
     if (LITERAL_PAIR.some((pattern) => pattern.test(line))) {
       problems.push(
         `${at}: a GPU leg over [false, true]; use common::engines()`,
@@ -102,13 +134,45 @@ function selfTest() {
       `// GPU allowed on purpose: far.\n${"\n".repeat(ON_PURPOSE_REACH)}canvas.set_gpu(true);`,
       1,
     ],
+    [
+      "a probe of the file's own",
+      "fn has_gpu() -> bool {",
+      1,
+      "a GPU probe of the file's own",
+    ],
+    [
+      "a bare call beside a gated one",
+      "if !common::has_gpu() { return; }\nif !has_gpu() { return; }",
+      1,
+    ],
+    ["a bare call of engines", "for gpu in engines() {", 1],
+    [
+      "a helper called through common",
+      "if gpu && !common::on_gpu(&canvas) {",
+      0,
+    ],
+    [
+      "a closure the file binds",
+      "let on_gpu = |space| space;\nassert_ne!(on_gpu(a), on_gpu(b));",
+      0,
+    ],
+    ["a method of the same name", "let gpu = canvas.engines();", 0],
+    ["a name in a comment", "// `has_gpu()` decides.", 0],
     ["a request for the CPU", "canvas.set_gpu(false);", 0],
     ["a request by variable", "canvas.set_gpu(gpu);", 0],
   ];
-  const failed = cases.filter(([, text, want]) => check(text).length !== want);
-  for (const [name, text, want] of failed) {
+  // A case naming a phrase also needs every problem to say it, so that a
+  // rule another one shadows is still seen to answer.
+  const failed = cases.filter(([, text, want, says]) => {
+    const problems = check(text);
+    return (
+      problems.length !== want ||
+      (says !== undefined && !problems.every((p) => p.includes(says)))
+    );
+  });
+  for (const [name, text, want, says] of failed) {
     console.error(
-      `self-test "${name}": want ${want} problems, got ${JSON.stringify(check(text))}`,
+      `self-test "${name}": want ${want} problems${says ? ` saying "${says}"` : ""}, got ${JSON.stringify(check(text))}`,
     );
   }
   if (failed.length) process.exit(1);
