@@ -765,6 +765,11 @@ fn keeps_text_reach() -> bool {
 ///   inked past the reach with no margin, and on Metal 2,510 of 25,600, each by
 ///   at most 1.73 pixels: Helvetica's 40px "fj Wq", scaled 1.7, kept and drawn
 ///   at 0.5.
+/// - On DirectWrite, on the Windows runners' CPU raster, in Oswald and Times
+///   New Roman, with each glyph's own box and not the font's, 604 of 11,040
+///   did, by at most 1.547: Oswald's 13px bold "Ag", turned, under
+///   `drop-shadow(0 0 3px black)` and drawn at 0.5. The x64 and arm64 runners
+///   read the same 604 playbacks to the digit.
 /// - On FreeType, on the Linux runner's CPU raster, in Oswald, DejaVu Sans,
 ///   Noto Color Emoji and Monoton, with the font's box as well, 142 of 16,640
 ///   did, by at most 1.70: DejaVu Sans's 13px "fj Wq", scaled 1.7 and stroked

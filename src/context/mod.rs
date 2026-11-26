@@ -9427,12 +9427,17 @@ mod text_reach_tests {
                     ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
                 )
                 .expect("registers");
-            FontLibrary::new()
-                .use_paths(
-                    Some(MONOTON),
-                    ["tests/assets/fonts/Monoton-Regular.woff2"],
-                )
-                .expect("registers");
+            // Windows builds without FreeType, so nothing decodes WOFF2
+            // there: Monoton does not register, and its scenes fall to
+            // `resolves` and are left out.
+            let monoton = FontLibrary::new().use_paths(
+                Some(MONOTON),
+                ["tests/assets/fonts/Monoton-Regular.woff2"],
+            );
+            assert!(
+                monoton.is_ok() || cfg!(target_os = "windows"),
+                "registers: {monoton:?}"
+            );
         }
     }
 
@@ -10077,37 +10082,54 @@ mod text_reach_tests {
 
     #[test]
     fn the_font_box_widens_a_reach_only_where_it_is_kept() {
-        // A run's reach takes in its font's declared box only where the
-        // sweep has not been played without it -- see `keeps_font_box`.
-        // Helvetica's box reaches far past "Ag": on macOS the reach is the
-        // glyphs' own boxes and lies inside the one with the font's box.
-        let scene = Scene {
-            font: "Helvetica",
-            filter: "blur(3px)",
-            ..BASE
-        };
-        if !resolves(scene.font) {
-            return;
+        // A run's reach takes in its font's declared box only on FreeType,
+        // where the sweep played without it inked past the drift -- see
+        // `keeps_font_box`. Elsewhere the reach is the glyphs' own boxes and
+        // lies inside the one with the font's box: Oswald's, which every
+        // platform registers, and Helvetica's, which reaches far past "Ag".
+        let keeps = !cfg!(any(target_os = "macos", target_os = "windows"));
+        let mut checked = 0;
+        for font in [OSWALD, "Helvetica"] {
+            let scene = Scene {
+                font,
+                filter: "blur(3px)",
+                ..BASE
+            };
+            if !resolves(scene.font) {
+                continue;
+            }
+            forget_laid_out();
+            let own = reached(&scene).expect("a reach");
+            FONT_BOX_FLOOR.set(true);
+            forget_laid_out();
+            let boxed = reached(&scene).expect("a reach");
+            FONT_BOX_FLOOR.set(false);
+            forget_laid_out();
+            eprintln!(
+                "{font}: own {own:?}, {} wide; with the font's box {boxed:?}, {} wide",
+                own.width(),
+                boxed.width()
+            );
+            let mut joined = own;
+            joined.join(boxed);
+            assert_eq!(
+                joined, boxed,
+                "{font}: the font's box holds the glyphs' own"
+            );
+            if keeps {
+                assert_eq!(own, boxed, "{font}");
+            } else {
+                assert_ne!(
+                    own, boxed,
+                    "{font}: the reach took in the font's box"
+                );
+            }
+            if font == "Helvetica" && !keeps {
+                assert!(own.width() < boxed.width() / 2.0, "{own:?}");
+            }
+            checked += 1;
         }
-        forget_laid_out();
-        let own = reached(&scene).expect("a reach");
-        FONT_BOX_FLOOR.set(true);
-        forget_laid_out();
-        let boxed = reached(&scene).expect("a reach");
-        FONT_BOX_FLOOR.set(false);
-        forget_laid_out();
-        eprintln!(
-            "own {own:?}, {} wide; with the font's box {boxed:?}, {} wide",
-            own.width(),
-            boxed.width()
-        );
-        let mut joined = own;
-        joined.join(boxed);
-        assert_eq!(joined, boxed, "the font's box holds the glyphs' own");
-        match cfg!(target_os = "macos") {
-            true => assert!(own.width() < boxed.width() / 2.0, "{own:?}"),
-            false => assert_eq!(own, boxed),
-        }
+        assert!(checked > 0, "Oswald is registered, so a font was checked");
     }
 
     /// The reach of each of `scenes`, drawn in turn on fresh canvases that

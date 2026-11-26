@@ -1214,19 +1214,20 @@ struct RunInks {
 /// Whether a run's reach takes in the box its font declares around every
 /// glyph, as well as each glyph's own box.
 ///
-/// Not where the reach sweep -- `text_in_a_chain_is_bounded_by_all_it_inks`
-/// with TEXT_REACH_SWEEP=full -- has been played without it: on CoreText each
-/// glyph's own box holds the ink within `layer::HINTED_INK_DRIFT`, and the
-/// font's box only widened what a blurred run reads, zeroes and blurs --
-/// Helvetica's, from 45.6 pixels across 40px "Ag" to 122.5. FreeType's and
-/// DirectWrite's sweeps were measured with it, and keep it until they are
-/// played without it.
+/// Only on FreeType. The reach sweep --
+/// `text_in_a_chain_is_bounded_by_all_it_inks` with TEXT_REACH_SWEEP=full --
+/// played without it holds the ink within `layer::HINTED_INK_DRIFT` on CoreText
+/// and on DirectWrite, x64 and arm64 alike, so there each glyph's own box is
+/// the reach, and the font's box would only widen what a blurred run reads,
+/// zeroes and blurs -- Helvetica's, from 45.6 pixels across 40px "Ag" to 122.5.
+/// Played without it on FreeType, the sweep inked 2.328 pixels past the reach,
+/// more than the drift allows, so FreeType keeps it.
 fn keeps_font_box() -> bool {
     #[cfg(test)]
     if FONT_BOX_FLOOR.get() {
         return true;
     }
-    !cfg!(target_os = "macos")
+    !cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 /// How many paints a kept run keeps blobs for: as many as one draw takes it
