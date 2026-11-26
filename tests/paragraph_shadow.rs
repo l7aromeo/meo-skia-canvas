@@ -10,6 +10,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const SIZE: (f32, f32) = (240.0, 80.0);
 
 /// Where the paragraph is drawn.
@@ -94,7 +96,7 @@ fn paragraph(spans: &[(&str, TextStyle)]) -> Paragraph {
 fn drawn(gpu: bool, paragraph: &Paragraph) -> Option<Vec<[u8; 4]>> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     canvas.context().draw_paragraph(paragraph, AT.0, AT.1);
@@ -179,7 +181,7 @@ fn a_paragraph_shadow_is_the_exact_gaussian_of_its_sharp_shadow() {
             style(24.0, vec![shadow((0, 0, 0), 1.0, 0.0, sigma)]),
         )])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(sharp) = drawn(gpu, &shadowed(0.0)) else {
             continue;
         };
@@ -222,7 +224,7 @@ fn a_styles_first_listed_shadow_lies_on_top() {
     // the first on top, as `box-shadow` and `text-shadow` do in Chrome.
     let red = shadow(RED, 2.0, 1.0, 0.0);
     let blue = shadow(BLUE, 3.0, 1.0, 0.0);
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let one = |shadows| paragraph(&[("Hm", style(48.0, shadows))]);
         let (Some(both), Some(reds), Some(blues)) = (
             drawn(gpu, &one(vec![red, blue])),
@@ -253,7 +255,7 @@ fn a_later_spans_shadow_lies_over_an_earlier_spans() {
         paragraph(&[("Hm", style(48.0, vec![]))]).max_intrinsic_width();
     let red = shadow(RED, advance, 0.0, 0.0);
     let blue = shadow(BLUE, 1.0, 0.0, 0.0);
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let (Some(both), Some(reds), Some(blues)) = (
             drawn(gpu, &spans(vec![red], vec![blue])),
             drawn(gpu, &spans(vec![red], vec![])),
@@ -281,7 +283,7 @@ fn a_later_lines_shadow_lies_over_an_earlier_lines() {
     let lines = spans(vec![], vec![]).line_metrics();
     let red = shadow(RED, 0.0, lines[1].baseline - lines[0].baseline, 0.0);
     let blue = shadow(BLUE, 0.0, 1.0, 0.0);
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let (Some(both), Some(reds), Some(blues)) = (
             drawn(gpu, &spans(vec![red], vec![blue])),
             drawn(gpu, &spans(vec![red], vec![])),
@@ -317,7 +319,7 @@ fn drawn_float(gpu: bool, paragraph: &Paragraph) -> Option<Vec<f64>> {
         },
     )
     .expect("a canvas");
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     canvas.context().draw_paragraph(paragraph, AT.0, AT.1);
@@ -356,7 +358,7 @@ fn neighbouring_spans_blur_apart_and_composite_in_order() {
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm", style(24.0, first)), ("Hm", style(24.0, second))])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         // Each sharp in the colour its span casts in: under FreeType a
         // glyph's coverage follows its colour's luminance (Skia's mask
         // preblend), so a red mask is not the blue one the blur is of.
@@ -450,7 +452,7 @@ fn neighbouring_spans_composite_within_three_eight_bit_roundings() {
     let spans = |first: Vec<TextShadow>, second: Vec<TextShadow>| {
         paragraph(&[("Hm", style(24.0, first)), ("Hm", style(24.0, second))])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         // Each sharp in the colour its span casts in: under FreeType a
         // glyph's coverage follows its colour's luminance (Skia's mask
         // preblend), so a red mask is not the blue one the blur is of.
@@ -521,7 +523,7 @@ fn a_style_set_in_two_faces_casts_the_blur_of_the_whole_run() {
             vec!["ShadowSplitOswald".into(), "ShadowSplitRaleway".into()];
         paragraph(&[("AbΩΩCd", style)])
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(sharp) = drawn(gpu, &shadowed(0.0)) else {
             continue;
         };
@@ -551,7 +553,7 @@ fn a_blurred_shadow_keeps_to_the_clip() {
         style(24.0, vec![shadow(RED, 0.0, 0.0, 3.0)]),
     )]);
     let edge = 60.0;
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(free) = drawn(gpu, &text) else {
             continue;
         };

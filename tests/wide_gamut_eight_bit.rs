@@ -13,6 +13,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 /// A colour space a case is named in or drawn onto, with the conversion a
 /// CSS colour in it takes, held here independently of the crate's own.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -175,10 +177,6 @@ fn css(space: Space, rgb: [f64; 3]) -> String {
     format!("color({} {} {} {})", space.css(), rgb[0], rgb[1], rgb[2])
 }
 
-/// Both engines: the raster backend, and the GPU's, whose shader stages
-/// can carry a colour at half precision.
-const ENGINES: [bool; 2] = [false, true];
-
 fn page(space: Space, gpu: bool) -> Canvas {
     let mut canvas = Canvas::with_options(
         1.0,
@@ -267,6 +265,7 @@ fn an_eight_bit_srgb_canvas_fills_a_colour_as_named() {
 /// the canvas holds lands as its exact conversion into the canvas's space.
 #[test]
 fn an_eight_bit_wide_gamut_canvas_fills_a_colour_as_its_exact_conversion() {
+    let engines = common::engines();
     let mut failures = vec![];
     for (page_space, named) in [
         (Space::DisplayP3, Space::DisplayP3),
@@ -275,15 +274,16 @@ fn an_eight_bit_wide_gamut_canvas_fills_a_colour_as_its_exact_conversion() {
         (Space::Rec2020, Space::DisplayP3),
         (Space::Rec2020, Space::Srgb),
     ] {
-        let parted: Vec<String> = ENGINES
-            .into_iter()
+        let parted: Vec<String> = engines
+            .iter()
+            .copied()
             .flat_map(|gpu| parted(page_space, named, gpu))
             .collect();
         if !parted.is_empty() {
             failures.push(format!(
                 "{page_space:?} canvas, named in {named:?}: {} of {} parted, {:?}",
                 parted.len(),
-                ENGINES.len() * colours().len(),
+                engines.len() * colours().len(),
                 &parted[..parted.len().min(3)]
             ));
         }
@@ -362,7 +362,7 @@ fn a_translucent_colour_on_an_eight_bit_wide_gamut_canvas_stores_its_exact_produ
     ] {
         let mut parted = vec![];
         let mut cases = 0;
-        for (gpu, rgb) in ENGINES.into_iter().flat_map(|gpu| {
+        for (gpu, rgb) in common::engines().into_iter().flat_map(|gpu| {
             colours().into_iter().step_by(5).map(move |rgb| (gpu, rgb))
         }) {
             for a in ALPHAS {
@@ -410,7 +410,7 @@ fn a_translucent_colour_on_an_eight_bit_wide_gamut_canvas_stores_its_exact_produ
 #[test]
 fn a_drop_shadow_on_an_eight_bit_wide_gamut_canvas_draws_the_fill_s_bytes() {
     let mut failures = vec![];
-    for (gpu, rgb) in ENGINES.into_iter().flat_map(|gpu| {
+    for (gpu, rgb) in common::engines().into_iter().flat_map(|gpu| {
         colours().into_iter().step_by(7).map(move |rgb| (gpu, rgb))
     }) {
         for (named, a) in
@@ -451,9 +451,12 @@ fn a_drop_shadow_on_an_eight_bit_wide_gamut_canvas_draws_the_fill_s_bytes() {
 fn a_white_drop_shadow_on_an_eight_bit_wide_gamut_canvas_stores_white() {
     const SIZE: usize = 40;
     let mut failures = vec![];
-    for (space, gpu) in [Space::DisplayP3, Space::Rec2020]
-        .into_iter()
-        .flat_map(|space| ENGINES.map(|gpu| (space, gpu)))
+    for (space, gpu) in
+        [Space::DisplayP3, Space::Rec2020]
+            .into_iter()
+            .flat_map(|space| {
+                common::engines().into_iter().map(move |gpu| (space, gpu))
+            })
     {
         let mut parted = 0;
         let mut first = None;
@@ -655,7 +658,7 @@ fn text_on_an_eight_bit_wide_gamut_canvas_stores_the_fill_s_bytes_inside_a_glyph
         .find(|&(x, y)| whole(x, y))
         .expect("a pixel the glyph covers whole");
     let mut failures = vec![];
-    for (gpu, rgb) in ENGINES.into_iter().flat_map(|gpu| {
+    for (gpu, rgb) in common::engines().into_iter().flat_map(|gpu| {
         colours().into_iter().step_by(7).map(move |rgb| (gpu, rgb))
     }) {
         for (named, a) in
@@ -696,7 +699,7 @@ fn text_on_an_eight_bit_wide_gamut_canvas_stores_the_fill_s_bytes_inside_a_glyph
 fn a_blurred_draw_on_an_eight_bit_wide_gamut_canvas_stores_the_fill_s_bytes_inside()
  {
     let mut failures = vec![];
-    for (gpu, rgb) in ENGINES.into_iter().flat_map(|gpu| {
+    for (gpu, rgb) in common::engines().into_iter().flat_map(|gpu| {
         colours().into_iter().step_by(7).map(move |rgb| (gpu, rgb))
     }) {
         for (named, a) in
@@ -747,7 +750,7 @@ fn a_blurred_draw_on_an_eight_bit_wide_gamut_canvas_stores_the_fill_s_bytes_insi
 fn a_blurred_path_on_an_eight_bit_wide_gamut_canvas_stores_the_fill_s_bytes_inside()
  {
     let mut failures = vec![];
-    for (gpu, page, rgb) in ENGINES.into_iter().flat_map(|gpu| {
+    for (gpu, page, rgb) in common::engines().into_iter().flat_map(|gpu| {
         [Space::DisplayP3, Space::Rec2020]
             .into_iter()
             .flat_map(move |page| {
@@ -804,7 +807,7 @@ fn every_placed_colour_a_blurred_path_takes_stores_the_fill_s_bytes() {
     /// sees neither its own edge nor its neighbours.
     const PITCH: usize = 8;
     let mut failures = vec![];
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for a in 1..=255u32 {
             let width = PITCH * (a as usize + 1);
             let drawn = |blur: bool| {
@@ -1037,7 +1040,7 @@ fn every_premultiplied_byte_under_every_alpha_byte_stores_as_named() {
     let want = sweep();
     let mut failures = vec![];
     for (space, name) in PLACED_PAGES {
-        for gpu in ENGINES {
+        for gpu in common::engines() {
             let parted = parted_bytes(space, name, gpu, &want);
             if !parted.is_empty() {
                 failures.push(format!(
@@ -1057,7 +1060,7 @@ fn every_premultiplied_byte_under_every_alpha_byte_stores_as_named() {
 /// of 89, which the shader draws.
 #[test]
 fn a_colour_skia_would_land_off_its_byte_stores_its_bytes() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let parted = parted_bytes(
             PixelColorSpace::Rec2020,
             "rec2020",
@@ -1125,10 +1128,9 @@ fn a_saturated_colour_on_an_eight_bit_wide_gamut_canvas_stores_its_exact_product
                 .iter()
                 .map(|c| f32::from_le_bytes(*c).clamp(0.0, 1.0))
                 .collect();
-            for (a, gpu) in [1.0, 0.5, 0.2]
-                .into_iter()
-                .flat_map(|a| ENGINES.map(|gpu| (a, gpu)))
-            {
+            for (a, gpu) in [1.0, 0.5, 0.2].into_iter().flat_map(|a| {
+                common::engines().into_iter().map(move |gpu| (a, gpu))
+            }) {
                 let alpha = (a as f32 * 255.0 + 0.5) as u8;
                 let want =
                     rgb.iter().map(|c| (c * a as f32 * 255.0 + 0.5) as u8);

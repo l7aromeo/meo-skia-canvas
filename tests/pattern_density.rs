@@ -11,6 +11,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 /// The size of every canvas here.
 const WIDTH: f32 = 200.0;
 const HEIGHT: f32 = 120.0;
@@ -620,6 +622,9 @@ fn text_inked_past_its_measured_box_is_dyed_to_its_edge() {
 /// share one.
 #[test]
 fn a_gpu_page_draws_each_pattern_at_each_density_from_its_own_tile() {
+    if !common::has_gpu() {
+        return;
+    }
     let mut holder = Canvas::new(WIDTH, HEIGHT);
     // The first with sharp edges, which a tile at the wrong density shows.
     let mut first = source_on(Source::Shadow, true);
@@ -747,7 +752,7 @@ fn every_way_a_run_is_drawn_is_dyed_as_the_pixels_pattern_dyes_it() {
         .use_paths(Some(OSWALD_FAMILY), [OSWALD])
         .expect("bundled Oswald registers");
     let mut failures = vec![];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for density in DENSITIES {
             let mut source = source_on(Source::Path70, gpu);
             let pixels = pixels_pattern(&mut source, density);
@@ -821,7 +826,7 @@ fn a_faint_path_dyed_by_it_on_a_float_page_paints_as_the_pixels_pattern_does() {
     };
     let mut failures = vec![];
     for depth in [PixelDepth::F16, PixelDepth::F32] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             let want = faint(&pixels, depth, gpu);
             let strongest = want
                 .chunks(16)

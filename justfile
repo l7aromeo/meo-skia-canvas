@@ -144,7 +144,7 @@ prepush: fmt-check (check-docs "origin/main") check-repo (typecheck prepush_type
 # no workflow at all. The rest of `prepush` runs in rust-ci.yml, where the Skia
 # they compile against is built.
 [doc("The checks in prepush that build no Skia, which ci.yml's repo job runs.")]
-check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack check-build-brotli check-notices lint-js
+check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-gpu-legs check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack check-build-brotli check-notices lint-js
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -384,6 +384,15 @@ check-workflow-gates: ensure-deps
 [doc("Fail when an upstream-defect note cannot be re-checked.")]
 check-upstream-notes:
     node scripts/check-upstream-notes.mjs
+
+# A GPU leg under tests/ goes through tests/common/mod.rs, which skips it
+# saying so where there is no GPU and fails it where one is required. Without
+# that, `set_gpu(true)` falls back to the CPU in silence and the leg compares
+# the CPU with itself. The self-test runs first, for the reason
+# `check-upstream-notes` runs one.
+[doc("Fail when an integration test asks for the GPU without tests/common.")]
+check-gpu-legs:
+    node scripts/check-gpu-legs.mjs --self-test
 
 # Refuse a Cargo.lock that a build with `skia-source.mjs cargo-patch` left
 # pointing skia-bindings, skia-safe and skia-svg-macros at a path on this
