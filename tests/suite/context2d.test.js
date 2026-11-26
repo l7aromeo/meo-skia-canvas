@@ -5746,6 +5746,56 @@ describe("gradient interpolation", () => {
     );
   });
 
+  test("prophoto-rgb mixes by CSS Color 4's curve, linear near black", () => {
+    // CSS Color 4 gives prophoto-rgb a 1.8 power with a linear segment,
+    // v / 16, below 16/512. Each expected byte is its arithmetic worked in
+    // f64 from its sample code by a script that reads nothing from this
+    // library, as in `a_prophoto_gradient_mixes_by_the_css_curve` in
+    // `tests/gradient_interpolation.rs`, which shares these ramps. A pure
+    // 1.8 power, the curve Skia names ProPhoto RGB by, draws 2, 2, 2 for the
+    // first, 0, 3, 12 for the second and 24, 15, 11 for the third.
+    const ramps = [
+      [
+        "color(prophoto-rgb 0 0 0)",
+        "color(prophoto-rgb 0.06 0.06 0.06)",
+        64,
+        [3, 3, 3],
+      ],
+      [
+        "color(prophoto-rgb 0 0.02 0.05)",
+        "color(prophoto-rgb 0.06 0 0.01)",
+        64,
+        [1, 3, 11],
+      ],
+      [
+        "color(prophoto-rgb 0.01 0.01 0.01)",
+        "color(prophoto-rgb 0.5 0.4 0.3)",
+        24,
+        [22, 12, 8],
+      ],
+    ];
+    for (const gpu of [false, true]) {
+      for (const [from, to, x, want] of ramps) {
+        const canvas = new Canvas(256, 1);
+        canvas.gpu = gpu;
+        // Assigning `true` falls back to raster where there is no GPU.
+        if (gpu && !canvas.gpu) continue;
+        const ctx = canvas.getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 256, 0);
+        gradient.colorInterpolationSpace = "prophoto-rgb";
+        gradient.addColorStop(0, from);
+        gradient.addColorStop(1, to);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 256, 1);
+        assert.deepEqual(
+          [...ctx.getImageData(x, 0, 1, 1).data].slice(0, 3),
+          want,
+          `${from} to ${to} at x = ${x}, ${gpu ? "GPU" : "CPU"}`,
+        );
+      }
+    }
+  });
+
   test("the XYZ spaces are linear sRGB, and cannot be otherwise", () => {
     // Not a coincidence to be pinned at one pair and not an implementation
     // detail that might change: interpolation is a linear operation and the

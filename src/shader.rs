@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use skia_safe::{
-    Color4f, Point as SkPoint, Shader as SkShader,
+    Color4f, ColorSpace as SkColorSpace, Point as SkPoint, Shader as SkShader,
     gradient::{Interpolation, interpolation},
     shaders as noise_shaders,
 };
 
 use crate::{
     color::{RgbaLinear, linear_srgb_color_space},
-    context::exact_gradient::{Geometry, GradientSpec},
+    context::exact_gradient::{Geometry, GradientSpec, css_prophoto_rgb},
     error::Error,
     export::VectorFeatures,
     geometry::Point,
@@ -97,7 +97,9 @@ pub enum GradientColorSpace {
     /// 4's pure 2.4 gamma -- the same space as a `rec2020` canvas -- rather
     /// than BT.2020's piecewise camera curve.
     Rec2020,
-    /// Interpolates in ProPhoto RGB's primaries.
+    /// Interpolates in ProPhoto RGB's primaries, gamma-encoded with CSS
+    /// Color 4's curve -- a 1.8 power, linear below 16/512 -- rather than
+    /// the pure 1.8 power Skia names ProPhoto RGB by.
     ProphotoRgb,
     /// Interpolates in Adobe RGB (1998)'s primaries.
     A98Rgb,
@@ -160,10 +162,13 @@ impl GradientColorSpace {
             Self::Hwb => interpolation::ColorSpace::HWB,
             Self::DisplayP3 => interpolation::ColorSpace::DisplayP3,
             // Mixed in the destination, which `in_working_space` makes CSS
-            // Color 4's 2.4-gamma Rec. 2020 -- see the note there on why
-            // Skia's own `Rec2020` is not that space.
+            // Color 4's 2.4-gamma Rec. 2020 -- see the note on
+            // `WorkingSpace::to_skia_color_space` on why Skia's own
+            // `Rec2020` is not that space.
             Self::Rec2020 => interpolation::ColorSpace::Destination,
-            Self::ProphotoRgb => interpolation::ColorSpace::ProphotoRGB,
+            // Mixed in the destination too, made CSS Color 4's
+            // `prophoto-rgb` by `in_working_space`, for the same reason.
+            Self::ProphotoRgb => interpolation::ColorSpace::Destination,
             Self::A98Rgb => interpolation::ColorSpace::A98RGB,
             // The three XYZ spaces are linear re-coordinatisations of linear
             // sRGB, so interpolating in them is interpolating in it. The
@@ -174,15 +179,16 @@ impl GradientColorSpace {
         }
     }
 
-    /// The canvas space a gradient in this space is computed in, where it
-    /// is not the canvas's own.
+    /// The space a gradient in this space is computed in, where it is not
+    /// the canvas's own.
     ///
-    /// Only [`Rec2020`](Self::Rec2020) has one: its gradient is mixed in
-    /// the destination, and this makes the destination CSS Color 4's
-    /// `rec2020`.
-    pub(crate) fn working_space(self) -> Option<PixelColorSpace> {
+    /// [`Rec2020`](Self::Rec2020) and [`ProphotoRgb`](Self::ProphotoRgb)
+    /// have one: their gradients are mixed in the destination, and this
+    /// makes the destination CSS Color 4's `rec2020` or `prophoto-rgb`.
+    pub(crate) fn working_space(self) -> Option<WorkingSpace> {
         match self {
-            Self::Rec2020 => Some(PixelColorSpace::Rec2020),
+            Self::Rec2020 => Some(WorkingSpace::Rec2020),
+            Self::ProphotoRgb => Some(WorkingSpace::ProphotoRgb),
             _ => None,
         }
     }
@@ -200,20 +206,10 @@ impl GradientColorSpace {
         self,
         shader: SkShader,
     ) -> Result<SkShader, Error> {
-        // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
-        // Re-check: cargo test a_rec2020_gradient_mixes_by_the_css_gamma
-        //
-        // Skia m156 lists its interpolation spaces under CSS Color 4's
-        // interpolation-space section (`SkGradient.h`), but builds `Rec2020`
-        // with `SkNamedTransferFn::kRec2020`, BT.2020's piecewise curve
-        // (`SkGradientBaseShader.cpp`). CSS Color 4 defines `rec2020` with a
-        // pure 2.4 gamma, the transfer `PixelColorSpace::Rec2020` is built
-        // with, so the gradient is mixed in the destination and the
-        // destination is made that space.
         let Some(space) = self.working_space() else {
             return Ok(shader);
         };
-        let working = space.to_skia_color_space().map_err(|_| {
+        let working = space.to_skia_color_space().ok_or_else(|| {
             Error::InvalidGradient {
                 reason: format!("skia could not build the {space:?} space"),
             }
@@ -246,6 +242,49 @@ impl GradientColorSpace {
     /// Pairs this space with an alpha-interpolation mode.
     pub fn alpha(self, alpha: AlphaInterpolation) -> GradientInterpolation {
         GradientInterpolation::new(self).with_alpha(alpha)
+    }
+}
+
+/// A space a gradient is mixed in, around Skia's gradient, where Skia's
+/// interpolation space of the same name is not CSS Color 4's: the gradient
+/// is built to interpolate in its destination, and this is made the
+/// destination -- see [`GradientColorSpace::in_working_space`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkingSpace {
+    /// CSS Color 4's `rec2020`: Rec. 2020's primaries and a pure 2.4 gamma.
+    Rec2020,
+    /// CSS Color 4's `prophoto-rgb`: ProPhoto RGB's primaries, a 1.8 power
+    /// and a linear segment below 16/512.
+    ProphotoRgb,
+}
+
+impl WorkingSpace {
+    /// The Skia space this is. `None` where Skia cannot build it.
+    pub(crate) fn to_skia_color_space(self) -> Option<SkColorSpace> {
+        match self {
+            // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+            // Re-check: cargo test a_rec2020_gradient_mixes_by_the_css_gamma
+            //
+            // Skia m156 lists its interpolation spaces under CSS Color 4's
+            // interpolation-space section (`SkGradient.h`), but builds
+            // `Rec2020` with `SkNamedTransferFn::kRec2020`, BT.2020's
+            // piecewise curve (`SkGradientBaseShader.cpp`). CSS Color 4
+            // defines `rec2020` with a pure 2.4 gamma, the transfer
+            // `PixelColorSpace::Rec2020` is built with.
+            Self::Rec2020 => {
+                PixelColorSpace::Rec2020.to_skia_color_space().ok()
+            }
+            // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+            // Re-check: cargo test a_prophoto_gradient_mixes_by_the_css_curve
+            //
+            // Skia m156 builds `ProphotoRGB` with
+            // `SkNamedTransferFn::kProPhotoRGB`, a pure 1.8 power
+            // (`SkGradientBaseShader.cpp`). CSS Color 4 gives `prophoto-rgb`
+            // a linear segment below 16/512 (section 10.7, `lin_ProPhoto` in
+            // its sample code), which draws a dark ramp up to 4 levels apart
+            // in sRGB.
+            Self::ProphotoRgb => css_prophoto_rgb(),
+        }
     }
 }
 
@@ -980,14 +1019,14 @@ pub(crate) mod interpolation_space_tests {
     ///
     /// A space is the pair of Skia's interpolation space and the working
     /// space the shader is wrapped in: `Rec2020` interpolates in
-    /// `Destination` like `Destination` itself, and only the working space
-    /// tells them apart.
+    /// `Destination` like `Destination` itself, as does `ProphotoRgb`, and
+    /// only the working space tells them apart.
     #[test]
     fn each_space_maps_to_a_skia_space_of_its_own() {
         use GradientColorSpace as S;
         let expected_collapse = [S::SrgbLinear, S::Xyz, S::XyzD65, S::XyzD50];
 
-        type Mapping = (interpolation::ColorSpace, Option<PixelColorSpace>);
+        type Mapping = (interpolation::ColorSpace, Option<WorkingSpace>);
         let mut seen: Vec<(Mapping, GradientColorSpace)> = vec![];
         for space in every_color_space() {
             let skia = (space.to_skia(), space.working_space());
