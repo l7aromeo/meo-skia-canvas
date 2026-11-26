@@ -869,6 +869,67 @@ describe("an SVG's font-relative lengths", () => {
   });
 });
 
+describe("an SVG's references", () => {
+  /** A document painting red, then `body`, as a data URL. */
+  const document = (body) =>
+    "data:image/svg+xml;base64," +
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">` +
+        `<rect width="4" height="2" fill="red"/>${body}</svg>`,
+    ).toString("base64");
+
+  /** What `src` draws at (1, 1) on a 4x2 canvas in `colorSpace`. */
+  const drawn = async (src, colorSpace = "srgb") => {
+    const canvas = new Canvas(4, 2, { colorSpace });
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(await loadImage(src), 0, 0);
+    return [...ctx.getImageData(1, 1, 1, 1, { colorSpace }).data];
+  };
+
+  /** A 4x2 PNG of one colour, written by a canvas in `colorSpace`. */
+  const png = (fill, colorSpace = "srgb") => {
+    const canvas = new Canvas(4, 2, { colorSpace });
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = fill;
+    ctx.fillRect(0, 0, 4, 2);
+    return `data:image/png;base64,${canvas.toBufferSync("png").toString("base64")}`;
+  };
+
+  // Chrome 156 draws each of these blue: SVG 2's `href`, which Skia's SVG
+  // module did not read, on an <image>, a <use> and a gradient inheriting
+  // its stops.
+  test("an href names what xlink:href does", async () => {
+    const blue = png("blue");
+    for (const body of [
+      `<image href="${blue}" width="4" height="2"/>`,
+      `<defs><rect id="a" width="4" height="2" fill="blue"/></defs><use href="#a"/>`,
+      `<defs><linearGradient id="g"><stop offset="0" stop-color="blue"/>` +
+        `<stop offset="1" stop-color="blue"/></linearGradient>` +
+        `<linearGradient id="h" href="#g"/></defs>` +
+        `<rect width="4" height="2" fill="url(#h)"/>`,
+    ]) {
+      assert.deepEqual(await drawn(document(body)), [0, 0, 255, 255], body);
+    }
+  });
+
+  // An image keeps its colours through the document: P3 green, drawn on a
+  // display-p3 canvas, reads P3 green, as Chrome 158 reads it. Clipped to
+  // sRGB on the way, as the crate's `Svg::rasterize` clips it, it reads
+  // 117, 251, 76.
+  test("an image in a wide space keeps its colours", async () => {
+    const green = png("color(display-p3 0 1 0)", "display-p3");
+    assert.deepEqual(
+      await drawn(
+        document(`<image href="${green}" width="4" height="2"/>`),
+        "display-p3",
+      ),
+      [0, 255, 0, 255],
+    );
+  });
+});
+
 describe("a refusal takes the type the standard names", () => {
   /** The name and constructor of whatever `run` throws. */
   const thrown = (run) => {

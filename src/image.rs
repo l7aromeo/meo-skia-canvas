@@ -1476,6 +1476,17 @@ impl<'a> ExRatios<'a> {
     }
 }
 
+/// The attribute Skia's SVG module reads every reference from: an
+/// `<image>`'s source, a `<use>` target, a `<textPath>`'s path, an
+/// `<feImage>`'s, and the gradient or pattern another inherits from. SVG 2
+/// names it `href`, which Skia does not read.
+const XLINK_HREF: &str = "xlink:href";
+
+/// What an element's `xlink:href` is renamed to where the element carries an
+/// `href` too: a name Skia reads nothing from, so that `href` alone decides
+/// the reference, as SVG 2 says it does.
+const SHADOWED_XLINK_HREF: &str = "data-shadowed-xlink-href";
+
 /// The elements whose positioning attributes Skia will not let us write.
 ///
 /// Matched by bare name, with no namespace resolution, because that is what
@@ -1782,6 +1793,7 @@ fn rewrite_text(
         // declaration, which wins -- and the slant it computes to.
         let mut family_attribute: Option<String> = None;
         let mut own_slant = inherited.slant;
+        let mut states_href = false;
 
         for attribute in element.attributes() {
             let attribute = attribute.ok()?;
@@ -1789,6 +1801,7 @@ fn rewrite_text(
             let Cow::Borrowed(raw) = attribute.value else {
                 return None;
             };
+            states_href |= key == "href";
             if raw.contains('&') {
                 continue;
             }
@@ -1873,6 +1886,24 @@ fn rewrite_text(
             let Cow::Borrowed(raw) = attribute.value else {
                 return None;
             };
+            // Skia's SVG module reads a reference from `xlink:href` alone, on
+            // every element that takes one, so SVG 2's `href` -- what a
+            // document written today carries -- named no image, no `<use>`
+            // target and no gradient or pattern to inherit from. `href` is
+            // renamed to the attribute Skia reads, and where an element
+            // carries both, its `xlink:href` to one Skia reads nothing from:
+            // SVG 2 has `href` win, and Chrome takes it whichever comes
+            // first, an empty one included. Only the name is spliced, so a
+            // value carrying an entity reference is renamed too.
+            let renamed = match key {
+                "href" => Some(XLINK_HREF),
+                XLINK_HREF if states_href => Some(SHADOWED_XLINK_HREF),
+                _ => None,
+            };
+            if let Some(renamed) = renamed {
+                splices.push((borrowed_range(text, key)?, renamed.to_string()));
+                continue;
+            }
             if raw.contains('&') {
                 continue;
             }
@@ -3266,6 +3297,105 @@ mod tests {
             .collect();
         assert_eq!(got, CHROME.to_vec());
     }
+
+    /// SVG 2's `href` names what `xlink:href` does, on every element that
+    /// takes a reference, and wins over an `xlink:href` beside it.
+    ///
+    /// Each document paints red and then something blue only through a
+    /// reference: an `<image>` of a blue PNG, a `<use>` of a blue rect, a
+    /// gradient and a pattern inheriting their blue from another. Chrome 156
+    /// draws each as an `<img>` into a canvas reading blue in the middle,
+    /// with and without `xmlns:xlink` declared; with both attributes on one
+    /// `<image>` it takes `href` whichever comes first, and an empty `href`
+    /// draws no image at all. Chrome refuses a document using `xlink:href`
+    /// without declaring the prefix, so those run only with it declared.
+    #[test]
+    fn an_svg_follows_href_as_chrome_does() {
+        /// A one-pixel PNG of opaque blue, and one of opaque lime.
+        const BLUE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNgYPj/HwADAgH/OSkZvgAAAABJRU5ErkJggg==";
+        const LIME: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNg+M/wHwAEAQH/rrVV9QAAAABJRU5ErkJggg==";
+        /// What Chrome 156 reads at (1, 1): the reference followed, or the
+        /// red ground where no image is drawn.
+        const BLUE_PIXEL: [u8; 4] = [0, 0, 255, 255];
+        const RED_PIXEL: [u8; 4] = [255, 0, 0, 255];
+        let ground = r#"<rect width="4" height="2" fill="red"/>"#;
+        let by_href = [
+            format!(r#"{ground}<image href="{BLUE}" width="4" height="2"/>"#),
+            format!(
+                r##"<defs><rect id="a" width="4" height="2" fill="blue"/></defs>{ground}<use href="#a"/>"##
+            ),
+            r##"<defs><linearGradient id="g"><stop offset="0" stop-color="blue"/><stop offset="1" stop-color="blue"/></linearGradient><linearGradient id="h" href="#g"/></defs><rect width="4" height="2" fill="url(#h)"/>"##.to_string(),
+            r##"<defs><pattern id="p" width="4" height="2" patternUnits="userSpaceOnUse"><rect width="4" height="2" fill="blue"/></pattern><pattern id="q" href="#p"/></defs><rect width="4" height="2" fill="url(#q)"/>"##.to_string(),
+        ];
+        let declared = [
+            (
+                format!(
+                    r#"{ground}<image xlink:href="{BLUE}" width="4" height="2"/>"#
+                ),
+                BLUE_PIXEL,
+            ),
+            (
+                format!(
+                    r#"{ground}<image href="{BLUE}" xlink:href="{LIME}" width="4" height="2"/>"#
+                ),
+                BLUE_PIXEL,
+            ),
+            (
+                format!(
+                    r#"{ground}<image xlink:href="{LIME}" href="{BLUE}" width="4" height="2"/>"#
+                ),
+                BLUE_PIXEL,
+            ),
+            (
+                format!(
+                    r#"{ground}<image href="" xlink:href="{BLUE}" width="4" height="2"/>"#
+                ),
+                RED_PIXEL,
+            ),
+        ];
+        let documents = by_href
+            .iter()
+            .flat_map(|body| {
+                [
+                    (String::new(), body.clone(), BLUE_PIXEL),
+                    (XLINK_DECLARATION.to_string(), body.clone(), BLUE_PIXEL),
+                ]
+            })
+            .chain(declared.into_iter().map(|(body, want)| {
+                (XLINK_DECLARATION.to_string(), body, want)
+            }));
+        let info = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let wrong: Vec<String> = documents
+            .filter_map(|(declaration, body, want)| {
+                let xml = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg"{declaration} width="4" height="2">{body}</svg>"#
+                );
+                let image = Svg::parse(&xml)
+                    .expect("valid SVG")
+                    .rasterize(4, 2)
+                    .expect("rasterizes");
+                let mut pixel = [0u8; 4];
+                assert!(image.inner.read_pixels(
+                    &info,
+                    &mut pixel,
+                    4,
+                    (1, 1),
+                    skia_safe::image::CachingHint::Allow,
+                ));
+                (pixel != want).then(|| format!("{xml}: {pixel:?}, not {want:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The declaration of the `xlink` prefix, as it sits on a root element.
+    const XLINK_DECLARATION: &str =
+        r#" xmlns:xlink="http://www.w3.org/1999/xlink""#;
 
     /// An SVG document's `italic` and `oblique <angle>` text in a family
     /// with no face that leans is drawn skewed, as canvas text is: a quarter
