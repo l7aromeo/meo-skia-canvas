@@ -42,8 +42,8 @@ const { BINARY_OVERRIDE } = require("../../lib/binary.js");
 // Loaded after `--list` has had its turn, which names the cases without
 // touching the native module, so the parity check in `just ci` needs no
 // build of it.
-let Canvas, Image;
-const loadLibrary = () => ({ Canvas, Image } = require("../../lib"));
+let Canvas, Image, Path2D;
+const loadLibrary = () => ({ Canvas, Image, Path2D } = require("../../lib"));
 
 const W = 1200;
 const H = 900;
@@ -153,6 +153,35 @@ const curves = (ctx, count = 300) => {
     ctx.lineWidth = 1 + (i % 4);
     ctx.stroke();
   }
+};
+
+// A five-pointed star in a 24-pixel box, its points 12 and 5 from the centre:
+// the star tests/gpu_crowded_flush.rs draws.
+const star = () => {
+  const shape = new Path2D();
+  for (let k = 0; k < 10; k++) {
+    const radius = k % 2 ? 5 : 12;
+    const angle = (k * Math.PI) / 5 - Math.PI / 2;
+    shape.lineTo(12 + radius * Math.cos(angle), 12 + radius * Math.sin(angle));
+  }
+  shape.closePath();
+  return shape;
+};
+
+// A heart in an `s`-pixel box at (x, y): two cubics meeting in a notch at the
+// top, so that no fill of it is convex.
+const heart = (ctx, x, y, s) => {
+  ctx.beginPath();
+  ctx.moveTo(x + s * 0.5, y + s * 0.3);
+  ctx.bezierCurveTo(x + s * 0.1, y, x, y + s * 0.6, x + s * 0.5, y + s);
+  ctx.bezierCurveTo(
+    x + s,
+    y + s * 0.6,
+    x + s * 0.9,
+    y,
+    x + s * 0.5,
+    y + s * 0.3,
+  );
 };
 
 const panels = (ctx, shadow) => {
@@ -405,6 +434,47 @@ const DRAWS = [
         ctx.fillStyle = i % 2 ? "#ff8844" : "#4488ff";
         ctx.fillRect(0, 1, W, H - 1);
       }
+    },
+  ],
+  // Two thousand small translucent stars, each moved by a transform: the
+  // crowded page tests/gpu_crowded_flush.rs checks. A non-convex fill under
+  // MSAA is drawn from Ganesh's path atlas, so on the GPU one flush packs
+  // every star into it, and this row is what the atlas costs. The whole page
+  // is read, because the pixel `rasterize` reads composites only the tile it
+  // lands in, and the crowded flush is the page's.
+  [
+    "stars",
+    (ctx) => {
+      const shape = star();
+      for (let i = 0; i < 2000; i++) {
+        ctx.fillStyle = `hsl(${(i * 37) % 360} 70% 50% / 0.8)`;
+        ctx.setTransform(
+          1,
+          0,
+          0,
+          1,
+          scatter(i, 53, W - 24) + (i % 7) * 0.3,
+          scatter(i, 97, H - 24) + (i % 5) * 0.2,
+        );
+        ctx.fill(shape);
+      }
+      ctx.getImageData(0, 0, W, H);
+    },
+  ],
+  // Non-convex fills from 8 to 399 pixels across in one flush. Under MSAA
+  // Ganesh's path atlas takes a path of up to 128 by 128 pixels' area and the
+  // larger are drawn without it, so on the GPU this row is the atlas beside
+  // what draws the paths it refuses. Read whole, as `stars` is.
+  [
+    "paths",
+    (ctx) => {
+      for (let i = 0; i < 240; i++) {
+        const s = 8 + ((i * 29) % 392);
+        ctx.fillStyle = `hsl(${(i * 23) % 360} 65% 55% / 0.85)`;
+        heart(ctx, scatter(i, 37, W - s), scatter(i, 53, H - s), s);
+        ctx.fill();
+      }
+      ctx.getImageData(0, 0, W, H);
     },
   ],
 ];

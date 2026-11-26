@@ -120,10 +120,10 @@ function buildRsPatch(cfg) {
 // which turns a cfg on from each, so the build and this check cannot disagree
 // about what a patched file holds.
 
-/// containers/skia-atlas-size.patch, on every platform.
-const ATLAS_SIZE = {
-  patch: "containers/skia-atlas-size.patch",
-  ...buildRsPatch("meo_atlas_size"),
+/// containers/skia-atlas-placement.patch, on every platform.
+const ATLAS_PLACEMENT = {
+  patch: "containers/skia-atlas-placement.patch",
+  ...buildRsPatch("meo_atlas_placement"),
 };
 
 /// containers/skia-triangulation-tolerance.patch, on every platform.
@@ -176,7 +176,7 @@ export const PATCHED = {
       file: "src/gpu/ganesh/mtl/GrMtlUtil.mm",
       marker: "GrMtlCompilesWithoutTimeout",
     },
-    ATLAS_SIZE,
+    ATLAS_PLACEMENT,
     TRIANGULATION,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
@@ -187,7 +187,7 @@ export const PATCHED = {
     PATCH_MARKER,
   ],
   linux: [
-    ATLAS_SIZE,
+    ATLAS_PLACEMENT,
     TRIANGULATION,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
@@ -198,7 +198,7 @@ export const PATCHED = {
     PATCH_MARKER,
   ],
   win32: [
-    ATLAS_SIZE,
+    ATLAS_PLACEMENT,
     TRIANGULATION,
     {
       patch: "containers/skia-dwrite-oblique.patch",
@@ -442,7 +442,7 @@ function check(buildDir) {
 /// that rule to Skia's build rather than to itself; a new patch needs a row.
 const COMPILED_WITH = {
   "src/gpu/ganesh/mtl/GrMtlUtil.mm": "ganesh",
-  "src/gpu/ganesh/ops/AtlasPathRenderer.cpp": "ganesh",
+  "src/gpu/ganesh/ops/AtlasRenderTask.cpp": "ganesh",
   "src/gpu/ganesh/ops/TriangulatingPathRenderer.cpp": "ganesh",
   "src/gpu/ganesh/SurfaceContext.cpp": "ganesh",
   "src/gpu/ganesh/GrRecordingContextPriv.cpp": "ganesh",
@@ -723,10 +723,10 @@ function selfTest() {
     false,
   );
   markerCase(
-    "a marker the patch does not write",
-    patchText(ATLAS_SIZE.patch),
-    ATLAS_SIZE.file,
-    "fAtlasMaxSize = 1024;",
+    "a marker the patch removes",
+    patchText(ATLAS_PLACEMENT.patch),
+    ATLAS_PLACEMENT.file,
+    "fWindingPathList.add(&fPathDrawAllocator, pathToAtlasMatrix, path);",
     false,
   );
   // Two files, the second given the marker: the first is read from its own
@@ -815,7 +815,7 @@ function selfTest() {
   // The real table, with an entry for every patch read from it.
   const real = skiaPatchTable(readFileSync(join(ROOT, "build.rs"), "utf8"));
   for (const cfg of [
-    "meo_atlas_size",
+    "meo_atlas_placement",
     "meo_triangulation_tolerance",
     "meo_async_transfer_reuse",
   ])
