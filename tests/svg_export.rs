@@ -3,6 +3,7 @@
 
 use meo_skia_canvas::prelude::*;
 use quick_xml::{Reader, events::Event};
+use std::ops::Range;
 
 /// The page every case draws on.
 const WIDTH: f32 = 80.0;
@@ -137,11 +138,17 @@ fn embeds_an_image(pdf: &[u8]) -> bool {
 
 /// A paragraph of one style, with `shadows`.
 fn paragraph(shadows: Vec<TextShadow>) -> Paragraph {
+    paragraph_in(shadows, TextStyle::default().color)
+}
+
+/// [`paragraph`] with its text in `color`.
+fn paragraph_in(shadows: Vec<TextShadow>, color: RgbaLinear) -> Paragraph {
     let library = FontLibrary::new();
     let engine = TextEngine::new(&library);
     let style = TextStyle {
         font_families: vec!["sans-serif".into()],
         font_size: 20.0,
+        color,
         shadows,
         ..TextStyle::default()
     };
@@ -564,25 +571,61 @@ fn a_paragraph_under_alpha_is_text_in_a_group() {
 }
 
 /// A paragraph casting a blurred shadow under a global alpha keeps its
-/// text: the group holds the shadow as pixels and the text as a vector.
+/// text: the shadow and then the text are each a group at that opacity, as
+/// the canvas composites them apart, the shadow as pixels and the text as a
+/// vector. Each group is rendered alone, against the same renderer's
+/// rendering of its part alone at full opacity: [`Svg::rasterize`] draws
+/// into a linear-light surface, so where the two groups overlap it
+/// composites them in linear light, which no canvas does.
 #[test]
 fn a_shadowed_paragraph_under_alpha_keeps_its_text() {
-    let draw = |alpha: f32| {
+    let draw = |alpha: f32, paragraph: Paragraph| {
         move |ctx: &mut Context2D| {
             ctx.set_global_alpha(alpha);
-            ctx.draw_paragraph(&paragraph(vec![shadow(2.0)]), 5.0, 5.0);
+            ctx.draw_paragraph(&paragraph, 5.0, 5.0);
         }
     };
-    let (svg, _) = exported_svg(draw(0.6));
-    assert_eq!(opacities(&svg), ["0.6"]);
+    let shadowed = || paragraph(vec![shadow(2.0)]);
+    let (svg, _) = exported_svg(draw(0.6, shadowed()));
+    assert_eq!(opacities(&svg), ["0.6", "0.6"]);
     assert_eq!(count(&svg, "text"), 1);
     assert_eq!(count(&svg, "image"), 1);
-    let parted = scaled_parted(
-        &rendered_export(draw(0.6)),
-        &rendered_export(draw(1.0)),
-        |_| 0.6,
+    let image = svg.elements.iter().position(|(e, _)| e == "image");
+    let text = svg.elements.iter().position(|(e, _)| e == "text");
+    assert!(image < text, "the shadow lies beneath the text");
+    // The export's two groups, each kept alone in the document.
+    let mut canvas = Canvas::new(WIDTH, HEIGHT);
+    canvas.set_gpu(false);
+    draw(0.6, shadowed())(canvas.context());
+    let document = String::from_utf8_lossy(&svg_of(&mut canvas)).into_owned();
+    let groups: Vec<usize> = document
+        .match_indices("<g opacity")
+        .map(|(at, _)| at)
+        .collect();
+    let [first, second] = groups[..] else {
+        panic!("two groups at an opacity: {groups:?}");
+    };
+    let end = document.rfind("</svg>").expect("a closed document");
+    let kept = |group: Range<usize>| {
+        rendered(
+            format!("{}{}</svg>", &document[..first], &document[group])
+                .as_bytes(),
+        )
+    };
+    let clear = RgbaLinear::from_srgb8(0, 0, 0, 0.0);
+    let shadow_alone =
+        rendered_export(draw(1.0, paragraph_in(vec![shadow(2.0)], clear)));
+    let text_alone = rendered_export(draw(1.0, paragraph(vec![])));
+    assert_eq!(
+        scaled_parted(&kept(first..second), &shadow_alone, |_| 0.6),
+        0,
+        "the first group is the shadow at the opacity"
     );
-    assert_eq!(parted, 0);
+    assert_eq!(
+        scaled_parted(&kept(second..end), &text_alone, |_| 0.6),
+        0,
+        "the second group is the text at the opacity"
+    );
 }
 
 /// Translucent layers inside one another nest as groups: where their

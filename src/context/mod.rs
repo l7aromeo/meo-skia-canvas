@@ -3,11 +3,12 @@ use neon::prelude::*;
 use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data, IRect,
-    Image, ImageFilter as SkImageFilter, ImageInfo, MaskFilter as SkMaskFilter,
-    Paint, PaintCap, PaintJoin, PaintStyle, Path, PathBuilder, PathFillType,
-    PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
-    Shader as SkShader, Size, Typeface, Vector,
+    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data,
+    FilterMode, IPoint, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
+    MaskFilter as SkMaskFilter, MipmapMode, Paint, PaintCap, PaintJoin,
+    PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
+    PictureRecorder, Point, Rect, RoundOut, SamplingOptions,
+    Shader as SkShader, Size, TileMode, Typeface, Vector,
     canvas::SrcRectConstraint::Strict,
     color_filters, dash_path_effect,
     font_style::{FontStyle, Width},
@@ -16,6 +17,7 @@ use skia_safe::{
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
     path_utils::fill_path_with_paint,
+    shaders,
     textlayout::{StrutStyle, TextStyle},
 };
 use std::{
@@ -84,7 +86,7 @@ use layer::{
     Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
     coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
 };
-use page::{ExportOptions, Page, PageRecorder, Recording};
+use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
 use typesetting::{TextSettings, Typesetting, Typography};
 
@@ -148,6 +150,17 @@ const TRANSPARENT: Color = Color::TRANSPARENT;
 /// that count within a tenth.
 pub(crate) const CONTEXT_BYTES: usize = 4_800;
 
+/// A colour matrix making a colour opaque and leaving its red, green and
+/// blue alone: Skia's 4x5 row-major layout (`SkColorMatrix`), one row per
+/// output channel, the fifth column a constant, the alpha row taking the
+/// constant 1.
+const OPAQUE: [f32; 20] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
 /// The most grid positions a texture may be stamped at in a single draw.
 ///
 /// Skia spends on the order of a hundred bytes on each, so this is several
@@ -208,6 +221,11 @@ pub struct Context2D {
     /// so that a run of draws in one colour holds one shader between them
     /// rather than one each -- see [`Self::exact_paint`].
     exact_shader: RefCell<Option<(ExactColour, SkShader)>>,
+    /// Whether a draw files its shadow alone and not itself: the first of
+    /// the two paintings [`Context2D::draw_text`] makes of a run whose
+    /// shadow and image are composited apart -- see
+    /// [`Context2D::paints_run_whole`].
+    shadow_alone: bool,
     pub state: State,
     stack: Vec<State>,
     /// Parallel to `stack`: whether each saved frame opened a Skia layer
@@ -272,19 +290,24 @@ fn flatten_image(image: &Image) -> Image {
 ///
 /// Both paths hold the same memory -- sixty draws grow the process by 84MB
 /// either way -- so the choice buys time and not footprint.
+///
+/// The picture replays under its canvas's text contrast and gamma, as that
+/// canvas's own pixels do, so the region's glyphs have their edges.
 fn rasterize_region(
     image: &Image,
-    picture: Option<&Picture>,
+    picture: Option<&SourcePicture>,
     region: IRect,
 ) -> Option<Image> {
     let info = image.image_info().with_dimensions(region.size());
-    let mut surface = started::raster(&info, None, None)?;
+    let props =
+        picture.map(|source| text_surface_props(source.text.0, source.text.1));
+    let mut surface = started::raster(&info, None, props.as_ref())?;
 
     match picture {
-        Some(pict) => {
+        Some(source) => {
             let canvas = surface.canvas();
             canvas.translate((-region.left as f32, -region.top as f32));
-            canvas.draw_picture(pict, None, None);
+            canvas.draw_picture(&source.picture, None, None);
         }
         // No picture to replay: a source reaching here by another door still
         // has to be stopped from travelling as one.
@@ -301,6 +324,16 @@ fn rasterize_region(
         }
     }
     Some(surface.image_snapshot())
+}
+
+/// A source canvas's picture, for a draw that rasterizes it -- see
+/// [`Context2D::draw_nested_image`] -- with what it is replayed under.
+#[derive(Clone, Debug)]
+pub struct SourcePicture {
+    pub picture: Picture,
+    /// The source canvas's text contrast and gamma, which its own pixels
+    /// rasterize glyphs under -- see [`text_surface_props`].
+    pub text: (f32, f32),
 }
 
 #[derive(Clone)]
@@ -689,6 +722,7 @@ impl Context2D {
             faint: Faint::of(canvas_color_type),
             recorder: RefCell::new(recorder),
             exact_shader: RefCell::default(),
+            shadow_alone: false,
             path: PathBuilder::new(),
             stack: vec![],
             layers: vec![],
@@ -1294,18 +1328,13 @@ impl Context2D {
             (Recording::Pixels, Some(exact)) => exact,
             _ => paint,
         };
-        // A run holding colour glyphs casts its shadow where it is filed --
-        // see `Self::files_as_replayed_text`.
-        let colour_run =
-            text.as_ref().is_some_and(|text| text.colour.is_some());
-        let cast_apart = !colour_run
-            && self.files_shadow_through_chain(
-                paint,
-                features,
-                text.as_ref(),
-                cpu_bytes.is_some(),
-                &f,
-            );
+        let cast_apart = self.files_shadow_through_chain(
+            paint,
+            features,
+            text.as_ref(),
+            cpu_bytes.is_some(),
+            &f,
+        );
         // A draw under a filter of its own whose shadow is filed apart is
         // run through the filter's chain, as it is casting none.
         if cast_apart
@@ -1320,6 +1349,10 @@ impl Context2D {
                 self.exact_steps(),
             )
         {
+            return;
+        }
+        // A shadow filed apart is all a painting of the shadow alone files.
+        if self.shadow_alone && cast_apart {
             return;
         }
         let casts = self.casts_shadow() && !cast_apart;
@@ -1347,10 +1380,14 @@ impl Context2D {
         let beyond =
             covers_beyond_the_draw(self.state.global_composite_operation);
         // The draw into one recording, under the canvas's transform, in
-        // `drawn` and casting its shadow from `cast`: for blend modes that
-        // affect regions of the canvas outside of the bounds of the object
-        // being drawn, through an intermediate picture, one for each
-        // recording, each with that recording's paint.
+        // `drawn` and casting its shadow from `cast`. Under a blend that
+        // changes the page beyond what the draw covers, the shadow and then
+        // the draw are each recorded `source-over` into a picture of their
+        // own, which the blend composites over the whole page: the HTML
+        // Standard composites the shadow and then what casts it. Drawn into
+        // one picture composited once, as they were, a shadowed rectangle
+        // under `source-in` stood 200 to 255 levels from Chrome and Firefox
+        // on every pixel of its shadow, where the two composites fit both.
         let draw_in = |canvas: &SkCanvas,
                        recording: Recording,
                        drawn: &Paint,
@@ -1358,37 +1395,51 @@ impl Context2D {
             true => {
                 let mut layer_paint = drawn.clone();
                 layer_paint.set_blend_mode(BlendMode::SrcOver);
-                let mut layer_recorder = PictureRecorder::new();
-                layer_recorder.begin_recording(self.bounds, true);
-                if let Some(layer) = layer_recorder.recording_canvas() {
-                    // draw the dropshadow (if applicable)
-                    render_shadow(layer, &layer_paint, recording);
-                    // draw normally
-                    layer.set_matrix(&self.state.matrix.into());
-                    f(layer, &layer_paint, Pass::Draw);
-                }
-
-                // transfer the picture contents to the canvas in a single
-                // operation, applying the blend mode to the whole canvas
-                // (regardless of the bounds of the text/path being drawn)
-                if let Some(pict) =
-                    layer_recorder.finish_recording_as_picture(None)
-                {
+                // `paint` recorded on its own and composited through the
+                // blend. A shadow that records nothing is not composited,
+                // which the blend would do as transparent black over the
+                // whole page; the draw always is, as a draw is.
+                let composite = |paint: &dyn Fn(&SkCanvas), shadow: bool| {
+                    let mut recorder = PictureRecorder::new();
+                    paint(recorder.begin_recording(self.bounds, true));
+                    let Some(picture) = recorder
+                        .finish_recording_as_picture(None)
+                        .filter(|picture| {
+                            !shadow || picture.approximate_op_count() > 0
+                        })
+                    else {
+                        return;
+                    };
                     canvas.save();
                     canvas.set_matrix(&Matrix::new_identity().into());
                     let mut blend_paint = Paint::default();
                     blend_paint.set_anti_alias(true);
                     blend_paint
                         .set_blend_mode(self.state.global_composite_operation);
-                    canvas.draw_picture(&pict, None, Some(&blend_paint));
+                    canvas.draw_picture(&picture, None, Some(&blend_paint));
                     canvas.restore();
+                };
+                composite(
+                    &|layer| render_shadow(layer, &layer_paint, recording),
+                    true,
+                );
+                if !self.shadow_alone {
+                    composite(
+                        &|layer| {
+                            layer.set_matrix(&self.state.matrix.into());
+                            f(layer, &layer_paint, Pass::Draw);
+                        },
+                        false,
+                    );
                 }
             }
             false => {
                 // draw the dropshadow (if applicable)
                 render_shadow(canvas, cast, recording);
                 // draw with the normal paint
-                f(canvas, drawn, Pass::Draw);
+                if !self.shadow_alone {
+                    f(canvas, drawn, Pass::Draw);
+                }
             }
         };
         let draw = |canvas: &SkCanvas, recording: Recording| {
@@ -1475,6 +1526,7 @@ impl Context2D {
                             paint_for(pixels),
                             beyond,
                             native.cull_rect(),
+                            text.is_some(),
                             &|canvas, paint| {
                                 draw_in(canvas, pixels, paint, paint)
                             },
@@ -1513,11 +1565,9 @@ impl Context2D {
 
     /// Whether a draw made now casts its shadow through a chain -- see
     /// [`Self::files_shadow_through_chain`]: one casting a shadow, under no
-    /// CanvasKit filter, through a blend that covers no more than it.
+    /// CanvasKit filter.
     fn casts_shadow_through_chain(&self) -> bool {
-        self.casts_shadow()
-            && self.state.skia_image_filter.is_none()
-            && !covers_beyond_the_draw(self.state.global_composite_operation)
+        self.casts_shadow() && self.state.skia_image_filter.is_none()
     }
 
     /// Whether a run of text drawn now is played through a chain, its own
@@ -1548,10 +1598,9 @@ impl Context2D {
     /// taking the CSS filter as its input. Through Skia's layer, the filter's
     /// blur and the shadow's were each Skia's approximation.
     ///
-    /// `false`, filing nothing, for a draw casting no shadow; for one under
-    /// a CanvasKit filter, which Skia's layer runs in the draw's own units;
-    /// and for one under a blend that covers beyond it, which
-    /// `render_to_canvas` composites with its shadow through one layer.
+    /// `false`, filing nothing, for a draw casting no shadow, and for one
+    /// under a CanvasKit filter, which Skia's layer runs in the draw's own
+    /// units.
     /// `cpu_bytes` says a GPU canvas draws the draw in the CPU's bytes -- a
     /// gradient, whose alpha the shadow casts, or a canvas holding such
     /// draws, see [`CpuBytes`] -- and so makes it on the CPU for the chain --
@@ -1640,14 +1689,67 @@ impl Context2D {
         let Some((entry, reach)) = entry else {
             return false;
         };
+        // A run holding colour glyphs is cast from where the chain plays
+        // it, its colour glyphs made for those pixels -- see
+        // `layer::ReplayedText` -- in the paint it casts in. Recorded into the
+        // chain's picture, they were images made at the scale the run was
+        // drawn at.
+        let entry = match (text.and_then(|text| text.colour.as_ref()), entry) {
+            (Some(run), entry) => {
+                let (recorded, document) = match entry {
+                    Layer::Targeted(pair) => {
+                        let (pixels, document) = Arc::unwrap_or_clone(pair);
+                        (pixels, Some(document))
+                    }
+                    Layer::Picture(picture) => (picture, None),
+                    _ => return false,
+                };
+                let mut drawn = pixels_cast.paint.clone();
+                drawn
+                    .set_image_filter(None)
+                    .set_blend_mode(BlendMode::SrcOver);
+                let replay = match pixels_cast.pass {
+                    Pass::Draw => run.clone(),
+                    Pass::AlphaInShadow => run.opaque(),
+                };
+                Layer::ReplayedText(Arc::new(layer::ReplayedText {
+                    matrix: self.state.matrix,
+                    replay: Some(replay),
+                    paint: drawn,
+                    inked: Rect::new_empty(),
+                    shadow: None,
+                    shadow_alone: false,
+                    blend: None,
+                    recording: LazyPicture::from(Some(recorded)),
+                    whole: LazyPicture::default(),
+                    bounds,
+                    document: document.map(layer::ReplayedRecording::recorded),
+                    clip: None,
+                    cast_before: false,
+                    #[cfg(test)]
+                    watch: None,
+                }))
+            }
+            (None, entry) => entry,
+        };
         let entry = self.chain_input(cpu_bytes, entry);
         // The group composites through the blend, and a document through
         // Skia's shadow filter in the colour it names, of what the draw's
-        // own filter makes.
+        // own filter makes. Under a blend that changes the page beyond what
+        // the shadow covers, the group composites `source-over` into a layer
+        // of its own, which the blend composites over the whole clip: a
+        // chain composites only over what it draws, so the page beyond the
+        // shadow kept its backdrop under `source-in`, where the HTML
+        // Standard's composite of the shadow clears it.
+        let blend = self.state.global_composite_operation;
+        let beyond = covers_beyond_the_draw(blend);
         let mut through = Paint::default();
         through
             .set_anti_alias(true)
-            .set_blend_mode(self.state.global_composite_operation)
+            .set_blend_mode(match beyond {
+                true => BlendMode::SrcOver,
+                false => blend,
+            })
             .set_image_filter(image_filters::drop_shadow_only(
                 (0.0, 0.0),
                 (document_cast.sigma.x, document_cast.sigma.y),
@@ -1665,6 +1767,14 @@ impl Context2D {
                 .with(VectorFeatures::MASKED_BLEND),
         );
         self.with_recorder(|mut recorder| {
+            if beyond {
+                let mut over = Paint::default();
+                over.set_anti_alias(true).set_blend_mode(blend);
+                recorder.open_layer(LayerRec {
+                    paint: Some(over),
+                    ..LayerRec::default()
+                });
+            }
             recorder.append_group(
                 Composite::Chain {
                     steps,
@@ -1681,6 +1791,9 @@ impl Context2D {
                 features,
                 offset,
             );
+            if beyond {
+                recorder.close_layer();
+            }
         });
         true
     }
@@ -1750,7 +1863,9 @@ impl Context2D {
     ///
     /// `whole` draws with the given paint what the draw records, its shadow
     /// included; `shadow` and `shape` its shadow and itself. `pixels` is
-    /// the paint the page's pixels recording draws with.
+    /// the paint the page's pixels recording draws with. `glyphs` says the
+    /// draw is a run of text, which takes the effect through the CPU's
+    /// coverage of it -- see [`Self::glyphs_with_effect`].
     #[allow(clippy::too_many_arguments)]
     fn gradient_on_gpu(
         &self,
@@ -1759,6 +1874,7 @@ impl Context2D {
         pixels: &Paint,
         beyond: bool,
         reach: Rect,
+        glyphs: bool,
         whole: &dyn Fn(&SkCanvas, &Paint),
         shadow: &dyn Fn(&SkCanvas, &Paint),
         shape: &dyn Fn(&SkCanvas, &Paint),
@@ -1773,16 +1889,106 @@ impl Context2D {
                 BlendMode::SrcOver => None,
                 _ => Some(self.recorded(&|canvas| shape(canvas, &over))?),
             };
-            return self.recorded(&|canvas| whole(canvas, &effect)).map(
-                |picture| layer::OnGpu::Effect {
-                    picture,
-                    over,
-                    blend,
-                    beyond,
-                },
-            );
+            let picture = match glyphs {
+                true => {
+                    self.glyphs_with_effect(dye, paint, pixels, reach, shape)
+                }
+                false => self.recorded(&|canvas| whole(canvas, &effect)),
+            };
+            return picture.map(|picture| layer::OnGpu::Effect {
+                picture,
+                over,
+                blend,
+                beyond,
+            });
         }
         self.raster_on_gpu(paint, pixels, beyond, shadow, shape)
+    }
+
+    /// A run of glyphs dyed by `dye`, as a GPU canvas draws it in the CPU's
+    /// bytes: the effect -- see
+    /// [`GradientSpec::exact`](exact_gradient::GradientSpec::exact) -- over
+    /// an aliased rectangle of the device pixels the run reaches, `reach`,
+    /// masked by the CPU's coverage of the run, through `paint`'s blend.
+    /// Under a blend that reaches beyond the run, the run's recording
+    /// composites over the whole page -- see `render_to_canvas` -- and
+    /// `reach`, what it reaches, is the page, so the rectangle composites
+    /// there too, transparent outside the run. `shape` draws the run with
+    /// the paint it is given; `pixels` is the paint the page's pixels
+    /// recording draws it with.
+    ///
+    /// A glyph's coverage is not the run's geometry alone: Skia sharpens or
+    /// softens a glyph's edge by the luminance of the colour it is drawn
+    /// in, and for a paint with a shader takes that colour from the shader
+    /// -- a gradient's is the mean of its stops, an image's none, which
+    /// Skia reads as mid grey (`just_a_color` in SkPaintPriv.cpp). Drawn
+    /// with an image of the effect as its shader, the run took mid grey's
+    /// edges, and stood up to 24 levels from the CPU canvas along them under
+    /// `xor`, 9 under `source-over`. So the coverage is the CPU's, drawn in
+    /// `pixels` -- the gradient itself, its luminance the CPU's -- with a
+    /// colour filter that makes it opaque: Skia passes a colour filter's
+    /// result on to the luminance, and this one changes none of its colour.
+    /// Ganesh's own coverage would take a large glyph's from its path and
+    /// its antialiasing, not the CPU's. The coverage surface takes the
+    /// canvas's text contrast and gamma, as the page's own surface does:
+    /// under Skia's defaults the edges differ from the page's on Linux and
+    /// on any canvas made with a contrast or gamma of its own.
+    fn glyphs_with_effect(
+        &self,
+        dye: &GradientDye<'_>,
+        paint: &Paint,
+        pixels: &Paint,
+        reach: Rect,
+        shape: &dyn Fn(&SkCanvas, &Paint),
+    ) -> Option<Picture> {
+        let area =
+            IRect::intersect(&reach.round_out(), &self.bounds.round_out())?;
+        let mut covering = pixels.clone();
+        covering
+            .set_color_filter(color_filters::matrix_row_major(
+                &OPAQUE,
+                color_filters::Clamp::No,
+            ))
+            .set_blend_mode(BlendMode::SrcOver);
+        let mut surface = started::raster(
+            &ImageInfo::new(
+                area.size(),
+                ColorType::Alpha8,
+                AlphaType::Premul,
+                None,
+            ),
+            None,
+            Some(&text_surface_props(self.canvas_text.0, self.canvas_text.1)),
+        )?;
+        let target = surface.canvas();
+        target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        target.translate((-area.left as f32, -area.top as f32));
+        target.concat(&self.state.matrix);
+        shape(target, &covering);
+        let coverage = surface.image_snapshot().to_shader(
+            (TileMode::Decal, TileMode::Decal),
+            SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+            Some(&Matrix::translate((area.left as f32, area.top as f32))),
+        )?;
+        // Drawn at the recording's identity, the page's device pixels: the
+        // effect is handed each pixel whole, as an aliased rectangle on
+        // whole pixels hands it.
+        let effect = dye
+            .spec
+            .exact(&self.canvas_color_space, paint.alpha_f())?
+            .placed(&self.state.matrix, IPoint::new(0, 0))?;
+        let mut masked = paint.clone();
+        masked
+            .set_shader(shaders::blend(BlendMode::DstIn, effect, coverage))
+            .set_alpha_f(1.0)
+            .set_anti_alias(false)
+            .set_style(PaintStyle::Fill)
+            .set_path_effect(None);
+        let mut recorder = PictureRecorder::new();
+        recorder
+            .begin_recording(self.bounds, true)
+            .draw_irect(area, &masked);
+        recorder.finish_recording_as_picture(None)
     }
 
     /// How a GPU canvas draws, on the CPU, a draw made with `paint` --
@@ -1988,6 +2194,11 @@ impl Context2D {
             (drawn, shadow)
         };
         let (drawn, shadow) = paints(pixels);
+        // A painting of the shadow alone with no shadow to cast files
+        // nothing.
+        if self.shadow_alone && shadow.is_none() {
+            return true;
+        }
         #[cfg_attr(not(test), expect(unused_mut))]
         let mut recording = LazyPicture::default();
         #[cfg_attr(not(test), expect(unused_mut))]
@@ -2023,6 +2234,7 @@ impl Context2D {
             paint: drawn,
             inked: Rect::new_empty(),
             shadow,
+            shadow_alone: self.shadow_alone,
             blend: beyond.then_some(blend),
             recording,
             whole: LazyPicture::default(),
@@ -2310,6 +2522,11 @@ impl Context2D {
                         offset,
                     );
                 }
+                // A painting of the shadow alone files the shadow alone --
+                // see `Self::draw_text`.
+                if self.shadow_alone {
+                    return;
+                }
                 if alone {
                     let clip = self.state.clip.as_ref();
                     recorder.append_tile(tile, clip, features);
@@ -2343,7 +2560,12 @@ impl Context2D {
             if let Some(shadow) = shadow {
                 held.push(group(shadow, &shadow_unit, offset));
             }
-            held.push(group(drawn, &unit, Point::default()));
+            if !self.shadow_alone {
+                held.push(group(drawn, &unit, Point::default()));
+            }
+            if held.is_empty() {
+                return;
+            }
             let mut blended = Paint::default();
             blended.set_anti_alias(true).set_blend_mode(blend);
             recorder.append_group(
@@ -2487,6 +2709,7 @@ impl Context2D {
                     paint: recorded(pixels_paint),
                     inked: Rect::new_empty(),
                     shadow: None,
+                    shadow_alone: false,
                     blend: None,
                     recording: LazyPicture::from(Some(recorded_as)),
                     whole: LazyPicture::default(),
@@ -2902,6 +3125,7 @@ impl Context2D {
             paint: Paint::default(),
             inked,
             shadow: None,
+            shadow_alone: false,
             blend: None,
             recording: LazyPicture::from(Some(recorded)),
             whole: LazyPicture::default(),
@@ -2914,10 +3138,21 @@ impl Context2D {
         }))
     }
 
-    /// Records a paragraph that casts text shadows: what lies beneath them,
-    /// each shadow, and the text over them, as one group composited through
-    /// the context's alpha and blend, as [`Self::with_composited_canvas`]
-    /// composites any paragraph. `draw` draws the part it is handed.
+    /// Whether a draw made now composites through more than `source-over`
+    /// at full alpha: under a `globalAlpha` below 1 or another operator.
+    pub(crate) fn composites_drawing(&self) -> bool {
+        self.state.global_alpha != 1.0
+            || self.state.global_composite_operation != BlendMode::SrcOver
+    }
+
+    /// Records a paragraph in its parts: what lies beneath its shadows --
+    /// its backgrounds -- each shadow in the order it is cast, and the text
+    /// over them, each composited apart through the context's alpha and
+    /// blend, as a canvas composites a `fillRect`, the shadow of a
+    /// `fillText` and then its run -- see [`Self::draw_text`]. `draw` draws
+    /// the part it is handed. A part that draws nothing beneath the text is
+    /// not composited, which a blend reaching beyond it would do as
+    /// transparent black over the whole page; the text always is.
     ///
     /// A blurred shadow is its own group, whose chain blurs the shadow drawn
     /// sharp on pixels by the exact Gaussian -- see `context::chain` -- so
@@ -2928,11 +3163,11 @@ impl Context2D {
     /// mask filter to write, embeds as pixels. An unblurred shadow is drawn
     /// sharp on both.
     ///
-    /// Under an alpha of 1 and `source-over` a group around them all would
-    /// change nothing, since every part is drawn `source-over` too, so there
-    /// is none: each part is filed on the page as it stands, which a vector
-    /// backend then takes part by part -- an SVG keeps the text and the
-    /// sharp shadows as vectors, where it writes nothing of a layer.
+    /// Under an alpha of 1 and `source-over` a group around each part would
+    /// change nothing, so there is none: each part is filed on the page as
+    /// it stands, which a vector backend then takes part by part -- an SVG
+    /// keeps the text and the sharp shadows as vectors, where it writes
+    /// nothing of a layer.
     ///
     /// `features` is what the paragraph's glyphs ask of a vector backend --
     /// see [`Self::with_composited_canvas`] -- which the parts that draw them
@@ -2945,9 +3180,7 @@ impl Context2D {
     ) where
         F: Fn(&SkCanvas, ShadowPart, Recording),
     {
-        if self.state.global_alpha == 1.0
-            && self.state.global_composite_operation == BlendMode::SrcOver
-        {
+        if !self.composites_drawing() {
             self.append_draw(features, false, |canvas, recording| {
                 draw(canvas, ShadowPart::Beneath, recording);
             });
@@ -2976,12 +3209,30 @@ impl Context2D {
         paint.set_alpha_f(self.state.global_alpha as f32);
         paint.set_blend_mode(self.state.global_composite_operation);
         let paint = self.faint().drawable(&paint).into_owned();
+        // A part's picture holds the transform it is recorded under as an
+        // operation of its own, so a part drawing nothing holds as many
+        // operations as a picture of that transform alone.
+        let placed = |canvas: &SkCanvas| {
+            canvas.set_matrix(&self.state.matrix.into());
+        };
+        let unmoved = {
+            let mut recorder = PictureRecorder::new();
+            placed(recorder.begin_recording(self.bounds, true));
+            recorder
+                .finish_recording_as_picture(None)
+                .map_or(0, |picture| picture.approximate_op_count())
+        };
         let record = |part: ShadowPart, recording: Recording| {
             let mut recorder = PictureRecorder::new();
             let canvas = recorder.begin_recording(self.bounds, true);
-            canvas.set_matrix(&self.state.matrix.into());
+            placed(canvas);
             draw(canvas, part, recording);
-            recorder.finish_recording_as_picture(None)
+            recorder
+                .finish_recording_as_picture(None)
+                .filter(|picture| {
+                    part == ShadowPart::Over
+                        || picture.approximate_op_count() > unmoved
+                })
         };
         let dual = self.recorder.borrow().dual();
         // The recording a pair's pixels and its document are each drawn for:
@@ -2997,39 +3248,47 @@ impl Context2D {
                 .zip(record(part, document))
                 .map(|pictures| Layer::Targeted(Arc::new(pictures))),
         };
-        // The parts drawn sharp ask for what the glyphs do, and a blurred
-        // shadow for its filter, as each does filed on the page.
-        let plain = |part| entry(part).map(|e| (e, features));
-        let mut contents: Vec<(Layer, VectorFeatures)> =
-            Vec::with_capacity(casts.len() + 2);
-        contents.extend(plain(ShadowPart::Beneath));
+        // Each part a group of its own, composited through the alpha and
+        // the blend. The parts drawn sharp ask for what the glyphs do, and a
+        // blurred shadow for its filter, as each does filed on the page.
+        let composite = |entry: Layer, asks: VectorFeatures| {
+            self.with_recorder(|mut recorder| {
+                recorder.append_group(
+                    Composite::Layer(LayerRec {
+                        paint: Some(paint.clone()),
+                        ..LayerRec::default()
+                    }),
+                    None,
+                    Matrix::new_identity(),
+                    [(entry, asks)].into_iter().collect(),
+                    self.composited_features(),
+                    Point::default(),
+                );
+            });
+        };
+        if let Some(beneath) = entry(ShadowPart::Beneath) {
+            composite(beneath, features);
+        }
         for (index, cast) in casts.iter().enumerate() {
             match cast.blurs() {
-                false => contents.extend(plain(ShadowPart::Sharp(index))),
-                true => contents.extend(
-                    self.shadow_group(cast, index, &draw).map(|group| {
-                        (
+                false => {
+                    if let Some(sharp) = entry(ShadowPart::Sharp(index)) {
+                        composite(sharp, features);
+                    }
+                }
+                true => {
+                    if let Some(group) = self.shadow_group(cast, index, &draw) {
+                        composite(
                             Layer::Group(Arc::new(group)),
                             VectorFeatures::IMAGE_FILTER,
-                        )
-                    }),
-                ),
+                        );
+                    }
+                }
             }
         }
-        contents.extend(plain(ShadowPart::Over));
-        self.with_recorder(|mut recorder| {
-            recorder.append_group(
-                Composite::Layer(LayerRec {
-                    paint: Some(paint),
-                    ..LayerRec::default()
-                }),
-                None,
-                Matrix::new_identity(),
-                contents.into_iter().collect(),
-                self.composited_features(),
-                Point::default(),
-            );
-        });
+        if let Some(over) = entry(ShadowPart::Over) {
+            composite(over, features);
+        }
     }
 
     /// What a group composited through the context's alpha and blend asks
@@ -3387,6 +3646,7 @@ impl Context2D {
                                 pixels,
                                 beyond,
                                 bounds,
+                                false,
                                 &shape,
                                 &|_, _| {},
                                 &shape,
@@ -4085,7 +4345,7 @@ impl Context2D {
     pub fn draw_nested_image(
         &mut self,
         image: &Image,
-        picture: Option<&Picture>,
+        picture: Option<&SourcePicture>,
         src_rect: &Rect,
         dst_rect: &Rect,
         apart: bool,
@@ -4389,9 +4649,11 @@ impl Context2D {
     }
 
     pub fn image(&self) -> Option<Image> {
-        self.recorder
-            .borrow_mut()
-            .image(self.canvas_color_type, &self.canvas_color_space)
+        self.recorder.borrow_mut().image(
+            self.canvas_color_type,
+            &self.canvas_color_space,
+            self.canvas_text,
+        )
     }
 
     /// This canvas as an image for another canvas to draw, rasterized on the
@@ -4401,6 +4663,7 @@ impl Context2D {
             flatten,
             self.canvas_color_type,
             &self.canvas_color_space,
+            self.canvas_text,
         )
     }
 
@@ -4429,6 +4692,16 @@ impl Context2D {
     /// `source_image` beside this.
     pub fn picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().page().picture(None)
+    }
+
+    /// [`Self::picture`], with the text contrast and gamma this canvas
+    /// rasterizes glyphs under, for a draw that rasterizes it -- see
+    /// [`Self::draw_nested_image`].
+    pub fn source_picture(&self) -> Option<SourcePicture> {
+        self.picture().map(|picture| SourcePicture {
+            picture,
+            text: self.canvas_text,
+        })
     }
 
     /// The page's own list of entries, for another canvas to draw this one
@@ -4727,7 +5000,101 @@ impl Context2D {
         self.state.font_width = width;
     }
 
+    /// Paints a run of text: `text` at (`x`, `y`), condensed to `width`
+    /// where given, filled or stroked by `style`.
+    ///
+    /// The HTML Standard paints the shapes `fillText` and `strokeText`
+    /// prepare once, through its drawing model: the shadow cast from the
+    /// painted image, composited with the operator, then the image itself,
+    /// multiplied by `globalAlpha` and composited with the operator. A run
+    /// that casts a shadow under an operator that is not `source-over` is
+    /// painted so -- see [`Self::paints_run_whole`] -- in two paintings: its
+    /// shadow alone, as any draw casts one, then the run drawn `source-over`
+    /// at full alpha into a layer the operator and `globalAlpha` composite,
+    /// which a GPU canvas composites on the CPU with the shadow, over one
+    /// read back of the page -- see `layer::LayerRec::one_image`.
+    /// Any other run is drawn glyph by glyph after its shadow, as Chrome
+    /// draws one: under `source-over` the two stand apart only by rounding,
+    /// and a run casting no shadow is drawn so, under an operator that stays
+    /// within it, by every browser measured.
+    ///
+    /// So at a `globalAlpha` below 1, where glyphs overlap, a run fades
+    /// differently casting a shadow and casting none under an operator that
+    /// reaches beyond it -- `source-in`, `copy` and the rest. Casting one,
+    /// it fades as one image, as Firefox and WebKit fade it; casting none,
+    /// each glyph is faded inside the one picture that operator composites,
+    /// its overlap compounding, as Chrome 158 fades it and Firefox and WebKit
+    /// do not -- docs/browser-differences.md has the figures.
     pub fn draw_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        width: Option<f32>,
+        style: PaintStyle,
+    ) {
+        if !self.paints_run_whole() {
+            self.paint_text(text, x, y, width, style);
+            return;
+        }
+        self.shadow_alone = true;
+        self.paint_text(text, x, y, width, style);
+        self.shadow_alone = false;
+
+        let mut composite = Paint::default();
+        composite
+            .set_alpha_f(self.state.global_alpha as f32)
+            .set_blend_mode(self.state.global_composite_operation);
+        let composite = self.faint().drawable(&composite).into_owned();
+        self.with_recorder(|mut recorder| {
+            recorder.open_layer(LayerRec {
+                paint: Some(composite),
+                one_image: true,
+                ..LayerRec::default()
+            });
+        });
+        let held = (
+            self.state.global_alpha,
+            self.state.global_composite_operation,
+            self.state.shadow_color.0,
+        );
+        self.state.global_alpha = 1.0;
+        self.state.global_composite_operation = BlendMode::SrcOver;
+        self.state.paint.set_blend_mode(BlendMode::SrcOver);
+        self.state.shadow_color.0.a = 0.0;
+        self.paint_text(text, x, y, width, style);
+        (
+            self.state.global_alpha,
+            self.state.global_composite_operation,
+            self.state.shadow_color.0,
+        ) = held;
+        self.state.paint.set_blend_mode(held.1);
+        self.with_recorder(|mut recorder| {
+            recorder.close_layer();
+        });
+    }
+
+    /// Whether a run of text drawn now is painted as the HTML Standard
+    /// paints it, its shadow composited and then the run as one image -- see
+    /// [`Self::draw_text`]: one casting a shadow under an operator other
+    /// than `source-over`, where the two part. Not under `clear` or
+    /// `modulate`, which leave a layer's transparent pixels no more alone
+    /// than its opaque ones, so a run composited through one would clear or
+    /// darken the layer's whole box rather than its glyphs; nor
+    /// `destination`, which draws nothing either way.
+    fn paints_run_whole(&self) -> bool {
+        self.casts_shadow()
+            && !matches!(
+                self.state.global_composite_operation,
+                BlendMode::SrcOver
+                    | BlendMode::Clear
+                    | BlendMode::Modulate
+                    | BlendMode::Dst
+            )
+    }
+
+    /// One painting of a run of text -- see [`Self::draw_text`].
+    fn paint_text(
         &mut self,
         text: &str,
         x: f32,

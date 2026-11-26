@@ -572,7 +572,10 @@ pub struct TextStyle {
     pub foreground_color: Option<RgbaLinear>,
     /// Colour painted behind the glyphs, for a highlight.
     ///
-    /// `None` -- the default -- draws nothing behind them. Unlike drawing a
+    /// `None` -- the default -- draws nothing behind them, and so does a
+    /// colour whose alpha is 0: it is no background, so under an operator
+    /// that reaches beyond what is drawn, such as `source-in`, it leaves the
+    /// page beneath the paragraph's shadows alone. Unlike drawing a
     /// rectangle first, this follows the run through wrapping and bidi
     /// reordering, which is what makes it worth having.
     pub background_color: Option<RgbaLinear>,
@@ -852,7 +855,9 @@ impl TextDecorationStyle {
 /// A shadow cast behind a style's text. A `TextStyle`'s shadows are painted
 /// with the first listed on top, each composited over the ones beneath it,
 /// as CSS paints `text-shadow`; each run of the style's text on a line casts
-/// a shadow as one, blurred whole.
+/// a shadow as one, blurred whole. Under a global alpha or a composite
+/// operation, each shadow is composited through them apart, in the order
+/// they are painted -- see `Context2D::draw_paragraph`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextShadow {
     /// Shadow color.
@@ -2590,7 +2595,13 @@ impl PaintKey {
 fn carries_taken(style: &TextStyle) -> bool {
     style.decoration.to_skia() != SkTextDecoration::NO_DECORATION
         || !style.shadows.is_empty()
-        || style.background_color.is_some()
+        || background(style).is_some()
+}
+
+/// The colour `style` paints behind its glyphs: none where its
+/// [`background_color`](TextStyle::background_color) paints nothing.
+fn background(style: &TextStyle) -> Option<RgbaLinear> {
+    style.background_color.filter(|colour| colour.a > 0.0)
 }
 
 /// Sets `sk_style`, a new Skia text style, to `style`, with its variable
@@ -2619,7 +2630,7 @@ fn fill_text_style(
     }
     sk_style.set_foreground_paint(&paint);
 
-    if let Some(behind) = style.background_color {
+    if let Some(behind) = background(style) {
         let mut background = SkPaint::default();
         background
             .set_color4f(rgba_linear_to_unpremul_color4f(behind), Some(&cs));
@@ -2784,7 +2795,7 @@ fn foreground_colour(style: &TextStyle) -> NamedColour {
 fn style_colours(style: &TextStyle) -> StyleColours {
     StyleColours {
         foreground: Some(foreground_colour(style)),
-        background: style.background_color.map(named),
+        background: background(style).map(named),
         decoration: (style.decoration != TextDecoration::default())
             .then(|| srgb(style.decoration_color.unwrap_or(style.color))),
         decoration_named: (style.decoration != TextDecoration::default())

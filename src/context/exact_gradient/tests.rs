@@ -2382,10 +2382,11 @@ fn a_blurred_gradient_reads_nothing_back() {
 
 /// On a page that keeps a recording for each kind of target, a gradient
 /// draw records one for a document only where it draws apart from the
-/// pixels -- casting its shadow itself, under a blend that covers beyond it,
-/// the shadow's paint taken by each recording for itself -- and otherwise
-/// plays its pixels for a document. A shadow cast apart, as a group of its
-/// own -- see `files_shadow_through_chain` -- leaves the draw alike. A
+/// pixels -- casting its shadow itself, under a CanvasKit filter, the
+/// shadow's paint taken by each recording for itself -- and otherwise plays
+/// its pixels for a document. A shadow cast apart, as a group of its own,
+/// under any blend -- see `files_shadow_through_chain` -- leaves the draw
+/// alike. A
 /// document's bytes cannot tell the two apart at the precision they write a
 /// colour in, so the rule is held here, on the entries.
 #[test]
@@ -2396,15 +2397,20 @@ fn a_gradient_draw_records_a_document_only_where_it_draws_apart() {
         features: VectorFeatures::PLAIN,
         gradient: Some(Arc::new(spec)),
     };
-    let documents = |shadow: bool, blend: BlendMode| -> Vec<bool> {
+    let documents = |shadow: bool, filtered: bool| -> Vec<bool> {
         let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
         let ctx = canvas.context();
+        if filtered {
+            let still =
+                crate::filter::ImageFilter::offset(0.0, 0.0, None, None)
+                    .expect("an offset filter");
+            ctx.set_image_filter(Some(&still));
+        }
         if shadow {
             ctx.set_shadow_color_css("rgb(0 0 0 / 0.5)")
                 .expect("a colour");
             ctx.set_shadow_offset(3.0, 2.0);
         }
-        ctx.set_global_composite_operation(blend);
         ctx.set_fill_shader(&shader);
         ctx.fill_rect(10.0, 10.0, 30.0, 20.0);
         ctx.inner
@@ -2419,18 +2425,14 @@ fn a_gradient_draw_records_a_document_only_where_it_draws_apart() {
             .map(|piece| piece.document.is_some())
             .collect()
     };
+    assert_eq!(documents(false, false), vec![false], "alike: no document");
     assert_eq!(
-        documents(false, BlendMode::SourceOver),
-        vec![false],
-        "alike: no document"
-    );
-    assert_eq!(
-        documents(true, BlendMode::SourceOver),
+        documents(true, false),
         vec![false],
         "a shadow cast apart: no document"
     );
     assert_eq!(
-        documents(true, BlendMode::Copy),
+        documents(true, true),
         vec![true],
         "a shadow the draw casts itself: a document"
     );
