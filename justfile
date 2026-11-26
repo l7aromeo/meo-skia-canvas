@@ -9,7 +9,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # invocation and must not download. It also holds the tree for as long as this
 # `just` runs, so a `prepare` in another worktree does not remove it -- `hold`
 # in scripts/skia-source.mjs. A variable already set in the environment wins. Which patches each platform's tree carries is `PATCHES` in
-# scripts/skia-source.mjs; macOS's are the one below and the atlas-size cap
+# scripts/skia-source.mjs; macOS's are the one below and the atlas placement
 # and triangulation tolerance noted there, Linux's the brotli build-list fix
 # and the same two, Windows's the same two and the DirectWrite oblique fix, and
 # all three the Graphite bindings, which a build takes only through

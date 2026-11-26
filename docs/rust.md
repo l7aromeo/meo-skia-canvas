@@ -251,7 +251,7 @@ Everything in this section describes a crate build of crates.io's Skia. A build 
 
 On macOS, the Skia that skia-bindings 0.156.0 downloads waits at most one second for each Metal shader and pipeline it compiles, then drops the draw. On a loaded machine a process's first image draw, blend mode or gradient can come back missing, with only a line on stderr ("Compilation took longer than 1000 ms"). The npm package's macOS binary is built without that limit, but a crate build uses whatever Skia skia-bindings gives it.
 
-The same Skia's atlas path renderer can also move a pixel of an anti-aliased path's coverage a step up or down, about 50 of 255 levels of alpha, on Metal and on Vulkan alike: it does to a path it places at an atlas row of 512 or more, and where a path lands depends on everything else the same flush draws. The npm package's binaries cap the atlas at 512 by 512, so no path is placed there; a crate build does not.
+The same Skia's atlas path renderer can also move a pixel of an anti-aliased path's coverage a step up or down, about 50 of 255 levels of alpha, on Metal and on Vulkan alike: where in its atlas it draws a path depends on everything else the same flush draws, and float rounding at that location decides where the path's edges land. The npm package's binaries draw each path relative to its own position, add the location only to coordinates that sum exactly, and size the atlas so its mapping to the GPU's coordinates is exact, through `containers/skia-atlas-placement.patch`; a crate build does not.
 
 Its triangulating path renderer keeps a filled curve's triangles keyed by the path's shape, not the scale it is drawn at, and reuses them for a draw asking for anything up to three times finer or coarser. So a curve drawn after a larger or smaller draw of the same path, such as an export at another density, is drawn from triangles cut for that other size, and under 4x MSAA its edge pixels can move by up to 128 levels of alpha. The npm package's binaries reuse triangles only at the draw's own tolerance, through `containers/skia-triangulation-tolerance.patch`; a crate build does not.
 
@@ -276,7 +276,7 @@ meo-skia-canvas = { version = "0.17", default-features = false, features = ["vul
 ```toml
 # .cargo/config.toml
 [env]
-SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-3f566dd7198c/skia-binaries-{key}.tar.gz"
+SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-9abc40fe47d6/skia-binaries-{key}.tar.gz"
 ```
 
 skia-bindings then downloads Skia built from `PATCHES` for that target and feature set instead of compiling crates.io's, and the crate draws what the npm package draws. `skia-binaries.txt`, in the crate, holds the URL for the crate version you have, and the targets the archives cover: npm's seven, from `lib/targets.json`, with either C runtime on Windows and musl, with and without `metal` or `vulkan`, whichever the target builds. A skia-safe feature added on top of the crate's has no archive.

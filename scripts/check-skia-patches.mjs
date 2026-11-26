@@ -381,7 +381,7 @@ function selfTest() {
     "a run step that applies a patch file",
     auditWorkflow(
       "w.yml",
-      job(["      - run: patch -p1 -i containers/skia-atlas-size.patch"]),
+      job(["      - run: patch -p1 -i containers/skia-atlas-placement.patch"]),
     ),
     1,
   );
@@ -389,7 +389,10 @@ function selfTest() {
     "a patch named only in a comment",
     auditWorkflow(
       "w.yml",
-      job(["      # containers/skia-atlas-size.patch", "      - run: true"]),
+      job([
+        "      # containers/skia-atlas-placement.patch",
+        "      - run: true",
+      ]),
     ),
     0,
   );
