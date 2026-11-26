@@ -247,7 +247,7 @@ function compiledLine(file) {
 }
 /// The line each ninja prints for `-C`, capturing the directory. ninja writes
 /// ``ninja: Entering directory `<dir>'``. samurai, which Alpine installs as
-/// `/usr/bin/ninja` and so the musl container builds with, writes
+/// `/usr/bin/ninja` and a build there runs unless told otherwise, writes
 /// `<the name it ran as>: entering directory '<dir>'` -- `ninja` there, `samu`
 /// when run as itself -- and writes it to stderr, which is why `buildLog`
 /// reads both streams. A CRLF line end needs nothing here: `$` in multiline
