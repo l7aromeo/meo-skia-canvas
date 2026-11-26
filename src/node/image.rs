@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use crate::{
     color::skia_color_to_rgba_linear,
-    context::{BoxedContext2D, Context2D},
+    context::{BoxedContext2D, Context2D, SourcePicture},
     image::{Svg, decode_frame, frame_delays},
     node::external::External,
     started,
@@ -165,12 +165,13 @@ pub struct Source {
     /// Whether this source carries someone else's picture, and so has to be
     /// rasterized rather than nested again.
     pub nested: bool,
-    /// The source's own picture, where it has one, so a nested draw replays
-    /// the visible region instead of materializing the whole page to copy a
-    /// sliver out of it. `None` for every source that is not a canvas, and
-    /// for a canvas with nothing nested in it, which travels as a picture
-    /// already. See `Context2D::draw_nested_image`.
-    pub picture: Option<Picture>,
+    /// The source's own picture and the text contrast and gamma it replays
+    /// under, where it has one, so a nested draw replays the visible region
+    /// instead of materializing the whole page to copy a sliver out of it.
+    /// `None` for every source that is not a canvas, and for a canvas with
+    /// nothing nested in it, which travels as a picture already. See
+    /// `Context2D::draw_nested_image`.
+    pub picture: Option<SourcePicture>,
     /// Whether the source is a canvas whose page holds what a GPU canvas
     /// replaying it draws in other bytes than a CPU canvas, which the
     /// destination then draws through a route of its own -- see
@@ -238,7 +239,7 @@ impl Source {
                 replay_cost: cost.max(1),
                 nested: cost > 0,
                 // Only the nested arm replays it, and only that arm asks.
-                picture: (cost > 0).then(|| ctx.picture()).flatten(),
+                picture: (cost > 0).then(|| ctx.source_picture()).flatten(),
                 // Asked after the image, whose page files what was drawn.
                 plays_apart_on_gpu: ctx.plays_apart_on_gpu(),
             });

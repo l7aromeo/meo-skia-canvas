@@ -719,9 +719,12 @@ fn parse_text_style<'a>(
         text_srgb = Some(color4f_to_srgb(color4f, Some(&cs)));
     }
 
-    // backgroundColor
+    // backgroundColor: one that paints nothing is none, so that a paragraph
+    // composited part by part composites nothing beneath its shadows -- see
+    // `Context2D::draw_with_shadows`.
     if let Some((color4f, cs)) =
         colour_option(cx, obj, prefix, "backgroundColor")?
+            .filter(|(color4f, _)| color4f.a > 0.0)
     {
         let mut paint = Paint::default();
         let (paint_color, paint_space) = skia_paint_color(color4f, &cs);
