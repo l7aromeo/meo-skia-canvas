@@ -2,13 +2,13 @@
 //! own, however many other paths the flush holds.
 //!
 //! Two thousand small filled stars on one page: about 26 by 26 pixels of atlas
-//! each, enough to fill a 512-by-512 atlas five times over, and a 2048 one a
-//! third full. Each pixel's alpha is checked against the stars that can reach
-//! it, drawn alone, in the page's order, on a canvas of their own: a flush of
-//! a few stars, whose atlas stays small. Without the atlas cap the crowded
-//! page read 51 levels of alpha above or below that at 28 pixels, 19 above and
-//! 9 below, single stars among them -- so the error goes both ways, and is
-//! not a matter of compositing.
+//! each, enough to fill a third of a 2048-by-2048 atlas. Each pixel's alpha is
+//! checked against the stars that can reach it, drawn alone, in the page's
+//! order, on a canvas of their own: a flush of a few stars, whose atlas stays
+//! small. Drawn by a Skia without containers/skia-atlas-placement.patch, and
+//! with no cap on the atlas's size, the crowded page read 51 levels of alpha
+//! above or below that at 28 pixels, 19 above and 9 below, single stars among
+//! them -- so the error goes both ways, and is not a matter of compositing.
 
 use std::{
     env,
@@ -102,15 +102,15 @@ fn drawn(
 
 /// Skips where there is no GPU, unless [`REQUIRE_GPU`] asks for one.
 ///
-/// Ignored, saying why, where the Skia compiled lacks the atlas cap --
-/// `cfg(meo_atlas_size)`, from `build.rs`.
+/// Ignored, saying why, where the Skia compiled lacks the atlas placement --
+/// `cfg(meo_atlas_placement)`, from `build.rs`.
 #[test]
 #[cfg_attr(
-    not(meo_atlas_size),
-    ignore = "crates.io's Skia, without containers/skia-atlas-size.patch, \
-              moves a path's coverage at an atlas row of 512 or more, for a \
-              reason not known and at pixels that vary by device, so there is \
-              no figure to hold it to"
+    not(meo_atlas_placement),
+    ignore = "crates.io's Skia, without containers/skia-atlas-placement.patch, \
+              moves a path's coverage with where the flush packs it in the \
+              atlas, at pixels that vary by device, so there is no figure to \
+              hold it to"
 )]
 fn a_path_covers_a_crowded_flush_as_it_covers_a_small_one() -> Result<(), Error>
 {

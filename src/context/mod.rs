@@ -9878,48 +9878,30 @@ mod text_reach_tests {
         )
     }
 
-    /// How far, in levels of an 8-bit alpha, Skia's analytic
-    /// anti-aliasing covers a curved edge from its true coverage: 40,
-    /// measured, not chosen. The stroked "g" of Times New Roman's 96px
-    /// "Ag", 40 wide with round joins at density 3, covers (581, 245) with
-    /// an alpha of 98 where 8 by 8 samples of the same outline give 137.6,
-    /// 39.6 levels short; moved 54 device pixels it covers it with 116.
-    /// Measured on the CPU raster, which is the only anti-aliasing route
-    /// Skia 156 has for a path -- see `skia_covers_a_curve_by_where_it_lies`.
-    const AAA_COVERAGE_ERROR: u8 = 40;
-
-    /// How far two placements of the same scene on the GPU may draw any
-    /// pixel apart. A clip-bounded chain's layer there is the page and the
-    /// region together, another size of target than the page, which draws an
-    /// edge otherwise (#747): a skewed hairline came 63 levels apart. Each
-    /// lies within [`AAA_COVERAGE_ERROR`] of the true coverage, so the two
-    /// within twice that of each other, until #747 is fixed.
-    const AAA_PLACEMENT_SPREAD: u8 = 2 * AAA_COVERAGE_ERROR;
-
-    /// How far two placements of the same scene on the CPU may draw any
-    /// pixel apart: a level, a tie either way. Both layers start at the
-    /// device's origin -- see `chain::draw_from_the_origin` -- so a curve is
-    /// covered alike; their widths differ, and a blur through the FFT rounds
-    /// a value within float noise of a half either way by the length it is
-    /// transformed at. Helvetica's 40px "Ag" under its drop shadow at
-    /// density 3 drew (186, 314) with an alpha of 86 from a region 254
-    /// pixels wide and 85 from one 1010 wide.
-    const CPU_PLACEMENT_SPREAD: u8 = 1;
+    /// How far two placements of the same scene may draw any pixel apart:
+    /// a level, a tie either way. On the CPU both layers start at the
+    /// device's origin -- see `chain::draw_from_the_origin` -- and on the GPU
+    /// both draw the page's pixels in a layer of the page's size -- see
+    /// `chain::draw_as_the_page` -- so a curve is covered alike; their widths
+    /// differ, and a blur through the FFT rounds a value within float noise
+    /// of a half either way by the length it is transformed at. Helvetica's
+    /// 40px "Ag" under its drop shadow at density 3 drew (186, 314) with an
+    /// alpha of 86 from a region 254 pixels wide and 85 from one 1010 wide.
+    /// On the GPU one scene of the sweep, Helvetica's 96px "Ag" skewed by
+    /// 0.3 and stroked 40 wide at density 2, comes a level apart; the rest
+    /// come none.
+    const PLACEMENT_SPREAD: u8 = 1;
 
     /// The largest difference, in premultiplied levels, between the scene
     /// drawn in a chain layer bounded by its reach and one bounded by the
     /// clip, at each scale.
     ///
     /// An end-to-end check that confining the layer changes nothing past a
-    /// tie on the CPU and #747's target sizes on the GPU -- see
-    /// [`CPU_PLACEMENT_SPREAD`] and [`AAA_PLACEMENT_SPREAD`] -- not the
-    /// guard on the reach: a reach that cuts a pixel off an anti-aliased
-    /// fringe can lose a few tens of levels, which the spread allows, and
-    /// [`inked_past`] is what refuses that. Drawn in by TEXT_REACH_INSET, in
+    /// tie on either engine -- see [`PLACEMENT_SPREAD`] -- not the guard on
+    /// the reach, which is [`inked_past`]. Drawn in by TEXT_REACH_INSET, in
     /// the units the run is laid out in, the reach fails [`inked_past`] from
-    /// an inset of 1 and this from one of 11: a chain's layer is its reach
-    /// widened by as far as the chain reads, so an inset under that cuts
-    /// nothing the chain draws.
+    /// an inset of 1 and this from one of 2, where ReachOswald's 40px "Ag"
+    /// under `blur(3px)` at density 3 parts by 20 levels on the CPU.
     fn parted_from_the_clip(scene: &Scene) -> Vec<(&'static str, u8)> {
         // Each play lays its runs out and blurs them for itself. Canvases
         // with equal settings share their kept runs, and a run kept from
@@ -10331,8 +10313,7 @@ mod text_reach_tests {
     /// its font's declared box (Zapfino's swashes), colour emoji, a wide
     /// stroke, a turn, a skew and a scale. And the chain bounded by it
     /// draws what one bounded by the clip draws, a drop shadow cast further
-    /// than the run is long included, within [`CPU_PLACEMENT_SPREAD`] on the
-    /// CPU and [`AAA_PLACEMENT_SPREAD`] on the GPU.
+    /// than the run is long included, within [`PLACEMENT_SPREAD`].
     #[test]
     fn text_in_a_chain_is_bounded_by_all_it_inks() {
         let full = std::env::var("TEXT_REACH_SWEEP").is_ok_and(|v| v == "full");
@@ -10432,13 +10413,7 @@ mod text_reach_tests {
                 }
                 let parted = if full { Vec::new() } else { parted_from_the_clip(&scene) }
                     .into_iter()
-                    .filter(|(at, levels)| {
-                        let spread = match at.starts_with("gpu") {
-                            true => AAA_PLACEMENT_SPREAD,
-                            false => CPU_PLACEMENT_SPREAD,
-                        };
-                        *levels > spread
-                    })
+                    .filter(|(_, levels)| *levels > PLACEMENT_SPREAD)
                     .map(|(at, levels)| {
                         format!("{label} {at}: {levels} levels from the clip-bounded chain")
                     })

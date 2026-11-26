@@ -90,12 +90,14 @@ struct SkiaPatch {
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
 const SKIA_PATCHES: [SkiaPatch; 7] = [
-    // `containers/skia-atlas-size.patch`: Ganesh's path atlas capped at 512 by
-    // 512, where an atlas row of 512 or more can move a path's coverage.
+    // `containers/skia-atlas-placement.patch`: a path drawn into Ganesh's
+    // path atlas relative to its own device top-left, rounded to a grid, and
+    // only then moved by its whole-pixel location, so its coverage does not
+    // depend on where the atlas places it.
     SkiaPatch {
-        cfg: "meo_atlas_size",
-        file: "src/gpu/ganesh/ops/AtlasPathRenderer.cpp",
-        marker: "fAtlasMaxSize = 512;",
+        cfg: "meo_atlas_placement",
+        file: "src/gpu/ganesh/ops/AtlasRenderTask.cpp",
+        marker: "fWindingPathList.add(&fPathDrawAllocator, pathToAtlasMatrix, path, location);",
     },
     // `containers/skia-triangulation-tolerance.patch`: a cached triangulation
     // reused only at the tolerance it was cut for.

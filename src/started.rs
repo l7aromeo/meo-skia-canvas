@@ -13,9 +13,9 @@
 
 use crate::start_skia;
 use skia_safe::{
-    AlphaType, Bitmap, Codec, ColorSpace, Data, ISize, Image, ImageInfo,
-    Matrix, Paint, Picture, Surface, SurfaceProps, image::BitDepth, images,
-    surfaces,
+    AlphaType, Bitmap, Borrows, Codec, ColorSpace, Data, ISize, Image,
+    ImageInfo, Matrix, Paint, Picture, Surface, SurfaceProps, image::BitDepth,
+    images, surfaces,
 };
 
 /// [`surfaces::raster`], once Skia is started.
@@ -34,6 +34,18 @@ pub(crate) fn raster(
 pub(crate) fn raster_n32_premul(size: impl Into<ISize>) -> Option<Surface> {
     start_skia();
     surfaces::raster_n32_premul(size)
+}
+
+/// [`surfaces::wrap_pixels`], once Skia is started: a raster surface drawing
+/// into `pixels`, which it borrows for as long as it lives.
+pub(crate) fn wrap_pixels<'pixels>(
+    info: &ImageInfo,
+    pixels: &'pixels mut [u8],
+    row_bytes: impl Into<Option<usize>>,
+    props: Option<&SurfaceProps>,
+) -> Option<Borrows<'pixels, Surface>> {
+    start_skia();
+    surfaces::wrap_pixels(info, pixels, row_bytes, props)
 }
 
 /// [`images::raster_from_data`], once Skia is started.
