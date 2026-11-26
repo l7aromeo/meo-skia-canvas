@@ -2792,15 +2792,15 @@ mod tests {
     /// Skia gains fails here as surely as one it loses.
     #[test]
     fn skia_reads_every_named_colour_but_these() {
-        use crate::node::utils::NAMED_COLORS;
-        use skia_safe::{Color, surfaces};
+        use crate::{node::utils::NAMED_COLORS, started};
+        use skia_safe::Color;
         let drawn = |fill: &str| {
             let svg = format!(
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="{fill}"/></svg>"#
             );
             let dom = svg::Dom::from_str(&svg, FontMgr::new()).expect("parses");
             let mut surface =
-                surfaces::raster_n32_premul((2, 2)).expect("surface");
+                started::raster_n32_premul((2, 2)).expect("surface");
             surface.canvas().clear(Color::WHITE);
             dom.render(surface.canvas());
             let pixels = surface.image_snapshot();
@@ -2832,8 +2832,8 @@ mod tests {
     /// whatever the document holds.
     #[test]
     fn a_wide_svg_paint_reaches_a_wide_surface() {
-        use crate::node::utils::opt_color_space;
-        use skia_safe::{Color, surfaces};
+        use crate::{node::utils::opt_color_space, started};
+        use skia_safe::Color;
         /// `color(display-p3 0 1 0)`, P3's green, which sRGB cannot hold.
         const WIDE: &str = "color(display-p3 0 1 0)";
         /// P3's green as a `display-p3` surface stores it.
@@ -2853,7 +2853,7 @@ mod tests {
                 opt_color_space("display-p3"),
             );
             let mut surface =
-                surfaces::raster(&info, None, None).expect("surface");
+                started::raster(&info, None, None).expect("surface");
             surface.canvas().clear(Color::WHITE);
             svg.dom.render(surface.canvas());
             let mut px = [0u8; 4];
@@ -2931,14 +2931,15 @@ mod tests {
     /// multiplies.
     #[test]
     fn a_translucent_flood_keeps_its_alpha() {
-        use skia_safe::{Color, surfaces};
+        use crate::started;
+        use skia_safe::Color;
         let drawn = |body: &str| {
             let svg = Svg::parse(&format!(
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
             ))
             .expect("parses");
             let mut surface =
-                surfaces::raster_n32_premul((4, 4)).expect("surface");
+                started::raster_n32_premul((4, 4)).expect("surface");
             surface.canvas().clear(Color::WHITE);
             svg.dom.render(surface.canvas());
             let colour = surface
