@@ -2606,10 +2606,21 @@ impl Context2D {
     /// The source is drawn as vectors rather than as a rasterized snapshot,
     /// so it stays sharp under a transform and exports to
     /// [`Pdf`](crate::export::ImageFormat::Pdf) and
-    /// [`Svg`](crate::export::ImageFormat::Svg) as geometry. That is the
-    /// difference from rendering the source to an
-    /// [`Image`] and calling
+    /// [`Svg`](crate::export::ImageFormat::Svg) as geometry, but for what
+    /// the format cannot write: an SVG embeds, as pixels, a source holding a
+    /// blend past `source-over` or a [`Context2D::put_image_data`]. That is
+    /// the difference from rendering the source to an [`Image`] and calling
     /// [`Context2D::draw_image`].
+    ///
+    /// The source composites as its own pixels do, as an image of it would:
+    /// its draws with one another on transparent black, then what they make
+    /// onto this canvas once, through the global alpha and composite
+    /// operation. Bytes it put with [`Context2D::put_image_data`] stand for
+    /// themselves, transparent ones leaving this canvas showing. Translated
+    /// by whole device pixels, it lands the source's own pixels byte for
+    /// byte, however a clip or this canvas's edge cuts it; under any other
+    /// transform its vectors are drawn at this canvas's resolution, where an
+    /// image would be resampled.
     ///
     /// Where the two canvases were made with a different
     /// [`text_contrast`](crate::canvas::CanvasOptions::text_contrast) or
@@ -4311,6 +4322,11 @@ impl Context2D {
     /// is cleared first, so the pixels land exactly as supplied. That is
     /// what `putImageData` specifies.
     ///
+    /// An [`Svg`](crate::export::ImageFormat::Svg) export embeds the put as
+    /// pixels, with what lies beneath it, and keeps what is drawn after it as
+    /// vectors: Skia's SVG backend writes no blend, and as vectors the page
+    /// beneath a transparent put would show.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::UnsupportedPixelColorSpace`] when `data`'s color
@@ -4537,6 +4553,7 @@ fn place_capture(
         content,
         features,
         cost,
+        size,
         picture,
         entries,
         apart,
@@ -4547,6 +4564,7 @@ fn place_capture(
         Captive::Page(page) => ctx.draw_picture_costing(
             &|| page.picture(None),
             entries.clone(),
+            SkRect::from_size(*size),
             src,
             dst,
             features,

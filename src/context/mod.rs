@@ -83,8 +83,8 @@ use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
-    Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
-    coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
+    DrawnIn, Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
+    coverage_files, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
@@ -2551,6 +2551,7 @@ impl Context2D {
                     matrix: Matrix::concat(&shift, &self.state.matrix),
                     clip: None,
                     entries_clipped: false,
+                    source: None,
                     within: None,
                     contents_matrix: shift,
                     contents: contents.clone(),
@@ -3345,6 +3346,7 @@ impl Context2D {
             matrix: Matrix::new_identity(),
             clip: None,
             entries_clipped: false,
+            source: None,
             within: None,
             contents_matrix: Matrix::new_identity(),
             // What a document plays of it is the shadow Skia's mask filter
@@ -4082,6 +4084,7 @@ impl Context2D {
         self.draw_picture_costing(
             &|| Some(picture.clone()),
             None,
+            picture.cull_rect(),
             src_rect,
             dst_rect,
             source,
@@ -4111,10 +4114,16 @@ impl Context2D {
     /// target composites its groups as it needs -- see `LayerRec::open_on`.
     /// `None` for a picture with no page behind it, which is then one entry
     /// asking for what `source` names.
+    ///
+    /// `bounds` is the source's own: a canvas's page, or the rectangle a
+    /// vector image is recorded in. What the draw lands is what the source
+    /// draws inside them, as it rasterizes there -- see `layer::DrawnIn`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_picture_costing(
         &mut self,
         picture: &dyn Fn() -> Option<Picture>,
         entries: Option<Entries>,
+        bounds: Rect,
         src_rect: &Rect,
         dst_rect: &Rect,
         source: VectorFeatures,
@@ -4151,38 +4160,34 @@ impl Context2D {
             .with(source.nested())
             .with(carried);
 
-        // Drawn through its paint as a group of our own, which composites
-        // the alpha exactly on pixels and as an opacity in a document -- see
-        // `LayerRec::open_on` -- wherever the blend composites only where
-        // the source lands, which `render_to_canvas` draws as it is: its
-        // shadow first, as a group of its own offset from it, then the
-        // source. A source holding a cut draw is drawn as its entries where
-        // the paint has nothing to say, through no layer, so that each target
-        // clips the draw its own way -- see `Composite::Plain` -- where the
-        // picture `render_to_canvas` draws holds one way for all. So is one
-        // from a page that keeps a pair of recordings, so that a document is
-        // written from the source's own and not from the colours placed for
-        // its pixels, which the picture holds -- and so is such a page whose
-        // draws have not forked its recordings, so that it is drawn as it is
-        // once they have: by the picture, the transforms are composed
-        // otherwise, and a PDF wrote one coordinate an ulp apart. So is a
-        // source the destination crops, so that a raster crops it by
-        // coverage rather than cutting its paths -- see `Group::confine`.
+        // Drawn through its paint as a group of our own wherever the blend
+        // composites only where the source lands, which `render_to_canvas`
+        // draws as it is: its shadow first, as a group of its own offset
+        // from it, then the source. The group composites the source as its
+        // own pixels do -- its draws with one another on transparent black,
+        // then what they make onto this page, once -- through a layer that
+        // keeps the alpha exact on pixels and is an opacity in a document,
+        // which opens one at full alpha and writes its entries as they are,
+        // unless the source holds a blend -- a put's `Clear` among them --
+        // which a document keeps inside the layer -- see `LayerRec::open_on`
+        // and `Group::opacity`. Replayed straight
+        // onto the page, a source's `put_image_data`, drawn under
+        // `BlendMode::Clear`, erased what this page held beneath it, and its
+        // overlapping translucent draws composited onto this page's bytes
+        // one at a time. Where the draws are made is the source's own raster
+        // where it can be, so that at a whole-pixel offset the group lands
+        // the source's pixels, and its shadow is cast from them -- see
+        // `Group::played_at_source`.
+        //
+        // Kept as its entries rather than the picture `render_to_canvas`
+        // draws, each target clips a cut draw its own way -- see
+        // `CutOp::playback` -- where the picture holds one way for all; a
+        // document is written from a page's own recording and not from the
+        // colours placed for its pixels; and a raster crops a source the
+        // destination crops by coverage rather than cutting its paths --
+        // see `Group::confine`.
         let drawn = self.faint().drawable(&paint).into_owned();
-        let through_paint = carries(source, &drawn);
-        let cut = entries.as_ref().is_some_and(|entries| {
-            entries.apart
-                || holds_a_cut(&entries.layers)
-                || holds_a_pair(&entries.layers)
-        });
-        let crops = || {
-            picture().is_some_and(|picture| {
-                !dst_rect.contains(matrix.map_rect(picture.cull_rect()).0)
-            })
-        };
-        if (through_paint || cut || crops())
-            && !covers_beyond_the_draw(self.state.global_composite_operation)
-        {
+        if !covers_beyond_the_draw(self.state.global_composite_operation) {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
             let Some(contents) = entries.or_else(|| {
                 picture().map(|picture| {
@@ -4243,12 +4248,14 @@ impl Context2D {
                             reach: None,
                             coverage: None,
                         },
-                        None if own && !through_paint => Composite::Plain,
                         None => Composite::Layer(rec),
                     };
                     recorder.append_group(
                         composite,
-                        Some(*dst_rect),
+                        Some(DrawnIn {
+                            within: *dst_rect,
+                            source: bounds,
+                        }),
                         contents_matrix,
                         contents.clone(),
                         features,
@@ -4275,29 +4282,21 @@ impl Context2D {
             None,
             None,
             |canvas, paint, _| {
-                // A paint here makes Skia draw the picture through a temporary
-                // layer, which is what keeps the source's own compositing to
-                // itself: a `destination-out` inside it used to erase what was
-                // already on this canvas, where drawing the source's pixels --
-                // which is what the Canvas API says this does -- leaves them
-                // alone. Only where the source needs it, because the SVG
-                // backend omits a picture drawn with a paint altogether -- so
-                // such a draw is `PICTURE_PAINT` and rasterized there -- and a
-                // source with nothing but source-over in it has nothing to
-                // leak. An explicit `save_layer` will not do: Skia's recording
-                // optimizer folds one wrapping a single draw back into the
-                // draw, layer and all.
-                //
-                // Past that, the paint is only worth carrying if it says
-                // something -- alpha, a blend mode, a filter, a colour filter.
-                // A faint paint drawn as its opaque stand-in is carried as
-                // well: its alpha is in a colour filter -- see
-                // `Faint::drawable`.
+                // Only a blend that covers beyond the draw comes here, and the
+                // paint carrying it makes Skia draw the picture through a
+                // temporary layer, which keeps the source's own compositing to
+                // itself, as drawing the source's pixels -- which is what the
+                // Canvas API says this does -- would. The SVG backend omits a
+                // picture drawn with a paint altogether, so such a draw is
+                // `PICTURE_PAINT` and rasterized there. An explicit
+                // `save_layer` will not do: Skia's recording optimizer folds
+                // one wrapping a single draw back into the draw, layer and all.
+                // A faint paint is drawn as its opaque stand-in, its alpha in a
+                // colour filter -- see `Faint::drawable`.
                 let paint = self.faint().drawable(paint);
-                let paint = carries(source, &paint).then_some(&*paint);
                 canvas.save();
                 canvas.clip_rect(dst_rect, ClipOp::Intersect, true);
-                canvas.draw_picture(picture, Some(&matrix), paint);
+                canvas.draw_picture(picture, Some(&matrix), Some(&*paint));
                 canvas.restore();
             },
         );
@@ -4787,24 +4786,29 @@ impl Context2D {
             started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
             self.push(); // cache matrix & clip in self.state
+            // `Clear` erases the destination beneath the put, which a
+            // document has to know of to write -- see `blend_features`.
             self.with_recorder(|mut recorder| {
-                recorder.append_unframed(|canvas, _| {
-                    let paint = Paint::default();
-                    let mut eraser = Paint::default();
-                    eraser.set_blend_mode(BlendMode::Clear);
-                    canvas.draw_image_rect(
-                        &bitmap,
-                        Some((src_rect, Strict)),
-                        dst_rect,
-                        &eraser,
-                    );
-                    canvas.draw_image_rect(
-                        &bitmap,
-                        Some((src_rect, Strict)),
-                        dst_rect,
-                        &paint,
-                    );
-                });
+                recorder.append_unframed(
+                    blend_features(BlendMode::Clear, true),
+                    |canvas, _| {
+                        let paint = Paint::default();
+                        let mut eraser = Paint::default();
+                        eraser.set_blend_mode(BlendMode::Clear);
+                        canvas.draw_image_rect(
+                            &bitmap,
+                            Some((src_rect, Strict)),
+                            dst_rect,
+                            &eraser,
+                        );
+                        canvas.draw_image_rect(
+                            &bitmap,
+                            Some((src_rect, Strict)),
+                            dst_rect,
+                            &paint,
+                        );
+                    },
+                );
             });
             self.pop(); // restore discarded matrix & clip
             return true;

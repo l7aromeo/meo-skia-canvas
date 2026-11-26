@@ -239,6 +239,7 @@ mod tests {
             matrix: Matrix::new_identity(),
             clip: None,
             entries_clipped: false,
+            source: None,
             within: None,
             contents_matrix: Matrix::new_identity(),
             contents: Entries::default(),
