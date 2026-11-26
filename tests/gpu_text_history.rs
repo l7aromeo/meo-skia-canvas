@@ -31,6 +31,27 @@
 //! every history alike -- so without the patch the history test holds only that
 //! each history draws the same page every time.
 
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+// Re-check: cargo test text_after_a_larger_draw_of_it_draws_as_a_fresh_draw
+// on a build of crates.io's Skia, which holds it to the defect; when it fails
+// there, Ganesh no longer draws these runs as distance fields, or its blob
+// cache keys them with their matrix, and which one decides whether the marker
+// goes. The crate cannot turn them off through `GrContextOptions` without
+// moving other text. Ganesh hands `fGlyphsAsPathsFontSize` to `SubRunControl`
+// as the largest distance-field size
+// (src/gpu/ganesh/GrRecordingContextPriv.cpp, `getSubRunControl`), and
+// src/text/gpu/SubRunContainer.cpp gates direct masks by the same value,
+// `approximateDeviceTextSize < maxMaskSize` at line 1455, so lowering it below
+// 162 to empty the distance-field range draws every run from there to 254
+// device pixels as paths instead of the direct masks the patch gives them.
+// `fMinDistanceFieldFontSize` cannot raise the range's floor:
+// `SubRunControl::MinSDFTRange` (src/text/gpu/SubRunControl.cpp) ignores it,
+// and sets 162, unless the surface asks for distance fields at small sizes. And
+// a paint the distance-field route refuses but the mask route takes, a stroke
+// and fill of no width, gives the scaler a frame width, so each mask is made
+// from the glyph's stroked outline (`fGenerateImageFromPath` in
+// src/core/SkScalerContext.cpp) and is not the mask the CPU page draws.
+
 use meo_skia_canvas::{
     export::{EncodeOptions, ImageFormat},
     prelude::*,
