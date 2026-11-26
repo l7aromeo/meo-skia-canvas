@@ -60,7 +60,7 @@ npm fails; build the addon from a clone of the repository instead.
 ### Rust
 
 Requires Rust 1.90 or newer, and CMake 3.9 or newer for the AV1 codec the crate builds; on x86_64,
-`yasm` or a NASM older than 3.0 as well.
+NASM or `yasm` as well.
 
 ```toml
 [dependencies]

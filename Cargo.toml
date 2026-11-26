@@ -212,7 +212,7 @@ ttf-parser = { version = "0.25", default-features = false, features = [
 # Fontations' reader, which Blink draws every COLR web font through on
 # Apple platforms -- see `font::colr`. Without its autohinter's shaping,
 # which nothing here asks for.
-skrifa = { version = "0.49", default-features = false, features = ["std"] }
+skrifa = { version = "0.50", default-features = false, features = ["std"] }
 
 # The formats Skia has no encoder for. Skia's encoder list is three modules
 # -- JPEG, PNG and WebP -- so anything else is encoded here,
@@ -334,7 +334,7 @@ avif-serialize = "0.8"
 # `just licenses` refuses, and with the container parsed in `src/decode/avif.rs`
 # the only thing wanted from that crate was the decoder handle. This is the
 # same library it wrapped, one layer down and BSD-2 throughout.
-libaom-sys = { version = "0.17.2", features = [
+libaom-sys = { version = "0.18.1", features = [
     "av1_decoder",
     "av1_encoder",
 ] }

@@ -1,0 +1,11 @@
+{
+  "crate": "libaom-sys",
+  "version": "0.18.1+libaom.3.15.3",
+  "license": "BSD-2-Clause",
+  "repository": "https://github.com/njaard/libavif-rs",
+  "commit": "4941f7708479f537f1b701c6771d6fe7effb6832",
+  "files": {
+    "LICENSE": "https://github.com/njaard/libavif-rs/blob/4941f7708479f537f1b701c6771d6fe7effb6832/LICENSE"
+  },
+  "why": "The crate's package on crates.io holds no licence file. Its .cargo_vcs_info.json records fa13ba0b5c9fad521ac2164ce4a24a97cef0dba5, which the repository does not hold, so the text is the repository's LICENSE at 4941f770, the newest commit there touching libaom-sys/Cargo.toml; it is byte-identical to the LICENSE at 18304417, the commit 0.17.2 recorded."
+}
