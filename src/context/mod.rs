@@ -290,19 +290,24 @@ fn flatten_image(image: &Image) -> Image {
 ///
 /// Both paths hold the same memory -- sixty draws grow the process by 84MB
 /// either way -- so the choice buys time and not footprint.
+///
+/// The picture replays under its canvas's text contrast and gamma, as that
+/// canvas's own pixels do, so the region's glyphs have their edges.
 fn rasterize_region(
     image: &Image,
-    picture: Option<&Picture>,
+    picture: Option<&SourcePicture>,
     region: IRect,
 ) -> Option<Image> {
     let info = image.image_info().with_dimensions(region.size());
-    let mut surface = started::raster(&info, None, None)?;
+    let props =
+        picture.map(|source| text_surface_props(source.text.0, source.text.1));
+    let mut surface = started::raster(&info, None, props.as_ref())?;
 
     match picture {
-        Some(pict) => {
+        Some(source) => {
             let canvas = surface.canvas();
             canvas.translate((-region.left as f32, -region.top as f32));
-            canvas.draw_picture(pict, None, None);
+            canvas.draw_picture(&source.picture, None, None);
         }
         // No picture to replay: a source reaching here by another door still
         // has to be stopped from travelling as one.
@@ -319,6 +324,16 @@ fn rasterize_region(
         }
     }
     Some(surface.image_snapshot())
+}
+
+/// A source canvas's picture, for a draw that rasterizes it -- see
+/// [`Context2D::draw_nested_image`] -- with what it is replayed under.
+#[derive(Clone, Debug)]
+pub struct SourcePicture {
+    pub picture: Picture,
+    /// The source canvas's text contrast and gamma, which its own pixels
+    /// rasterize glyphs under -- see [`text_surface_props`].
+    pub text: (f32, f32),
 }
 
 #[derive(Clone)]
@@ -4291,7 +4306,7 @@ impl Context2D {
     pub fn draw_nested_image(
         &mut self,
         image: &Image,
-        picture: Option<&Picture>,
+        picture: Option<&SourcePicture>,
         src_rect: &Rect,
         dst_rect: &Rect,
         apart: bool,
@@ -4581,9 +4596,11 @@ impl Context2D {
     }
 
     pub fn image(&self) -> Option<Image> {
-        self.recorder
-            .borrow_mut()
-            .image(self.canvas_color_type, &self.canvas_color_space)
+        self.recorder.borrow_mut().image(
+            self.canvas_color_type,
+            &self.canvas_color_space,
+            self.canvas_text,
+        )
     }
 
     /// This canvas as an image for another canvas to draw, rasterized on the
@@ -4593,6 +4610,7 @@ impl Context2D {
             flatten,
             self.canvas_color_type,
             &self.canvas_color_space,
+            self.canvas_text,
         )
     }
 
@@ -4621,6 +4639,16 @@ impl Context2D {
     /// `source_image` beside this.
     pub fn picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().page().picture(None)
+    }
+
+    /// [`Self::picture`], with the text contrast and gamma this canvas
+    /// rasterizes glyphs under, for a draw that rasterizes it -- see
+    /// [`Self::draw_nested_image`].
+    pub fn source_picture(&self) -> Option<SourcePicture> {
+        self.picture().map(|picture| SourcePicture {
+            picture,
+            text: self.canvas_text,
+        })
     }
 
     /// The page's own list of entries, for another canvas to draw this one

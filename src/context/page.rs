@@ -2948,8 +2948,9 @@ impl PageRecorder {
         &mut self,
         color_type: ColorType,
         space: &ColorSpace,
+        text: (f32, f32),
     ) -> Option<SkImage> {
-        self.image_flattened(false, color_type, space)
+        self.image_flattened(false, color_type, space, text)
     }
 
     /// This page as an image, optionally rasterized on the spot.
@@ -2974,11 +2975,17 @@ impl PageRecorder {
     /// `RGBAF32` canvas on the 1/255 grid, whatever either canvas is made
     /// with. `ExportOptions::compositing_color_type` bounds the same two
     /// properties for the surface a page draws into.
+    ///
+    /// The picture replays under `text`, the canvas's text contrast and gamma
+    /// -- see [`text_surface_props`] -- so its glyphs land with the edges the
+    /// canvas's own pixels have. Skia's defaults are not the page's on Linux,
+    /// nor on any canvas made with a contrast or gamma of its own.
     pub fn image_flattened(
         &mut self,
         flatten: bool,
         color_type: ColorType,
         space: &ColorSpace,
+        text: (f32, f32),
     ) -> Option<SkImage> {
         let size = self.bounds.size().to_floor();
         let deferred = self.page().picture(None).and_then(|pict| {
@@ -2989,7 +2996,7 @@ impl PageRecorder {
                 None,
                 source_bit_depth(color_type),
                 Some(space.clone()),
-                None,
+                text_surface_props(text.0, text.1),
             )
         })?;
         match flatten {

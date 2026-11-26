@@ -25,8 +25,7 @@ use skia_safe::{
     Color4f, Data, FourByteTag, IRect, Image as SkImage,
     ImageInfo as SkImageInfo, Matrix as SkMatrix, Paint as SkPaint,
     PaintStyle as SkPaintStyle, Path as SkPath, PathBuilder as SkPathBuilder,
-    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
-    Rect as SkRect, Size as SkSize,
+    PathDirection, Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -44,7 +43,7 @@ use crate::{
         unpremul_color4f_to_rgba_linear,
     },
     context::{
-        Context2D as Inner, Dye, initial_root_face,
+        Context2D as Inner, Dye, SourcePicture, initial_root_face,
         layer::{Entries, reach_the_clip},
         page::{ExportOptions, Matte, Page},
     },
@@ -2612,6 +2611,14 @@ impl Context2D {
     /// [`Image`] and calling
     /// [`Context2D::draw_image`].
     ///
+    /// Where the two canvases were made with a different
+    /// [`text_contrast`](crate::canvas::CanvasOptions::text_contrast) or
+    /// [`text_gamma`](crate::canvas::CanvasOptions::text_gamma), the source
+    /// is drawn as an image of its page instead, at its own size, as the
+    /// npm package draws every canvas: replayed into the destination, its
+    /// text would be rasterized under the destination's and land with other
+    /// edges than the source's own pixels have.
+    ///
     /// Not in the Canvas standard.
     pub fn draw_canvas(&mut self, source: &mut Canvas, x: f32, y: f32) {
         let (width, height) = (source.width(), source.height());
@@ -2627,7 +2634,7 @@ impl Context2D {
         width: f32,
         height: f32,
     ) {
-        let Some(captured) = capture(source) else {
+        let Some(captured) = capture(source, self.inner.canvas_text) else {
             return;
         };
         let src = SkRect::from_size(captured.size);
@@ -2649,7 +2656,7 @@ impl Context2D {
         dst_width: f32,
         dst_height: f32,
     ) {
-        let Some(captured) = capture(source) else {
+        let Some(captured) = capture(source, self.inner.canvas_text) else {
             return;
         };
         let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
@@ -4423,10 +4430,11 @@ struct Captured {
     size: SkSize,
     features: VectorFeatures,
     cost: usize,
-    /// The source's own picture when it was handed over as pixels, so the
-    /// draw can replay just the region it shows rather than materializing
-    /// the whole page. `None` when the content is the page itself.
-    picture: Option<SkPicture>,
+    /// The source's own picture, with its text contrast and gamma, when it
+    /// was handed over as a [`Captive::Bitmap`], so the draw can replay just
+    /// the region it shows rather than materializing the whole page. `None`
+    /// for the other two.
+    picture: Option<SourcePicture>,
     /// The source page's own entries where the content is its picture, so a
     /// draw through a paint holds the page as recorded -- see
     /// `Inner::draw_picture_costing`.
@@ -4437,11 +4445,19 @@ struct Captured {
     apart: bool,
 }
 
-/// A source canvas's page as [`capture`] hands it over: as pixels, or as the
-/// page itself, recorded into a picture only where the draw needs one -- see
-/// `Inner::draw_picture_costing`.
+/// A source canvas's page as [`capture`] hands it over: as pixels, as an
+/// image of its picture, or as the page itself, recorded into a picture only
+/// where the draw needs one -- see `Inner::draw_picture_costing`.
 enum Captive {
+    /// A page carrying someone else's picture, rasterized at the draw -- see
+    /// `Inner::draw_nested_image`.
     Bitmap(SkImage),
+    /// A page whose text the destination would rasterize under a contrast
+    /// or gamma other than the source's own, as an image of its picture
+    /// that replays under the source's -- see `Inner::source_image`.
+    Image(SkImage),
+    /// A page played into the destination as itself, its text rasterized
+    /// under the destination's contrast and gamma, which are the source's.
     Page(Page),
 }
 
@@ -4450,7 +4466,13 @@ enum Captive {
 /// `None` only where a source handed over as pixels yields none -- the
 /// callers treat it as nothing to draw. A page handed over as itself is
 /// recorded into a picture, if at all, by the draw -- see [`Captive`].
-fn capture(source: &mut Canvas) -> Option<Captured> {
+///
+/// `text` is the destination's text contrast and gamma. A page played into
+/// the destination as itself rasterizes its glyphs under those; where they
+/// are not the source's, it is handed over as an image that replays under
+/// the source's, so the copy's glyphs keep the edges the source's own pixels
+/// have. The binding hands every canvas over so.
+fn capture(source: &mut Canvas, text: (f32, f32)) -> Option<Captured> {
     let context = source.context();
     let size = context.inner.bounds.size();
     let features = context.inner.page().vector_features();
@@ -4469,17 +4491,28 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
     // sliver of it on screen is most of what the flattening costs.
     let cost = context.inner.replay_cost();
 
-    match cost > 0 {
-        true => context.inner.source_image(false).map(|image| Captured {
+    match (cost > 0, context.inner.canvas_text == text) {
+        (true, _) => context.inner.source_image(false).map(|image| Captured {
             content: Captive::Bitmap(image),
             size,
             features,
             cost,
-            picture: context.inner.picture(),
+            picture: context.inner.source_picture(),
             entries: None,
             apart: context.inner.plays_apart_on_gpu(),
         }),
-        false => Some(Captured {
+        (false, false) => {
+            context.inner.source_image(false).map(|image| Captured {
+                content: Captive::Image(image),
+                size,
+                features,
+                cost,
+                picture: None,
+                entries: None,
+                apart: context.inner.plays_apart_on_gpu(),
+            })
+        }
+        (false, true) => Some(Captured {
             content: Captive::Page(context.inner.page()),
             size,
             features,
@@ -4525,6 +4558,10 @@ fn place_capture(
         Captive::Bitmap(image) => {
             ctx.charge_replay(cost.max(1));
             ctx.draw_nested_image(image, picture.as_ref(), src, dst, *apart)
+        }
+        Captive::Image(image) => {
+            ctx.charge_replay(cost.max(1));
+            ctx.draw_source_image(image, src, dst, *apart)
         }
     }
 }
