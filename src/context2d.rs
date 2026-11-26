@@ -9236,8 +9236,10 @@ mod translucent_text_tests {
         },
     ];
 
-    /// Registers the face the scenes draw in, once on each thread: a face
-    /// another test thread registered is not found on this one.
+    /// Registers the faces the scenes draw in, once on each thread: a face
+    /// another test thread registered is not found on this one. A face with
+    /// a `COLR` table among them, whose "A" is a colour glyph this library
+    /// draws and whose lowercase letters are plain boxes.
     fn register() {
         thread_local! {
             static REGISTERED: std::cell::Cell<bool> =
@@ -9246,12 +9248,21 @@ mod translucent_text_tests {
         if REGISTERED.replace(true) {
             return;
         }
-        FontLibrary::new()
-            .register_font_from_path(
+        let fonts = FontLibrary::new();
+        for (family, path) in [
+            (
                 "TranslucentOswald",
                 "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
-            )
-            .expect("a bundled face registers");
+            ),
+            (
+                "TranslucentPalettes",
+                "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
+            ),
+        ] {
+            fonts
+                .register_font_from_path(family, path)
+                .expect("a bundled face registers");
+        }
     }
 
     /// The canvas `scene` draws its run onto in `rgb`, named in the page's
@@ -10026,6 +10037,297 @@ mod translucent_text_tests {
                             apart.iter().max().unwrap_or(&0)
                         ));
                     }
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
+    fn a_colour_runs_plain_glyphs_composite_as_each_does_alone() {
+        // A run holding colour glyphs this library draws lands its plain
+        // glyphs from their coverage, as a run of plain glyphs does, and its
+        // colour glyphs in their place among them: under an operator within
+        // the shape, the run is each glyph drawn alone in turn, as every
+        // browser measured composites it; under one that covers beyond the
+        // draw, an image of the run drawn alone, which the library
+        // composites through a layer of its own. `destination-out` is one:
+        // glyph by glyph it erases the same pixels, rounded at each glyph
+        // rather than once, up to 2 levels apart where glyphs overlap, as a
+        // run of Oswald's plain glyphs stands too. Letter spacing of -12px
+        // overlaps the colour "A" with the plain "b" after it, so a colour
+        // glyph drawn out of its place stands apart where the two overlap.
+        // On the GPU too, within a level or two of the CPU's page, as plain
+        // runs are -- see `METAL_LEVELS`.
+        const TEXT: &str = "Abcdef";
+        const BEYOND: [BlendMode; 6] = [
+            BlendMode::SourceIn,
+            BlendMode::SourceOut,
+            BlendMode::DestinationIn,
+            BlendMode::DestinationOut,
+            BlendMode::DestinationAtop,
+            BlendMode::Copy,
+        ];
+        const WITHIN: [BlendMode; 20] = [
+            BlendMode::SourceOver,
+            BlendMode::SourceAtop,
+            BlendMode::DestinationOver,
+            BlendMode::Lighter,
+            BlendMode::Xor,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::HardLight,
+            BlendMode::SoftLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ];
+        const X: f32 = 10.3;
+        const Y: f32 = 70.6;
+        let page = |gpu: bool, background: bool| {
+            let mut page = Canvas::with_options(
+                W,
+                H,
+                CanvasOptions {
+                    gpu,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            if background {
+                let ctx = page.context();
+                ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+                ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+                ctx.set_fill_style_css("rgba(30,120,90,0.7)")
+                    .expect("a colour");
+                ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            }
+            page
+        };
+        let style = |ctx: &mut Context2D, spacing: f32, global: f32| {
+            register();
+            assert!(ctx.set_font_css("40px TranslucentPalettes"));
+            ctx.set_font_kerning(FontKerning::None);
+            ctx.set_letter_spacing(spacing);
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.set_global_alpha(global);
+        };
+        let whole = |ctx: &mut Context2D| ctx.fill_text(TEXT, X, Y, None);
+        let one_by_one = |ctx: &mut Context2D| {
+            for (at, glyph) in TEXT.char_indices() {
+                let x = X + ctx.measure_text(&TEXT[..at], None).width;
+                ctx.fill_text(&glyph.to_string(), x, Y, None);
+            }
+        };
+        let read =
+            |canvas: &mut Canvas| bytes(canvas, 1, PixelColorSpace::Srgb);
+        let mut problems = vec![];
+        let mut drawn_flat = 0;
+        for spacing in [-12.0, 0.0] {
+            for global in [0.6, 0.3] {
+                let mut alone = page(false, false);
+                style(alone.context(), spacing, global);
+                whole(alone.context());
+                let image = Image::from_pixels(
+                    &read(&mut alone),
+                    W as u32,
+                    H as u32,
+                    W as usize * 4,
+                    PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                )
+                .expect("the bytes make an image");
+                for blend in WITHIN.into_iter().chain(BEYOND) {
+                    let mut cpu = vec![];
+                    for gpu in [false, true] {
+                        if gpu && !RenderingEngine::GPU.selectable() {
+                            continue;
+                        }
+                        let mut drawn = page(gpu, true);
+                        let ctx = drawn.context();
+                        style(ctx, spacing, global);
+                        ctx.set_global_composite_operation(blend);
+                        let before = FLAT_RUNS.get();
+                        whole(ctx);
+                        let drawn = read(&mut drawn);
+                        drawn_flat += FLAT_RUNS.get() - before;
+                        let mut expected = page(gpu, true);
+                        let ctx = expected.context();
+                        style(ctx, spacing, global);
+                        ctx.set_global_composite_operation(blend);
+                        match BEYOND.contains(&blend) {
+                            true => {
+                                ctx.set_global_alpha(1.0);
+                                ctx.draw_image(&image, 0.0, 0.0);
+                            }
+                            false => one_by_one(ctx),
+                        }
+                        let expected = read(&mut expected);
+                        // Exact on the CPU; on the GPU, which composites
+                        // half floats, within the plain runs' bound.
+                        let bound = match (gpu, on_llvmpipe()) {
+                            (false, _) => 0,
+                            (true, true) => UNMEASURED_LEVELS,
+                            (true, false) => METAL_LEVELS,
+                        };
+                        let mut compare = |what: &str, a: &[u8], b: &[u8]| {
+                            let apart: Vec<u8> = zip(a, b)
+                                .filter(|(a, b)| a != b)
+                                .map(|(a, b)| a.abs_diff(*b))
+                                .collect();
+                            if apart.iter().any(|&level| level > bound) {
+                                problems.push(format!(
+                                    "{what} at spacing {spacing}, alpha \
+                                     {global}, {blend:?}: {} bytes apart, \
+                                     most {}",
+                                    apart.len(),
+                                    apart.iter().max().unwrap_or(&0)
+                                ));
+                            }
+                        };
+                        let engine = if gpu { "GPU" } else { "CPU" };
+                        compare(engine, &drawn, &expected);
+                        match gpu {
+                            false => cpu = drawn,
+                            true => compare("GPU against CPU", &drawn, &cpu),
+                        }
+                    }
+                }
+            }
+        }
+        // The CPU pages drew the run from its plain glyphs' coverage: one
+        // for each operator within the shape at each spacing and alpha,
+        // where a GPU page plays it through the GPU's own route.
+        assert!(drawn_flat >= WITHIN.len() * 4, "{drawn_flat} flat runs");
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
+    fn a_colour_run_under_a_filter_lands_as_it_does_unfiltered() {
+        // A filter's chain draws the run into a layer of its own, which
+        // starts transparent, so a filter that adds nothing the page shows
+        // -- a shadow cast off the page -- leaves a transparent page holding
+        // the run's bytes unfiltered: its plain glyphs drawn from their
+        // coverage in the chain's layer as on the page, its colour glyph in
+        // its place among them.
+        let drawn = |filter: Option<&str>| {
+            let mut page = Canvas::with_options(
+                W,
+                H,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = page.context();
+            register();
+            assert!(ctx.set_font_css("40px TranslucentPalettes"));
+            ctx.set_font_kerning(FontKerning::None);
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+            ctx.set_global_alpha(0.6);
+            if let Some(filter) = filter {
+                ctx.set_filter_css(filter).expect("a filter");
+            }
+            let before = FLAT_RUNS.get();
+            ctx.fill_text("Abcdef", 10.3, 70.6, None);
+            let bytes = bytes(&mut page, 1, PixelColorSpace::Srgb);
+            (bytes, FLAT_RUNS.get() - before)
+        };
+        let (unfiltered, _) = drawn(None);
+        // A page's height and more below the run: off the page.
+        let (filtered, flat) = drawn(Some("drop-shadow(0px 900px 0px black)"));
+        assert!(flat > 0, "the chain's layer drew no run from its coverage");
+        let apart = zip(&unfiltered, &filtered).filter(|(a, b)| a != b).count();
+        assert!(unfiltered.iter().any(|&byte| byte > 0), "the run drew");
+        assert_eq!(apart, 0, "bytes apart from the run unfiltered");
+    }
+
+    /// How far a canvas holding a run in the `COLR` face, drawn into another
+    /// as the image of its page, stands from the bytes its page holds: on
+    /// macOS CoreText reports the face as holding colour glyphs, and Skia
+    /// then draws every glyph of it, its plain boxes too, as an image in the
+    /// paint's colour faded by its alpha (`SkTypeface_Mac::onFilterRec`),
+    /// rounding an anti-aliased edge once more than the page's coverage
+    /// does -- measured on macOS, at most 2 levels under `source-over` over a
+    /// page of two colours, at 0 and -12px of spacing, in the three colours.
+    /// A picture holds no coverage to draw them from. FreeType makes an
+    /// image only of a glyph with colour layers of its own, and a box drawn
+    /// as a mask lands the exact product, within this.
+    const COLR_RECORDED_LEVELS: u8 = 2;
+
+    #[test]
+    fn a_canvas_holding_a_colour_run_draws_near_its_own_pixels() {
+        // Within `COLR_RECORDED_LEVELS` of the bytes the page holds. Drawn
+        // with the run's alpha in a colour shader, which such a glyph does
+        // not read, its plain boxes landed opaque, 102 levels off at 0.6.
+        let options = CanvasOptions {
+            gpu: false,
+            ..CanvasOptions::default()
+        };
+        let page = |draw: &mut dyn FnMut(&mut Context2D)| {
+            let mut page =
+                Canvas::with_options(W, H, options.clone()).expect("a canvas");
+            let ctx = page.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            draw(ctx);
+            bytes(&mut page, 1, PixelColorSpace::Srgb)
+        };
+        let mut problems = vec![];
+        for rgb in COLOURS {
+            for spacing in [-12.0, 0.0] {
+                register();
+                let mut run = Canvas::with_options(W, H, options.clone())
+                    .expect("a canvas");
+                let ctx = run.context();
+                assert!(ctx.set_font_css("40px TranslucentPalettes"));
+                ctx.set_font_kerning(FontKerning::None);
+                ctx.set_letter_spacing(spacing);
+                ctx.set_fill_style_css(&named(rgb, 0.6, PixelColorSpace::Srgb))
+                    .expect("a colour");
+                ctx.fill_text("Abcdef", 10.3, 90.6, None);
+                let held = bytes(&mut run, 1, PixelColorSpace::Srgb);
+                let pixels = Image::from_pixels(
+                    &held,
+                    W as u32,
+                    H as u32,
+                    W as usize * 4,
+                    PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                )
+                .expect("the bytes make an image");
+                let image =
+                    run.context().inner.source_image(false).expect("an image");
+                let expected =
+                    page(&mut |ctx| ctx.draw_image(&pixels, 0.0, 0.0));
+                let whole = Rect::from_wh(W, H);
+                let drawn = page(&mut |ctx| {
+                    ctx.inner.draw_source_image(&image, &whole, &whole, false);
+                });
+                let most = zip(&drawn, &expected)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap_or(0);
+                if most > COLR_RECORDED_LEVELS {
+                    problems.push(format!(
+                        "{rgb:?} at spacing {spacing}: {most} levels off"
+                    ));
                 }
             }
         }

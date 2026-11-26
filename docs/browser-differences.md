@@ -245,15 +245,24 @@ under a `drop-shadow()`, or casting a `shadowColor` shadow, is drawn the same
 way above its shadow, and one under `blur()` is blurred from its coverage
 times its alpha. A canvas holding such a run, drawn into another with
 `drawImage`, lands the bytes its own page holds under every blend: its
-recording draws the run's glyphs through a colour shader in the named colour,
-which Skia's raster pipeline multiplies by the coverage rounded once, and
-which keeps the named colour's bucket. A run under a blend that covers
-beyond the draw, such as `copy`, is drawn through the same shader into the
-layer the blend composites, which starts transparent. A run in a gradient or
-a pattern, dithered, holding colour glyphs, naming a line colour of its own,
-or under a filter the library leaves to Skia, such as `brightness()` alone,
-is blitted as Skia blits it, and so is every run on a float canvas, where
-nothing is rounded to a byte.
+recording draws the run's glyphs through an opaque colour shader in the named
+colour at the paint's alpha, which Skia's raster pipeline multiplies by the
+coverage rounded once, and which keeps the named colour's bucket. A run under
+a blend that covers beyond the draw, such as `copy`, is drawn from its
+coverage into the layer the blend composites, which starts transparent. A run
+holding colour glyphs this library draws from a `COLR` table lands its plain
+glyphs the same way, each colour glyph composited in its place among them.
+One exception: on macOS, a canvas holding a run in a face CoreText reports
+as holding colour glyphs, drawn into another, lands within two levels of its
+page, because Skia draws every glyph of such a face, its plain ones too, as an
+image faded by the paint's alpha, which rounds an anti-aliased edge once more
+than the coverage does. A canvas's image is its recording played by Skia,
+which reaches none of this library's own drawing to draw it from the
+coverage. A run in a gradient or a pattern, dithered, holding colour glyphs the
+platform draws, such as emoji through CoreText, naming a line colour of its
+own, or under a filter the library leaves to Skia, such as `brightness()`
+alone, is blitted as Skia blits it, and so is every run on a float canvas,
+where nothing is rounded to a byte.
 
 **Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
 17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at

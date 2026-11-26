@@ -1375,22 +1375,22 @@ impl Context2D {
     /// The flat colour of a run of text drawn in `paint` for `style`, where
     /// the run is translucent in one, for an eight-bit page on the CPU to
     /// paint the run from its coverage -- see [`layer::FlatRun`]. `None`
-    /// for a run that holds colour glyphs this library draws (`colour`) or
-    /// names a line colour of its own (`lines`), drawn in two colours; for
-    /// one opaque, or whose alpha rounds to no byte, which draws nothing;
-    /// for a paint carrying a shader, a colour filter or dither, whose
-    /// colour is not one flat colour, a mask filter, or a filter no chain
-    /// runs -- see [`Self::chains_text_filter`]; and on a page whose pixels
-    /// do not place the colour on the bytes they store -- see
-    /// [`ExactColour::bytes`]. A run under a blend that covers beyond the
-    /// draw has one too, and is drawn through
-    /// [`layer::ReplayedText::flat_paint`] into the layer the blend
-    /// composites.
+    /// for a run that names a line colour of its own (`lines`), drawn in
+    /// two colours; for one opaque, or whose alpha rounds to no byte, which
+    /// draws nothing; for a paint carrying a shader, a colour filter or
+    /// dither, whose colour is not one flat colour, a mask filter, or a
+    /// filter no chain runs -- see [`Self::chains_text_filter`]; and on a
+    /// page whose pixels do not place the colour on the bytes they store --
+    /// see [`ExactColour::bytes`]. A run under a blend that covers beyond
+    /// the draw has one too, and is drawn from its coverage into the layer
+    /// the blend composites -- through [`layer::ReplayedText::flat_paint`]
+    /// on a GPU page. A run holding colour glyphs this library draws has one
+    /// for its plain glyphs, its colour glyphs drawn in their own colours
+    /// in their place among them -- see `typography::held_groups`.
     fn flat_run(
         &self,
         paint: &Paint,
         style: PaintStyle,
-        colour: bool,
         lines: bool,
     ) -> Option<layer::FlatRun> {
         #[cfg(test)]
@@ -1405,13 +1405,17 @@ impl Context2D {
             && paint.mask_filter().is_none()
             && !paint.is_dither()
             && matches!(self.state.dye(style), Dye::Color(..));
-        let drawn = !colour && !lines && stored > 0.0 && stored < 1.0;
+        let drawn = !lines && stored > 0.0 && stored < 1.0;
         if !(flat && drawn) {
             return None;
         }
         let exact = self.exact_colour(style).filter(|exact| exact.bytes)?;
+        // Source-over, whatever the draw's blend: the plane its coverage is
+        // read from starts transparent, and under `source-in`,
+        // `destination-in` or `destination-out` the run drawn onto it in
+        // its own blend left it so.
         let mut opaque = paint.clone();
-        opaque.set_alpha_f(1.0);
+        opaque.set_alpha_f(1.0).set_blend_mode(BlendMode::SrcOver);
         Some(layer::FlatRun {
             exact,
             alpha,
@@ -1611,7 +1615,6 @@ impl Context2D {
         // the paint's, which the run's coverage would leave out.
         let flat = text
             .as_ref()
-            .filter(|text| text.colour.is_none())
             .filter(|_| paint.image_filter().is_none())
             .and_then(|text| text.flat.clone());
         if let Some(run) = replayed
@@ -2027,7 +2030,9 @@ impl Context2D {
     /// 1,935 pixels of a run of 13 to 60px in orange, blue and grey -- see
     /// `a_translucent_runs_shadow_rounds_its_alpha_once`. `recorded` makes
     /// a paint the chain records the run in, of `pixels` for its pixels and
-    /// of `paint` for a document. Any other entry is handed back.
+    /// of `paint` for a document. Any other entry is handed back, a run
+    /// holding colour glyphs among them, whose own entry keeps its flat
+    /// colour -- see `colour_entry` in [`Self::files_through_chain`].
     fn flat_entry(
         &self,
         entry: Layer,
@@ -2945,6 +2950,15 @@ impl Context2D {
             false => paint,
             true => exact.unwrap_or(paint),
         };
+        // A run holding colour glyphs keeps its flat colour, as
+        // [`Self::flat_entry`] keeps a plain run's, so that the chain's layer
+        // draws its plain glyphs from their coverage too.
+        let colour_flat = text.and_then(|text| text.flat.clone()).map(|flat| {
+            layer::FlatRun {
+                opaque: recorded(&flat.opaque),
+                ..flat
+            }
+        });
         let colour_entry =
             |run: Replay, recorded_as: Picture, document: Option<Picture>| {
                 Layer::ReplayedText(Arc::new(layer::ReplayedText {
@@ -2961,7 +2975,7 @@ impl Context2D {
                     document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
                     cast_before: false,
-                    flat: None,
+                    flat: colour_flat.clone(),
                     #[cfg(test)]
                     watch: None,
                 }))
@@ -5500,9 +5514,8 @@ impl Context2D {
             let replays = true;
             let op = self.state.global_composite_operation;
             let lines = typesetter.names_a_line_colour();
-            let flat = self
-                .flat_run(&paint, style, colour.is_some(), lines)
-                .filter(|_| match &kept {
+            let flat =
+                self.flat_run(&paint, style, lines).filter(|_| match &kept {
                     Some(kept) => !kept.draws_own_colours(),
                     None => !typesetter.draws_own_colours(),
                 });

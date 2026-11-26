@@ -65,7 +65,10 @@ use crate::{
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
-        typography::{DrawnText, HeldGroup, RunPaint, WholeRuns, held_groups},
+        typography::{
+            ColourGlyphsIn, DrawnText, HeldGroup, RunPaint, WholeRuns,
+            held_groups,
+        },
         utils::{color_space_name, skia_paint_color_onto_own},
     },
     pixels::PixelColorSpace,
@@ -2096,7 +2099,8 @@ pub struct FlatRun {
     pub exact: ExactColour,
     /// The alpha the run is drawn at, `globalAlpha` included.
     pub alpha: f32,
-    /// The run's paint in the colour it was named in, opaque.
+    /// The run's paint in the colour it was named in, opaque, through
+    /// source-over: what the run's coverage is drawn in.
     pub opaque: Paint,
 }
 
@@ -2246,28 +2250,42 @@ impl ReplayedText {
     /// Draws `replay`, the run, onto `canvas` from its coverage, where it is
     /// translucent in one flat colour and `canvas` is an eight-bit page on
     /// the CPU in the colour's space -- see [`FlatRun`] -- and reports
-    /// whether it did. Not through a layer for a blend that covers beyond
-    /// the draw, whose own composite would round the run again.
+    /// whether it did. Under a blend that covers beyond the draw, `canvas`
+    /// is drawing into the layer the blend composites, which starts
+    /// transparent, and the run is drawn there as on a page of its own: its
+    /// groups composited one over another as the page composites them, where
+    /// through [`Self::flat_paint`] Skia composites a glyph over one beneath
+    /// it before rounding the product, a level off on the pixels two glyphs
+    /// share.
     fn drawn_flat(&self, canvas: &SkCanvas, replay: &Replay) -> bool {
         let Some(flat) = &self.flat else {
             return false;
         };
-        if self.blend.is_some() || !coverage_plays(canvas, &flat.exact, false) {
+        // Under a perspective no plane is made, and nothing is drawn here: a
+        // run's colour glyphs drawn before that is known would be drawn
+        // again with the rest.
+        if !coverage_plays(canvas, &flat.exact, false)
+            || canvas.local_to_device_as_3x3().has_perspective()
+        {
             return false;
         }
         // The run's draws held rather than made -- a group of its glyphs at
-        // a time, no two of which ink a pixel in common -- and what each can
-        // ink in the page's device pixels: from the blobs a raster keeps, so
-        // that nothing builds them again -- see `RunPaint::paint`.
+        // a time, no two of which ink a pixel in common, and the colour
+        // glyphs this library draws in their place among them -- and what
+        // each can ink in the page's device pixels: from the blobs a raster
+        // keeps, so that nothing builds them again -- see `RunPaint::paint`.
         canvas.save();
         let groups = held_groups(canvas, || {
-            replay.draw(canvas, &self.matrix, &flat.opaque);
+            self.draw_run(canvas, replay, &flat.opaque, true);
         });
         canvas.restore();
         // Skia bounds a glyph at the font's own size, unhinted, and FreeType
-        // hints it at the size it is drawn -- see [`Self::ink_under`].
+        // hints it at the size it is drawn -- see [`Self::ink_under`]. A run
+        // of colour glyphs alone has no plain glyph to draw from its
+        // coverage, and is drawn as it stands.
         let Some(ink) = groups
             .iter()
+            .filter(|group| !group.coloured())
             .map(HeldGroup::bounds)
             .reduce(Rect::join2)
             .map(|ink| {
@@ -2329,9 +2347,22 @@ impl ReplayedText {
         // composited, a plane not made among the reasons.
         // Counted rather than asked with `any`, which would stop at the
         // first group composited and leave the rest undrawn.
+        //
+        // Colour glyphs are drawn as they stand, in their place in the run:
+        // each composites through a layer of its own in the run's paint --
+        // see `ColourRun::draw` -- over the groups before it and under the
+        // groups after, as Skia composites a run of them. Drawn, they count
+        // as drawn, so that a run whose plain glyphs the clip hides is not
+        // drawn again with its colour glyphs on top.
         let drawn = groups
             .iter()
-            .filter(|group| composited(&|plane| group.draw(plane)))
+            .filter(|group| match group.coloured() {
+                true => {
+                    group.draw(canvas);
+                    true
+                }
+                false => composited(&|plane| group.draw(plane)),
+            })
             .count()
             > 0;
         #[cfg(test)]
@@ -2374,16 +2405,17 @@ impl ReplayedText {
                     self.replay.as_ref().filter(|_| !self.shadow_alone)
                     && !self.drawn_flat(canvas, replay)
                 {
-                    // In the layer the blend opened, a flat run through the
-                    // paint its recording is drawn in -- see
-                    // [`Self::flat_paint`].
+                    // In the layer the blend opened, where the coverage does
+                    // not play -- a GPU page -- a flat run through the paint
+                    // its recording is drawn in -- see [`Self::flat_paint`].
                     let shaded =
                         self.flat_paint().filter(|_| self.blend.is_some());
                     canvas.save();
-                    replay.draw(
+                    self.draw_run(
                         canvas,
-                        &self.matrix,
+                        replay,
                         shaded.as_ref().unwrap_or(&self.paint),
+                        shaded.is_some(),
                     );
                     canvas.restore();
                 }
@@ -2428,30 +2460,62 @@ impl ReplayedText {
             self.record(
                 shaded.as_ref().unwrap_or(&self.paint),
                 self.shadow.as_ref(),
+                shaded.is_some(),
             )
         })
     }
 
+    /// Draws `replay`, the run, onto `canvas` in `paint`, under the
+    /// transform it was drawn under. Where `flat`, `paint` is one a flat
+    /// run's plain glyphs are drawn in -- [`FlatRun::opaque`] or
+    /// [`Self::flat_paint`] -- and its colour glyphs are drawn in the run's
+    /// own paint, as every other draw of the run draws them -- see
+    /// [`ColourGlyphsIn`].
+    fn draw_run(
+        &self,
+        canvas: &SkCanvas,
+        replay: &Replay,
+        paint: &Paint,
+        flat: bool,
+    ) {
+        let _colours = flat.then(|| ColourGlyphsIn::hold(self.paint.clone()));
+        replay.draw(canvas, &self.matrix, paint);
+    }
+
     /// The paint a flat run is recorded for pixels in -- see [`FlatRun`] --
     /// so that a picture of the page lands the bytes the page itself does:
-    /// its colour at its alpha through a colour shader, which Skia's raster
-    /// pipeline multiplies by a glyph's coverage rounded once, the product
-    /// [`Self::drawn_flat`] lands, where the run's own paint is blitted as
-    /// `a * (c + 1) >> 8`. In the colour the run was named in, so that Skia
-    /// pre-blends the mask by the colour the plane is drawn in. A run under
-    /// a blend of its own is drawn in it too, into the layer the blend
-    /// composites, which starts transparent: over pixels already there the
-    /// pipeline composites the product before rounding it, as Skia's blit
-    /// does, which is why the page itself is drawn from the coverage.
-    /// `None` for any other run.
+    /// its colour through an opaque colour shader, at its alpha as the
+    /// paint's, which Skia's raster pipeline multiplies by a glyph's coverage
+    /// rounded once, the product [`Self::drawn_flat`] lands, where the run's
+    /// own paint is blitted as `a * (c + 1) >> 8`. In the colour the run was
+    /// named in, so that Skia pre-blends the mask by the colour the plane is
+    /// drawn in. A run under a blend of its own is drawn in it too, into the
+    /// layer the blend composites, where that layer is not drawn from the
+    /// coverage -- on a GPU page. Over pixels already there the pipeline
+    /// composites the product before rounding it, as Skia's blit does,
+    /// which is why an eight-bit page on the CPU, and a layer on one, is
+    /// drawn from the coverage. `None` for any other run.
+    ///
+    /// The alpha is the paint's rather than the shader's because a glyph its
+    /// scaler makes an image of is drawn in the paint's colour, faded by the
+    /// paint's alpha alone, the shader unread: on macOS every glyph of a face
+    /// CoreText reports as holding colour glyphs, such as one with a `COLR`
+    /// table, its plain glyphs too (`SkTypeface_Mac::onFilterRec`). With the
+    /// alpha in the shader such a run at 0.6 landed opaque, 102 levels off
+    /// its own page; in the paint, where an anti-aliased edge of the image is
+    /// rounded once more than the coverage rounds it, within two levels --
+    /// see `COLR_RECORDED_LEVELS` in the tests -- and a glyph mask lands the
+    /// exact product either way.
     pub(crate) fn flat_paint(&self) -> Option<Paint> {
         let flat = self.flat.as_ref()?;
         let named = flat.opaque.color4f();
         let mut paint = flat.opaque.clone();
-        paint.set_shader(shaders::color_in_space(
-            Color4f::new(named.r, named.g, named.b, flat.alpha),
-            ColorSpace::new_srgb(),
-        ));
+        paint
+            .set_shader(shaders::color_in_space(
+                Color4f::new(named.r, named.g, named.b, 1.0),
+                ColorSpace::new_srgb(),
+            ))
+            .set_alpha_f(flat.alpha);
         // The blend the run's own paint is drawn through: under a blend that
         // covers beyond the draw that is source-over, into the layer the
         // blend composites, where the blend itself would leave nothing.
@@ -2474,20 +2538,22 @@ impl ReplayedText {
                 return self.recorded();
             }
             return self.whole.get_or_record(|| {
-                self.record(&self.paint, self.shadow.as_ref())
+                self.record(&self.paint, self.shadow.as_ref(), false)
             });
         };
         document.picture.get_or_record(|| {
-            self.record(&document.paint, document.shadow.as_ref())
+            self.record(&document.paint, document.shadow.as_ref(), false)
         })
     }
 
     /// The run recorded in `paint`, `shadow` beneath it, for
-    /// [`Self::recorded`].
+    /// [`Self::recorded`]: its colour glyphs in the run's own paint where
+    /// `flat` -- see [`Self::draw_run`].
     fn record(
         &self,
         paint: &Paint,
         shadow: Option<&ReplayedShadow>,
+        flat: bool,
     ) -> Option<Picture> {
         #[cfg(test)]
         if let Some(watch) = &self.watch {
@@ -2507,7 +2573,7 @@ impl ReplayedText {
             }
             if !self.shadow_alone {
                 canvas.save();
-                replay.draw(canvas, &self.matrix, paint);
+                self.draw_run(canvas, replay, paint, flat);
                 reach_the_clip(canvas);
                 canvas.restore();
             }
