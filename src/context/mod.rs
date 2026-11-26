@@ -85,7 +85,8 @@ use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
     DrawnIn, Entries, ExactColour, Group, HeldImage, Layer, LayerRec,
-    LazyPicture, Replay, Target, coverage_files, reach_the_clip,
+    LazyPicture, Pipeline, Replay, Target, coverage_files, pipeline_of,
+    reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
@@ -1690,6 +1691,7 @@ impl Context2D {
                             &shape,
                         ),
                         CpuBytes::Source => self.raster_on_gpu(
+                            None,
                             paint,
                             paint_for(pixels),
                             beyond,
@@ -2123,6 +2125,12 @@ impl Context2D {
                 BlendMode::SrcOver => None,
                 _ => Some(self.recorded(&|canvas| shape(canvas, &over))?),
             };
+            let made_in = pipeline_of(
+                Some(&dye.spec),
+                &self.canvas_color_space,
+                pixels,
+                blend,
+            );
             let picture = match glyphs {
                 true => {
                     self.glyphs_with_effect(dye, paint, pixels, reach, shape)
@@ -2134,9 +2142,17 @@ impl Context2D {
                 over,
                 blend,
                 beyond,
+                made_in,
             });
         }
-        self.raster_on_gpu(paint, pixels, beyond, shadow, shape)
+        self.raster_on_gpu(
+            Some(&dye.spec),
+            paint,
+            pixels,
+            beyond,
+            shadow,
+            shape,
+        )
     }
 
     /// A run of glyphs dyed by `dye`, as a GPU canvas draws it in the CPU's
@@ -2231,9 +2247,14 @@ impl Context2D {
     /// by itself -- the draw's shadow, then the draw; and under a blend that
     /// changes what lies `beyond` the draw, the two in one layer, as a draw
     /// through such a blend is composited -- see `layer::OnGpu::Raster`.
-    /// `shadow` and `shape` draw the draw's shadow and itself.
+    /// `shadow` and `shape` draw the draw's shadow and itself; `spec` is the
+    /// gradient dyeing it, where one does, which with `pixels` says the
+    /// pipeline the CPU draws it on -- see `layer::pipeline_of`. A shadow is
+    /// cast through its filter, in a layer Skia makes of its own, and so is
+    /// rounded there whatever its colour is made on.
     fn raster_on_gpu(
         &self,
+        spec: Option<&GradientSpec>,
         paint: &Paint,
         pixels: &Paint,
         beyond: bool,
@@ -2245,19 +2266,28 @@ impl Context2D {
         let blend = self.state.global_composite_operation;
         let mut cast = paint.clone();
         cast.set_blend_mode(BlendMode::SrcOver);
-        let layers: Vec<Picture> = match beyond {
+        let casts = self.casts_shadow();
+        let shaped = pipeline_of(spec, &self.canvas_color_space, pixels, blend);
+        let layer = |picture, made_in| layer::RasterLayer { picture, made_in };
+        let layers: Vec<layer::RasterLayer> = match beyond {
             true => self
                 .recorded(&|canvas| {
                     shadow(canvas, &over);
                     shape(canvas, &over);
                 })
+                .map(|picture| match casts {
+                    true => layer(picture, Pipeline::Bytes),
+                    false => layer(picture, shaped),
+                })
                 .into_iter()
                 .collect(),
             false => [
-                self.casts_shadow()
+                casts
                     .then(|| self.recorded(&|canvas| shadow(canvas, &cast)))
-                    .flatten(),
-                self.recorded(&|canvas| shape(canvas, &over)),
+                    .flatten()
+                    .map(|picture| layer(picture, Pipeline::Bytes)),
+                self.recorded(&|canvas| shape(canvas, &over))
+                    .map(|picture| layer(picture, shaped)),
             ]
             .into_iter()
             .flatten()
@@ -2301,6 +2331,7 @@ impl Context2D {
             path: Mutex::new(path.clone()),
             bounds,
             inked: OnceLock::new(),
+            made_in: OnceLock::new(),
             matrix: self.state.matrix,
             paint: drawn,
             pixels: self.faint().drawable(pixels).into_owned(),
@@ -5082,7 +5113,13 @@ impl Context2D {
                                 ),
                                 document,
                                 gpu: layer::OnGpu::Raster {
-                                    layers: vec![drawn],
+                                    // Into the chain's layer, which starts
+                                    // transparent: there the CPU rounds the
+                                    // image once, which bytes hold exactly.
+                                    layers: vec![layer::RasterLayer {
+                                        picture: drawn,
+                                        made_in: Pipeline::Bytes,
+                                    }],
                                     blend: BlendMode::SrcOver,
                                     beyond: false,
                                 },

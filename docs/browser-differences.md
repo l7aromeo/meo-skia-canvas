@@ -1775,11 +1775,19 @@ reading the destination, #736's case; text's anti-aliased edge, which is
 Ganesh's coverage as for a flat colour; a gradient the CPU draws in floats --
 a translucent two-point conical one, one interpolated in a space other than
 the page's, one under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
-for -- inside a layer whose own paint carries a filter or which a backdrop
-seeds, where the pixels cannot be read back and the CPU's raster is
-composited instead, a level apart wherever its two roundings differ from the
-CPU's one (9,792 of 16,384 pixels on a translucent radial over a fill,
-measured with the layer played inside itself); any other layer holding such a gradient plays its entries on a
+for -- inside a layer a backdrop seeds, where the pixels cannot be read back:
+the CPU's raster of it is made in sixteen bits a channel and composited
+through a blender that rounds once as the CPU does, and lands apart only
+within 0.18 of a level of a tie, from the precision the blender takes its
+source in -- 892 of 65,536 bytes of a translucent Oklab radial on Metal,
+which hands it a half, and 41 on llvmpipe and on an NVIDIA GTX 1050 Ti,
+where a raster of bytes left 9,689 on Metal and 9,793 on each Vulkan device,
+and the sixteen-bit raster through Ganesh's fixed-function blend 1,214 on
+Metal and 9,793 and 9,796 on Vulkan, whose two devices blend an eight-bit
+target at its own precision (#800); the same gradient inside a layer whose
+own paint carries a filter -- a pattern's group -- whose CPU raster of bytes
+is composited, a level apart wherever its two roundings differ from the
+CPU's one; any other layer holding such a gradient plays its entries on a
 surface of its own, where the gradient is drawn as on the page
 (`layer::played_on_a_root`); and what a GPU canvas does with any colour -- `multiply` a level apart on 97 of 4,096
 pixels of the sweep, as for an image of the same pixels. Chrome's GPU canvas

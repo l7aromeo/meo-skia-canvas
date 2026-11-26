@@ -30,6 +30,10 @@
 //! bytes and the coverage's one go to it packed in the source's four
 //! channels -- see [`PACKED`]. Either hands on a whole level, which a
 //! half-precision output carries to an eight-bit target unchanged.
+//!
+//! [`float_over`] is the same composite for a source the CPU draws on its
+//! float pipeline, rounded once, which a layer takes from a raster of
+//! sixteen bits a channel -- see `layer::rasterized_onto`.
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -112,7 +116,34 @@ half4 main(float2 p) {
 }
 "#;
 
+/// The SkSL of the CPU's float `source-over` (`highp`): the unrounded
+/// source over the destination's whole levels, rounded once as the CPU's
+/// store rounds, a half to the even level where `ties_even` -- see
+/// `exact_gradient::HIGHP_TIES_TO_EVEN`. Exact to the precision the source
+/// reaches it in, which a blender is handed as a half: 32 bits on Vulkan's
+/// desktop drivers, 16 on Metal.
+const FLOAT_OVER: &str = r#"
+uniform int ties_even;
+half4 main(half4 src, half4 dst) {
+    float4 s = float4(src);
+    float4 d = floor(float4(dst) * 255.0 + 0.5) / 255.0;
+    float4 v = clamp(s + d * (1.0 - s.a), 0.0, 1.0) * 255.0;
+    float4 r = floor(v + 0.5);
+    if (ties_even != 0) {
+        for (int k = 0; k < 4; k++) {
+            if (r[k] - v[k] == 0.5 && mod(r[k], 2.0) == 1.0) {
+                r[k] -= 1.0;
+            }
+        }
+    }
+    return half4(r / 255.0);
+}
+"#;
+
 thread_local! {
+    /// [`FLOAT_OVER`] compiled, once per thread.
+    static FLOAT: Option<RuntimeEffect> =
+        RuntimeEffect::make_for_blender(FLOAT_OVER, None).ok();
     /// [`PACKED`] compiled, once per thread.
     static PACKER: Option<RuntimeEffect> =
         RuntimeEffect::make_for_shader(PACKED, None).ok();
@@ -173,6 +204,15 @@ pub(crate) fn blended(
     };
     paint.set_shader(packed).set_blender(blender);
     true
+}
+
+/// A blender compositing an unrounded source `source-over` as the CPU's
+/// float pipeline does onto an eight-bit destination -- see [`FLOAT_OVER`]
+/// -- its half rounded to the even level where `ties_even`. `None` where
+/// Skia refuses the effect.
+pub(crate) fn float_over(ties_even: bool) -> Option<Blender> {
+    let data = Data::new_copy(&i32::from(ties_even).to_ne_bytes());
+    FLOAT.with(|compiled| compiled.as_ref()?.make_blender(data, None))
 }
 
 /// A draw waiting in a [`Batch`]: the device pixels it can change, the

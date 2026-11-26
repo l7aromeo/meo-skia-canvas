@@ -281,6 +281,18 @@ impl GradientSpec {
         made
     }
 
+    /// Whether the CPU shades this gradient on its float pipeline (`highp`)
+    /// on an eight-bit page in `page`, for the gradient's own stages alone:
+    /// a paint's blend, dither or colour filter can move a draw of it there
+    /// as well -- see `layer::pipeline_of`. `None` where [`Layout`] or
+    /// [`Ramp`] does not know the stages the CPU takes, a degenerate
+    /// gradient's or a conversion they do not model.
+    pub(crate) fn shaded_in_floats(&self, page: &ColorSpace) -> Option<bool> {
+        let layout = Layout::of(self)?;
+        let ramp = Ramp::of(self, page)?;
+        Some(made_in_floats(&layout, &ramp))
+    }
+
     /// [`Self::exact`], made afresh.
     fn made(&self, page: &ColorSpace, alpha: f32) -> Option<Exact> {
         #[cfg(test)]
@@ -290,10 +302,7 @@ impl GradientSpec {
         // The `highp` pipeline premultiplies, scales and blends in floats
         // and rounds once, at the store; the effect hands the GPU whole
         // levels, which match it only where none of those happen.
-        // A conversion to the page runs on the float pipeline too, as
-        // does Lab's or Oklab's back to the space it was converted from.
-        let highp =
-            layout.highp || !ramp.toward.is_identity() || ramp.css != Css::None;
+        let highp = made_in_floats(&layout, &ramp);
         if highp && (!ramp.opaque || alpha < 1.0) {
             return None;
         }
@@ -573,6 +582,15 @@ impl ExactKey {
             && self.spec.color_space == spec.color_space
             && self.page == *page
     }
+}
+
+/// Whether the CPU shades a gradient of `layout` and `ramp` on its float
+/// pipeline (`highp`): where `layout` computes `t` through a stage that has
+/// no eight-bit form, as a two-point conical one does, or the colours are
+/// converted to the page -- or out of Lab or Oklab back to the space they
+/// came from -- which runs on the float pipeline too.
+fn made_in_floats(layout: &Layout, ramp: &Ramp) -> bool {
+    layout.highp || !ramp.toward.is_identity() || ramp.css != Css::None
 }
 
 /// Where [`EXACTS`] files the key of `spec` on `page` at the alpha whose
@@ -2494,7 +2512,7 @@ pub(crate) const EXACT_SCALE: bool = cfg!(target_arch = "aarch64");
 /// NEON's `vcvtnq` and x86's `cvtps` do, or up, as `round` in
 /// `SkRasterPipeline_opts.h` does on 32-bit ARM, LoongArch and the scalar
 /// backend. Its `lowp` pipeline rounds a half up everywhere.
-const HIGHP_TIES_TO_EVEN: bool =
+pub(crate) const HIGHP_TIES_TO_EVEN: bool =
     cfg!(any(target_arch = "aarch64", target_arch = "x86_64"));
 
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
