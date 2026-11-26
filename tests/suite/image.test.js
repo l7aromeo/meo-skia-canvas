@@ -1006,6 +1006,56 @@ describe("an SVG's paint", () => {
       filled("#00cc00"),
     );
   });
+
+  // A paint outside sRGB reaches a display-p3 canvas as it is, as Chrome
+  // 156 reads fill="color(display-p3 0 1 0)" back as 0, 255, 0 there: the
+  // paints, a gradient's stops and <feFlood>'s colour are held in extended
+  // sRGB by containers/skia-svg-wide-colour.patch. `color`, and so
+  // currentcolor, is an eight-bit SkColor in Skia and stays sRGB's green.
+  test("keeps a wide colour on a wide canvas", async () => {
+    const wide = "color(display-p3 0 1 0)";
+    /** P3's green, and sRGB's green, as a display-p3 canvas stores them. */
+    const [kept, clipped] = [
+      [0, 255, 0, 255],
+      [117, 251, 76, 255],
+    ];
+    const rect = (paint) => `<rect width="4" height="4" ${paint}/>`;
+    const cases = [
+      [rect(`fill="${wide}"`), kept],
+      [rect(`style="fill: ${wide}"`), kept],
+      [
+        `<line x1="0" y1="2" x2="4" y2="2" stroke-width="4" stroke="${wide}"/>`,
+        kept,
+      ],
+      [
+        `<defs><linearGradient id="g"><stop offset="0" stop-color="${wide}"/>` +
+          `<stop offset="1" stop-color="${wide}"/></linearGradient></defs>` +
+          rect(`fill="url(#g)"`),
+        kept,
+      ],
+      [
+        `<defs><filter id="f" x="0" y="0" width="1" height="1" ` +
+          `color-interpolation-filters="sRGB"><feFlood flood-color="${wide}"/>` +
+          `</filter></defs>` +
+          rect(`filter="url(#f)"`),
+        kept,
+      ],
+      [`<g color="${wide}">${rect(`fill="currentcolor"`)}</g>`, clipped],
+    ];
+    const off = [];
+    for (const [body, expected] of cases) {
+      const canvas = new Canvas(4, 4, { colorSpace: "display-p3" });
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(await loadImage(document(body)), 0, 0);
+      const got = [
+        ...ctx.getImageData(2, 2, 1, 1, { colorSpace: "display-p3" }).data,
+      ];
+      if (got.join() !== expected.join())
+        off.push(`${body}: ${got}, expected ${expected}`);
+    }
+    assert.deepEqual(off, []);
+  });
 });
 
 describe("a refusal takes the type the standard names", () => {

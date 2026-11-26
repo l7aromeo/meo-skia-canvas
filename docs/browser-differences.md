@@ -1055,16 +1055,27 @@ stays within a level of its fill on the same canvas:
 filters 149, 108, 204 in Chrome. On an sRGB canvas Chrome's filter and fill
 agree.
 
-**An SVG image's paint is drawn in sRGB, so a wide colour in it is clipped
-on a wide canvas, where Chrome keeps it.** Skia's SVG module holds a paint as
-an eight-bit sRGB `SkColor` and parses no CSS Color 4 form, so every colour
-property -- `fill`, `stroke`, `stop-color`, `flood-color`, `lighting-color`
-and `color`, as an attribute or in `style` -- is read here by the reader a
-`fillStyle` uses and written back as `rgba()` before Skia parses the
-document (`colour_for_skia` in `src/image.rs`). On an sRGB canvas that is
-the colour Chrome draws: `fill="color(display-p3 0 1 0)"` reads 0, 255, 0 in
-Chrome 156 and here. On a `display-p3` canvas Chrome reads that fill back as
-0, 255, 0 and here it reads sRGB green, 117, 251, 76.
+**An SVG image's `color`, and so `currentcolor`, and its `lighting-color`
+are drawn in sRGB, so a wide colour in them is clipped on a wide canvas, where
+Chrome keeps it; so is every colour `Svg::rasterize` draws.** Skia's SVG
+module parses no CSS Color 4 form, so every colour property -- `fill`,
+`stroke`, `stop-color`, `flood-color`, `lighting-color` and `color`, as an
+attribute or in `style` -- is read here by the reader a `fillStyle` uses and
+written back before Skia parses the document (`colour_for_skia` in
+`src/image.rs`). The paints, a gradient's stops and `<feFlood>`'s colour are
+written as `color(srgb ...)` in extended sRGB, which
+`containers/skia-svg-wide-colour.patch` teaches Skia to read and keep as an
+`SkColor4f`: `fill="color(display-p3 0 1 0)"` reads back 0, 255, 0 on a
+`display-p3` canvas, here and in Chrome 156, and on an sRGB canvas 0, 255, 0
+in both. Skia holds `color` as an eight-bit sRGB `SkColor`, through a reader
+the patch leaves alone, and its lighting filters take an `SkColor`, so those
+two are written as `rgba()` clipped to sRGB: `color="color(display-p3 0 1 0)"`
+under `fill="currentcolor"` reads sRGB green on a `display-p3` canvas, 117,
+251, 76. Chrome was measured only for `fill`; CSS Color 4 resolves
+`currentcolor` to the colour `color` computes, so it is expected to keep P3
+green there as it does for `fill`. `Svg::rasterize` draws into an
+eight-bit sRGB surface and clips every colour the document holds
+([#816](https://github.com/l7aromeo/meo-skia-canvas/issues/816)).
 
 **`AccentColor` and `AccentColorText` are read; Chrome 156 refuses both.**
 CSS Color 4 section 6.2 lists them among the system colours, valued by the

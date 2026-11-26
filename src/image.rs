@@ -1499,6 +1499,16 @@ const COLOUR_PROPERTIES: [&str; 6] = [
     "color",
 ];
 
+/// The colour properties whose value Skia's SVG module, patched by
+/// `containers/skia-svg-wide-colour.patch`, keeps as an `SkColor4f` in
+/// extended sRGB: the paints, a gradient's stops and `<feFlood>`'s colour.
+///
+/// `color` is not among them, because Skia parses it as an `SkColor` through
+/// a reader the patch does not change, and neither is `lighting-color`,
+/// whose value Skia's lighting filters take as an `SkColor`.
+const WIDE_COLOUR_PROPERTIES: [&str; 4] =
+    ["fill", "stroke", "stop-color", "flood-color"];
+
 /// The CSS named colours Skia's SVG module has no entry for, which it draws
 /// as the initial black.
 ///
@@ -1538,16 +1548,21 @@ const SKIA_CURRENT_COLOR: &str = "currentColor";
 /// written back as `rgba()` with eight-bit channels and the alpha as a
 /// number.
 ///
-/// A colour outside sRGB is clipped to it here, as an eight-bit sRGB canvas
-/// clips a `fillStyle`, because `SkSVGColorType` is an eight-bit sRGB
-/// `SkColor` and holds nothing wider.
+/// Where Skia's SVG module is patched to read one
+/// (`cfg(meo_svg_wide_colour)`), a property of [`WIDE_COLOUR_PROPERTIES`] is
+/// written as `color(srgb r g b / a)` instead, its channels in extended sRGB
+/// and unclamped, so a colour outside sRGB reaches a wide canvas as it is.
+/// Every other property, and every property on an unpatched build, is
+/// clipped to sRGB here, as an eight-bit sRGB canvas clips a `fillStyle`,
+/// because `SkSVGColorType` is an eight-bit sRGB `SkColor` and holds nothing
+/// wider.
 ///
 /// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 /// Re-check: cargo test an_svg_paint_is_the_colour_it_names
 /// with this function answering `None`; it fails while
 /// `SkSVGAttributeParser` reads no CSS Color 4 form and `SkSVGColorType` is
 /// an `SkColor`.
-fn colour_for_skia(value: &str) -> Option<String> {
+fn colour_for_skia(property: &str, value: &str) -> Option<String> {
     /// Steps in one eight-bit channel.
     const LEVELS: f32 = 255.0;
     let value = value.trim();
@@ -1564,9 +1579,14 @@ fn colour_for_skia(value: &str) -> Option<String> {
         return None;
     }
     let colour = css_to_color4f(value)?;
+    let alpha = colour.a.clamp(0.0, 1.0);
+    if cfg!(meo_svg_wide_colour) && WIDE_COLOUR_PROPERTIES.contains(&property) {
+        let Color4f { r, g, b, .. } = colour;
+        return Some(format!("color(srgb {r} {g} {b} / {alpha})"));
+    }
     let [r, g, b] = [colour.r, colour.g, colour.b]
         .map(|channel| (channel.clamp(0.0, 1.0) * LEVELS).round() as u8);
-    Some(format!("rgba({r}, {g}, {b}, {})", colour.a.clamp(0.0, 1.0)))
+    Some(format!("rgba({r}, {g}, {b}, {alpha})"))
 }
 
 /// A `style` attribute with each colour declaration written as Skia reads
@@ -1585,7 +1605,7 @@ fn style_colours_for_skia(style: &str) -> Option<String> {
             let property = name.trim().to_ascii_lowercase();
             match COLOUR_PROPERTIES
                 .contains(&property.as_str())
-                .then(|| colour_for_skia(value))
+                .then(|| colour_for_skia(&property, value))
                 .flatten()
             {
                 Some(colour) => {
@@ -2032,7 +2052,7 @@ fn rewrite_text(
                 style_colours_for_skia(family.as_deref().unwrap_or(raw))
                     .or(family)
             } else if COLOUR_PROPERTIES.contains(&key) {
-                colour_for_skia(raw)
+                colour_for_skia(key, raw)
             } else if key == "font-family" {
                 // A family stated in `style` too is the one Skia reads, so
                 // the attribute is left as it is.
@@ -2802,6 +2822,151 @@ mod tests {
             "Skia's table and SKIA_UNNAMED disagree over {wrong:?}"
         );
     }
+    /// A paint outside sRGB reaches a wide surface as it is where Skia's SVG
+    /// module is patched to keep one (`cfg(meo_svg_wide_colour)`), and is
+    /// clipped to sRGB where it is not. `color`, and so `currentcolor`, is
+    /// clipped on both, Skia holding it as an `SkColor`.
+    ///
+    /// Drawn through the document's own DOM onto a `display-p3` raster,
+    /// because [`Svg::rasterize`] draws into eight-bit sRGB and clips
+    /// whatever the document holds.
+    #[test]
+    fn a_wide_svg_paint_reaches_a_wide_surface() {
+        use crate::node::utils::opt_color_space;
+        use skia_safe::{Color, surfaces};
+        /// `color(display-p3 0 1 0)`, P3's green, which sRGB cannot hold.
+        const WIDE: &str = "color(display-p3 0 1 0)";
+        /// P3's green as a `display-p3` surface stores it.
+        const KEPT: [u8; 3] = [0, 255, 0];
+        /// sRGB's green as a `display-p3` surface stores it: what P3's
+        /// green is drawn as once clipped to sRGB.
+        const CLIPPED: [u8; 3] = [117, 251, 76];
+        let drawn = |body: &str| {
+            let svg = Svg::parse(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
+            ))
+            .expect("parses");
+            let info = ImageInfo::new(
+                (4, 4),
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                opt_color_space("display-p3"),
+            );
+            let mut surface =
+                surfaces::raster(&info, None, None).expect("surface");
+            surface.canvas().clear(Color::WHITE);
+            svg.dom.render(surface.canvas());
+            let mut px = [0u8; 4];
+            assert!(surface.read_pixels(
+                &info.with_dimensions((1, 1)),
+                &mut px,
+                4,
+                (2, 2)
+            ));
+            [px[0], px[1], px[2]]
+        };
+        let rect =
+            |paint: &str| format!(r#"<rect width="4" height="4" {paint}/>"#);
+        let wide = if cfg!(meo_svg_wide_colour) {
+            KEPT
+        } else {
+            CLIPPED
+        };
+        let cases = [
+            (rect(&format!(r#"fill="{WIDE}""#)), wide, "fill"),
+            (
+                rect(&format!(r#"style="fill: {WIDE}""#)),
+                wide,
+                "style fill",
+            ),
+            (
+                format!(
+                    r#"<line x1="0" y1="2" x2="4" y2="2" stroke-width="4" stroke="{WIDE}"/>"#
+                ),
+                wide,
+                "stroke",
+            ),
+            (
+                format!(
+                    r#"<defs><linearGradient id="g"><stop offset="0" stop-color="{WIDE}"/><stop offset="1" stop-color="{WIDE}"/></linearGradient></defs>{}"#,
+                    rect(r#"fill="url(#g)""#)
+                ),
+                wide,
+                "stop-color",
+            ),
+            (
+                format!(
+                    r#"<defs><filter id="f" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB"><feFlood flood-color="{WIDE}"/></filter></defs>{}"#,
+                    rect(r#"filter="url(#f)""#)
+                ),
+                wide,
+                "flood-color",
+            ),
+            (
+                format!(
+                    r#"<g color="{WIDE}">{}</g>"#,
+                    rect(r#"fill="currentcolor""#)
+                ),
+                CLIPPED,
+                "currentcolor",
+            ),
+        ];
+        let off: Vec<String> = cases
+            .iter()
+            .filter_map(|(body, expected, what)| {
+                let got = drawn(body);
+                (got != *expected)
+                    .then(|| format!("{what}: {got:?}, expected {expected:?}"))
+            })
+            .collect();
+        assert!(off.is_empty(), "{off:#?}");
+    }
+
+    /// A translucent `flood-color` is drawn at its own alpha times
+    /// `flood-opacity`, as Filter Effects 1 section 9.13.2 says: "If the
+    /// flood-color value includes an alpha channel, the alpha channel gets
+    /// multiplied with the computed value of the flood-opacity property."
+    /// Skia replaces the colour's alpha with the opacity, so the flood is
+    /// opaque where the patched module (`cfg(meo_svg_wide_colour)`)
+    /// multiplies.
+    #[test]
+    fn a_translucent_flood_keeps_its_alpha() {
+        use skia_safe::{Color, surfaces};
+        let drawn = |body: &str| {
+            let svg = Svg::parse(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
+            ))
+            .expect("parses");
+            let mut surface =
+                surfaces::raster_n32_premul((4, 4)).expect("surface");
+            surface.canvas().clear(Color::WHITE);
+            svg.dom.render(surface.canvas());
+            let colour = surface
+                .image_snapshot()
+                .peek_pixels()
+                .expect("raster pixels")
+                .get_color((2, 2));
+            [colour.r(), colour.g(), colour.b()]
+        };
+        for (colour, opacity) in [
+            ("rgba(0, 204, 0, 0.5)", "1"),
+            ("rgba(0, 204, 0, 0.5)", "0.5"),
+            ("color(srgb 0 0.8 0 / 0.25)", "1"),
+        ] {
+            let flood = drawn(&format!(
+                r#"<defs><filter id="f" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB"><feFlood flood-color="{colour}" flood-opacity="{opacity}"/></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
+            ));
+            let fill = drawn(&format!(
+                r#"<rect width="4" height="4" fill="{colour}" fill-opacity="{opacity}"/>"#
+            ));
+            assert_eq!(
+                flood == fill,
+                cfg!(meo_svg_wide_colour),
+                "{colour} at {opacity}: the flood {flood:?}, the fill {fill:?}"
+            );
+        }
+    }
+
     use crate::node::{
         image::{Content, record_svg},
         typography::FAKE_ITALIC_SKEW,

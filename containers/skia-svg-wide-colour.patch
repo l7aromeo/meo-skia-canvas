@@ -1,0 +1,191 @@
+--- a/skia-bindings/skia/modules/svg/include/SkSVGFeFlood.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGFeFlood.h
+@@ -34,7 +34,7 @@
+ private:
+     SkSVGFeFlood() : INHERITED(SkSVGTag::kFeFlood) {}
+ 
+-    SkColor resolveFloodColor(const SkSVGRenderContext&) const;
++    SkColor4f resolveFloodColor(const SkSVGRenderContext&) const;
+ 
+     using INHERITED = SkSVGFe;
+ };
+--- a/skia-bindings/skia/modules/svg/include/SkSVGRenderContext.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGRenderContext.h
+@@ -145,6 +145,8 @@
+     std::optional<SkPaint> strokePaint() const;
+ 
+     SkSVGColorType resolveSvgColor(const SkSVGColor&) const;
++    // meo-skia-canvas: the colour in extended sRGB, as wide as it was written.
++    SkColor4f resolveSvgColor4f(const SkSVGColor&) const;
+ 
+     // The local computed clip path (not inherited).
+     const SkPath* clipPath() const { return SkOptAddressOrNull(fClipPath); }
+--- a/skia-bindings/skia/modules/svg/include/SkSVGTypes.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGTypes.h
+@@ -184,13 +184,23 @@
+     using Vars = std::vector<SkString>;
+ 
+     SkSVGColor() : SkSVGColor(SK_ColorBLACK) {}
+-    explicit SkSVGColor(const SkSVGColorType& c) : fType(Type::kColor), fColor(c), fVars(nullptr) {}
++    explicit SkSVGColor(const SkSVGColorType& c)
++        : fType(Type::kColor), fColor(c), fVars(nullptr), fColor4f(SkColor4f::FromColor(c)) {}
+     explicit SkSVGColor(Type t, Vars&& vars)
+         : fType(t), fColor(SK_ColorBLACK)
+-        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars))) {}
++        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars)))
++        , fColor4f(SkColors::kBlack) {}
+     explicit SkSVGColor(const SkSVGColorType& c, Vars&& vars)
+         : fType(Type::kColor), fColor(c)
+-        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars))) {}
++        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars)))
++        , fColor4f(SkColor4f::FromColor(c)) {}
++    // meo-skia-canvas: a colour in extended sRGB, unclamped, so one outside
++    // sRGB reaches a wide surface. `fColor` keeps it as eight-bit sRGB for
++    // what reads only an SkColor.
++    explicit SkSVGColor(const SkColor4f& c, Vars&& vars)
++        : fType(Type::kColor), fColor(c.toSkColor())
++        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars)))
++        , fColor4f(c) {}
+ 
+     SkSVGColor(const SkSVGColor&)            = default;
+     SkSVGColor& operator=(const SkSVGColor&) = default;
+@@ -198,12 +208,14 @@
+     SkSVGColor& operator=(SkSVGColor&&)      = default;
+ 
+     bool operator==(const SkSVGColor& other) const {
+-        return fType == other.fType && fColor == other.fColor && fVars == other.fVars;
++        return fType == other.fType && fColor == other.fColor && fVars == other.fVars &&
++               fColor4f == other.fColor4f;
+     }
+     bool operator!=(const SkSVGColor& other) const { return !(*this == other); }
+ 
+     Type type() const { return fType; }
+     const SkSVGColorType& color() const { SkASSERT(fType == Type::kColor); return fColor; }
++    const SkColor4f& color4f() const { SkASSERT(fType == Type::kColor); return fColor4f; }
+     SkSpan<const SkString> vars() const {
+         return fVars ? SkSpan<const SkString>(fVars->fData) : SkSpan<const SkString>();
+     }
+@@ -219,6 +231,7 @@
+         Vars fData;
+     };
+     sk_sp<RefCntVars> fVars;
++    SkColor4f fColor4f;
+ };
+ 
+ class SK_API SkSVGPaint {
+--- a/skia-bindings/skia/modules/svg/src/SkSVGAttributeParser.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGAttributeParser.cpp
+@@ -419,6 +419,32 @@
+         *color = SkSVGColor(c, std::move(vars));
+         return true;
+     }
++    // meo-skia-canvas: `color(srgb r g b)` and `color(srgb r g b / a)`, the
++    // channels in extended sRGB and unclamped, so a colour outside sRGB
++    // keeps its value. The library writes a paint, a stop and a flood colour
++    // in this form; CSS Color 4's other forms are read there, not here.
++    if (SkColor4f c4; this->parseParenthesized("color", [this](SkColor4f* c) -> bool {
++            SkScalar r, g, b, a = 1;
++            if (!this->parseExpectedStringToken("srgb") || !this->parseWSToken() ||
++                !this->parseScalarToken(&r) || !this->parseWSToken() ||
++                !this->parseScalarToken(&g) || !this->parseWSToken() ||
++                !this->parseScalarToken(&b)) {
++                return false;
++            }
++            this->parseWSToken();
++            if (this->parseExpectedStringToken("/")) {
++                this->parseWSToken();
++                if (!this->parseScalarToken(&a)) {
++                    return false;
++                }
++                this->parseWSToken();
++            }
++            *c = {r, g, b, SkTPin(a, 0.0f, 1.0f)};
++            return true;
++        }, &c4)) {
++        *color = SkSVGColor(c4, std::move(vars));
++        return true;
++    }
+     if (this->parseExpectedStringToken("currentColor")) {
+         *color = SkSVGColor(SkSVGColor::Type::kCurrentColor, std::move(vars));
+         return true;
+--- a/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
+@@ -16,21 +16,22 @@
+ class SkImageFilter;
+ class SkSVGFilterContext;
+ 
+-SkColor SkSVGFeFlood::resolveFloodColor(const SkSVGRenderContext& ctx) const {
++SkColor4f SkSVGFeFlood::resolveFloodColor(const SkSVGRenderContext& ctx) const {
+     const auto floodColor = this->getFloodColor();
+     const auto floodOpacity = this->getFloodOpacity();
+     // Uninherited presentation attributes should have a concrete value by now.
+     if (!floodColor.isValue() || !floodOpacity.isValue()) {
+         SkDEBUGF("unhandled: flood-color or flood-opacity has no value\n");
+-        return SK_ColorBLACK;
++        return SkColors::kBlack;
+     }
+ 
+-    const SkColor color = ctx.resolveSvgColor(*floodColor);
+-    return SkColorSetA(color, SkScalarRoundToInt(*floodOpacity * 255));
++    SkColor4f color = ctx.resolveSvgColor4f(*floodColor);
++    color.fA *= *floodOpacity;
++    return color;
+ }
+ 
+ sk_sp<SkImageFilter> SkSVGFeFlood::onMakeImageFilter(const SkSVGRenderContext& ctx,
+                                                      const SkSVGFilterContext& fctx) const {
+-    return SkImageFilters::Shader(SkShaders::Color(resolveFloodColor(ctx)),
++    return SkImageFilters::Shader(SkShaders::Color(resolveFloodColor(ctx), nullptr),
+                                   this->resolveFilterSubregion(ctx, fctx));
+ }
+--- a/skia-bindings/skia/modules/svg/src/SkSVGGradient.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGGradient.cpp
+@@ -68,7 +68,7 @@
+         return SkColors::kBlack;
+     }
+ 
+-    const auto color = SkColor4f::FromColor(ctx.resolveSvgColor(*stopColor));
++    const auto color = ctx.resolveSvgColor4f(*stopColor);
+ 
+     return { color.fR, color.fG, color.fB, *stopOpacity * color.fA };
+ }
+--- a/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
+@@ -407,7 +407,7 @@
+ 
+     switch (paint_selector.type()) {
+     case SkSVGPaint::Type::kColor:
+-        p.setColor(this->resolveSvgColor(paint_selector.color()));
++        p.setColor(this->resolveSvgColor4f(paint_selector.color()), nullptr);
+         break;
+     case SkSVGPaint::Type::kIRI: {
+         // Our property inheritance is borked as it follows the render path and not the tree
+@@ -432,7 +432,7 @@
+         const auto node = this->findNodeById(paint_selector.iri());
+         if (!node || !node->asPaint(local_ctx, &p)) {
+             // Use the fallback color.
+-            p.setColor(this->resolveSvgColor(paint_selector.color()));
++            p.setColor(this->resolveSvgColor4f(paint_selector.color()), nullptr);
+         }
+     } break;
+     default:
+@@ -476,6 +476,19 @@
+     }
+ 
+     return p;
++}
++
++SkColor4f SkSVGRenderContext::resolveSvgColor4f(const SkSVGColor& color) const {
++    if (fPresentationContext->fNamedColors) {
++        for (auto&& ident : color.vars()) {
++            if (SkSVGColorType* c = fPresentationContext->fNamedColors->find(ident)) {
++                return SkColor4f::FromColor(*c);
++            }
++        }
++    }
++    return color.type() == SkSVGColor::Type::kColor
++                   ? color.color4f()
++                   : SkColor4f::FromColor(this->resolveSvgColor(color));
+ }
+ 
+ SkSVGColorType SkSVGRenderContext::resolveSvgColor(const SkSVGColor& color) const {

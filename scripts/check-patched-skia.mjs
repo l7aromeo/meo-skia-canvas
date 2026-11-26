@@ -78,10 +78,15 @@ export function skiaPatchTable(rust) {
     /^const SKIA_PATCHES: \[SkiaPatch; \d+\] = \[([\s\S]*?)^\];/m,
   );
   if (!table) return { error: "no SKIA_PATCHES table" };
+  // A Rust string literal, its `\"` and `\\` escapes read as the characters
+  // they stand for, which is what build.rs compares against the source. Any
+  // other escape is left unmatched, and the entry refused.
   const literal = (body, field) =>
-    body.match(
-      new RegExp(`^\\s*${field}: "((?:[^"\\\\]|\\\\.)*)",$`, "m"),
-    )?.[1];
+    body
+      .match(
+        new RegExp(`^\\s*${field}: "((?:[^"\\\\]|\\\\["\\\\])*)",$`, "m"),
+      )?.[1]
+      ?.replace(/\\(["\\])/g, "$1");
   const entries = {};
   for (const [, body] of table[1].matchAll(/SkiaPatch \{([^}]*)\}/g)) {
     const [cfg, file, marker] = ["cfg", "file", "marker"].map((field) =>
@@ -158,6 +163,12 @@ const SVG_SYNTHETIC_SLANT = {
   ...buildRsPatch("meo_svg_synthetic_slant"),
 };
 
+/// containers/skia-svg-wide-colour.patch, on every platform.
+const SVG_WIDE_COLOUR = {
+  patch: "containers/skia-svg-wide-colour.patch",
+  ...buildRsPatch("meo_svg_wide_colour"),
+};
+
 /// containers/skia-freetype-advance.patch, on Linux, the one platform whose
 /// build compiles Skia's FreeType port.
 const FREETYPE_ADVANCE = {
@@ -186,6 +197,7 @@ export const PATCHED = {
     TRIANGULATION,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -197,6 +209,7 @@ export const PATCHED = {
     TRIANGULATION,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -213,6 +226,7 @@ export const PATCHED = {
       marker: "fsSelection.field.Oblique",
     },
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -455,6 +469,7 @@ const COMPILED_WITH = {
   "src/gpu/ganesh/GrRecordingContextPriv.cpp": "ganesh",
   "src/text/gpu/SubRunContainer.cpp": "gpu",
   "modules/svg/src/SkSVGText.cpp": null,
+  "modules/svg/src/SkSVGAttributeParser.cpp": null,
   "src/core/SkFontMgr.cpp": null,
   "src/ports/SkTypeface_win_dw.cpp": null,
   "src/ports/SkFontHost_FreeType.cpp": null,
@@ -809,6 +824,16 @@ function selfTest() {
       table(entry("a", "f.cpp", "x").replace('"x"', "MARKER")),
       null,
       "a marker that is no literal",
+    ],
+    [
+      table(entry("a", "f.cpp", 'f(\\"x\\", a\\\\b)')),
+      { a: { file: "f.cpp", marker: 'f("x", a\\b)' } },
+      "a marker with escaped quotes and backslashes",
+    ],
+    [
+      table(entry("a", "f.cpp", "x\\ny")),
+      null,
+      "a marker with an escape other than a quote or a backslash",
     ],
   ]) {
     const read = skiaPatchTable(rust);

@@ -205,6 +205,25 @@ const SVG_SYNTHETIC_SLANT = join(
 );
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: node scripts/test.mjs tests/suite/image.test.js against a binary built from a tree prepared without this patch; "keeps a wide colour on a wide canvas" fails
+//
+// Skia's SVG module holds a paint as `SkSVGColorType`, an eight-bit sRGB
+// `SkColor`, so a colour outside sRGB is clipped before it is drawn: on a
+// display-p3 canvas `color(display-p3 0 1 0)` read 117, 251, 76 where Chrome
+// keeps 0, 255, 0. The patch keeps an `SkColor4f` in extended sRGB beside
+// `SkSVGColor`'s eight-bit one, and its parser reads `color(srgb r g b / a)`
+// unclamped, which is the form `colour_for_skia` in src/image.rs writes a
+// paint, a gradient stop and a flood colour in when the build carries the
+// patch. Paints, gradient stops and `feFlood` draw from the wide colour, and
+// `feFlood` multiplies the colour's alpha by `flood-opacity`, as Filter
+// Effects 1 section 9.13.2 says, where Skia replaced it. It does not change
+// `SkSVGColorType`: skia-safe reads `SkSVGColor`'s eight-bit `fColor` field
+// by name, so the field stays, and the `color` property and
+// `lighting-color`, which Skia keeps as an `SkColor` through
+// `SkSVGFeLighting`'s eight-bit lights, stay eight-bit.
+const SVG_WIDE_COLOUR = join("containers", "skia-svg-wide-colour.patch");
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 // Re-check: node scripts/test.mjs tests/suite/text.test.js against a binary built from a tree prepared without this patch; "a family's italic face is drawn for italic whatever its weight" fails
 //
 // `SkFontStyleSet::matchStyleCSS3` (src/core/SkFontMgr.cpp) scores a
@@ -310,6 +329,7 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -323,6 +343,7 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -339,6 +360,7 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     DWRITE_OBLIQUE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
