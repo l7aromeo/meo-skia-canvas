@@ -54,6 +54,7 @@ use crate::{
             tiles_exactly,
         },
         resident::{Place, SharedSurface},
+        tile_cuts::{InteriorSides, TileCuts, TileReach},
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -378,6 +379,14 @@ pub struct PageRecorder {
     /// vector backend. Empty for the ordinary ones. See
     /// [`PageRecorder::append_isolated`]. Shared as `layers` is.
     features: Arc<Vec<VectorFeatures>>,
+    /// Where the page's draws would come out otherwise in a tile than in the
+    /// page -- see [`TileCuts`]. Replaced with `layers`.
+    tile_cuts: TileCuts,
+    /// What the draw being recorded is, for the tiles, as the context
+    /// declared it -- see [`Self::declare_tile_reach`]. `None` where nothing
+    /// declared one, which [`Self::note_tile_cut`] takes as a cut over the
+    /// draw's clip, or over the whole page.
+    tile_reach: Option<TileReach>,
     bounds: Rect,
     matrix: Matrix,
     clip: Option<Path>,
@@ -668,6 +677,9 @@ thread_local! {
     /// clear -- see [`PageRecorder::set_bounds`].
     pub(crate) static FINISHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many reads on this thread a page's tiles served -- see
+    /// [`RecordingSurface::read_tiled`].
+    pub(crate) static TILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1195,6 +1207,8 @@ impl PageRecorder {
             dual,
             layers: Arc::default(),
             features: Arc::default(),
+            tile_cuts: TileCuts::default(),
+            tile_reach: None,
             changed: false,
             isolated: None,
             filtered: 0,
@@ -1244,10 +1258,32 @@ impl PageRecorder {
         self.append_as(true, f);
     }
 
+    /// Declares what the draws recorded from here on are, for the tiles --
+    /// see [`TileCuts`] -- until it is declared again: the context declares
+    /// one before each draw it records and clears it after.
+    pub fn declare_tile_reach(&mut self, reach: Option<TileReach>) {
+        self.tile_reach = reach;
+    }
+
+    /// Notes the draw being recorded in the page's [`TileCuts`]: as
+    /// declared, or, where nothing was, as a cut over its clip's device
+    /// bounds, or over the whole page where it has none.
+    fn note_tile_cut(&mut self) {
+        let reach = self.tile_reach.unwrap_or_else(|| {
+            TileReach::Cut(
+                self.clip
+                    .as_ref()
+                    .map_or(self.bounds, |clip| *clip.bounds()),
+            )
+        });
+        self.tile_cuts.note(reach);
+    }
+
     fn append_as<F>(&mut self, alike: bool, f: F)
     where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         // An ordinary draw cannot join an isolated layer: that layer is
         // marked for rasterization, and everything in it is rasterized with
         // it. Close it first so this draw stays a vector.
@@ -1293,6 +1329,7 @@ impl PageRecorder {
     where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         if self.isolated.is_some() {
             self.flush();
         }
@@ -1372,6 +1409,7 @@ impl PageRecorder {
         // what it was given.
         self.layers = Arc::default();
         self.features = Arc::default();
+        self.tile_cuts = TileCuts::default();
         self.holds_reading_runs = false;
         // A count of its own, which what the old content records when an
         // export first plays it adds to rather than to this one's.
@@ -1730,6 +1768,21 @@ impl PageRecorder {
         let Some(layer) = self.open.pop() else {
             return;
         };
+        // Composited through its clip, where a path's edge is what a tile
+        // cuts, and from a backdrop read off the device beneath it, which a
+        // tile holds only within itself.
+        let backdrop =
+            layer.rec.backdrop.is_some() || layer.rec.pixels_backdrop.is_some();
+        let cut = match (&layer.clip, backdrop) {
+            (_, true) => Some(self.bounds),
+            (Some(clip), false) if clip.is_rect().is_none() => {
+                Some(*clip.bounds())
+            }
+            _ => None,
+        };
+        if let Some(cut) = cut {
+            self.tile_cuts.note(TileReach::Cut(cut));
+        }
         self.surface
             .borrow_mut()
             .forget_layers_past(self.open.len());
@@ -1775,6 +1828,7 @@ impl PageRecorder {
         features: VectorFeatures,
         shift: Point,
     ) {
+        self.note_tile_cut();
         self.close_run();
         self.file_current();
         let shift = Matrix::translate(shift);
@@ -1801,6 +1855,7 @@ impl PageRecorder {
         group: Group,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         self.file_current();
         let group = Group {
             clip: self.clip.as_ref().map(Path::serialize),
@@ -2058,6 +2113,8 @@ impl PageRecorder {
         if surface
             .read_tiled(&page, opts, engine, dst_info, crop, dst_buffer)?
         {
+            #[cfg(test)]
+            TILE_READS.set(TILE_READS.get() + 1);
             return Ok(());
         }
 
@@ -2221,6 +2278,7 @@ impl PageRecorder {
     ) where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         // Inside a layer a run of draws asking for the same features is one
         // of its entries, as on the page, and one asking for others is
         // filed apart: what the frame's run holds, drawn before this and
@@ -2358,6 +2416,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         if self.isolated.is_some() {
             self.flush();
         }
@@ -2431,6 +2490,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         self.append_under_clip(
             |clip| match clip {
                 None => Layer::Pattern(tile),
@@ -2461,6 +2521,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         self.holds_reading_runs |= text.reads_the_page();
         self.append_under_clip(
             |clip| match clip {
@@ -2513,6 +2574,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         let isolated = features.any() && self.open.is_empty();
         if self.isolated.is_some() {
             self.flush();
@@ -2702,6 +2764,7 @@ impl PageRecorder {
     ) where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         if self.isolated.is_some() {
             self.flush();
         }
@@ -2861,6 +2924,7 @@ impl PageRecorder {
         Page {
             layers: Arc::new(layers),
             features: Arc::new(features),
+            tile_cuts: self.tile_cuts.clone(),
             bounds: self.bounds,
             id: id.0,
             starts_from: Some(FiledPrefix {
@@ -2918,6 +2982,7 @@ impl PageRecorder {
         Page {
             layers: Arc::clone(&self.layers),
             features: Arc::clone(&self.features),
+            tile_cuts: self.tile_cuts.clone(),
             bounds: self.bounds,
             id: self.id.0,
             starts_from: None,
@@ -3891,6 +3956,10 @@ pub struct RecordingSurface {
     /// for each that a read has been taken inside -- see
     /// [`Self::read_rastered`]. Made like `surface` and dropped with it.
     layers: Vec<LayerRaster>,
+    /// Tiles composited from nothing since the page was last composited --
+    /// see [`Self::read_tiled`], which hands reads roaming over more tiles
+    /// than the page holds to the page.
+    tiles_composited: usize,
 }
 
 /// Clips `canvas` as the layers in `open` clip what is drawn inside the
@@ -3940,6 +4009,7 @@ impl Default for RecordingSurface {
             color_space: ColorSpace::new_srgb(),
             density: 0.0,
             layers: Vec::new(),
+            tiles_composited: 0,
         }
     }
 }
@@ -4068,6 +4138,7 @@ impl RecordingSurface {
                     return false;
                 };
                 let samples = engine.sample_count(&surface.image_info(), opts);
+                self.tiles_composited += 1;
                 self.tiles.insert(
                     *origin,
                     Tile {
@@ -4198,9 +4269,11 @@ impl RecordingSurface {
     ///
     /// False when the page surface already holds a current composite -- it
     /// answers the read for nothing -- when the rectangle is wider than the
-    /// grid is worth, when a tile could not be allocated, or when a tile
-    /// refused the read. Every one of those falls back to the page rather
-    /// than failing.
+    /// grid is worth, when reads have roamed over as many tiles as the page
+    /// holds, when a tile it touches would make one of the page's draws
+    /// otherwise than the page does -- see [`TileCuts`] -- when a tile could
+    /// not be allocated, or when a tile refused the read. Every one of those
+    /// falls back to the page rather than failing.
     pub fn read_tiled(
         &mut self,
         page: &Page,
@@ -4233,6 +4306,56 @@ impl RecordingSurface {
         let page_size = page.scaled_dimensions(opts.density);
         let wanted = Self::tiles_covering(crop, page_size);
         if wanted.is_empty() || wanted.len() > TILES_PER_READ as usize {
+            return Ok(false);
+        }
+
+        // Reads roaming over the page: once the tiles composited since the
+        // page last was number as many as the page holds, they have cost what
+        // compositing it does -- sixteen 256 tiles of a page take what the
+        // page takes, see [`TILE`] -- and the page, which then answers every
+        // read for a copy, serves them. At most twice what choosing either
+        // in hindsight would have cost. Not where the page is past what the
+        // pages a thread keeps may hold, where the tiles keep reading in a
+        // megabyte: a GPU page of 8000 by 8000 took 137 microseconds a read
+        // composited, against 3.9 from a tile.
+        let page_tiles =
+            Self::tiles_covering(IRect::from_size(page_size), page_size).len();
+        let page_bytes = ImageInfo::new(
+            page_size,
+            opts.compositing_color_type(),
+            AlphaType::Premul,
+            None,
+        )
+        .compute_min_byte_size();
+        if self.tiles_composited >= page_tiles && page_bytes <= PAGE_CACHE_BYTES
+        {
+            return Ok(false);
+        }
+
+        // A tile makes some draws otherwise than the page: a path across one
+        // of its sides, or on the GPU touching it at all, and a shader or an
+        // image sampled anywhere in it -- see [`TileCuts`]. The page serves
+        // a read of such a tile.
+        let gpu = !matches!(engine, RenderingEngine::CPU);
+        let density = opts.density;
+        let scaled = density != 1.0;
+        let cut = wanted.iter().any(|origin| {
+            let rect = Self::tile_rect(*origin, page_size);
+            let interior = InteriorSides {
+                left: rect.left > 0,
+                top: rect.top > 0,
+                right: rect.right < page_size.width,
+                bottom: rect.bottom < page_size.height,
+            };
+            let in_page = Rect::new(
+                rect.left as f32 / density,
+                rect.top as f32 / density,
+                rect.right as f32 / density,
+                rect.bottom as f32 / density,
+            );
+            page.tile_cuts.keep_off(in_page, interior, gpu, scaled)
+        });
+        if cut {
             return Ok(false);
         }
 
@@ -4447,6 +4570,7 @@ impl RecordingSurface {
         opts: &ExportOptions,
         engine: &RenderingEngine,
     ) {
+        self.tiles_composited = 0;
         // check for anything that would invalidate the previous contents
         let reconfigure = self.is_config_stale(opts);
         // Made again only because there is none: what the budget dropped --
@@ -5013,6 +5137,9 @@ pub struct Page {
     pub layers: Arc<Vec<Layer>>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
     pub(crate) features: Arc<Vec<VectorFeatures>>,
+    /// Where these draws would come out otherwise in a tile than in the
+    /// page -- see [`RecordingSurface::read_tiled`].
+    pub(crate) tile_cuts: TileCuts,
 }
 
 /// The filed page a page taken inside a `saveLayer` holds the open layers
@@ -5062,6 +5189,7 @@ impl Default for Page {
             bounds: skia_safe::Rect::new_empty(),
             layers: Arc::default(),
             features: Arc::default(),
+            tile_cuts: TileCuts::default(),
         }
     }
 }

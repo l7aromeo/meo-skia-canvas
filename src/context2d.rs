@@ -9862,3 +9862,565 @@ mod translucent_text_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tile_read_tests {
+    //! A small read a page's tiles serve stores the bytes a whole read of
+    //! the page does -- see `context::tile_cuts` and
+    //! `page::RecordingSurface::read_tiled`.
+    use super::*;
+    use crate::{
+        canvas::EngineKind,
+        context::page::TILE_READS,
+        font::FontLibrary,
+        pixels::{ImageDataExport, PixelExportOptions},
+        shader::{GradientColorSpace, GradientInterpolation, GradientStop},
+    };
+    use std::iter::zip;
+
+    const W: f32 = 768.0;
+    const H: f32 = 512.0;
+    /// The edge of a tile in a page's pixels, `page::TILE`.
+    const TILE: f32 = 256.0;
+    /// The tiles a `W` by `H` page holds.
+    const TILES: usize = 6;
+    const OSWALD: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    );
+
+    type Scene = fn(&mut Context2D);
+
+    fn register() {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
+            FontLibrary::new()
+                .register_font_from_path("TileOswald", OSWALD)
+                .expect("a bundled face registers");
+        }
+    }
+
+    /// A 64-pixel image of stripes with a disc on them.
+    fn source() -> Image {
+        let side = 64usize;
+        let bytes: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let (x, y) = ((i % side) as i32 - 32, (i / side) as i32 - 32);
+                match x * x + y * y < 400 {
+                    true => [255, 255, 255, 255],
+                    false => {
+                        let c = (i % side * 4) as u8;
+                        [c, 255 - c, c.wrapping_mul(37), 255]
+                    }
+                }
+            })
+            .collect();
+        Image::from_pixels(
+            &bytes,
+            side as u32,
+            side as u32,
+            side * 4,
+            PixelExportOptions::default(),
+        )
+        .expect("an image")
+    }
+
+    /// A `side`-pixel image whose every neighbouring pixel differs, so a
+    /// sample a hair off lands on another level.
+    fn busy(side: usize) -> Image {
+        let bytes: Vec<u8> = (0..side * side)
+            .flat_map(|i| {
+                let (x, y) = (i % side, i / side);
+                let c = ((x * 37 + y * 101) % 256) as u8;
+                [c, 255 - c, c.wrapping_mul(53), 255]
+            })
+            .collect();
+        Image::from_pixels(
+            &bytes,
+            side as u32,
+            side as u32,
+            side * 4,
+            PixelExportOptions::default(),
+        )
+        .expect("an image")
+    }
+
+    /// A three-stop gradient along the page's diagonal, from a point moved
+    /// part of a pixel by `(f, g)`.
+    fn gradient(f: f32, g: f32) -> Shader {
+        let stop = |position, r, g, b| GradientStop {
+            position,
+            color: RgbaLinear::opaque(r, g, b),
+        };
+        Shader::linear_gradient(
+            Point {
+                x: 13.7 + f,
+                y: 21.3 + g,
+            },
+            Point {
+                x: 700.3 - f,
+                y: 480.9,
+            },
+            &[
+                stop(0.0, 1.0, 0.5, 0.0),
+                stop(0.37, 0.1, 0.9, 0.3),
+                stop(1.0, 0.0, 0.2, 1.0),
+            ],
+            GradientInterpolation::new(GradientColorSpace::Destination),
+        )
+        .expect("a gradient")
+    }
+
+    fn triangle(ctx: &mut Context2D, points: [(f32, f32); 3]) {
+        ctx.begin_path();
+        ctx.move_to(points[0].0, points[0].1);
+        ctx.line_to(points[1].0, points[1].1);
+        ctx.line_to(points[2].0, points[2].1);
+        ctx.fill(FillRule::NonZero);
+    }
+
+    fn disc(ctx: &mut Context2D, x: f32, y: f32, r: f32) {
+        ctx.begin_path();
+        ctx.arc(x, y, r, 0.0, std::f32::consts::TAU, false)
+            .expect("an arc");
+        ctx.fill(FillRule::NonZero);
+    }
+
+    fn text(ctx: &mut Context2D) {
+        register();
+        assert!(ctx.set_font_css("64px TileOswald"));
+        ctx.fill_text("Tiles cut glyphs?", 30.3, 290.6, None);
+    }
+
+    /// `scene` read whole on one canvas and tile by tile on another, on
+    /// the GPU where `gpu`, and how many of the tiled reads the tiles
+    /// served. `None` where `gpu` and there is no GPU.
+    fn whole_and_tiled(
+        gpu: bool,
+        scene: Scene,
+    ) -> Option<(Vec<u8>, Vec<u8>, usize)> {
+        let canvas = |gpu: bool| {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(30 120 60)").expect("a colour");
+            scene(ctx);
+            canvas
+        };
+        let mut whole = canvas(gpu);
+        let bytes = whole
+            .context()
+            .get_image_data(0.0, 0.0, W, H)
+            .expect("a whole read")
+            .pixels()
+            .to_vec();
+        if (whole.engine_kind() == EngineKind::Gpu) != gpu {
+            return None;
+        }
+        let mut tiled = canvas(gpu);
+        let ctx = tiled.context();
+        let before = TILE_READS.get();
+        let mut pieced = vec![0; bytes.len()];
+        let row = W as usize * 4;
+        for ty in (0..H as usize).step_by(TILE as usize) {
+            for tx in (0..W as usize).step_by(TILE as usize) {
+                let part = ctx
+                    .get_image_data(tx as f32, ty as f32, TILE, TILE)
+                    .expect("a tile's read")
+                    .pixels()
+                    .to_vec();
+                let side = TILE as usize * 4;
+                for (y, line) in part.chunks(side).enumerate() {
+                    let at = (ty + y) * row + tx * 4;
+                    pieced[at..at + side].copy_from_slice(line);
+                }
+            }
+        }
+        Some((bytes, pieced, TILE_READS.get() - before))
+    }
+
+    /// How a row's reads are served: every tile by the tiles, or some by
+    /// the page.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Served {
+        Tiles,
+        Page,
+    }
+    use Served::*;
+
+    /// Each draw, read tiled, lands the bytes a whole read lands, and the
+    /// tiles serve it where they make it as the page does: not where an
+    /// anti-aliased path crosses a side of a tile the page does not share,
+    /// nor on the GPU where one touches the tile at all -- a path wholly
+    /// inside one tile came out a pixel apart there on 3 of 250 positions,
+    /// the three rows below -- nor where a shader or an image off whole
+    /// pixels is sampled in it, on either engine. The sampled rows are
+    /// placed where a tile made them otherwise: the gradients and the
+    /// scaled image on the CPU, the pattern and the image moved part of a
+    /// pixel from the page's corner on both. Rotated text, a stroked
+    /// rectangle and text under a path's clip came out alike in one scene
+    /// each and are kept off the tiles until a sweep of them puts them on;
+    /// widening that changes this table.
+    #[test]
+    fn a_tiled_read_stores_what_a_whole_read_does() {
+        let rows: [(&str, Scene, Served, Served); 27] = [
+            ("nothing", |_| {}, Tiles, Tiles),
+            (
+                "a rectangle off whole pixels",
+                |ctx| ctx.fill_rect(100.3, 100.6, 400.5, 200.2),
+                Tiles,
+                Tiles,
+            ),
+            (
+                "a rectangle's clip under a scale, then a rectangle",
+                |ctx| {
+                    ctx.translate(10.25, 5.5);
+                    ctx.scale(1.7, 1.3);
+                    ctx.begin_path();
+                    ctx.rect(60.3, 70.6, 250.5, 200.2);
+                    ctx.clip(FillRule::NonZero);
+                    ctx.fill_rect(-10.0, -10.0, 800.0, 600.0);
+                },
+                Tiles,
+                Tiles,
+            ),
+            ("text", text, Tiles, Tiles),
+            (
+                "an image on whole pixels",
+                |ctx| ctx.draw_image(&source(), 230.0, 231.0),
+                Tiles,
+                Tiles,
+            ),
+            (
+                "an image moved part of a pixel",
+                |ctx| ctx.draw_image(&source(), 230.4, 230.7),
+                Page,
+                Page,
+            ),
+            (
+                "an image moved part of a pixel from the page's corner",
+                |ctx| ctx.draw_image(&busy(500), 0.013, 0.071),
+                Page,
+                Page,
+            ),
+            (
+                "an image scaled",
+                |ctx| {
+                    ctx.draw_image_sized(&source(), 200.3, 200.1, 130.7, 120.2)
+                },
+                Page,
+                Page,
+            ),
+            (
+                "an image scaled inside one tile",
+                |ctx| {
+                    ctx.draw_image_sized(&busy(64), 300.3, 280.1, 130.7, 120.2)
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a rectangle in a gradient",
+                |ctx| {
+                    ctx.set_fill_shader(&gradient(0.013, 0.071));
+                    ctx.fill_rect(0.0, 0.0, W, H);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "text in a gradient",
+                |ctx| {
+                    register();
+                    ctx.set_fill_shader(&gradient(0.88999987, 0.18200016));
+                    assert!(ctx.set_font_css("64px TileOswald"));
+                    ctx.fill_text(
+                        "Tiles cut glyphs? Wg",
+                        10.0 + 0.88999987,
+                        290.0 + 0.18200016,
+                        None,
+                    );
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a pattern moved part of a pixel",
+                |ctx| {
+                    let pattern =
+                        ctx.create_pattern(&busy(50), PatternRepeat::Repeat);
+                    ctx.set_fill_pattern(&pattern);
+                    ctx.translate(0.931 * 3.0, 0.14500046 * 3.0);
+                    ctx.fill_rect(0.0, 0.0, W, H);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "text scaled",
+                |ctx| {
+                    register();
+                    ctx.scale(1.37, 1.21);
+                    assert!(ctx.set_font_css("48px TileOswald"));
+                    ctx.fill_text(
+                        "Tiles cut glyphs? Wg",
+                        10.013,
+                        220.071,
+                        None,
+                    );
+                },
+                Tiles,
+                Tiles,
+            ),
+            (
+                "a triangle across tiles",
+                |ctx| {
+                    triangle(
+                        ctx,
+                        [(10.0, 300.3), (760.7, 240.2), (700.0, 500.6)],
+                    )
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a triangle inside one tile",
+                |ctx| {
+                    triangle(
+                        ctx,
+                        [(270.2, 300.3), (500.7, 280.2), (480.0, 500.6)],
+                    )
+                },
+                Tiles,
+                Page,
+            ),
+            (
+                "a disc across a corner",
+                |ctx| disc(ctx, 256.3, 256.7, 90.2),
+                Page,
+                Page,
+            ),
+            (
+                "a stroked line",
+                |ctx| {
+                    ctx.set_line_width(3.3);
+                    ctx.begin_path();
+                    ctx.move_to(5.5, 10.2);
+                    ctx.line_to(760.1, 500.9);
+                    ctx.stroke();
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a rotated rectangle",
+                |ctx| {
+                    ctx.translate(384.0, 256.0);
+                    ctx.rotate(0.3);
+                    ctx.fill_rect(-200.5, -100.25, 400.0, 200.0);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a rounded rectangle",
+                |ctx| {
+                    ctx.begin_path();
+                    ctx.round_rect(150.5, 120.2, 300.0, 260.0, [40.0; 4])
+                        .expect("a rounded rectangle");
+                    ctx.fill(FillRule::NonZero);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "an image rotated",
+                |ctx| {
+                    ctx.translate(256.0, 256.0);
+                    ctx.rotate(0.4);
+                    ctx.draw_image_sized(&source(), -40.0, -40.0, 90.0, 90.0);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a path's clip, then a rectangle",
+                |ctx| {
+                    ctx.begin_path();
+                    ctx.arc(256.4, 256.2, 100.3, 0.0, 7.0, false)
+                        .expect("an arc");
+                    ctx.clip(FillRule::NonZero);
+                    ctx.fill_rect(0.0, 0.0, W, H);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "rotated text",
+                |ctx| {
+                    ctx.translate(384.0, 256.0);
+                    ctx.rotate(0.3);
+                    ctx.translate(-354.0, 34.6);
+                    text(ctx);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a stroked rectangle",
+                |ctx| {
+                    ctx.set_line_width(3.3);
+                    ctx.stroke_rect(100.3, 100.6, 400.5, 200.2);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "text under a path's clip",
+                |ctx| {
+                    ctx.begin_path();
+                    ctx.arc(256.4, 256.2, 150.3, 0.0, 7.0, false)
+                        .expect("an arc");
+                    ctx.clip(FillRule::NonZero);
+                    text(ctx);
+                },
+                Page,
+                Page,
+            ),
+            (
+                "a disc inside one tile",
+                |ctx| {
+                    let (x, y, side) = (356.556_4, 352.094_9, 92.315_93);
+                    disc(ctx, x + side / 2.0, y + side / 2.0, side / 2.0);
+                },
+                Tiles,
+                Page,
+            ),
+            (
+                "a stroke inside one tile",
+                |ctx| {
+                    let (x, y, side) = (272.761_25, 263.272_26, 172.086_38);
+                    ctx.set_line_width(2.103_943_5);
+                    ctx.begin_path();
+                    ctx.move_to(x + 3.0, y + 3.0);
+                    ctx.line_to(x + side - 3.0, y + side * 0.7);
+                    ctx.stroke();
+                },
+                Tiles,
+                Page,
+            ),
+            (
+                "a rotated square inside one tile",
+                |ctx| {
+                    let (x, y, side) = (324.811_2, 279.736_83, 144.907_99);
+                    ctx.translate(x + side / 2.0, y + side / 2.0);
+                    ctx.rotate(0.4);
+                    ctx.fill_rect(
+                        -side / 3.0,
+                        -side / 3.0,
+                        side * 0.66,
+                        side * 0.66,
+                    );
+                },
+                Tiles,
+                Page,
+            ),
+        ];
+        for (name, scene, cpu, gpu) in rows {
+            for (on_gpu, want) in [(false, cpu), (true, gpu)] {
+                let Some((whole, tiled, served)) =
+                    whole_and_tiled(on_gpu, scene)
+                else {
+                    continue;
+                };
+                let apart = zip(&whole, &tiled).filter(|(a, b)| a != b).count();
+                assert_eq!(apart, 0, "{name}, gpu {on_gpu}: bytes apart");
+                let got = match served == TILES {
+                    true => Tiles,
+                    false => Page,
+                };
+                assert_eq!(got, want, "{name}, gpu {on_gpu}: {served} served");
+            }
+        }
+    }
+
+    /// A 1x1 read in each of `count` tiles of a `width` by `height` page in
+    /// turn, roaming as a hit test over a large canvas does, and how many
+    /// the tiles served.
+    fn roaming(width: f32, height: f32, count: usize) -> usize {
+        let mut canvas = Canvas::new(width, height);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.fill_rect(10.0, 10.0, 40.0, 40.0);
+        let across = (width / TILE).ceil() as usize;
+        let before = TILE_READS.get();
+        let down = (height / TILE).ceil() as usize;
+        for i in 0..count {
+            let (tx, ty) = (i % across, i / across % down);
+            ctx.get_image_data(
+                tx as f32 * TILE + 7.0,
+                ty as f32 * TILE + 7.0,
+                1.0,
+                1.0,
+            )
+            .expect("a read");
+        }
+        TILE_READS.get() - before
+    }
+
+    /// Reads roaming over a page take its tiles until they have composited
+    /// as many as the page holds, which costs what compositing the page
+    /// does, and then the page.
+    #[test]
+    fn reads_roaming_past_the_pages_tiles_take_the_page() {
+        // 1200 by 900 holds 5 by 4 tiles.
+        assert_eq!(roaming(1200.0, 900.0, 40), 20);
+    }
+
+    /// Not a page past what the pages a thread keeps may hold: 8000 square
+    /// is 256 megabytes composited, and its tiles keep serving.
+    #[test]
+    fn a_page_too_large_to_keep_keeps_its_tiles_roaming() {
+        // 8000 square holds 32 by 32 tiles: past them, the page would be
+        // composited were it small enough to keep.
+        let reads = 32 * 32 + 64;
+        assert_eq!(roaming(8000.0, 8000.0, reads), reads);
+    }
+
+    /// An image moved by whole pixels is copied onto the page's pixels, in
+    /// a tile as in the page, and the tiles serve a read of it at a density
+    /// of 1; read at any other, a tile would sample it under a scale, and
+    /// the page serves the read.
+    #[test]
+    fn an_image_on_whole_pixels_read_at_a_density_takes_the_page() {
+        for gpu in [false, true] {
+            let mut canvas = Canvas::new(W, H);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.draw_image(&busy(300), 100.0, 100.0);
+            // One tile's worth of device pixels at each density, so the
+            // grid would serve it were nothing to keep it off.
+            let tiled = |ctx: &mut Context2D, density: u32| {
+                let before = TILE_READS.get();
+                let export = ImageDataExport {
+                    density,
+                    ..ImageDataExport::default()
+                };
+                let side = TILE / density as f32;
+                ctx.get_image_data_with(side, side, side, side, &export)
+                    .expect("a tile's read");
+                TILE_READS.get() - before
+            };
+            let at_two = tiled(ctx, 2);
+            let at_one = tiled(ctx, 1);
+            if (canvas.engine_kind() == EngineKind::Gpu) != gpu {
+                continue;
+            }
+            assert_eq!(at_two, 0, "gpu {gpu}: tiles served a read at 2");
+            assert_eq!(at_one, 1, "gpu {gpu}: tiles did not serve a read at 1");
+        }
+    }
+}

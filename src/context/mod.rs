@@ -39,6 +39,7 @@ pub mod layer;
 pub mod page;
 pub(crate) mod resident;
 pub(crate) mod run_mask;
+pub(crate) mod tile_cuts;
 pub mod typesetting;
 
 #[cfg(test)]
@@ -86,6 +87,7 @@ use layer::{
 };
 use page::{ExportOptions, Page, PageRecorder, Recording};
 use run_mask::Kept;
+use tile_cuts::TileReach;
 use typesetting::{TextSettings, Typesetting, Typography};
 
 /// A shadow cast by one run of a paragraph's text -- see
@@ -163,6 +165,11 @@ const MAX_TEXTURE_TILES: f32 = 4_000_000.0;
 /// a ratio of miter length to stroke width, that is a size in pixels.
 const DEFAULT_MITER_LIMIT: f32 = 10.0;
 
+/// How far past a shape's edge its anti-aliasing can ink, in device pixels:
+/// the pixel the edge passes through, partly covered. Widens a draw's
+/// rectangle for the page's tiles -- see [`Context2D::tile_cut`].
+const AA_REACH: f32 = 1.0;
+
 /// The size of the Canvas API's initial font.
 ///
 /// HTML gives it as `10px sans-serif`, which is the whole reason unstyled
@@ -224,6 +231,11 @@ pub struct Context2D {
     /// to drops a page's pixels and never these. See
     /// [`Context2D::report_resident`].
     beside_page: External,
+    /// What the draw being recorded is, for the page's tiles -- see
+    /// `tile_cuts` -- declared by each draw entry point while it records
+    /// and handed to the recorder with it. `None` between draws, which the
+    /// recorder takes as a cut over the clip.
+    tile_reach: Option<TileReach>,
 }
 
 /// A picture-backed image with its pixels taken now.
@@ -695,6 +707,7 @@ impl Context2D {
             state: State::default(),
             external,
             beside_page: External::default(),
+            tile_reach: None,
         }
     }
 
@@ -739,7 +752,104 @@ impl Context2D {
     where
         F: FnOnce(std::cell::RefMut<'a, PageRecorder>),
     {
-        f(self.recorder.borrow_mut());
+        let mut recorder = self.recorder.borrow_mut();
+        recorder.declare_tile_reach(self.tile_reach);
+        f(recorder);
+    }
+
+    /// Runs `f` with the draws it records declared as `reach` -- see
+    /// `tile_cuts` -- and the declaration before it put back after.
+    fn declaring<R>(
+        &mut self,
+        reach: TileReach,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let was = self.tile_reach.replace(reach);
+        let made = f(self);
+        self.tile_reach = was;
+        made
+    }
+
+    /// Whether the clip lets a draw keep the page's tiles: none, or a
+    /// rectangle in device space, which a tile cuts no differently from
+    /// the page -- see `tile_cuts`.
+    fn clip_keeps_tiles(&self) -> bool {
+        self.state
+            .clip
+            .as_ref()
+            .is_none_or(|clip| clip.is_rect().is_some())
+    }
+
+    /// Whether `style` paints with a colour, which a tile makes pixel by
+    /// pixel as the page does, rather than a shader sampled through the
+    /// inverse of the transform -- see `tile_cuts`.
+    fn painted_solid(&self, style: PaintStyle) -> bool {
+        let dye = match style {
+            PaintStyle::Stroke => &self.state.stroke_style,
+            _ => &self.state.fill_style,
+        };
+        matches!(dye, Dye::Color(..))
+    }
+
+    /// Whether a filter stands between a draw and the page, which the tiles
+    /// were not measured through.
+    fn filtered_for_tiles(&self) -> bool {
+        !self.state.filter.is_none()
+            || self.state.skia_image_filter.is_some()
+            || self.state.skia_color_filter.is_some()
+            || self.state.skia_mask_filter.is_some()
+    }
+
+    /// The device rectangle of a draw whose own is not known, for the page's
+    /// tiles: its clip's, or the page's without one.
+    fn tile_cut_unbounded(&self) -> Rect {
+        self.state
+            .clip
+            .as_ref()
+            .map_or(self.bounds, |clip| *clip.bounds())
+    }
+
+    /// The device rectangle a draw of `local` reaches, for the page's tiles
+    /// -- see `tile_cuts`: where `stroked` names the path stroked, what
+    /// [`drawn_bounds`] gives its stroke, and otherwise `local` widened by
+    /// a pixel of anti-aliasing; then by the shadow it casts, and kept
+    /// within the clip. A filtered draw reaches what its clip does, since a
+    /// filter may move what it draws anywhere.
+    fn tile_cut(&self, local: Rect, stroked: Option<&Path>) -> Rect {
+        let mut reach = match self.filtered_for_tiles() {
+            true => self.bounds,
+            false => {
+                let matrix = &self.state.matrix;
+                let mut device = match stroked {
+                    Some(path) => drawn_bounds(
+                        path,
+                        &self.state.paint,
+                        PaintStyle::Stroke,
+                        matrix,
+                        false,
+                    ),
+                    None => matrix
+                        .map_rect(local)
+                        .0
+                        .with_outset((AA_REACH, AA_REACH)),
+                };
+                if self.casts_shadow() {
+                    let sigma = self.state.shadow_blur / 2.0;
+                    let blur = sigma * REACH_SIGMAS as f32;
+                    let shadow = device
+                        .with_offset(self.state.shadow_offset)
+                        .with_outset((blur, blur));
+                    device.join(shadow);
+                }
+                device
+            }
+        };
+        if let Some(clip) = &self.state.clip
+            && !reach.intersect(*clip.bounds())
+        {
+            reach = Rect::new_empty();
+        }
+        reach
     }
 
     /// Records `f` into every recording the page keeps -- see
@@ -3424,11 +3534,43 @@ impl Context2D {
         style: PaintStyle,
         rule: Option<PathFillType>,
     ) {
-        let mut path = path.unwrap_or_else(|| {
+        let path = path.unwrap_or_else(|| {
             // the current path has already incorporated its transform state
             let inverse = self.state.matrix.invert().unwrap_or_default();
             self.path.snapshot().make_transform(&inverse)
         });
+        // A rectangle filled with a colour under a scale and a translation
+        // is made pixel by pixel from device coordinates, in a tile as in
+        // the page; any other path's edge a tile's side would clip, and a
+        // shader is sampled through a transform the tile's offset rounds
+        // otherwise -- see `tile_cuts`.
+        let rect = style == PaintStyle::Fill
+            && path.is_rect().is_some()
+            && self.state.matrix.is_scale_translate()
+            && self.clip_keeps_tiles()
+            && !self.filtered_for_tiles();
+        let stroked = (style != PaintStyle::Fill).then_some(&path);
+        let reach = match (rect, self.painted_solid(style)) {
+            (true, true) => TileReach::Safe,
+            (false, true) => {
+                TileReach::Cut(self.tile_cut(*path.bounds(), stroked))
+            }
+            (_, false) => {
+                TileReach::Sampled(self.tile_cut(*path.bounds(), stroked))
+            }
+        };
+        self.declaring(reach, |this| {
+            this.draw_path_declared(path, style, rule)
+        });
+    }
+
+    /// [`Self::draw_path`], declared.
+    fn draw_path_declared(
+        &mut self,
+        mut path: Path,
+        style: PaintStyle,
+        rule: Option<PathFillType>,
+    ) {
         path.set_fill_type(rule.unwrap_or(PathFillType::Winding));
 
         // A flat rectangle's shadow is a blurred rectangle, filed as a
@@ -3918,6 +4060,19 @@ impl Context2D {
     }
 
     pub fn clear_rect(&mut self, rect: &Rect) {
+        // A rectangle under a scale and a translation, made pixel by pixel
+        // -- see `tile_cuts`.
+        let reach = match self.state.matrix.is_scale_translate()
+            && self.clip_keeps_tiles()
+        {
+            true => TileReach::Safe,
+            false => TileReach::Cut(self.tile_cut(*rect, None)),
+        };
+        self.declaring(reach, |this| this.clear_rect_declared(rect))
+    }
+
+    /// [`Self::clear_rect`], declared.
+    fn clear_rect_declared(&mut self, rect: &Rect) {
         match self.state.matrix.map_rect(rect).0.contains(self.bounds) {
             // if rect fully encloses canvas, erase existing content (but
             // preserve CTM & clip path)
@@ -3987,6 +4142,26 @@ impl Context2D {
     /// `None` for a picture with no page behind it, which is then one entry
     /// asking for what `source` names.
     pub(crate) fn draw_picture_costing(
+        &mut self,
+        picture: &dyn Fn() -> Option<Picture>,
+        entries: Option<Entries>,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        source: VectorFeatures,
+        cost: usize,
+    ) {
+        // A recording replayed into the page, whose paths a tile's sides
+        // would clip -- see `tile_cuts`.
+        let reach = TileReach::Cut(self.tile_cut(*dst_rect, None));
+        self.declaring(reach, |this| {
+            this.draw_picture_costing_declared(
+                picture, entries, src_rect, dst_rect, source, cost,
+            )
+        })
+    }
+
+    /// [`Self::draw_picture_costing`], declared.
+    fn draw_picture_costing_declared(
         &mut self,
         picture: &dyn Fn() -> Option<Picture>,
         entries: Option<Entries>,
@@ -4193,6 +4368,25 @@ impl Context2D {
         dst_rect: &Rect,
         apart: bool,
     ) {
+        // A canvas drawn in, which may replay its recording into the page
+        // -- see `tile_cuts`.
+        let reach = TileReach::Cut(self.tile_cut(*dst_rect, None));
+        self.declaring(reach, |this| {
+            this.draw_nested_image_declared(
+                image, picture, src_rect, dst_rect, apart,
+            )
+        })
+    }
+
+    /// [`Self::draw_nested_image`], declared.
+    fn draw_nested_image_declared(
+        &mut self,
+        image: &Image,
+        picture: Option<&Picture>,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        apart: bool,
+    ) {
         let whole = |this: &mut Self| {
             this.draw_source_image(
                 &flatten_image(image),
@@ -4310,6 +4504,42 @@ impl Context2D {
     /// see `layer::OnGpu::Raster` -- and a CPU canvas and a document play it
     /// as recorded, so that what either stores or writes for it is unchanged.
     pub fn draw_source_image(
+        &mut self,
+        image: &Image,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        apart: bool,
+    ) {
+        // An image moved by whole pixels and not scaled is copied onto the
+        // page's pixels, in a tile as in the page; any other placement is
+        // sampled through a transform the tile's offset rounds otherwise --
+        // see `tile_cuts`. Asked of the placement Skia draws with: an image
+        // moved part of a pixel is drawn into a rectangle whose far edge is
+        // summed in single precision -- 230.7 + 64 spans 64.000015 -- and
+        // so under a scale a hair off one.
+        let placed = Matrix::concat(
+            &self.state.matrix,
+            &Matrix::rect_2_rect(src_rect, dst_rect, None)
+                .unwrap_or_else(Matrix::new_identity),
+        );
+        let whole = |v: f32| v.fract() == 0.0;
+        let reach = match placed.is_translate()
+            && whole(placed.translate_x())
+            && whole(placed.translate_y())
+            && self.clip_keeps_tiles()
+            && !self.filtered_for_tiles()
+            && !self.casts_shadow()
+        {
+            true => TileReach::Copied(self.tile_cut(*dst_rect, None)),
+            false => TileReach::Sampled(self.tile_cut(*dst_rect, None)),
+        };
+        self.declaring(reach, |this| {
+            this.draw_source_image_declared(image, src_rect, dst_rect, apart)
+        })
+    }
+
+    /// [`Self::draw_source_image`], declared.
+    fn draw_source_image_declared(
         &mut self,
         image: &Image,
         src_rect: &Rect,
@@ -4642,6 +4872,22 @@ impl Context2D {
         src_rect: &Rect,
         dst_rect: &Rect,
     ) -> bool {
+        // Pixels copied in place, untransformed and unclipped -- see
+        // `tile_cuts`.
+        let reach = TileReach::Safe;
+        self.declaring(reach, |this| {
+            this.blit_pixels_raw_declared(info, buffer, src_rect, dst_rect)
+        })
+    }
+
+    /// [`Self::blit_pixels_raw`], declared.
+    fn blit_pixels_raw_declared(
+        &mut self,
+        info: ImageInfo,
+        buffer: Data,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) -> bool {
         // works just like draw_image in terms of src/dst rects, but clears the
         // dst_rect and then draws without clips, transforms, alpha,
         // blend, or shadows
@@ -4807,6 +5053,34 @@ impl Context2D {
     }
 
     pub fn draw_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        width: Option<f32>,
+        style: PaintStyle,
+    ) {
+        // Glyphs filled with a colour under a scale and a translation,
+        // shadowed or not, came out alike in a tile and in the page;
+        // stroked, rotated or under a path's clip they are kept off the
+        // tiles over the clip, and in a shader wherever it touches one --
+        // see `tile_cuts`.
+        let glyphs = style == PaintStyle::Fill
+            && self.state.matrix.is_scale_translate()
+            && self.clip_keeps_tiles()
+            && !self.filtered_for_tiles();
+        let reach = match (glyphs, self.painted_solid(style)) {
+            (true, true) => TileReach::Safe,
+            (false, true) => TileReach::Cut(self.tile_cut_unbounded()),
+            (_, false) => TileReach::Sampled(self.tile_cut_unbounded()),
+        };
+        self.declaring(reach, |this| {
+            this.draw_text_declared(text, x, y, width, style)
+        })
+    }
+
+    /// [`Self::draw_text`], declared.
+    fn draw_text_declared(
         &mut self,
         text: &str,
         x: f32,
@@ -6255,9 +6529,10 @@ thread_local! {
 /// Where a fill or stroke of `path` in `paint` under `matrix` can put
 /// coverage, in device pixels: the path's bounds, widened by the stroke --
 /// half its width, times the miter limit where joins are mitred and the
-/// square root of two where caps are square -- or, where `outline` is set or
-/// a path effect makes the path drawn, the bounds of the outline Skia fills;
-/// and a pixel either side for anti-aliasing, two for a hairline.
+/// path has one, and the square root of two where caps are square -- or,
+/// where `outline` is set or a path effect makes the path drawn, the bounds
+/// of the outline Skia fills; and a pixel either side for anti-aliasing, two
+/// for a hairline.
 fn drawn_bounds(
     path: &Path,
     paint: &Paint,
@@ -6275,8 +6550,12 @@ fn drawn_bounds(
         false if stroked => {
             let reach = [
                 1.0,
+                // A single open segment -- a move and a line -- has no join
+                // for a miter to reach past.
                 match paint.stroke_join() {
-                    PaintJoin::Miter => paint.stroke_miter(),
+                    PaintJoin::Miter if path.count_verbs() > 2 => {
+                        paint.stroke_miter()
+                    }
                     _ => 1.0,
                 },
                 match paint.stroke_cap() {
@@ -6307,6 +6586,57 @@ mod tests {
         node::{filter::FilterSpec, utils::opt_color_space},
         pixels::PixelDepth,
     };
+
+    /// A stroke's reach takes the miter limit only where the path has a
+    /// join for a miter to reach past, and still holds the outline Skia
+    /// fills: a single open segment reaches its half width and a pixel, and
+    /// a corner of 30 degrees reaches past that by its miter.
+    #[test]
+    fn a_stroke_reaches_its_miter_only_where_it_has_a_join() {
+        let mut paint = Paint::default();
+        paint.set_style(PaintStyle::Stroke);
+        paint.set_stroke_width(4.0);
+        paint.set_stroke_join(PaintJoin::Miter);
+        paint.set_stroke_miter(10.0);
+        let turn = 30f32.to_radians();
+        let path = |points: &[(f32, f32)]| {
+            let mut builder = PathBuilder::new();
+            builder.move_to(points[0]);
+            points[1..].iter().for_each(|&p| {
+                builder.line_to(p);
+            });
+            builder.detach()
+        };
+        let line = path(&[(10.0, 10.0), (100.0, 10.0)]);
+        let corner = path(&[
+            (10.0, 10.0),
+            (100.0, 10.0),
+            (100.0 - 90.0 * turn.cos(), 10.0 + 90.0 * turn.sin()),
+        ]);
+        let identity = Matrix::new_identity();
+        let reach = |path: &Path| {
+            drawn_bounds(path, &paint, PaintStyle::Stroke, &identity, false)
+        };
+        let outline = |path: &Path| {
+            let mut filled = PathBuilder::new();
+            fill_path_with_paint(path, &paint, &mut filled, None, None);
+            *filled.detach().bounds()
+        };
+
+        assert_eq!(reach(&line), Rect::new(7.0, 7.0, 103.0, 13.0));
+        for (name, path) in [("line", &line), ("corner", &corner)] {
+            assert!(
+                reach(path).contains(outline(path)),
+                "{name}: {:?} does not hold the outline {:?}",
+                reach(path),
+                outline(path),
+            );
+        }
+        assert!(
+            outline(&corner).right > 100.0 + 2.0 + 1.0,
+            "the corner's miter reaches past its half width and a pixel",
+        );
+    }
 
     /// An sRGB page keeps a recording for pixels only where it composites
     /// in eight bits, while `keeps_two_recordings` -- which places a
