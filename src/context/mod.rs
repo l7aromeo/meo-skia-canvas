@@ -3,11 +3,12 @@ use neon::prelude::*;
 use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data, IRect,
-    Image, ImageFilter as SkImageFilter, ImageInfo, MaskFilter as SkMaskFilter,
-    Paint, PaintCap, PaintJoin, PaintStyle, Path, PathBuilder, PathFillType,
-    PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
-    Shader as SkShader, Size, Typeface, Vector,
+    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data,
+    FilterMode, IPoint, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
+    MaskFilter as SkMaskFilter, MipmapMode, Paint, PaintCap, PaintJoin,
+    PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
+    PictureRecorder, Point, Rect, RoundOut, SamplingOptions,
+    Shader as SkShader, Size, TileMode, Typeface, Vector,
     canvas::SrcRectConstraint::Strict,
     color_filters, dash_path_effect,
     font_style::{FontStyle, Width},
@@ -16,6 +17,7 @@ use skia_safe::{
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
     path_utils::fill_path_with_paint,
+    shaders,
     textlayout::{StrutStyle, TextStyle},
 };
 use std::{
@@ -84,7 +86,7 @@ use layer::{
     Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
     coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
 };
-use page::{ExportOptions, Page, PageRecorder, Recording};
+use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
 use typesetting::{TextSettings, Typesetting, Typography};
 
@@ -147,6 +149,17 @@ const TRANSPARENT: Color = Color::TRANSPARENT;
 /// 0.95 of the other. `tests/suite/external-memory.test.js` holds it to
 /// that count within a tenth.
 pub(crate) const CONTEXT_BYTES: usize = 4_800;
+
+/// A colour matrix making a colour opaque and leaving its red, green and
+/// blue alone: Skia's 4x5 row-major layout (`SkColorMatrix`), one row per
+/// output channel, the fifth column a constant, the alpha row taking the
+/// constant 1.
+const OPAQUE: [f32; 20] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 0.0, 0.0, 1.0,
+];
 
 /// The most grid positions a texture may be stamped at in a single draw.
 ///
@@ -1498,6 +1511,7 @@ impl Context2D {
                             paint_for(pixels),
                             beyond,
                             native.cull_rect(),
+                            text.is_some(),
                             &|canvas, paint| {
                                 draw_in(canvas, pixels, paint, paint)
                             },
@@ -1834,7 +1848,9 @@ impl Context2D {
     ///
     /// `whole` draws with the given paint what the draw records, its shadow
     /// included; `shadow` and `shape` its shadow and itself. `pixels` is
-    /// the paint the page's pixels recording draws with.
+    /// the paint the page's pixels recording draws with. `glyphs` says the
+    /// draw is a run of text, which takes the effect through the CPU's
+    /// coverage of it -- see [`Self::glyphs_with_effect`].
     #[allow(clippy::too_many_arguments)]
     fn gradient_on_gpu(
         &self,
@@ -1843,6 +1859,7 @@ impl Context2D {
         pixels: &Paint,
         beyond: bool,
         reach: Rect,
+        glyphs: bool,
         whole: &dyn Fn(&SkCanvas, &Paint),
         shadow: &dyn Fn(&SkCanvas, &Paint),
         shape: &dyn Fn(&SkCanvas, &Paint),
@@ -1857,16 +1874,106 @@ impl Context2D {
                 BlendMode::SrcOver => None,
                 _ => Some(self.recorded(&|canvas| shape(canvas, &over))?),
             };
-            return self.recorded(&|canvas| whole(canvas, &effect)).map(
-                |picture| layer::OnGpu::Effect {
-                    picture,
-                    over,
-                    blend,
-                    beyond,
-                },
-            );
+            let picture = match glyphs {
+                true => {
+                    self.glyphs_with_effect(dye, paint, pixels, reach, shape)
+                }
+                false => self.recorded(&|canvas| whole(canvas, &effect)),
+            };
+            return picture.map(|picture| layer::OnGpu::Effect {
+                picture,
+                over,
+                blend,
+                beyond,
+            });
         }
         self.raster_on_gpu(paint, pixels, beyond, shadow, shape)
+    }
+
+    /// A run of glyphs dyed by `dye`, as a GPU canvas draws it in the CPU's
+    /// bytes: the effect -- see
+    /// [`GradientSpec::exact`](exact_gradient::GradientSpec::exact) -- over
+    /// an aliased rectangle of the device pixels the run reaches, `reach`,
+    /// masked by the CPU's coverage of the run, through `paint`'s blend.
+    /// Under a blend that reaches beyond the run, the run's recording
+    /// composites over the whole page -- see `render_to_canvas` -- and
+    /// `reach`, what it reaches, is the page, so the rectangle composites
+    /// there too, transparent outside the run. `shape` draws the run with
+    /// the paint it is given; `pixels` is the paint the page's pixels
+    /// recording draws it with.
+    ///
+    /// A glyph's coverage is not the run's geometry alone: Skia sharpens or
+    /// softens a glyph's edge by the luminance of the colour it is drawn
+    /// in, and for a paint with a shader takes that colour from the shader
+    /// -- a gradient's is the mean of its stops, an image's none, which
+    /// Skia reads as mid grey (`just_a_color` in SkPaintPriv.cpp). Drawn
+    /// with an image of the effect as its shader, the run took mid grey's
+    /// edges, and stood up to 24 levels from the CPU canvas along them under
+    /// `xor`, 9 under `source-over`. So the coverage is the CPU's, drawn in
+    /// `pixels` -- the gradient itself, its luminance the CPU's -- with a
+    /// colour filter that makes it opaque: Skia passes a colour filter's
+    /// result on to the luminance, and this one changes none of its colour.
+    /// Ganesh's own coverage would take a large glyph's from its path and
+    /// its antialiasing, not the CPU's. The coverage surface takes the
+    /// canvas's text contrast and gamma, as the page's own surface does:
+    /// under Skia's defaults the edges differ from the page's on Linux and
+    /// on any canvas made with a contrast or gamma of its own.
+    fn glyphs_with_effect(
+        &self,
+        dye: &GradientDye<'_>,
+        paint: &Paint,
+        pixels: &Paint,
+        reach: Rect,
+        shape: &dyn Fn(&SkCanvas, &Paint),
+    ) -> Option<Picture> {
+        let area =
+            IRect::intersect(&reach.round_out(), &self.bounds.round_out())?;
+        let mut covering = pixels.clone();
+        covering
+            .set_color_filter(color_filters::matrix_row_major(
+                &OPAQUE,
+                color_filters::Clamp::No,
+            ))
+            .set_blend_mode(BlendMode::SrcOver);
+        let mut surface = started::raster(
+            &ImageInfo::new(
+                area.size(),
+                ColorType::Alpha8,
+                AlphaType::Premul,
+                None,
+            ),
+            None,
+            Some(&text_surface_props(self.canvas_text.0, self.canvas_text.1)),
+        )?;
+        let target = surface.canvas();
+        target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        target.translate((-area.left as f32, -area.top as f32));
+        target.concat(&self.state.matrix);
+        shape(target, &covering);
+        let coverage = surface.image_snapshot().to_shader(
+            (TileMode::Decal, TileMode::Decal),
+            SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+            Some(&Matrix::translate((area.left as f32, area.top as f32))),
+        )?;
+        // Drawn at the recording's identity, the page's device pixels: the
+        // effect is handed each pixel whole, as an aliased rectangle on
+        // whole pixels hands it.
+        let effect = dye
+            .spec
+            .exact(&self.canvas_color_space, paint.alpha_f())?
+            .placed(&self.state.matrix, IPoint::new(0, 0))?;
+        let mut masked = paint.clone();
+        masked
+            .set_shader(shaders::blend(BlendMode::DstIn, effect, coverage))
+            .set_alpha_f(1.0)
+            .set_anti_alias(false)
+            .set_style(PaintStyle::Fill)
+            .set_path_effect(None);
+        let mut recorder = PictureRecorder::new();
+        recorder
+            .begin_recording(self.bounds, true)
+            .draw_irect(area, &masked);
+        recorder.finish_recording_as_picture(None)
     }
 
     /// How a GPU canvas draws, on the CPU, a draw made with `paint` --
@@ -3554,6 +3661,7 @@ impl Context2D {
                                 pixels,
                                 beyond,
                                 bounds,
+                                false,
                                 &shape,
                                 &|_, _| {},
                                 &shape,

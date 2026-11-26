@@ -7398,7 +7398,7 @@ fn as_jpeg(image: &SkImage, ink: IRect, jpeg: EmbeddedJpeg) -> Option<SkImage> {
 /// The surface properties a page's text is rasterized under: `contrast` and
 /// `gamma`, the canvas's -- see
 /// [`CanvasOptions::text_contrast`](crate::canvas::CanvasOptions::text_contrast).
-fn text_surface_props(contrast: f32, gamma: f32) -> SurfaceProps {
+pub(crate) fn text_surface_props(contrast: f32, gamma: f32) -> SurfaceProps {
     SurfaceProps::new_with_text_properties(
         SurfacePropsFlags::default(),
         PixelGeometry::Unknown,

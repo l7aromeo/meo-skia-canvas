@@ -300,6 +300,165 @@ describe("a gradient on a GPU canvas", () => {
       assert.equal(interiorApart(cpu, 64, 64)(drawn(true, 64, 64, scene)), 0);
     });
 
+  describe("text dyed by a gradient, edges included", () => {
+    const W = 320,
+      H = 70;
+    const OSWALD = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+    // The operators a run takes on the CPU's eight-bit pipeline, which the
+    // effect covers: those that stay within the run, and those that reach
+    // beyond it, from `source-in` on.
+    const OPERATORS = [
+      "source-over",
+      "source-atop",
+      "destination-over",
+      "lighter",
+      "xor",
+      "multiply",
+      "screen",
+      "overlay",
+      "darken",
+      "lighten",
+      "hard-light",
+      "difference",
+      "exclusion",
+      "source-in",
+      "source-out",
+      "destination-in",
+      "destination-out",
+      "destination-atop",
+      "copy",
+    ];
+    // How far the GPU canvas may stand from the CPU canvas: a level, and a
+    // second off arm64, where Skia's eight-bit pipeline divides by 255 as
+    // `(v + 255) / 256`, a level high at worst, rather than exactly as on
+    // NEON (`div255` in SkRasterPipeline_opts.h). A flat colour, the
+    // control, one more: the CPU composites its antialiased edge up to a
+    // level off the exact composite (#626).
+    const BOUND = process.arch == "arm64" ? 1 : 2;
+    const FLAT_BOUND = BOUND + 1;
+    const dyes = {
+      linear: (ctx) => {
+        const g = ctx.createLinearGradient(0, 0, 300, 0);
+        g.addColorStop(0, "rgb(40,90,160)");
+        g.addColorStop(1, "rgb(160,40,90)");
+        return g;
+      },
+      conic: (ctx) => {
+        const g = ctx.createConicGradient(0, 150, 40);
+        g.addColorStop(0, "rgb(40,90,160)");
+        g.addColorStop(0.5, "rgb(160,40,90)");
+        g.addColorStop(1, "rgb(40,90,160)");
+        return g;
+      },
+      // Its coverage is drawn opaque, then the effect's alpha taken over it.
+      translucent: (ctx) => {
+        const g = ctx.createLinearGradient(0, 0, 300, 0);
+        g.addColorStop(0, "rgb(40 90 160 / 0.6)");
+        g.addColorStop(1, "rgb(160 40 90 / 0.9)");
+        return g;
+      },
+      // Near black, whose glyph contrast stands farthest from mid grey's:
+      // FreeType sharpens a glyph by its luminance far less than CoreText
+      // does, and the mid-luminance gradients above barely move it.
+      dark: (ctx) => {
+        const g = ctx.createLinearGradient(0, 0, 300, 0);
+        g.addColorStop(0, "rgb(0,0,0)");
+        g.addColorStop(1, "rgb(20,0,40)");
+        return g;
+      },
+      flat: () => "rgb(40,90,160)",
+    };
+    /** The run in `dye` under `op`, over an opaque page. */
+    const run = (dye, op) => (ctx) => {
+      ctx.fillStyle = "rgb(120,80,60)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.font = "48px GradientRunOswald";
+      ctx.fillStyle = typeof dye == "function" ? dye(ctx) : dye;
+      ctx.globalCompositeOperation = op;
+      ctx.fillText("Hello Wq", 10, 60);
+    };
+    /**
+     * `scene` drawn on the GPU or the CPU, read premultiplied: unpremultiplied,
+     * a level of a pixel at alpha 4 reads as 64.
+     */
+    const premultiplied = (gpu, scene, options = {}) => {
+      const canvas = new Canvas(W, H, options);
+      canvas.gpu = gpu;
+      const ctx = canvas.getContext("2d");
+      scene(ctx);
+      return ctx.getImageData(0, 0, W, H, { alphaType: "premultiplied" }).data;
+    };
+    /** The most any byte of `a` and `b` parts by. */
+    const most = (a, b) => {
+      let gap = 0;
+      for (let i = 0; i < a.length; i++)
+        gap = Math.max(gap, Math.abs(a[i] - b[i]));
+      return gap;
+    };
+
+    test("its glyphs' contrast is the gradient's own", () => {
+      // The control: on the CPU alone, the run dyed by an image of the same
+      // gradient -- a shader that names no colour for the glyphs' contrast,
+      // which Skia then takes as mid grey -- stands far from it. A GPU
+      // route drawing the run through such a shader does the same. The
+      // near-black gradient, which stands 11 levels apart on FreeType and
+      // 46 on CoreText.
+      FontLibrary.use("GradientRunOswald", [OSWALD]);
+      const source = new Canvas(W, H);
+      source.gpu = false;
+      const sctx = source.getContext("2d");
+      sctx.fillStyle = dyes.dark(sctx);
+      sctx.fillRect(0, 0, W, H);
+      const imaged = premultiplied(false, (ctx) =>
+        run(ctx.createPattern(source, "no-repeat"), "xor")(ctx),
+      );
+      const dyed = premultiplied(false, run(dyes.dark, "xor"));
+      assert.ok(most(dyed, imaged) > 4 * BOUND);
+    });
+
+    for (const [name, dye] of Object.entries(dyes))
+      test(
+        `${name}: the GPU canvas stores the CPU canvas's bytes`,
+        { skip },
+        () => {
+          FontLibrary.use("GradientRunOswald", [OSWALD]);
+          const bound = name == "flat" ? FLAT_BOUND : BOUND;
+          const missed = OPERATORS.flatMap((op) => {
+            const gap = most(
+              premultiplied(true, run(dye, op)),
+              premultiplied(false, run(dye, op)),
+            );
+            return gap > bound ? [`${op}: ${gap}`] : [];
+          });
+          assert.deepEqual(missed, []);
+        },
+      );
+
+    test(
+      "under a contrast and gamma of the canvas's own, as on the CPU",
+      { skip },
+      () => {
+        // The run's coverage is the CPU's under the canvas's own contrast
+        // and gamma, not Skia's defaults: unhinted, since hinted macOS text
+        // takes no contrast.
+        FontLibrary.use("GradientRunOswald", [OSWALD]);
+        const options = { textContrast: 0, textGamma: 3 };
+        const scene = (op) => (ctx) => {
+          ctx.textRendering = "geometricPrecision";
+          run(dyes.linear, op)(ctx);
+        };
+        const missed = OPERATORS.flatMap((op) => {
+          const gap = most(
+            premultiplied(true, scene(op), options),
+            premultiplied(false, scene(op), options),
+          );
+          return gap > BOUND ? [`${op}: ${gap}`] : [];
+        });
+        assert.deepEqual(missed, []);
+      },
+    );
+  });
+
   const sweepScene = (ctx) => {
     ctx.fillStyle = sweep(ctx);
     ctx.fillRect(0, 0, 64, 64);

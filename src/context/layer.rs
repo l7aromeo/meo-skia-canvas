@@ -2562,7 +2562,10 @@ pub enum OnGpu {
     /// see [`GradientDye`](super::GradientDye) -- and otherwise an image of
     /// it -- see
     /// [`GradientSpec::sampled`](super::exact_gradient::GradientSpec::sampled)
-    /// -- whose texels are the page's device pixels. Played under any
+    /// -- whose texels are the page's device pixels. A run of glyphs is
+    /// recorded as the effect over the pixels it reaches, masked by the
+    /// CPU's coverage of the run, whose edges a glyph takes from the
+    /// gradient -- see `Context2D::glyphs_with_effect`. Played under any
     /// other mapping than onto whole pixels -- a canvas drawn into another
     /// under a scale, say -- the image would be resampled, so the draw is
     /// made on the CPU instead: over the GPU's pixels, `beyond` saying as
