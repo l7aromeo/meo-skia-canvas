@@ -131,6 +131,13 @@ const DRAWS = 3;
 /** Frames a changing canvas is drawn into a page never cleared. */
 const FRAMES = 24;
 
+/**
+ * Canvases dropped while a count is being taken: enough that their
+ * contexts move the count by more than anything else the process does
+ * between two readings, few enough to cost nothing.
+ */
+const LATE_CANVASES = 10;
+
 /** Fills drawn on a page whose recording is to weigh something. */
 const FILLS = 1000;
 
@@ -141,17 +148,50 @@ const FILLS = 1000;
 const FILL_RECORD_BYTES = 16;
 
 /**
- * What this addon has reported once everything collectable has been
- * collected and finalized. Neon runs a finalizer only once the event loop
- * turns, so a collection alone leaves a dropped object counted.
+ * Rounds of a collection and a turn that `settled` reads in a row without
+ * the count moving before it takes the count: two, so that an object
+ * dropped during one round's turn, after its collection, is collected in
+ * the next and finalized on that round's turn, and the round after reads
+ * it gone.
  */
-const settled = async () => {
-  collect();
-  await turn();
-  collect();
+const QUIET_ROUNDS = 2;
+
+/**
+ * The most rounds `settled` takes before it gives up and fails: a count
+ * still moving this long is a defect to report rather than one to wait
+ * out, and a test that hangs reports nothing.
+ */
+const SETTLE_ROUNDS = 64;
+
+/** What this addon reports now. */
+const reportedNow = () => {
   const reported = skiaNode.__reportedMemory();
   assert.equal(typeof reported, "number", "the addon reports its count");
   return /** @type {number} */ (reported);
+};
+
+/**
+ * What this addon has reported once everything collectable has been
+ * collected and finalized: read after each collection and turn, until
+ * `QUIET_ROUNDS` in a row leave it where it stood. Neon runs a finalizer
+ * only once the event loop turns, so a collection alone leaves a dropped
+ * object counted, and an object dropped while the count is being taken
+ * is finalized a round later than one dropped before.
+ */
+const settled = async () => {
+  let reported = reportedNow();
+  let quiet = 0;
+  for (let round = 0; round < SETTLE_ROUNDS; round++) {
+    collect();
+    await turn();
+    const now = reportedNow();
+    quiet = now === reported ? quiet + 1 : 0;
+    reported = now;
+    if (quiet === QUIET_ROUNDS) return reported;
+  }
+  assert.fail(
+    `the count still moved after ${SETTLE_ROUNDS} rounds, at ${reported}`,
+  );
 };
 
 describe("Native memory reported to V8", () => {
@@ -599,6 +639,39 @@ describe("Native memory reported to V8", () => {
         (await settled()) - before,
         0,
         "what stays counted once the image is finalized",
+      );
+    },
+  );
+
+  // A canvas a test drops can be finalized after the next test has taken
+  // its count, and lands in that test's reading as a release it never
+  // made: 4,000 contexts the allocator's test held once did, -19,196,593
+  // where 3,407 was expected (#824). Dropped here on the turn `settled`
+  // collects on, so that its finalizer is still waiting when a count taken
+  // a round too early would be read.
+  test(
+    "takes its count once a canvas dropped while counting is released",
+    { skip: why ?? false },
+    async () => {
+      const live = Array.from({ length: LATE_CANVASES }, () => {
+        const canvas = cpuCanvas();
+        canvas.getContext("2d");
+        return canvas;
+      });
+      const held = await settled();
+      setImmediate(() => {
+        live.length = 0;
+      });
+      const before = await settled();
+      assert.equal(
+        held - before,
+        LATE_CANVASES * CONTEXT_BYTES,
+        "the contexts dropped while the count was taken",
+      );
+      assert.equal(
+        (await settled()) - before,
+        0,
+        "what is released after the count was taken",
       );
     },
   );
