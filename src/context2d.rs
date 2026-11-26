@@ -9094,6 +9094,14 @@ mod translucent_text_tests {
     const W: f32 = 360.0;
     const H: f32 = 120.0;
 
+    /// The fewest pixels a scene's run covers for its check to have
+    /// anything to fail on: chosen, thousands, and below the fewest any
+    /// scene was measured to cover. The clipped scene covers the fewest:
+    /// 3,131 pixels through CoreText on macOS and 2,791 through FreeType
+    /// on Linux, which inks the face thinner -- 7,469 pixels for the whole
+    /// run against 8,484.
+    const ENOUGH_COVERED: usize = 2000;
+
     /// The colours drawn: the issue's two, and a grey, whose colour placed
     /// for the page's bytes at 0.3 sits in another of Skia's contrast
     /// buckets than the grey named -- see
@@ -9429,8 +9437,10 @@ mod translucent_text_tests {
             );
             let apart = apart(&opaque, &translucent, fill);
             let covered = apart.iter().flatten().count();
-            // Thousands, or the scene holds nothing to fail.
-            assert!(covered > 3000, "{rgb:?} {scene:?}: {covered} covered");
+            assert!(
+                covered > ENOUGH_COVERED,
+                "{rgb:?} {scene:?}: {covered} covered"
+            );
             // Where an anti-aliased clip's edge crosses the run, Skia applies
             // the clip's coverage to the coloured run as it composites it,
             // which rounds each value once more: within a level there. The
@@ -9811,7 +9821,10 @@ mod translucent_text_tests {
                 let apart = apart(&opaque, &translucent, filled(rgb, scene));
                 let most = apart.iter().flatten().max().copied().unwrap_or(0);
                 let covered = apart.iter().flatten().count();
-                assert!(covered > 3000, "{rgb:?} {scene:?}: {covered} covered");
+                assert!(
+                    covered > ENOUGH_COVERED,
+                    "{rgb:?} {scene:?}: {covered} covered"
+                );
                 if most > u32::from(bound) {
                     problems.push(format!(
                         "{rgb:?} at {}: {most} levels off the product",
