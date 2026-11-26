@@ -61,6 +61,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use parking_lot::Mutex;
+
 thread_local! {
     /// [`family_of`]'s answers, by the face's [`base_face`].
     static FAMILIES: RefCell<CacheMap<TypefaceId, String>> =
@@ -526,6 +528,15 @@ pub struct RunPaint {
     /// built for every playback instead, they were 7.4% of the samples of a
     /// page of 40 runs drawn and read on the CPU, in a release build.
     raster_blobs: OnceLock<Vec<Option<TextBlob>>>,
+    /// Whether a face of the run draws its own colours -- see
+    /// [`draws_own_colours`].
+    own_colours: bool,
+    /// For a run whose faces draw their own colours, on a build that keys
+    /// them -- see [`KEYS_OWN_COLOUR_BLOBS`] -- the blobs
+    /// [`Self::built_keyed_blobs`] builds for draws onto a GPU canvas, by
+    /// the paint they were drawn in, the least recently drawn first and at
+    /// most [`BLOB_PAINTS`] of them -- see [`Self::paint`].
+    gpu_blobs: Mutex<Vec<PaintedBlobs>>,
 }
 
 /// What a draw of a [`RunPaint`] depends on besides the canvas: the
@@ -554,10 +565,7 @@ impl LaidOut {
     /// Whether the run holds a glyph the platform draws in its own colours
     /// -- see [`draws_own_colours`].
     pub(crate) fn draws_own_colours(&self) -> bool {
-        self.drawn
-            .runs
-            .iter()
-            .any(|run| draws_own_colours(&run.font.typeface()))
+        self.drawn.own_colours
     }
 
     fn new(
@@ -583,6 +591,9 @@ impl LaidOut {
             .max(spans.last().map(|span| span.line + 1))
             .unwrap_or(0);
         let glyphs = runs.iter().map(|run| run.glyphs.len()).sum();
+        let own_colours = runs
+            .iter()
+            .any(|run| draws_own_colours(&run.font.typeface()));
         Self {
             layout,
             drawn: Arc::new(RunPaint {
@@ -593,6 +604,8 @@ impl LaidOut {
                 lines,
                 placed: Placed::default(),
                 raster_blobs: OnceLock::new(),
+                own_colours,
+                gpu_blobs: Mutex::default(),
             }),
             blobs: RefCell::new(Vec::new()),
             bytes: laid_out_bytes(glyphs),
@@ -985,7 +998,11 @@ impl RunPaint {
     /// blob into its pixels as it is drawn, and keeps nothing a GPU draws
     /// again, so there the blobs are kept -- see [`Self::raster_blobs`].
     /// A recording is not a raster: one played on the GPU later draws the
-    /// blobs it holds there.
+    /// blobs it holds there. A run whose faces draw their own colours, on a
+    /// build that keys its blobs -- see [`KEYS_OWN_COLOUR_BLOBS`] -- is
+    /// drawn onto a GPU canvas from blobs kept by the paint they were drawn
+    /// in, one colour each, so that Ganesh finds the masks it made for each
+    /// matrix -- see [`Self::gpu_blobs`].
     pub fn paint(
         &self,
         canvas: &Canvas,
@@ -1014,9 +1031,71 @@ impl RunPaint {
                 );
                 return;
             }
+            if KEYS_OWN_COLOUR_BLOBS && self.own_colours && on_gpu(canvas) {
+                let blobs = self.gpu_blobs(paint);
+                self.paint_from(
+                    canvas,
+                    origin,
+                    paint,
+                    global_alpha,
+                    faint,
+                    &blobs,
+                );
+                return;
+            }
             let blobs = self.built_plain_blobs();
             self.paint_from(canvas, origin, paint, global_alpha, faint, &blobs);
         });
+    }
+
+    /// The blobs a run whose faces draw their own colours is drawn from onto
+    /// a GPU canvas in `paint`: kept for it -- see [`PaintedBlobs::matches`]
+    /// -- or built now by [`Self::built_keyed_blobs`] and kept, letting the
+    /// paint drawn in least recently go past [`BLOB_PAINTS`].
+    ///
+    /// Kept, since each carries [`MATRIX_KEY_GLYPH_SIZE`]'s run, which has
+    /// Ganesh keep its masks for each matrix a blob is drawn under, so that
+    /// a page read again at a scale it was read at draws from the masks
+    /// made for it.
+    fn gpu_blobs(&self, paint: &Paint) -> Arc<[Option<TextBlob>]> {
+        let mut kept = self.gpu_blobs.lock();
+        if let Some(at) = kept.iter().position(|painted| painted.matches(paint))
+        {
+            let drawn = kept.remove(at);
+            let blobs = Arc::clone(&drawn.blobs);
+            kept.push(drawn);
+            return blobs;
+        }
+        if kept.len() == BLOB_PAINTS {
+            kept.remove(0);
+        }
+        let blobs: Arc<[Option<TextBlob>]> = self.built_keyed_blobs().into();
+        kept.push(PaintedBlobs {
+            paint: paint.clone(),
+            blobs: Arc::clone(&blobs),
+            inks: Vec::new(),
+        });
+        blobs
+    }
+
+    /// [`Self::built_plain_blobs`], each run in a face that draws its own
+    /// colours with a run of [`MATRIX_KEY_GLYPH_SIZE`] beside its glyphs --
+    /// see [`built_blob`].
+    fn built_keyed_blobs(&self) -> Vec<Option<TextBlob>> {
+        #[cfg(test)]
+        BLOB_BUILDS.set(BLOB_BUILDS.get() + 1);
+        zip(&self.runs, &self.shears)
+            .map(|(run, &shear)| match draws_colour_glyphs(&run.font) {
+                true => None,
+                false => built_blob(
+                    &run.font,
+                    &run.glyphs,
+                    &run.positions,
+                    shear,
+                    draws_own_colours(&run.font.typeface()),
+                ),
+            })
+            .collect()
     }
 
     /// [`Self::built_blobs`] for the runs a draw paints as glyph masks, and
@@ -1963,6 +2042,54 @@ pub(crate) fn sheared_blob(
     positions: &[Point],
     shear: Shear,
 ) -> Option<TextBlob> {
+    built_blob(font, glyphs, positions, shear, false)
+}
+
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test colour_bitmaps_after_a_larger_draw_draw_afresh
+// on a GPU machine against crates.io's Skia, where this route is on. It holds
+// that build to a paragraph's colour bitmaps drawn from an earlier scale's
+// masks, as SkParagraph draws blobs of its own that this route never builds,
+// and fails there once Ganesh reuses a transformed mask only at the matrix it
+// was made for -- then the route, and
+// containers/skia-transformed-mask-reuse.patch, can both go.
+/// Whether a run whose faces draw their own colours is drawn onto a GPU
+/// canvas from blobs keyed by the matrix they are drawn under, and drawn
+/// again where its page is played rather than recorded -- see
+/// [`MATRIX_KEY_GLYPH_SIZE`] and `context::layer::ReplayedText`.
+///
+/// Only on a build whose Skia lacks
+/// `containers/skia-transformed-mask-reuse.patch`, which reuses a
+/// transformed mask only at the matrix it was made for, and so needs
+/// neither. The patch also covers the Paragraph API, whose blobs SkParagraph
+/// builds itself, and this route does not.
+pub(crate) const KEYS_OWN_COLOUR_BLOBS: bool =
+    !cfg!(meo_transformed_mask_reuse);
+
+/// The size of the run [`built_blob`] puts beside a run whose face draws its
+/// own colours: one space, small enough that any matrix a page is read under
+/// draws it as a direct mask.
+///
+/// Ganesh draws a glyph with no outline at 254 device pixels or more as a
+/// transformed mask made for the matrix its blob was first drawn under, and
+/// its blob cache keys a blob by its matrix only where some run of it is a
+/// direct mask (`TextBlob::Key::Make`, src/text/gpu/TextBlob.cpp,
+/// `fHasSomeDirectSubRuns`); otherwise by the blob alone, so a blob drawn
+/// again under a smaller matrix drew the mask made for the larger. A direct
+/// run needs a size above 0 (`SubRunControl::isDirect`), and a space inks
+/// nothing. Only blobs drawn onto a GPU canvas carry it: a document would
+/// write it, since SkPDFDevice skips only a run of no size.
+const MATRIX_KEY_GLYPH_SIZE: f32 = 1.0;
+
+/// [`sheared_blob`], with a run of [`MATRIX_KEY_GLYPH_SIZE`] at the first
+/// glyph's place where `keyed` asks and `font`'s face has a space.
+fn built_blob(
+    font: &Font,
+    glyphs: &[GlyphId],
+    positions: &[Point],
+    shear: Shear,
+    keyed: bool,
+) -> Option<TextBlob> {
     let (sheared, moved, bounds) = match shear {
         Shear::None => (Cow::Borrowed(font), Cow::Borrowed(positions), None),
         Shear::By(shear) => {
@@ -1984,6 +2111,15 @@ pub(crate) fn sheared_blob(
         builder.alloc_run_pos(&sheared, glyphs.len(), bounds.as_ref());
     into_glyphs.copy_from_slice(glyphs);
     into_positions.copy_from_slice(&moved);
+    let space = font.typeface().unichar_to_glyph(' ' as i32);
+    if let Some(&at) = moved.first().filter(|_| keyed && space != 0) {
+        let key = Font::from_typeface(font.typeface(), MATRIX_KEY_GLYPH_SIZE);
+        // Bounded by nothing, so that the blob's bounds are its glyphs'.
+        let (key_glyphs, key_positions) =
+            builder.alloc_run_pos(&key, 1, Some(&Rect::new_empty()));
+        key_glyphs[0] = space;
+        key_positions[0] = at;
+    }
     builder.make()
 }
 

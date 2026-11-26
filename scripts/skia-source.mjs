@@ -244,7 +244,7 @@ const TEXT_DISTANCE_FIELDS_OFF = join(
 );
 
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-// Re-check: cargo test colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw against crates.io's Skia on macOS, where Apple Color Emoji is; it holds that build to emoji drawn from the earlier scale's masks, and fails there once a transformed mask is reused only at the matrix it was made for
+// Re-check: cargo test colour_bitmaps_after_a_larger_draw_draw_afresh against crates.io's Skia on a GPU machine; it holds that build to a paragraph's colour bitmaps drawn from an earlier scale's masks, and fails there once a transformed mask is reused only at the matrix it was made for
 //
 // A glyph with no outline -- a colour bitmap such as an emoji -- at 254
 // device pixels or more is drawn from a transformed mask, a bitmap made for
@@ -256,7 +256,10 @@ const TEXT_DISTANCE_FIELDS_OFF = join(
 // scale, rotation and skew they were made for, compared exactly; translation
 // alone still reuses, and a blob only rebuilds when that matrix changes. Not
 // covered: a sub-run read back from a buffer, as a slug is, has no matrix to
-// compare and keeps the old rule. This crate makes no slugs.
+// compare and keeps the old rule. This crate makes no slugs. Without the
+// patch, `KEYS_OWN_COLOUR_BLOBS` in src/node/typography.rs draws such runs
+// from blobs Ganesh keys by their matrix, on every route but the Paragraph
+// API, whose blobs SkParagraph builds; that route is why the patch stays.
 const TRANSFORMED_MASK_REUSE = join(
   "containers",
   "skia-transformed-mask-reuse.patch",

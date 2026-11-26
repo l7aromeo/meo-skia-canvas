@@ -18,7 +18,10 @@
 //!   device pixels or more is a transformed mask made for one matrix, and a
 //!   cached blob of them was drawn at any other scale.
 //!   `containers/skia-transformed-mask-reuse.patch` reuses one only at the
-//!   matrix it was made for.
+//!   matrix it was made for. Without it, a run whose blobs this library builds
+//!   is drawn on a GPU canvas from blobs Ganesh keys by their matrix
+//!   (`KEYS_OWN_COLOUR_BLOBS` in src/node/typography.rs), and a paragraph,
+//!   whose blobs SkParagraph builds, is not.
 //!
 //! A crate build's Skia carries neither, and
 //! `cfg(meo_text_distance_fields_off)` and `cfg(meo_transformed_mask_reuse)`,
@@ -67,6 +70,13 @@ const OSWALD: &str = concat!(
 const RALEWAY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf"
+);
+
+/// A bundled colour bitmap face, whose glyphs are PNG images in `sbix`, as
+/// Apple Color Emoji's are.
+const SBIX: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/assets/fonts/bitmap-colour/sbix.ttf"
 );
 
 /// The page of issue #622: 96px text under a 2.4 scale, 230 device pixels,
@@ -328,52 +338,195 @@ fn text_after_a_larger_draw_of_it_draws_as_a_fresh_draw() {
     }
 }
 
-/// Apple Color Emoji, a colour bitmap (`sbix`) face, is on macOS only, so
-/// elsewhere the test says it is skipped: no bundled face has bitmap glyphs.
+/// What a scene sets on the context beside its text, answering the width
+/// to condense the text to where it has one.
+type Style<'a> = &'a dyn Fn(&mut Context2D) -> Option<f32>;
+
+/// Two colour bitmap glyphs, set in [`SBIX`] at `px` under a `scale` and
+/// whatever `style` sets beside, onto `ctx`, condensed to the width `style`
+/// answers where it answers one.
+fn colour_bitmaps(ctx: &mut Context2D, px: f32, scale: f32, style: Style) {
+    ctx.scale(scale, scale);
+    ctx.set_font(&Font::new("HistorySbix", px));
+    let width = style(ctx);
+    ctx.fill_text(
+        "\u{1F600}\u{2662}",
+        4.0,
+        (200.0 / scale - 4.0).min(px),
+        width,
+    );
+}
+
 #[test]
-fn colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw() {
+fn colour_bitmaps_after_a_larger_draw_draw_afresh() {
     if !has_gpu() {
         return;
     }
-    if FontLibrary::new()
-        .family_details("Apple Color Emoji")
-        .is_none()
-    {
-        eprintln!("skipped: no Apple Color Emoji, a colour bitmap face");
-        return;
-    }
-    // 200px under 1.7 and 400px under 1: 340 and 400 device pixels at
+    register("HistorySbix", SBIX);
+    let library = FontLibrary::new();
+    library
+        .register_font_from_data(
+            "ParagraphSbix",
+            &std::fs::read(SBIX).expect("a bundled face"),
+        )
+        .expect("a bundled face registers");
+    let plain = |_: &mut Context2D| None;
+    let shadowed = |ctx: &mut Context2D| {
+        ctx.set_filter_css("drop-shadow(0 0 3px black)")
+            .expect("a filter");
+        None
+    };
+    let blurred = |ctx: &mut Context2D| {
+        ctx.set_filter_css("blur(2px)").expect("a filter");
+        None
+    };
+    let multiplied = |ctx: &mut Context2D| {
+        ctx.set_global_composite_operation(BlendMode::Multiply);
+        None
+    };
+    // Narrower than the two glyphs at either size, so the run is squeezed.
+    let condensed = |_: &mut Context2D| Some(120.0);
+    let styles: [(&str, Style); 5] = [
+        ("plain", &plain),
+        ("drop-shadow", &shadowed),
+        ("blur", &blurred),
+        ("multiply", &multiplied),
+        ("condensed", &condensed),
+    ];
+    // From 200px under 1.7 and 400px under 1: 340 and 400 device pixels at
     // density 1, past the 254 where a bitmap glyph becomes a transformed
-    // mask, at every density read.
-    let worst: Vec<u8> = [(200.0, 1.7), (400.0, 1.0)]
-        .into_iter()
-        .flat_map(|(px, scale)| {
-            let scene = move || {
-                let mut canvas = Canvas::new(400.0, 200.0);
-                let ctx = canvas.context();
-                ctx.scale(scale, scale);
-                ctx.set_font(&Font::new("Apple Color Emoji", px));
-                ctx.fill_text(
-                    "\u{1F600}\u{1F680}",
-                    4.0,
-                    (200.0 / scale - 4.0).min(px),
-                    None,
-                );
-                canvas
-            };
-            [(3, 1), (1, 3)]
-                .map(|(first, then)| after_another_scale(&scene, first, then))
-        })
-        .collect();
+    // mask, at every density read. Each check sets its run a pixel larger
+    // than the last, so that its fresh draw is the run's first, drawn from
+    // blobs of its own: Ganesh keeps a blob's masks for each scale it has
+    // drawn it at, and one fresh draw sharing the history's blobs puts the
+    // mask for its scale there first, which hides the defect.
+    let mut apart = Vec::new();
+    let mut size = 0.0;
+    for (px, scale) in [(200.0, 1.7), (400.0, 1.0)] {
+        for (name, style) in styles {
+            for route in ROUTES {
+                for (first, then) in [(3, 1), (1, 3)] {
+                    let px = px + size;
+                    size += 1.0;
+                    let on_page = || {
+                        let mut canvas = Canvas::new(400.0, 200.0);
+                        colour_bitmaps(canvas.context(), px, scale, style);
+                        canvas
+                    };
+                    let scene = || match route {
+                        "page" => on_page(),
+                        "drawCanvas" => {
+                            let mut source = on_page();
+                            let mut canvas = Canvas::new(400.0, 200.0);
+                            canvas.context().draw_canvas(&mut source, 0.0, 0.0);
+                            canvas
+                        }
+                        "pattern" => {
+                            let mut source = on_page();
+                            let mut canvas = Canvas::new(400.0, 200.0);
+                            let ctx = canvas.context();
+                            let pattern = ctx.create_pattern_from_canvas(
+                                &mut source,
+                                PatternRepeat::NoRepeat,
+                            );
+                            ctx.set_fill_pattern(&pattern);
+                            ctx.fill_rect(0.0, 0.0, 400.0, 200.0);
+                            canvas
+                        }
+                        _ => {
+                            let mut canvas = Canvas::new(400.0, 200.0);
+                            let ctx = canvas.context();
+                            // A paragraph has no `maxWidth`: condensed, it
+                            // is drawn as it is plain.
+                            style(ctx);
+                            let layout = sbix_paragraph(&library, px);
+                            ctx.scale(scale, scale);
+                            ctx.draw_paragraph(&layout, 4.0, 0.0);
+                            canvas
+                        }
+                    };
+                    let fresh = read_at(&mut scene(), then);
+                    assert!(
+                        fresh.iter().any(|&b| b != 0),
+                        "{name} {route} at {px}px drew nothing"
+                    );
+                    let mut canvas = scene();
+                    read_at(&mut canvas, first);
+                    let worst = fresh
+                        .iter()
+                        .zip(&read_at(&mut canvas, then))
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap_or(0);
+                    if worst > 0 {
+                        apart.push((px, name, route, first, then, worst));
+                    }
+                }
+            }
+        }
+    }
     if cfg!(meo_transformed_mask_reuse) {
-        assert_eq!(worst, [0, 0, 0, 0]);
-    } else {
         assert!(
-            worst.iter().any(|&w| w > 0),
-            "crates.io's Skia drew the emoji after another scale's as \
-             afresh; it reuses a transformed mask only at its own matrix now"
+            apart.is_empty(),
+            "drawn apart after another scale: {apart:?}"
+        );
+    } else {
+        // Without the patch, a run this library builds the blobs of is drawn
+        // from blobs keyed by their matrix, and a paragraph, whose blobs
+        // SkParagraph builds, is not -- see `KEYS_OWN_COLOUR_BLOBS` in
+        // src/node/typography.rs.
+        let (paragraphs, others): (Vec<_>, Vec<_>) = apart
+            .into_iter()
+            .partition(|&(_, _, route, ..)| route == "paragraph");
+        assert!(
+            others.is_empty(),
+            "drawn apart after another scale: {others:?}"
+        );
+        assert!(
+            !paragraphs.is_empty(),
+            "crates.io's Skia drew a paragraph's colour bitmaps after a larger \
+             draw as afresh; it reuses a transformed mask only at its matrix \
+             there now"
         );
     }
+}
+
+/// The routes [`colour_bitmaps`]' runs are checked on: drawn on the page,
+/// drawn onto another canvas, filled as a canvas pattern, and laid out by
+/// the Paragraph API -- see [`sbix_paragraph`].
+const ROUTES: [&str; 4] = ["page", "drawCanvas", "pattern", "paragraph"];
+
+/// [`colour_bitmaps`]' two glyphs laid out by the Paragraph API at `px`, in
+/// [`SBIX`] registered in `library` as `ParagraphSbix`.
+///
+/// One library for every scene, as one face: on a GPU canvas, a paragraph in
+/// one registration of [`SBIX`] read a level apart from the same paragraph
+/// in another, with nothing drawn before either, at sizes drawn from
+/// transformed masks -- not at one drawn from direct masks, nor on the CPU.
+///
+/// Checked to have resolved that face, by its width against `fillText`'s:
+/// a paragraph that fell back to another face would be checked in it.
+fn sbix_paragraph(library: &FontLibrary, px: f32) -> Paragraph {
+    let style = TextStyle {
+        font_families: vec!["ParagraphSbix".into()],
+        font_size: px,
+        color: RgbaLinear::from_srgb8(0, 0, 0, 1.0),
+        ..TextStyle::default()
+    };
+    let engine = TextEngine::new(library);
+    let mut builder = engine.paragraph_builder(&style);
+    builder.add_text("\u{1F600}\u{2662}");
+    let layout = builder.build(f32::INFINITY);
+    let mut probe = Canvas::new(1.0, 1.0);
+    let ctx = probe.context();
+    ctx.set_font(&Font::new("HistorySbix", px));
+    let set = ctx.measure_text("\u{1F600}\u{2662}", None).width;
+    assert!(
+        (layout.max_intrinsic_width() - set).abs() < 0.5,
+        "the paragraph set {} px wide, fillText {set}",
+        layout.max_intrinsic_width()
+    );
+    layout
 }
 
 /// This repository's builds compile the tree `scripts/skia-source.mjs`
