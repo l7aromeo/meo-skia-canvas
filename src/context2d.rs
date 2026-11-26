@@ -9347,19 +9347,40 @@ mod translucent_text_tests {
 
     /// How many covered pixels a scene's alpha stands off `model` at, and
     /// how many it covers, the coverage `c` of each read from the run
-    /// drawn opaque.
+    /// drawn opaque, leaving out the pixels two glyphs share -- see
+    /// [`shared`].
     fn alpha_off(
         opaque: &[u8],
         translucent: &[u8],
+        shared: &[bool],
         a: u32,
         model: fn(u32, u32) -> u32,
     ) -> (usize, usize) {
-        zip(opaque.chunks(4), translucent.chunks(4))
-            .filter(|(o, _)| o[3] > 0)
+        zip(zip(opaque.chunks(4), translucent.chunks(4)), shared)
+            .filter(|((o, _), shared)| o[3] > 0 && !**shared)
+            .map(|(pixel, _)| pixel)
             .fold((0, 0), |(off, covered), (o, t)| {
                 let off_here = u32::from(t[3]) != model(a, u32::from(o[3]));
                 (off + usize::from(off_here), covered + 1)
             })
+    }
+
+    /// Whether each pixel of the run `scene` draws in `rgb` is one two of
+    /// its glyphs share. The second is composited over the first there, as
+    /// a raster composites a blob's glyphs, so the pixel is no one product
+    /// of the run's coverage, and how many there are and what they land
+    /// moves with the platform's glyph masks. Found as where the run drawn
+    /// opaque under `lighter`, which adds the glyphs' coverage, parts from
+    /// it drawn `source-over`, which does not.
+    fn shared(rgb: [u8; 3], scene: Scene) -> Vec<bool> {
+        let opaque_in = |blend| drawn(rgb, Scene { blend, ..scene }, true);
+        let (over, added) = (
+            opaque_in(BlendMode::SourceOver),
+            opaque_in(BlendMode::Lighter),
+        );
+        zip(over.chunks(4), added.chunks(4))
+            .map(|(over, added)| over[3] != added[3])
+            .collect()
     }
 
     /// `rgb` at `alpha`, named in `space`, as CSS.
@@ -9460,22 +9481,11 @@ mod translucent_text_tests {
             };
             let edges = zip(opaque.chunks(4), unclipped.chunks(4))
                 .map(|(clipped, whole)| clipped[3] != whole[3]);
-            // Where two of the run's glyphs share a pixel, the second is
-            // composited over the first, as a raster composites a blob's
-            // glyphs, and the pixel is no one product of the run's coverage:
-            // left to the tests against the GPU, which composites them so as
-            // well. Found as where the run drawn opaque under `lighter`,
-            // which adds the glyphs' coverage, parts from it drawn
-            // `source-over`, which does not.
-            let opaque_in = |blend| drawn(rgb, Scene { blend, ..scene }, true);
-            let (over, added) = (
-                opaque_in(BlendMode::SourceOver),
-                opaque_in(BlendMode::Lighter),
-            );
-            let shared = zip(over.chunks(4), added.chunks(4))
-                .map(|(over, added)| over[3] != added[3]);
+            // A pixel two of the run's glyphs share is left to the tests
+            // against the GPU, which composites them so as well.
+            let shared = shared(rgb, scene);
             let (mut off, mut on_edge, mut overlaps) = (0, 0, 0);
-            for ((apart, edge), shared) in zip(zip(&apart, edges), shared) {
+            for ((apart, edge), &shared) in zip(zip(&apart, edges), &shared) {
                 let Some(apart) = apart else { continue };
                 if shared {
                     overlaps += 1;
@@ -9552,7 +9562,9 @@ mod translucent_text_tests {
     #[test]
     fn without_the_route_translucent_text_lands_skias_shifted_product() {
         // The control: the same scenes, the route off, land the product
-        // Skia's blit does on every pixel, and stand off the exact one.
+        // Skia's blit does on every pixel no two glyphs share, and stand off
+        // the exact one. A shared pixel lands either only by chance, and
+        // which chance moves with the platform's glyph masks.
         // Grey at 0.3 is the exception: its paint is a colour shader of the
         // grey through the filter `layer::ExactColour::nearest_text_paint`
         // keeps its glyph contrast with, which Skia blits through its
@@ -9564,9 +9576,11 @@ mod translucent_text_tests {
             let (opaque, translucent) =
                 (drawn(rgb, scene, true), drawn(rgb, scene, false));
             let a = byte(scene.alpha);
-            let (shifted_off, _) = alpha_off(&opaque, &translucent, a, shifted);
+            let shared = shared(rgb, scene);
+            let (shifted_off, _) =
+                alpha_off(&opaque, &translucent, &shared, a, shifted);
             let (exact_off, covered) =
-                alpha_off(&opaque, &translucent, a, product);
+                alpha_off(&opaque, &translucent, &shared, a, product);
             match rgb == [128, 128, 128] {
                 true => {
                     assert_eq!(exact_off, 0, "{rgb:?}: of {covered}");
