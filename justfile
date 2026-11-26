@@ -254,18 +254,21 @@ precommit: ensure-deps check-docs check-cargo-lock check-skia-patches
 #
 # `base` decides which question the Rust half is asked, and the three callers
 # want two different ones. `precommit` passes nothing and gets the staged diff,
-# because that is what is about to become a commit. `ci` passes `origin/main`
-# and gets the range a pull request will be reviewed over -- a contributor who
-# declined the opt-in hook runs `ci` to find out what CI will say, and the
-# staged diff is empty on a clean tree, which is the normal state after a
-# commit. Asked that way the Rust half examined nothing and reported success.
-# It now prints how many files and added lines each pass read, so a zero reads
-# as a zero rather than as coverage. `rust-ci.yml` asks the range form itself,
-# against the pull request's own base.
+# because that is what is about to become a commit. `prepush`, and `ci` through
+# it, pass `origin/main` and get everything between its merge base and the work
+# tree: what a pull request will be reviewed over, and what is staged or not
+# yet staged on top. A contributor who declined the opt-in hook runs `prepush`
+# to find out what CI will say, and the staged diff is empty on a clean tree,
+# which is the normal state after a commit; asked that way the Rust half
+# examined nothing and reported success. Asked for the committed range alone,
+# it passed an uncommitted edit the hook then refused. It prints how many files
+# and added lines each pass read, so a zero reads as a zero rather than as
+# coverage. `rust-ci.yml` asks the range form itself, against the pull
+# request's own base; on a clean checkout the two forms ask the same thing.
 #
-# The range is skipped rather than fatal when the base ref is missing, which is
-# a shallow clone or a fork with no `origin`. The JavaScript half is tree-wide
-# under every one of them and is unaffected by any of this.
+# The base form is skipped rather than fatal when the base ref is missing,
+# which is a shallow clone or a fork with no `origin`. The JavaScript half is
+# tree-wide under every one of them and is unaffected by any of this.
 #
 # The self-test runs first and checks the scanner rather than the tree: it
 # appends a known stacked pair to every tracked file and asserts the count
@@ -290,8 +293,8 @@ check-docs base="":
         node scripts/check-stacked-docs.mjs --cached
         node scripts/check-doc-attachment.mjs --cached
     elif git rev-parse --verify --quiet "{{ base }}" >/dev/null; then
-        node scripts/check-stacked-docs.mjs --range "{{ base }}...HEAD"
-        node scripts/check-doc-attachment.mjs --range "{{ base }}...HEAD"
+        node scripts/check-stacked-docs.mjs --worktree "{{ base }}"
+        node scripts/check-doc-attachment.mjs --worktree "{{ base }}"
     else
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
