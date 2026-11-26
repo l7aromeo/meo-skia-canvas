@@ -53,7 +53,7 @@ export const BINARIES = "binaries";
 
 /// The library skia-bindings compiles from its own sources in every build,
 /// cached or not, and so never takes from an entry.
-const BINDINGS_LIBRARY = "libskia-bindings.a";
+export const BINDINGS_LIBRARY = "libskia-bindings.a";
 
 /// The file skia-bindings saves the build's definitions to, beside the
 /// libraries (`save_definitions`, skia_bindgen.rs), which `SKIA_BUILD_DEFINES`

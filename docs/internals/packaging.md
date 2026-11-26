@@ -293,9 +293,11 @@ the archive is missing.
 **What still vouches for the patches.** An entry is stored only from a build
 `scripts/check-patched-skia.mjs` passes, from the worktree's own tree, and it
 keeps that build's log. A build that linked an entry passes the same check
-when every library it linked is, byte for byte, one an entry of the
-worktree's tree holds, and that entry's log passes: patched where it was
-compiled, the same bytes where it was linked. A library changed after it was
+when every library it linked -- each its log names in a `rustc-link-lib`
+line, not each archive its out-dir holds, which can keep an earlier build's
+-- is, byte for byte, one an entry of the worktree's tree holds, and that
+entry's log passes: patched where it was compiled, the same bytes where it
+was linked. A library changed after it was
 stored, or an entry from another tree, fails. The check holds a build with no
 Ganesh -- the clippy pass with no features -- to the patched files it
 compiles, which are the SVG slant and the face match.

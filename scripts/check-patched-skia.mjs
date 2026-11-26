@@ -36,7 +36,9 @@
 // A build that linked compiled Skia from the local cache instead --
 // "STARTING BIND AGAINST SYSTEM SKIA", see scripts/skia-binaries.mjs -- ran no
 // ninja, so it has nothing of its own to read. It passes when every library
-// it linked is, byte for byte, one an entry of this worktree's tree holds, and
+// it linked -- each its log names in a `rustc-link-lib=static` line, not each
+// its out-dir holds, which can keep archives of an earlier build -- is, byte
+// for byte, one an entry of this worktree's tree holds, and
 // that entry's stored seed build passes the three checks above: patched where
 // it was compiled, the same bytes where they were linked. See `bindRefusal`.
 import {
@@ -50,7 +52,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  cachedLibraries,
+  BINDINGS_LIBRARY,
   digest,
   entriesFor,
   seedLog,
@@ -335,18 +337,38 @@ export function refusal(output, patched) {
 /// `SKIA_LIBRARY_SEARCH_PATH` rather than building them (build.rs).
 const LINKED = "STARTING BIND AGAINST SYSTEM SKIA";
 
+/// A static library a build script tells cargo to link, as
+/// `cargo:rustc-link-lib=static=skia` or with modifiers,
+/// `static:+whole-archive=skia`, in either the `cargo:` or `cargo::` form.
+const LINK_STATIC = /^cargo::?rustc-link-lib=static(?::[^=]*)?=(.+)$/gm;
+
+/**
+ * The archives skia-bindings' build script in `log` linked statically, as
+ * file names -- `libskia.a` -- less its own.
+ */
+export function linkedLibraries(log) {
+  return [...log.matchAll(LINK_STATIC)]
+    .map(([, name]) => `lib${name.trim()}.a`)
+    .filter((name) => name !== BINDINGS_LIBRARY);
+}
+
 /**
  * Why the build in `buildDir`, which linked cached Skia, does not show Skia
- * built with `patched`, or `null` when it does: the libraries in its
- * `out/skia` are each, byte for byte, one an entry of `tree` under `cache`
- * holds, and the entry's seed build passes `refusal`. An entry of another
- * tree, or a library changed after it was stored, matches nothing.
+ * built with `patched`, or `null` when it does: the libraries its log links
+ * are each, in its `out/skia` and byte for byte, one an entry of `tree` under
+ * `cache` holds, and the entry's seed build passes `refusal`. An entry of
+ * another tree, or a library changed after it was stored, matches nothing.
+ * An archive the out-dir keeps but the build does not link -- one an earlier
+ * build of another tree left there, which a bind does not replace -- is not
+ * read.
  */
 export function bindRefusal(buildDir, patched, { cache, tree }) {
   const skia = join(buildDir, "out", "skia");
-  const linked = existsSync(skia) ? cachedLibraries(skia) : [];
+  const linked = linkedLibraries(buildLog(buildDir));
   if (!linked.includes("libskia.a"))
-    return "it linked cached Skia, and its out-dir holds no libskia.a";
+    return "it linked cached Skia, and its log links no libskia.a";
+  const absent = linked.find((name) => !existsSync(join(skia, name)));
+  if (absent) return `it links ${absent}, which its out-dir does not hold`;
   const digests = Object.fromEntries(
     linked.map((name) => [name, digest(join(skia, name))]),
   );
@@ -651,12 +673,22 @@ function bindCases(root) {
     }),
   );
   const build = join(root, "linked");
+  /// Archives an out-dir keeps that the bind's log does not link.
+  let stale = {};
   const linked = (changes = {}) => {
     rmSync(build, { recursive: true, force: true });
     const all = { ...libraries, "libskia-bindings.a": "its own", ...changes };
     for (const [name, text] of Object.entries(all))
       if (text !== null) write(join(build, "out", "skia", name), text);
-    write(join(build, "output"), "STARTING BIND AGAINST SYSTEM SKIA");
+    const links = Object.keys(all)
+      .filter((name) => !name.startsWith("stale-"))
+      .map((name) => `cargo:rustc-link-lib=static=${name.slice(3, -2)}`);
+    write(
+      join(build, "output"),
+      ["STARTING BIND AGAINST SYSTEM SKIA", ...links].join("\n"),
+    );
+    for (const [name, text] of Object.entries(stale))
+      write(join(build, "out", "skia", name), text);
   };
   const setFiles = (overrides = {}) => {
     for (const [file, contents] of Object.entries({ ...files, ...overrides }))
@@ -677,9 +709,25 @@ function bindCases(root) {
     ],
     [{ "libskia.a": null }, {}, tree, false, "no libskia.a"],
     [{ "libextra.a": "x" }, {}, tree, false, "a library no entry holds"],
+    [
+      { "stale-libexpat.a": "from another tree" },
+      {},
+      tree,
+      true,
+      "an archive an earlier build left and this one does not link",
+    ],
   ]) {
     setFiles(overrides);
-    linked(changes);
+    stale = Object.fromEntries(
+      Object.entries(changes)
+        .filter(([name]) => name.startsWith("stale-"))
+        .map(([name, text]) => [name.slice("stale-".length), text]),
+    );
+    linked(
+      Object.fromEntries(
+        Object.entries(changes).filter(([name]) => !name.startsWith("stale-")),
+      ),
+    );
     const why = bindRefusal(build, patched, { cache, tree: against });
     if ((why === null) !== accepted) {
       console.error(
