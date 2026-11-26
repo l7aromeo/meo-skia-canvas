@@ -303,23 +303,48 @@ describe("A run casting a shadow under an operator other than source-over", () =
 
   test("overlapping glyphs are what part one image from glyph by glyph", () => {
     // The control on the scenes: where glyphs do not overlap, the shadow
-    // then one image and the shadow then glyph by glyph are one page under
-    // an operator within the shape, and where they overlap they are not.
-    // Without it, a page held to one image could pass by being equal to
-    // both.
+    // then one image and the shadow then glyph by glyph part no further than
+    // a glyph drawn alone does each way, and where they overlap they part
+    // further. Without it, a page held to one image could pass by being
+    // equal to both.
+    //
+    // A glyph alone still parts the two at its edges under an operator that
+    // divides: one image composites the run's premultiplied bytes, a glyph
+    // drawn with the operator composites its colour at its coverage, and
+    // `color-burn` carries a byte of rounding in a faint edge pixel to
+    // several: "Hello Wq" parts by 6 on macOS and 5 on Windows, more than
+    // `carried` estimates there. So the bound is that parting, measured: each
+    // glyph drawn alone, over the run's own shadow, both ways. A run whose
+    // glyphs do not overlap is those pages side by side.
     const within = OPERATORS.filter((op) => !BEYOND.includes(op));
     for (const run of RUNS) {
       const flat = { ...SCENES[0], spacing: 0 };
+      const xs = positions(run, flat);
       for (const op of within) {
         const { most } = apart(
           oneImage(run, op, flat),
           glyphs(run, op, flat),
           0,
         );
-        const bound =
-          SHARP_BOUND +
-          carried((s, alpha) => oneImage(run, op, s, true, alpha), flat);
-        assert.ok(most <= bound, `${named(run, op, flat)}: ${most}`);
+        const alone = [...run.text].map((glyph, i) => {
+          const one = page(op, flat);
+          cast(one.ctx, run, flat, SHADOW_ALPHA);
+          const lone = canvas(),
+            loneCtx = lone.getContext("2d");
+          style(loneCtx, run, flat);
+          ink(loneCtx, flat, glyph, xs[i]);
+          one.ctx.drawImage(lone, 0, 0);
+          const each = page(op, flat);
+          cast(each.ctx, run, flat, SHADOW_ALPHA);
+          style(each.ctx, run, flat);
+          ink(each.ctx, flat, glyph, xs[i]);
+          return apart(read(one.c), read(each.c), 0).most;
+        });
+        const bound = Math.max(...alone);
+        assert.ok(
+          most <= bound,
+          `${named(run, op, flat)}: ${most}, a glyph alone ${bound}`,
+        );
       }
       for (const op of ["difference", "xor", "multiply"]) {
         const { most } = apart(
