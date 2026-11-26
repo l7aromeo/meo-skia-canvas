@@ -114,14 +114,25 @@ function time(fn, { runs, warmup } = RUNS) {
 // in levels, a residency in megabytes.
 const value = (unit, v) => ({ unit, median: v, p10: null, p90: null, runs: 1 });
 
-// Reading one pixel back forces the recording to rasterize. Without it the
-// timing measures how fast commands are appended to a picture, not drawing.
+// Reads one pixel back, which draws the recording into the one tile of the
+// page that holds it: a read inside one 256-pixel tile -- `TILE` in
+// src/context/page.rs -- is served from that tile alone, about a sixteenth of
+// a 1200 by 900 page. Without a read the timing measures how fast commands
+// are appended to a picture, not drawing; a row that times drawing the page
+// reads it whole.
 const rasterize = (canvas) => canvas.getContext("2d").getImageData(0, 0, 1, 1);
+
+// Reads the whole page back, which composites all of it: what a row timing
+// drawing the page ends with, and what a caller exporting the page pays. It
+// adds the read's own cost to the row, the same for every scene on a page of
+// one size and format. `examples/rust/benchmark.rs` reads the same.
+const readPage = (canvas) =>
+  canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
 
 function draw(options, paint) {
   const canvas = new Canvas(W, H, options);
   paint(canvas.getContext("2d"));
-  rasterize(canvas);
+  readPage(canvas);
 }
 
 // The fraction of a pixel `text-blur-moved` moves each draw by, past the one before: the golden ratio's, whose
@@ -439,9 +450,7 @@ const DRAWS = [
   // Two thousand small translucent stars, each moved by a transform: the
   // crowded page tests/gpu_crowded_flush.rs checks. A non-convex fill under
   // MSAA is drawn from Ganesh's path atlas, so on the GPU one flush packs
-  // every star into it, and this row is what the atlas costs. The whole page
-  // is read, because the pixel `rasterize` reads composites only the tile it
-  // lands in, and the crowded flush is the page's.
+  // every star into it, and this row is what the atlas costs.
   [
     "stars",
     (ctx) => {
@@ -458,13 +467,12 @@ const DRAWS = [
         );
         ctx.fill(shape);
       }
-      ctx.getImageData(0, 0, W, H);
     },
   ],
   // Non-convex fills from 8 to 399 pixels across in one flush. Under MSAA
   // Ganesh's path atlas takes a path of up to 128 by 128 pixels' area and the
   // larger are drawn without it, so on the GPU this row is the atlas beside
-  // what draws the paths it refuses. Read whole, as `stars` is.
+  // what draws the paths it refuses.
   [
     "paths",
     (ctx) => {
@@ -474,7 +482,6 @@ const DRAWS = [
         heart(ctx, scatter(i, 37, W - s), scatter(i, 53, H - s), s);
         ctx.fill();
       }
-      ctx.getImageData(0, 0, W, H);
     },
   ],
 ];
