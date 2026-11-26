@@ -617,3 +617,45 @@ fn a_shadow_lies_over_its_background_and_under_its_text() {
     assert!(count(RED) > 0, "the shadow is drawn over the background");
     assert!(count((0, 0, 0)) > 0, "the text is drawn over its shadow");
 }
+
+/// A background whose alpha is 0 is no background: under `source-in`, whose
+/// composite reaches beyond what it draws, a paragraph casting a shadow over
+/// a transparent background leaves the page as one naming none leaves it.
+/// Composited as the part beneath the shadows, the transparent background
+/// was transparent black over the whole page, and `source-in` cleared it.
+#[test]
+fn a_transparent_background_is_no_background() {
+    let page = |background: Option<RgbaLinear>| {
+        let styled = TextStyle {
+            color: RgbaLinear::from_srgb8(40, 90, 160, 1.0),
+            background_color: background,
+            ..style(24.0, vec![shadow(RED, 2.0, 2.0, 0.0)])
+        };
+        let text = paragraph(&[("HHHH", styled)]);
+        let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::from_srgb8(220, 180, 60, 1.0));
+        ctx.fill_rect(0.0, 0.0, SIZE.0, SIZE.1);
+        ctx.set_global_composite_operation(BlendMode::SourceIn);
+        ctx.draw_paragraph(&text, AT.0, AT.1);
+        let data = ctx
+            .get_image_data(0.0, 0.0, SIZE.0, SIZE.1)
+            .expect("pixels");
+        data.pixels().to_vec()
+    };
+    let none = page(None);
+    let transparent = page(Some(RgbaLinear::from_srgb8(0, 0, 0, 0.0)));
+    let apart = none
+        .iter()
+        .zip(&transparent)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        apart, 0,
+        "bytes apart from a paragraph naming no background"
+    );
+    // The control: the page holds the paragraph, so that two empty pages
+    // cannot pass as one.
+    assert!(none.iter().any(|&byte| byte != 0), "the paragraph draws");
+}

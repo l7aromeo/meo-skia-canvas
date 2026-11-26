@@ -261,6 +261,53 @@ fn every_shape_stores_the_cpus_bytes_inside_it() {
     }
 }
 
+/// `pixels`, read unpremultiplied, premultiplied and rounded: a level of a
+/// translucent pixel reads unpremultiplied as more than one.
+fn premultiplied(pixels: &[u8]) -> Vec<u8> {
+    let (pixels, _) = pixels.as_chunks::<4>();
+    pixels
+        .iter()
+        .flat_map(|p| {
+            let alpha = f32::from(p[3]) / 255.0;
+            let colour = |c: u8| (f32::from(c) * alpha).round() as u8;
+            [colour(p[0]), colour(p[1]), colour(p[2]), p[3]]
+        })
+        .collect()
+}
+
+/// Text dyed by a gradient lands the CPU canvas's bytes at its glyphs'
+/// edges too (#803), where Skia makes a glyph's coverage by the luminance
+/// of the colour it is drawn in: a gradient's the mean of its stops, an
+/// image's none, which Skia reads as mid grey. Drawn through an image of
+/// the effect, the run took mid grey's edges, 24 levels off under `xor`.
+#[test]
+fn text_dyed_by_a_gradient_stores_the_cpus_bytes_at_its_edges() {
+    if !has_gpu() {
+        return;
+    }
+    let dye = Shader::linear_gradient(
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 64.0, y: 0.0 },
+        &[stop(0.0, 40, 90, 160, 1.0), stop(1.0, 160, 40, 90, 1.0)],
+        GradientColorSpace::Destination,
+    )
+    .expect("a linear gradient");
+    for blend in [BlendMode::SourceOver, BlendMode::Xor, BlendMode::Lighter] {
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_fill_style_css("rgb(120 80 60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 64.0, 64.0);
+            assert!(ctx.set_font_css("bold 40px sans-serif"));
+            ctx.set_fill_shader(&dye);
+            ctx.set_global_composite_operation(blend);
+            ctx.fill_text("Wg", 2.0, 48.0, None);
+        };
+        let cpu = premultiplied(&drawn(false, 64.0, 64.0, &scene));
+        let gpu = premultiplied(&drawn(true, 64.0, 64.0, &scene));
+        let most = cpu.iter().zip(&gpu).map(|(a, b)| a.abs_diff(*b)).max();
+        assert!(most <= Some(1), "{blend:?}: {most:?} levels apart");
+    }
+}
+
 #[test]
 fn a_canvas_drawn_on_the_cpu_and_read_on_the_gpu_stores_the_cpus_bytes() {
     if !common::has_gpu() {

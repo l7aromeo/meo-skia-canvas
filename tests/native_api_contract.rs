@@ -4657,6 +4657,97 @@ fn a_canvas_rasterizes_text_with_chromiums_contrast_and_gamma() {
 }
 
 #[test]
+fn a_canvas_drawn_into_another_keeps_its_texts_contrast_and_gamma() -> Result<()>
+{
+    // A canvas drawn into another replays its page, and the replay's glyphs
+    // take the source's contrast and gamma -- not Skia's defaults, nor the
+    // destination's: the copy's coverage is the source's own. Unhinted,
+    // since hinted macOS text takes no contrast; black, so the coverage is
+    // the alpha; and once more with a canvas nested in the source, which
+    // then rasterizes at the draw -- the whole page, or under a clip that
+    // shows less than half of it, only the part the clip shows.
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+    ))?;
+    FontLibrary::new().register_font_from_data("ReplayOswald", &bytes)?;
+    let (width, height) = (160.0, 48.0);
+    // A third of the page's width, so a clipped draw rasterizes a part.
+    let part = width / 3.0;
+    let defaults = CanvasOptions::default();
+    let make = |(text_contrast, text_gamma): (f32, f32)| -> Result<Canvas> {
+        let mut canvas = Canvas::with_options(
+            width,
+            height,
+            CanvasOptions {
+                text_contrast,
+                text_gamma,
+                ..CanvasOptions::default()
+            },
+        )?;
+        canvas.set_gpu(false);
+        Ok(canvas)
+    };
+    let alphas = |data: ImageData| -> Vec<u8> {
+        data.pixels().iter().skip(3).step_by(4).copied().collect()
+    };
+    let mut misses = Vec::new();
+    for text in [
+        (defaults.text_contrast, defaults.text_gamma),
+        (0.0, 3.0),
+        (1.0, 1.0),
+    ] {
+        for (nested, clipped) in [(false, false), (true, false), (true, true)] {
+            let default = (defaults.text_contrast, defaults.text_gamma);
+            let intos = match text == default {
+                true => vec![text],
+                false => vec![text, default],
+            };
+            for into in intos {
+                let mut source = make(text)?;
+                if nested {
+                    let mut inner = make(text)?;
+                    source.context().draw_canvas(&mut inner, 0.0, 0.0);
+                }
+                let ctx = source.context();
+                ctx.set_text_rendering(TextRendering::GeometricPrecision);
+                ctx.set_font(&Font::new("ReplayOswald", 36.0));
+                ctx.fill_text("Wag", 8.0, 38.0, None);
+                let own = alphas(ctx.get_image_data(0.0, 0.0, width, height)?);
+                let mut copy = make(into)?;
+                let shown = match clipped {
+                    true => part,
+                    false => width,
+                };
+                let to = copy.context();
+                to.begin_path();
+                to.rect(0.0, 0.0, shown, height);
+                to.clip(FillRule::NonZero);
+                to.draw_canvas(&mut source, 0.0, 0.0);
+                let copied =
+                    alphas(to.get_image_data(0.0, 0.0, width, height)?);
+                assert!(own.iter().any(|&alpha| alpha > 0), "the run inks");
+                // The columns the clip shows.
+                let most = (0..own.len())
+                    .filter(|i| (i % width as usize) < shown as usize)
+                    .map(|i| own[i].abs_diff(copied[i]))
+                    .max()
+                    .unwrap_or(0);
+                if most > 1 {
+                    misses.push(format!(
+                        "{text:?}{}{} into {into:?}: {most}",
+                        if nested { " nested" } else { "" },
+                        if clipped { " clipped" } else { "" }
+                    ));
+                }
+            }
+        }
+    }
+    assert!(misses.is_empty(), "{misses:#?}");
+    Ok(())
+}
+
+#[test]
 fn canvas_options_refuse_text_contrast_and_gamma_outside_skias_range() {
     // Skia's `SkSurfaceProps` takes a text contrast from 0 to 1 and a gamma
     // from 0 up to, not including, 4; a canvas refuses anything else rather

@@ -125,6 +125,120 @@ fn a_colr_version_0_font_inks_in_its_palettes_colours() {
     );
 }
 
+/// A run of COLRv0 glyphs set so tight that its colour "A" overlaps the
+/// plain "b" after it, and the shadow it casts, dropped clear of the run.
+mod one_shadow {
+    use super::*;
+    use std::iter::zip;
+
+    const SIDE: (f32, f32) = (320.0, 160.0);
+    /// The run's anchor.
+    const AT: (f32, f32) = (10.0, 50.0);
+    /// The shadow's offset: dropped below the glyphs, so that only the
+    /// shadow lies in the rows below them.
+    const DROP: (f32, f32) = (3.0, 64.0);
+    /// The first row clear of the glyphs, whose descent ends above it.
+    const BELOW_THE_RUN: usize = 70;
+    /// A spacing at which the "A" overlaps the "b".
+    const TIGHT: f32 = -12.0;
+    /// A shadow colour whose premultiplied channels are whole bytes at its
+    /// alpha, so that the model's tint and the canvas's land on one byte.
+    const SHADOW: &str = "rgba(200,30,60,0.6)";
+    /// How far the canvas's shadow may stand from the model's: a level, at
+    /// a tie. Both are eight-bit layers, each composited once.
+    const ONE_LEVEL: u8 = 1;
+    /// How far a shadow for each piece must stand from one shadow for the
+    /// scene to tell them apart: where the pieces overlap, the second
+    /// composited over the first darkens the overlap by 36 levels.
+    const DOUBLED: u8 = 20;
+
+    fn page() -> Canvas {
+        let mut canvas = Canvas::new(SIDE.0, SIDE.1);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("#fff").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        canvas
+    }
+
+    fn styled(ctx: &mut Context2D) {
+        assert!(ctx.set_font_css("40px ColrV0"));
+        ctx.set_font_kerning(FontKerning::None);
+        ctx.set_letter_spacing(TIGHT);
+        ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+    }
+
+    /// The canvas's page: white, each of `pieces` -- a run and the x it is
+    /// drawn at -- casting its shadow, under `filter` where there is one.
+    fn cast(pieces: &[(&str, f32)], filter: Option<&ImageFilter>) -> Vec<u8> {
+        let mut canvas = page();
+        let ctx = canvas.context();
+        styled(ctx);
+        ctx.set_image_filter(filter);
+        ctx.set_shadow_color_css(SHADOW).expect("a colour");
+        ctx.set_shadow_offset(DROP.0, DROP.1);
+        for (text, x) in pieces {
+            ctx.fill_text(text, *x, AT.1, None);
+        }
+        pixels(&mut canvas)
+    }
+
+    /// One shadow cast from the whole run: the run drawn opaque onto
+    /// nothing, tinted in the shadow's colour and composited once, at the
+    /// shadow's offset, over white.
+    fn modelled() -> Vec<u8> {
+        let mut run = Canvas::new(SIDE.0, SIDE.1);
+        run.set_gpu(false);
+        let ctx = run.context();
+        styled(ctx);
+        ctx.fill_text("Abcdef", AT.0, AT.1, None);
+        ctx.set_global_composite_operation(BlendMode::SourceIn);
+        ctx.set_fill_style_css(SHADOW).expect("a colour");
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        let mut canvas = page();
+        canvas.context().draw_canvas(&mut run, DROP.0, DROP.1);
+        pixels(&mut canvas)
+    }
+
+    /// The most any byte of the rows below the run stands apart.
+    fn apart(a: &[u8], b: &[u8]) -> u8 {
+        let below = BELOW_THE_RUN * SIDE.0 as usize * 4;
+        zip(&a[below..], &b[below..])
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_colour_run_casts_one_shadow_from_the_whole_run() {
+        register();
+        let model = modelled();
+        // Through the chain a shadow is cast through, and under a CanvasKit
+        // filter, which no chain runs and the run's own draw casts: an
+        // offset of nothing, which leaves the run as it is.
+        let still =
+            ImageFilter::offset(0.0, 0.0, None, None).expect("a filter");
+        for (route, filter) in [("chain", None), ("filter", Some(&still))] {
+            let most = apart(&cast(&[("Abcdef", AT.0)], filter), &model);
+            assert!(
+                most <= ONE_LEVEL,
+                "{route}: {most} levels from one shadow"
+            );
+        }
+        // The control on the scene: the colour glyph and the plain ones
+        // drawn as two runs, each casting a shadow of its own, stand well
+        // apart from one shadow. Without it, a scene whose pieces did not
+        // overlap would pass whatever casts the shadow.
+        let mut canvas = page();
+        let ctx = canvas.context();
+        styled(ctx);
+        let after_a = AT.0 + ctx.measure_text("A", None).width;
+        let pieces =
+            apart(&cast(&[("A", AT.0), ("bcdef", after_a)], None), &model);
+        assert!(pieces > DOUBLED, "a shadow for each piece, only {pieces}");
+    }
+}
+
 mod against_chrome {
     use super::*;
 
@@ -686,8 +800,9 @@ mod played_back {
 }
 
 /// Colour glyphs on a GPU canvas through each route a text draw takes, held
-/// to the CPU canvas's bytes. The glyphs stand apart, so that no glyph's
-/// image composites over another's -- see
+/// to the CPU canvas's bytes, and a blurred shadow to within the level the
+/// GPU's blur may stand off the Gaussian. The glyphs stand apart, so that no
+/// glyph's image composites over another's -- see
 /// `against_chrome::an_overlapping_colour_glyph_parts_from_the_cpu_only_near_a_tie`.
 mod on_the_gpu {
     use super::*;
@@ -729,13 +844,25 @@ mod on_the_gpu {
     /// What a case sets on the context before the run is drawn.
     type SetUp = dyn Fn(&mut Context2D);
 
+    /// How far a byte of a blurred shadow may stand between the canvases:
+    /// the CPU's chain lands the exact Gaussian's byte, and the GPU's, which
+    /// blurs through a layer of half floats, up to a level off it -- the
+    /// rule for blurred colours on an eight-bit page in
+    /// docs/browser-differences.md.
+    const BLURRED_LEVELS: u8 = 1;
+
     /// Whether the GPU canvas draws what the CPU canvas does after
-    /// `set_up`, naming the case where it does not.
-    fn holds(case: &str, set_up: &SetUp) -> Option<String> {
+    /// `set_up`, to within `levels` of every byte, naming the case where it
+    /// does not.
+    fn holds(case: &str, levels: u8, set_up: &SetUp) -> Option<String> {
         register();
         let gpu = drawn(true, set_up)?;
         let cpu = drawn(false, set_up).expect("a CPU canvas");
-        let apart = gpu.iter().zip(&cpu).filter(|(a, b)| a != b).count();
+        let apart = gpu
+            .iter()
+            .zip(&cpu)
+            .filter(|(a, b)| a.abs_diff(**b) > levels)
+            .count();
         let largest = gpu
             .iter()
             .zip(&cpu)
@@ -747,30 +874,30 @@ mod on_the_gpu {
 
     #[test]
     fn every_route_draws_colour_glyphs_on_the_gpu_as_on_the_cpu() {
-        let cases: [(&str, &SetUp); 6] = [
-            ("sharp shadow", &|ctx| {
+        let cases: [(&str, u8, &SetUp); 6] = [
+            ("sharp shadow", 0, &|ctx| {
                 ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
                     .expect("a colour");
                 ctx.set_shadow_offset(3.0, SHADOW_DROP);
             }),
-            ("plain", &|_| {}),
-            ("shadow", &|ctx| {
+            ("plain", 0, &|_| {}),
+            ("shadow", BLURRED_LEVELS, &|ctx| {
                 ctx.set_shadow_color_css("rgba(0,0,0,0.5)")
                     .expect("a colour");
                 ctx.set_shadow_blur(4.0);
                 ctx.set_shadow_offset(3.0, SHADOW_DROP);
             }),
-            ("source-in", &|ctx| {
+            ("source-in", 0, &|ctx| {
                 ctx.set_global_composite_operation(BlendMode::SourceIn);
             }),
-            ("filter", &|ctx| {
+            ("filter", 0, &|ctx| {
                 ctx.set_filter_css("blur(2px)").expect("a filter");
             }),
-            ("rotated", &|ctx| ctx.rotate(0.1)),
+            ("rotated", 0, &|ctx| ctx.rotate(0.1)),
         ];
         let wrong: Vec<String> = cases
             .iter()
-            .filter_map(|(case, set_up)| holds(case, *set_up))
+            .filter_map(|(case, levels, set_up)| holds(case, *levels, *set_up))
             .collect();
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }

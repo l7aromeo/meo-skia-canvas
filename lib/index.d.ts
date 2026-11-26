@@ -4535,9 +4535,11 @@ export interface CanvasRenderingContext2D
    *   `fillStyle` before the call changes nothing; colour, opacity and
    *   decoration are whatever the `TextStyleInput` carried.
    * - **The compositing state does apply**, along with the transform and clip:
-   *   the paragraph is drawn as a group, so `globalAlpha` fades it and
-   *   `globalCompositeOperation` composites it. Before 4.2.0 both were
-   *   dropped, and every blend mode behaved as `source-over`.
+   *   `globalAlpha` fades the paragraph and `globalCompositeOperation`
+   *   composites it, part by part, as a canvas composites a `fillRect` and
+   *   then a `fillText`: its text backgrounds as one image, then each text
+   *   shadow, then its glyphs and decorations as one image, each through the
+   *   alpha and the operator.
    *
    * @example
    * const builder = ParagraphBuilder.Make({
@@ -5510,7 +5512,12 @@ export interface TextStyleInput {
    * given. The two are separate in CanvasKit and kept separate here.
    */
   foregroundColor?: TextColorInput;
-  /** Color painted behind the run's glyphs. */
+  /**
+   * Color painted behind the run's glyphs. One whose alpha is 0 is no
+   * background: under an operator that reaches beyond what is drawn, such
+   * as `source-in`, it leaves the page beneath the paragraph's shadows
+   * alone.
+   */
   backgroundColor?: TextColorInput;
   /**
    * Outline the glyphs at this width in pixels instead of filling them, as
@@ -5606,7 +5613,10 @@ export interface TextStyleInput {
    * Shadows painted under the text, the first listed on top, as CSS paints
    * `text-shadow` -- several are allowed, unlike the context's single
    * `shadowColor`. Each run of this style's text on a line casts each
-   * shadow as one, the exact Gaussian blur of the whole run.
+   * shadow as one, the exact Gaussian blur of the whole run. Under a
+   * `globalAlpha` or a `globalCompositeOperation`, each shadow is
+   * composited through them apart, in the order they are painted, as the
+   * context's shadow is -- see {@link CanvasRenderingContext2D.drawParagraph}.
    */
   shadows?: TextShadowInput[];
   /**

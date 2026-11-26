@@ -2301,6 +2301,11 @@ impl Passes {
         self.drawn && self.shadows.iter().any(|shadows| !shadows.is_empty())
     }
 
+    /// Whether the layout this has followed paints a background.
+    pub(crate) fn paints_backgrounds(&self) -> bool {
+        self.drawn && !self.background_spans.is_empty()
+    }
+
     /// Every shadow the layout casts, in the order they are painted: by
     /// line, and along each line by run, each style's run of text on a line
     /// casting its shadows as one element, as CSS Text Decoration 3 section
@@ -2385,10 +2390,13 @@ impl Passes {
 }
 
 /// Draws `paragraph`, laid out with `passes`, onto `context` with its
-/// top-left corner at `at`, where it casts a text shadow: each run's shadow
-/// the exact blur of the whole run, on pixels -- see
-/// [`Context2D::draw_with_shadows`]. Returns whether it drew; a paragraph
-/// that casts none is left to the caller, which draws it as any other.
+/// top-left corner at `at`, in its parts -- see
+/// [`Context2D::draw_with_shadows`]: where it casts a text shadow, each
+/// run's shadow the exact blur of the whole run, on pixels; and where it
+/// paints a background under an alpha or a blend, which composites its
+/// backgrounds apart from its text, as a canvas composites a `fillRect` and
+/// then a `fillText`. Returns whether it drew; a paragraph that is neither
+/// is left to the caller, which composites it as one image.
 pub(crate) fn draw_shadowed(
     context: &Context2D,
     paragraph: &mut Paragraph,
@@ -2397,7 +2405,13 @@ pub(crate) fn draw_shadowed(
 ) -> bool {
     passes.follow(paragraph);
     if !passes.casts_shadows() {
-        return false;
+        if !(passes.paints_backgrounds() && context.composites_drawing()) {
+            return false;
+        }
+        // Its glyphs are drawn apart from its backgrounds, from their runs,
+        // as a shadowed paragraph's are: `Paragraph::paint` draws them only
+        // between the backgrounds and the lines over them.
+        passes.follow_runs(paragraph);
     }
     let passes = &*passes;
     let casts: Vec<Cast<'_>> =
