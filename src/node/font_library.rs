@@ -1228,6 +1228,27 @@ impl FontLibrary {
             .collect()
     }
 
+    /// The [`generic_name`] of each generic whose curated stack holds
+    /// `font`, a generic the caller has claimed aside: the names
+    /// [`collection_parts`](Self::collection_parts) files it under, and the
+    /// only ones a list asking for the generic reaches it by. An instance of
+    /// it is filed under them too, or the list is answered with the face at
+    /// its default position.
+    fn curated_names(&mut self, font: &Typeface) -> Vec<String> {
+        let claimed = self.claimed_aliases();
+        self.generics()
+            .iter()
+            .filter(|(curated, alias)| {
+                Typeface::equal(font, curated)
+                    && !claims(&claimed, alias.as_deref())
+            })
+            .filter_map(|(_, alias)| {
+                alias.as_deref().and_then(GenericFamily::from_css)
+            })
+            .map(generic_name)
+            .collect()
+    }
+
     fn generics(&mut self) -> &Vec<(Typeface, Option<String>)> {
         // set up generic font family mappings
         if self.generics_cache.is_empty() {
@@ -2494,6 +2515,7 @@ impl FontLibrary {
                 .find_typefaces(&families, style.font_style());
 
             for font in matches.into_iter() {
+                let curated = self.curated_names(&font);
                 if let Some(params) = self.known_axes.of(&font) {
                     let coords =
                         instance_coordinates(&params, style, variations);
@@ -2510,21 +2532,26 @@ impl FontLibrary {
                                     None
                                 }
                             });
-                        // Under the group alias its family is asked for
-                        // by too, where it has one -- see `styled_names`.
+                        // Under the name of each generic it is curated for
+                        // -- see `curated_names` -- and under the group
+                        // alias its family or such a generic is asked for by
+                        // too, where it has one -- see `styled_names`.
                         let family =
                             alias.clone().unwrap_or_else(|| font.family_name());
-                        let filed = iter::once(family.clone()).chain(
-                            GenericFamily::from_css(&family).map(generic_name),
-                        );
+                        let filed = iter::once(family.clone())
+                            .chain(
+                                GenericFamily::from_css(&family)
+                                    .map(generic_name),
+                            )
+                            .chain(curated.iter().cloned());
                         let groups: Vec<String> = filed
                             .filter_map(|name| {
                                 self.style_groups
                                     .alias_of(&name, font.font_style())
                             })
                             .collect();
-                        for group in &groups {
-                            dynamic.register(face.clone(), Some(group));
+                        for name in curated.iter().chain(&groups) {
+                            dynamic.register(face.clone(), Some(name));
                         }
                         register_under(&mut dynamic, face, alias.as_deref());
                     }
@@ -3936,5 +3963,105 @@ mod tests {
             "{WIDTH_CLASS_PERCENT:?} is not strictly increasing"
         );
         assert_eq!(WIDTH_CLASS_PERCENT[4], 100.0, "the middle class is normal");
+    }
+    /// A bundled variable face, `wght` 400 at its default position.
+    fn amstelvar() -> Typeface {
+        variable_face("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+    }
+
+    /// A bundled face with no variation axes, so that no instance of it is
+    /// filed beside the one under test.
+    fn recursive() -> Typeface {
+        bundled_face(
+            "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf",
+        )
+    }
+
+    fn variable_face(file: &str) -> Typeface {
+        bundled_face(file)
+    }
+
+    fn bundled_face(file: &str) -> Typeface {
+        let path = format!("{}/{file}", env!("CARGO_MANIFEST_DIR"));
+        let bytes = std::fs::read(path).expect("a bundled face");
+        FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("the face loads")
+    }
+
+    /// The family and `wght` of the face `families`' collection for weight
+    /// 550 answers `asked` with.
+    fn answer_at_550(
+        lib: &mut FontLibrary,
+        families: &[&str],
+        asked: &str,
+    ) -> (String, Option<f32>) {
+        let wght = FourByteTag::from_chars('w', 'g', 'h', 't');
+        let mut style = TextStyle::new();
+        style.set_font_families(families);
+        style.set_font_style(FontStyle::new(
+            Weight::from(550),
+            Width::NORMAL,
+            skia_safe::font_style::Slant::Upright,
+        ));
+        let (mut collection, _) = lib.fonts_for_style(&style, &[]);
+        let found = collection.find_typefaces(&[asked], style.font_style());
+        let face = found.first().expect("a face answers");
+        let weight = face.variation_design_position().and_then(|position| {
+            position
+                .iter()
+                .find(|coordinate| coordinate.axis == wght)
+                .map(|coordinate| coordinate.value)
+        });
+        (face.family_name(), weight)
+    }
+
+    #[test]
+    fn a_variable_face_behind_a_generic_draws_the_weight_asked_for() {
+        // #818: a curated generic's variable face, asked for by the generic,
+        // answered at its default 400 whatever the weight.
+        let sans = generic_name(GenericFamily::SansSerif);
+        let mut curated = FontLibrary::with_fonts(vec![]);
+        curated.generics_cache = vec![(amstelvar(), Some("sans-serif".into()))];
+        assert_eq!(
+            answer_at_550(&mut curated, &[&sans], &sans),
+            ("AmstelvarAlpha".into(), Some(550.0)),
+        );
+        // The same face registered by name, which was always instanced.
+        let mut registered =
+            FontLibrary::with_fonts(vec![(amstelvar(), Some("Named".into()))]);
+        assert_eq!(
+            answer_at_550(&mut registered, &["Named"], "Named"),
+            ("AmstelvarAlpha".into(), Some(550.0)),
+        );
+    }
+
+    #[test]
+    fn a_claimed_generic_is_not_answered_by_its_curated_face() {
+        // The curated face reached under its own name while the caller has
+        // claimed the generic with another: the generic is still the claim's.
+        // The claim's face is static, so the dynamic manager holds no
+        // instance under the generic's name but the curated one, were it
+        // filed there.
+        // One face in both places: `Typeface::equal` compares unique IDs, so
+        // the same file loaded twice would be two faces.
+        let sans = generic_name(GenericFamily::SansSerif);
+        let face = amstelvar();
+        let mut lib = FontLibrary::with_fonts(vec![
+            (face.clone(), None),
+            (recursive(), Some("sans-serif".into())),
+        ]);
+        lib.generics_cache = vec![(face, Some("sans-serif".into()))];
+        let families = ["AmstelvarAlpha", sans.as_str()];
+        assert_eq!(
+            answer_at_550(&mut lib, &families, "AmstelvarAlpha"),
+            ("AmstelvarAlpha".into(), Some(550.0)),
+            "the curated face answers its own name",
+        );
+        assert_eq!(
+            answer_at_550(&mut lib, &families, &sans).0,
+            recursive().family_name(),
+            "the claimed generic answers with the claim's face",
+        );
     }
 }
