@@ -6469,3 +6469,54 @@ describe("fontKerning and textRendering", () => {
     },
   );
 });
+
+describe("a draw covering the page replaces what lies under it", () => {
+  test("a full-size fill shrunk by the transform keeps what lies outside it", () => {
+    // Whether the fill covers the page is asked where the transform puts it:
+    // scaled by 0.5, a 64-unit square covers a quarter of the page, and the
+    // black square drawn before it at x = 40 still shows.
+    const canvas = new Canvas(64, 64);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillRect(40, 4, 2, 2);
+    ctx.scale(0.5, 0.5);
+    ctx.fillStyle = "blue";
+    ctx.fillRect(0, 0, 64, 64);
+    assert.deepEqual([...ctx.getImageData(40, 4, 1, 1).data], BLACK);
+    assert.deepEqual([...ctx.getImageData(4, 4, 1, 1).data], [0, 0, 255, 255]);
+  });
+
+  test("clearRect over the page keeps what its clip, layer or turn spares", () => {
+    // A clip lets the clear through only inside it, a layer takes it in
+    // place of the page beneath, and a square turned by 45 degrees whose
+    // bounding box holds the page leaves its corners: in each, the black
+    // square drawn first at the left edge still shows.
+    const cases = {
+      clip: (ctx) => {
+        ctx.beginPath();
+        ctx.rect(16, 16, 32, 32);
+        ctx.clip();
+        ctx.clearRect(0, 0, 64, 64);
+      },
+      layer: (ctx) => {
+        ctx.saveLayer();
+        ctx.clearRect(0, 0, 64, 64);
+        ctx.restore();
+      },
+      turn: (ctx) => {
+        ctx.translate(32, 32);
+        ctx.rotate(Math.PI / 4);
+        ctx.clearRect(-32, -32, 64, 64);
+      },
+    };
+    for (const [name, clear] of Object.entries(cases)) {
+      const canvas = new Canvas(64, 64);
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      ctx.fillRect(0, 4, 2, 2);
+      clear(ctx);
+      ctx.resetTransform();
+      assert.deepEqual([...ctx.getImageData(0, 4, 1, 1).data], BLACK, name);
+    }
+  });
+});

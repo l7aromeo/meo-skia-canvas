@@ -3339,14 +3339,12 @@ impl Context2D {
             && self.state.skia_color_filter.is_none()
             && self.state.skia_mask_filter.is_none()
             && self.state.filter.is_none()
-            && holds(&path, self.bounds)
+            // ...and it holds the page where the transform puts it, rather
+            // than before: a full-size fill under `scale(0.5)` covers a
+            // quarter of the page.
+            && holds_on_the_device(&path, &self.state.matrix, self.bounds)
         {
-            // ...erase existing vector content layers (but preserve CTM & clip
-            // path)
-            self.with_recorder(|mut recorder| {
-                recorder.set_bounds(self.bounds);
-                recorder.set_state(self.state.matrix, &self.state.clip);
-            });
+            self.erase_the_page();
         }
 
         // A draw under a sole `blur()` may become a `BlurOp`, which reads
@@ -3775,14 +3773,35 @@ impl Context2D {
         is_in
     }
 
+    /// Drops everything drawn on the page so far, keeping the transform
+    /// and the clip, for a draw that is about to cover all of it.
+    fn erase_the_page(&self) {
+        self.with_recorder(|mut recorder| {
+            recorder.set_bounds(self.bounds);
+            recorder.set_state(self.state.matrix, &self.state.clip);
+        });
+    }
+
+    /// Clears `rect` to transparent black through the clip and into an open
+    /// layer, as `clearRect` does, whatever the alpha, composite operation,
+    /// filter or shadow.
+    ///
+    /// Where that clears the whole page -- no clip, no layer open, and the
+    /// rectangle holding the page where the transform puts it -- everything
+    /// drawn before is dropped rather than recorded under a clear. Only
+    /// then: a clip keeps what lies outside it, a layer what lies beneath
+    /// it, and a turned rectangle whose bounding box holds the page leaves
+    /// its corners.
     pub fn clear_rect(&mut self, rect: &Rect) {
-        match self.state.matrix.map_rect(rect).0.contains(self.bounds) {
-            // if rect fully encloses canvas, erase existing content (but
-            // preserve CTM & clip path)
-            true => self.with_recorder(|mut recorder| {
-                recorder.set_bounds(self.bounds);
-                recorder.set_state(self.state.matrix, &self.state.clip);
-            }),
+        let whole = self.state.clip.is_none()
+            && !self.layers.iter().any(|owns_layer| *owns_layer)
+            && holds_on_the_device(
+                &Path::rect(*rect, None),
+                &self.state.matrix,
+                self.bounds,
+            );
+        match whole {
+            true => self.erase_the_page(),
 
             // otherwise, paint over the specified region but preserve overdrawn
             // vectors
@@ -6055,6 +6074,22 @@ fn holds(path: &Path, rect: Rect) -> bool {
         && reach.right >= rect.right
         && reach.bottom >= rect.bottom
         && path.conservatively_contains_rect(rect)
+}
+
+/// Whether `path`, put on the device by `matrix`, holds `rect` -- see
+/// [`holds`]. The path is transformed only where its bounds, mapped, reach
+/// past `rect` on every side: a fill that does not reach the page's edges
+/// pays for no path.
+fn holds_on_the_device(path: &Path, matrix: &Matrix, rect: Rect) -> bool {
+    if matrix.is_identity() {
+        return holds(path, rect);
+    }
+    let reach = matrix.map_rect(path.bounds()).0;
+    reach.left <= rect.left
+        && reach.top <= rect.top
+        && reach.right >= rect.right
+        && reach.bottom >= rect.bottom
+        && holds(&path.make_transform(matrix), rect)
 }
 
 /// What `path` covers once `matrix` puts it on the device, for choosing how
