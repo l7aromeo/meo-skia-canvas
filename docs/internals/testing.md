@@ -45,7 +45,8 @@ features, rather than compiling it -- see
 [packaging.md](packaging.md#compiled-skia-is-cached-for-every-worktree).
 
 A bare `cargo test` also has no GPU: the GPU legs need the platform's feature
-(`metal`, or `vulkan` on Linux), and without it they skip or fall back. Add
+(`metal`, or `vulkan` on Linux), and without it they skip, printing
+`skipped: no GPU`. Add
 `--no-fail-fast` when the library's own tests are red, or cargo stops at the
 first failing test binary and the integration tests never run.
 
@@ -53,7 +54,16 @@ first failing test binary and the integration tests never run.
 
 `set_gpu(true)` falls back to the CPU engine where no GPU starts, silently. A
 test of GPU behaviour checks `engine_kind()` and skips, saying so, rather than
-passing on the CPU. A test that pins one engine's output hides the other:
+passing on the CPU. Under `tests/`, that check is `tests/common/mod.rs`:
+`common::engines()` for a test drawn on both engines, `common::has_gpu()` for
+one with only a GPU leg, and `common::on_gpu(&canvas)` for a canvas whose
+options may send it to the CPU by design. Each fails instead of skipping
+where a GPU is required: on macOS with `metal` and a device, and wherever
+`MEO_SKIA_CANVAS_REQUIRE_GPU` names the device, as CI's lavapipe job does.
+`just check-gpu-legs` refuses a GPU leg that bypasses them, and a probe or
+call of one of their names that does not go through `common::`.
+
+A test that pins one engine's output hides the other:
 cover the other engine with a property that holds on both, never by asserting
 a defect persists there.
 

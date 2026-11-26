@@ -8,9 +8,9 @@
 //! apart in a few edge pixels, in a sequence that followed the registrations.
 //! A CPU canvas drew one page throughout.
 
-use std::env;
-
 use meo_skia_canvas::prelude::*;
+
+mod common;
 
 /// The page, in pixels.
 const WIDTH: f32 = 600.0;
@@ -32,16 +32,12 @@ const FAMILY: &str = "Drawn After Registrations";
 /// The family registered between draws, no other test's.
 const BETWEEN: &str = "Registered Between Draws";
 
-/// The same text tests/gpu_path_coverage.rs reads, for the same reason: CI's
-/// Linux runner sets it so that a green run has drawn on lavapipe.
-const REQUIRE_GPU: &str = "MEO_SKIA_CANVAS_REQUIRE_GPU";
-
 /// #611's draw: glyphs large enough that the GPU draws them otherwise than
 /// as small masks -- 96px at a scale of 2.4.
 fn drawn() -> Result<Option<ImageData>, Error> {
     let mut canvas = Canvas::new(WIDTH, HEIGHT);
     canvas.set_gpu(true);
-    if canvas.engine_kind() != EngineKind::Gpu {
+    if !common::on_gpu(&canvas) {
         return Ok(None);
     }
     let ctx = canvas.context();
@@ -79,28 +75,12 @@ fn pages(
     Ok(pages.len())
 }
 
-/// Skips where there is no GPU, unless [`REQUIRE_GPU`] asks for one.
+/// Skips where there is no GPU, and fails where one is required -- see
+/// `common::on_gpu`.
 #[test]
 fn text_draws_the_same_whatever_fonts_were_registered_before_it()
 -> Result<(), Error> {
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    if let Ok(required) = env::var(REQUIRE_GPU) {
-        let backend = BackendInfo::query();
-        assert!(
-            probe.engine_kind() == EngineKind::Gpu
-                && backend
-                    .device
-                    .as_deref()
-                    .is_some_and(|device| device.contains(&required)),
-            "{REQUIRE_GPU} asks for a GPU named {required:?}; the engine is \
-             {:?} on {:?}, error {:?}",
-            probe.engine_kind(),
-            backend.device,
-            backend.error,
-        );
-    }
-    if probe.engine_kind() != EngineKind::Gpu {
+    if !common::has_gpu() {
         return Ok(());
     }
 

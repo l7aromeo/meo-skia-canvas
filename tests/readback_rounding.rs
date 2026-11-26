@@ -12,6 +12,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const ROWS: &[(&str, [u8; 4])] = &[
     ("color(display-p3 0.5 0.2 0.1 / 0.1)", [128, 49, 29, 26]),
     ("color(display-p3 0.3 0.6 0.9 / 0.1)", [78, 147, 226, 26]),
@@ -69,7 +71,7 @@ fn read_twice(css: &str, gpu: bool, side: f32) -> Result<[[u8; 4]; 2], Error> {
 #[test]
 fn either_engine_unpremultiplies_as_chrome_does() -> Result<(), Error> {
     // Four pixels square is served by a tile; 600 by the page.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for side in [4.0, 600.0] {
             for &(css, chrome) in ROWS {
                 assert_eq!(
@@ -91,7 +93,7 @@ fn a_large_read_unpremultiplies_across_threads_as_a_small_one_does()
     // thread from the same surface, so the two have to agree byte for byte.
     // The engines are not compared with each other: the GPU rasterizes some
     // translucent colours a premultiplied step away from the raster engine.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let mut canvas = Canvas::with_options(
             1200.0,
             900.0,

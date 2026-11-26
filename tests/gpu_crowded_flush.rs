@@ -11,12 +11,13 @@
 //! them -- so the error goes both ways, and is not a matter of compositing.
 
 use std::{
-    env,
     f32::consts::{FRAC_PI_2, PI},
     ops::Range,
 };
 
 use meo_skia_canvas::prelude::*;
+
+mod common;
 
 /// The page, in pixels.
 const WIDTH: usize = 1280;
@@ -31,10 +32,6 @@ const SIDE: f32 = 24.0;
 
 /// How far past its box a star's anti-aliasing can reach, in pixels.
 const FRINGE: f32 = 2.0;
-
-/// The same text tests/gpu_path_coverage.rs reads, for the same reason: CI's
-/// Linux runner sets it so that a green run has drawn on lavapipe.
-const REQUIRE_GPU: &str = "MEO_SKIA_CANVAS_REQUIRE_GPU";
 
 /// A five-pointed star in a `SIDE` box, its points 12 and 5 from the centre.
 fn star() -> Path2D {
@@ -100,7 +97,8 @@ fn drawn(
     canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())
 }
 
-/// Skips where there is no GPU, unless [`REQUIRE_GPU`] asks for one.
+/// Skips where there is no GPU, and fails where one is required -- see
+/// `common::on_gpu`.
 ///
 /// Ignored, saying why, where the Skia compiled lacks the atlas placement --
 /// `cfg(meo_atlas_placement)`, from `build.rs`.
@@ -114,24 +112,7 @@ fn drawn(
 )]
 fn a_path_covers_a_crowded_flush_as_it_covers_a_small_one() -> Result<(), Error>
 {
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    if let Ok(required) = env::var(REQUIRE_GPU) {
-        let backend = BackendInfo::query();
-        assert!(
-            probe.engine_kind() == EngineKind::Gpu
-                && backend
-                    .device
-                    .as_deref()
-                    .is_some_and(|device| device.contains(&required)),
-            "{REQUIRE_GPU} asks for a GPU named {required:?}; the engine is \
-             {:?} on {:?}, error {:?}",
-            probe.engine_kind(),
-            backend.device,
-            backend.error,
-        );
-    }
-    if probe.engine_kind() != EngineKind::Gpu {
+    if !common::has_gpu() {
         return Ok(());
     }
 

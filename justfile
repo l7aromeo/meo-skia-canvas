@@ -29,10 +29,10 @@ set dotenv-command := "node scripts/skia-source.mjs env"
 # Every cargo call here that builds skia-bindings goes through this. Where the
 # local cache holds Skia compiled from this worktree's patched tree for the
 # call's features, skia-bindings links it and runs no ninja; otherwise cargo
-# runs as it is and compiles Skia. `just skia-cache-fill` stores a feature
-# set's Skia; scripts/skia-cache.mjs and scripts/skia-binaries.mjs say how an
-# entry is chosen and checked. A call written as plain `cargo` still builds,
-# only without the cache.
+# compiles Skia and the script stores what it compiled, for the next build of
+# those features to link. scripts/skia-cache.mjs and scripts/skia-binaries.mjs
+# say how an entry is chosen and checked. A call written as plain `cargo` still
+# builds, only without the cache.
 skia_cargo := "node scripts/skia-cache.mjs cargo"
 
 # On Linux, `metal` feature does not compile -- use feature subset.
@@ -144,7 +144,7 @@ prepush: fmt-check (check-docs "origin/main") check-repo (typecheck prepush_type
 # no workflow at all. The rest of `prepush` runs in rust-ci.yml, where the Skia
 # they compile against is built.
 [doc("The checks in prepush that build no Skia, which ci.yml's repo job runs.")]
-check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack check-build-brotli check-notices lint-js
+check-repo: check-changelog check-release-guards check-release-tags check-upstream-notes check-gpu-legs check-cargo-lock check-markdown-links check-readme-facts check-fetch-deps check-workflow-gates check-skia-patches check-skia-pack check-build-brotli check-notices lint-js
 
 # Installs when node_modules is missing *or* no longer matches bun.lock, which
 # a rebase or merge can move under a warm worktree. scripts/install-deps.mjs
@@ -187,10 +187,14 @@ typecheck features=linux_features: ensure-deps
 
 # Compile Skia once for a feature set and keep it in the local cache, for every
 # worktree's builds with those features to link instead of compiling it --
-# `skia_cargo` above, and scripts/skia-cache.mjs. `args` are cargo's feature
+# `skia_cargo` above, and scripts/skia-cache.mjs. A build through `skia_cargo`
+# that compiles stores its Skia too; this fills a set ahead of any build that
+# needs it, from a library-only build. `args` are cargo's feature
 # and profile flags as a recipe gives them, as in `just skia-cache-fill
 # --no-default-features --features metal`. Stored only once
-# scripts/check-patched-skia.mjs passes the build.
+# scripts/check-patched-skia.mjs passes the build, and only where this build
+# ran skia-bindings' build script: a set cargo finds fresh here is not
+# stored -- see `store` in scripts/skia-binaries.mjs.
 [doc("Compile Skia for a feature set and store it in the local cache.")]
 skia-cache-fill *args: ensure-deps
     node scripts/skia-cache.mjs fill {{ args }}
@@ -254,18 +258,21 @@ precommit: ensure-deps check-docs check-cargo-lock check-skia-patches
 #
 # `base` decides which question the Rust half is asked, and the three callers
 # want two different ones. `precommit` passes nothing and gets the staged diff,
-# because that is what is about to become a commit. `ci` passes `origin/main`
-# and gets the range a pull request will be reviewed over -- a contributor who
-# declined the opt-in hook runs `ci` to find out what CI will say, and the
-# staged diff is empty on a clean tree, which is the normal state after a
-# commit. Asked that way the Rust half examined nothing and reported success.
-# It now prints how many files and added lines each pass read, so a zero reads
-# as a zero rather than as coverage. `rust-ci.yml` asks the range form itself,
-# against the pull request's own base.
+# because that is what is about to become a commit. `prepush`, and `ci` through
+# it, pass `origin/main` and get everything between its merge base and the work
+# tree: what a pull request will be reviewed over, and what is staged or not
+# yet staged on top. A contributor who declined the opt-in hook runs `prepush`
+# to find out what CI will say, and the staged diff is empty on a clean tree,
+# which is the normal state after a commit; asked that way the Rust half
+# examined nothing and reported success. Asked for the committed range alone,
+# it passed an uncommitted edit the hook then refused. It prints how many files
+# and added lines each pass read, so a zero reads as a zero rather than as
+# coverage. `rust-ci.yml` asks the range form itself, against the pull
+# request's own base; on a clean checkout the two forms ask the same thing.
 #
-# The range is skipped rather than fatal when the base ref is missing, which is
-# a shallow clone or a fork with no `origin`. The JavaScript half is tree-wide
-# under every one of them and is unaffected by any of this.
+# The base form is skipped rather than fatal when the base ref is missing,
+# which is a shallow clone or a fork with no `origin`. The JavaScript half is
+# tree-wide under every one of them and is unaffected by any of this.
 #
 # The self-test runs first and checks the scanner rather than the tree: it
 # appends a known stacked pair to every tracked file and asserts the count
@@ -290,8 +297,8 @@ check-docs base="":
         node scripts/check-stacked-docs.mjs --cached
         node scripts/check-doc-attachment.mjs --cached
     elif git rev-parse --verify --quiet "{{ base }}" >/dev/null; then
-        node scripts/check-stacked-docs.mjs --range "{{ base }}...HEAD"
-        node scripts/check-doc-attachment.mjs --range "{{ base }}...HEAD"
+        node scripts/check-stacked-docs.mjs --worktree "{{ base }}"
+        node scripts/check-doc-attachment.mjs --worktree "{{ base }}"
     else
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
@@ -381,6 +388,15 @@ check-workflow-gates: ensure-deps
 [doc("Fail when an upstream-defect note cannot be re-checked.")]
 check-upstream-notes:
     node scripts/check-upstream-notes.mjs
+
+# A GPU leg under tests/ goes through tests/common/mod.rs, which skips it
+# saying so where there is no GPU and fails it where one is required. Without
+# that, `set_gpu(true)` falls back to the CPU in silence and the leg compares
+# the CPU with itself. The self-test runs first, for the reason
+# `check-upstream-notes` runs one.
+[doc("Fail when an integration test asks for the GPU without tests/common.")]
+check-gpu-legs:
+    node scripts/check-gpu-legs.mjs --self-test
 
 # Refuse a Cargo.lock that a build with `skia-source.mjs cargo-patch` left
 # pointing skia-bindings, skia-safe and skia-svg-macros at a path on this
