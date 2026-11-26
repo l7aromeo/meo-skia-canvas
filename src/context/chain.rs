@@ -28,7 +28,7 @@ use skia_safe::{
     color_filters,
     image::{CachingHint, RequiredProperties},
     image_filter::MapDirection,
-    image_filters, surfaces,
+    image_filters,
 };
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -1694,7 +1694,7 @@ fn draw_from_the_origin(
     // The layer holds the origin, `-at.left` columns and `-at.top` rows in.
     let start = (-at.top) as usize * row_bytes
         + (-at.left) as usize * info.bytes_per_pixel();
-    let origin = surfaces::wrap_pixels(
+    let origin = started::wrap_pixels(
         &info.with_dimensions(from_origin.size()),
         &mut pixels[start..],
         row_bytes,
