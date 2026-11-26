@@ -36,6 +36,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -60,8 +61,9 @@ export const BINDINGS_LIBRARY = "libskia-bindings.a";
 /// takes back.
 const DEFINES = "skia-defines.txt";
 
-/// The manifest's layout. A cache written by another layout is not read.
-const MANIFEST_VERSION = 1;
+/// The manifest's layout. A cache written by another layout is not read:
+/// entries of layout 1 name no compiler.
+export const MANIFEST_VERSION = 2;
 
 /// What an entry's build compiled, for the notices of a build that links
 /// it: see `record` in scripts/notices.mjs.
@@ -162,6 +164,78 @@ export function loggedSdk(log, platform = process.platform) {
   return sysroot ? sdkKey(sysroot[1]) : { why: "the log names no --sysroot" };
 }
 
+/// The variables skia-bindings takes Skia's C and C++ compilers from, the
+/// first one set winning, and the command it runs where none is:
+/// `BuildConfiguration::from_features` in skia-bindings 0.156.0's
+/// build_support/skia/config.rs. Its build script reruns when any of them
+/// changes.
+const COMPILERS = [
+  { role: "cc", names: ["CLANGCC", "CC"], otherwise: "clang" },
+  { role: "cxx", names: ["CLANGCXX", "CXX"], otherwise: "clang++" },
+];
+
+/** The first line `command --version` prints, or `null` where it fails. */
+function versionLine(command) {
+  try {
+    const out = execFileSync(command, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.split("\n")[0].trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The compilers skia-bindings would compile Skia with under `env`, each by
+ * the first line its `--version` prints, as `{ compiler: { cc, cxx } }`, or
+ * `{ why }` where one cannot be named. `version` runs a command with
+ * `--version`; a test replaces it.
+ *
+ * The line names the compiler's release -- `Apple clang version 21.0.0
+ * (clang-2100.4.1.1)` -- so an Xcode or Command Line Tools update that
+ * changes clang changes the key, whether or not it changes the SDK. A
+ * command with arguments, such as `CC="clang -O0"` or `ccache clang`, is not
+ * named: what the arguments do to the objects is not in the line.
+ */
+export function compilerKey(env = process.env, version = versionLine) {
+  const compiler = {};
+  for (const { role, names, otherwise } of COMPILERS) {
+    const name = names.find((n) => env[n] !== undefined);
+    const command = name ? env[name] : otherwise;
+    if (command === "") return { why: `${name} is empty` };
+    if (/\s/.test(command))
+      return {
+        why: `${name} is ${JSON.stringify(command)}, a command with arguments, which no version names`,
+      };
+    const line = version(command);
+    if (!line) return { why: `\`${command} --version\` named no version` };
+    compiler[role] = line;
+  }
+  return { compiler };
+}
+
+/// What a version line keeps in an entry's directory name. Every other run
+/// of characters becomes one `-`, so that the name cannot reach outside its
+/// directory; the manifest keeps the lines whole.
+const NAME_KEEPS = /[^A-Za-z0-9.]+/g;
+
+/**
+ * The directory name of `compiler`, as `compilerKey` gives it: the version
+ * line once where both compilers print the same one, as clang and clang++
+ * of one release do.
+ */
+function compilerName({ cc, cxx }) {
+  const name = (line) => line.replace(NAME_KEEPS, "-").replace(/^-|-$/g, "");
+  return cc === cxx ? name(cc) : `${name(cc)}+${name(cxx)}`;
+}
+
+/** Whether two compilers, as `compilerKey` gives them, are the same. */
+function sameCompiler(a, b) {
+  return a?.cc === b?.cc && a?.cxx === b?.cxx;
+}
+
 /// cargo's flags that choose features, and those that take a value.
 const FEATURE_FLAGS = new Set([
   "--features",
@@ -229,11 +303,11 @@ export function skiaFeatures(featureArgs, root = ROOT) {
 }
 
 /**
- * The directory of the entry for `key` under `cache`: the tree, then where
- * and how it was compiled, then skia-bindings' features.
+ * The directory of the entry for `key` under `cache`: the tree, then where,
+ * by what and how it was compiled, then skia-bindings' features.
  */
 export function entryDir(
-  { tree, target, sdk, profile, features },
+  { tree, target, sdk, compiler, profile, features },
   cache = cacheRoot(),
 ) {
   return join(
@@ -242,6 +316,7 @@ export function entryDir(
     tree,
     target,
     sdk,
+    compilerName(compiler),
     profile,
     features.join("+") || "none",
   );
@@ -289,6 +364,8 @@ export function keyFor(args, env = process.env, root = ROOT) {
   if (!read) return { why: "a cross target or another manifest" };
   const { sdk, why } = currentSdk(env);
   if (!sdk) return { why };
+  const { compiler, why: unnamed } = compilerKey(env);
+  if (!compiler) return { why: unnamed };
   const features = skiaFeatures(read.features, root);
   if (!features) return { why: "cargo tree could not resolve the features" };
   return {
@@ -296,6 +373,7 @@ export function keyFor(args, env = process.env, root = ROOT) {
       tree: treeName(root),
       target: hostTarget(),
       sdk,
+      compiler,
       profile: read.profile,
       features,
     },
@@ -303,7 +381,10 @@ export function keyFor(args, env = process.env, root = ROOT) {
 }
 
 /**
- * Why the entry at `dir` cannot be linked, or `null` where it can. A build
+ * Why the entry at `dir` cannot be linked by a build whose compiler is
+ * `compiler`, as `compilerKey` gives it, or `null` where it can. Two version
+ * lines can share a directory name, so the compiler the manifest names
+ * whole has to be this one. A build
  * that links an entry runs no ninja of its own, so its notices come from the
  * record the entry keeps. An entry stored before entries kept one has it
  * derived here from the gn arguments its seed build printed -- `derive`,
@@ -311,8 +392,11 @@ export function keyFor(args, env = process.env, root = ROOT) {
  * before; one whose record cannot be derived is not linked, and the build
  * that compiles instead stores one.
  */
-export function linkable(dir, tree, derive = recordFromLog) {
-  if (!readManifest(dir)) return `no entry at ${dir}`;
+export function linkable(dir, tree, compiler, derive = recordFromLog) {
+  const manifest = readManifest(dir);
+  if (!manifest) return `no entry at ${dir}`;
+  if (!sameCompiler(manifest.compiler, compiler))
+    return `${dir} was compiled by ${JSON.stringify(manifest.compiler)}`;
   if (existsSync(join(dir, NOTICES_RECORD))) return null;
   let derived;
   try {
@@ -338,7 +422,7 @@ export function cacheEnv(args, env = process.env, root = ROOT) {
   const { key, why } = keyFor(args, env, root);
   if (!key) return { why };
   const dir = entryDir(key);
-  const unlinkable = linkable(dir, env.SKIA_SOURCE_DIR);
+  const unlinkable = linkable(dir, env.SKIA_SOURCE_DIR, key.compiler);
   if (unlinkable) return { why: unlinkable, key };
   return {
     dir,
@@ -353,22 +437,156 @@ export function cacheEnv(args, env = process.env, root = ROOT) {
   };
 }
 
+/// What every ar archive opens with, and the size of the header before each
+/// member: `ARMAG` and `struct ar_hdr` in `<ar.h>`.
+const AR_MAGIC = "!<arch>\n";
+const AR_HEADER = 60;
+
+/// Where `struct ar_hdr` keeps a member's name and its size in bytes, as
+/// `[start, end)` within the header: `ar_name[16]`, then `ar_date[12]`,
+/// `ar_uid[6]`, `ar_gid[6]` and `ar_mode[8]` before `ar_size[10]`.
+const AR_NAME = [0, 16];
+const AR_SIZE = [48, 58];
+
+/// BSD's mark for a name kept after the header, its length following:
+/// `AR_EFMT1` in `<ar.h>`. Apple's `ar` and `libtool` write every name so.
+const BSD_LONG_NAME = "#1/";
+
+/// System V's table of the names too long for a header, named `//`; a member
+/// named `/<offset>` has its name there, ended by `/\n`.
+const SYSV_NAMES = "//";
+
+/// The members that index the others' symbols, rebuilt whenever the
+/// archive is written: BSD's `__.SYMDEF` family and System V's `/` and
+/// `/SYM64/`. Apple's `ranlib` records the time it ran in one, so two
+/// archives of the same objects differ there.
+const SYMBOL_INDEX = /^(?:__\.SYMDEF(?:_64)?(?: SORTED)?|\/|\/SYM64\/)$/;
+
+/**
+ * The members of the ar archive `bytes`, in order, each `{ name, digest }`
+ * with the digest over its contents alone -- not its header, whose date
+ * changes with every build -- and the symbol index left out. `null` where
+ * `bytes` is not an archive this reads.
+ */
+export function archiveMembers(bytes) {
+  if (bytes.toString("latin1", 0, AR_MAGIC.length) !== AR_MAGIC) return null;
+  const members = [];
+  let names = null;
+  for (let at = AR_MAGIC.length; at < bytes.length;) {
+    if (at + AR_HEADER > bytes.length) return null;
+    const field = ([from, to]) =>
+      bytes.toString("latin1", at + from, at + to).trimEnd();
+    const sized = field(AR_SIZE);
+    if (!/^\d+$/.test(sized)) return null;
+    const size = Number(sized);
+    const start = at + AR_HEADER;
+    if (start + size > bytes.length) return null;
+    let name = field(AR_NAME);
+    let data = bytes.subarray(start, start + size);
+    if (name === SYSV_NAMES) names = data.toString("latin1");
+    else if (name.startsWith(BSD_LONG_NAME)) {
+      const length = Number(name.slice(BSD_LONG_NAME.length));
+      if (!Number.isInteger(length) || length > size) return null;
+      name = data.toString("latin1", 0, length).replace(/\0+$/, "");
+      data = data.subarray(length);
+    } else if (/^\/\d+$/.test(name)) {
+      if (names === null) return null;
+      name = names.slice(Number(name.slice(1))).match(/^[^/\n\0]*/)[0];
+    } else if (
+      name.length > 1 &&
+      name.endsWith("/") &&
+      !SYMBOL_INDEX.test(name)
+    )
+      name = name.slice(0, -1);
+    if (name !== SYSV_NAMES && !SYMBOL_INDEX.test(name))
+      members.push({
+        name,
+        digest: `sha256:${createHash("sha256").update(data).digest("hex")}`,
+      });
+    // Each member starts on an even offset.
+    at = start + size + (size % 2);
+  }
+  return members;
+}
+
+/**
+ * Where the archive `built` holds other objects than `held`, naming the
+ * first member that differs, or `null` where they hold the same objects in
+ * the same order.
+ */
+export function archiveDifference(held, built) {
+  const [was, is] = [archiveMembers(held), archiveMembers(built)];
+  if (!was || !is)
+    return `${was ? "this build's" : "the entry's"} is not an ar archive`;
+  for (let i = 0; i < Math.max(was.length, is.length); i += 1) {
+    if (!was[i]) return `this build's has ${is[i].name} as well`;
+    if (!is[i]) return `this build's has no ${was[i].name}`;
+    if (was[i].name !== is[i].name)
+      return `member ${i + 1} is ${was[i].name} in the entry and ${is[i].name} in this build`;
+    if (was[i].digest !== is[i].digest) return `its ${was[i].name} differs`;
+  }
+  return null;
+}
+
+/**
+ * Where the build in `skia`, about to be stored as `built`, differs from the
+ * entry in `dir` that `held` describes, or `null` where it holds what the
+ * entry holds. Two builds of one key never agree byte for byte: `ar` records
+ * each member's date and `ranlib` its own time, so archives are compared by
+ * their members, the definitions file by its bytes.
+ */
+function entryDifference(dir, held, skia, built) {
+  if (!sameCompiler(held.compiler, built.compiler))
+    return `it was compiled by ${JSON.stringify(held.compiler)}`;
+  const names = Object.keys(built.libraries);
+  const heldNames = Object.keys(held.libraries);
+  const extra = names.find((name) => !heldNames.includes(name));
+  if (extra) return `this build has ${extra}, which the entry does not`;
+  const missing = heldNames.find((name) => !names.includes(name));
+  if (missing) return `this build has no ${missing}`;
+  for (const name of names) {
+    if (held.libraries[name] === built.libraries[name]) continue;
+    const why = archiveDifference(
+      readFileSync(join(dir, name)),
+      readFileSync(join(skia, name)),
+    );
+    if (why) return `${name}: ${why}`;
+  }
+  if (
+    !readFileSync(join(dir, DEFINES)).equals(readFileSync(join(skia, DEFINES)))
+  )
+    return `its ${DEFINES} differs`;
+  return null;
+}
+
 /**
  * Stores the build in `buildDir` -- the unit directory skia-bindings' build
- * script ran in, see scripts/cargo-build-dir.mjs -- as the entry for `profile` and `features`, once `vouch` finds
- * nothing wrong with its log. Written beside the entry and renamed into
- * place, so a reader never finds half an entry. An entry already there with
- * the same libraries is kept, given this build's notices record where it has
- * none; one with others is refused, since two builds of one key ought to
- * agree.
+ * script ran in, see scripts/cargo-build-dir.mjs -- as the entry for
+ * `profile`, `features` and `compiler`, once `vouch` finds nothing wrong with
+ * its log. Written beside the entry and renamed into place, so a reader
+ * never finds half an entry.
+ *
+ * `compiler` is what `compilerKey` named when the build started, at `since`,
+ * a time in milliseconds as `Date.now` gives it. A build whose script did
+ * not run after that -- one cargo found fresh -- is refused: its log does
+ * not say which clang compiled it, and an update since would key it under
+ * the wrong one.
+ *
+ * An entry already there holding the same objects is kept, given this
+ * build's notices record where it has none. One holding others is refused,
+ * naming the first difference, since two builds of one key ought to agree.
  */
 export function store(
   buildDir,
-  { profile, features },
+  { profile, features, compiler, since },
   vouch,
   { cache = cacheRoot(), root = ROOT, notices = record } = {},
 ) {
   const logs = buildScriptLogs(buildDir);
+  if (!(statSync(logs.output).mtimeMs >= since))
+    throw new Error(
+      `skia-cache: ${buildDir} is not stored: its build script did not run in this build, so which compiler built it is not known`,
+    );
   const log = [
     readFileSync(logs.output, "utf8"),
     existsSync(logs.stderr) ? readFileSync(logs.stderr, "utf8") : "",
@@ -392,6 +610,7 @@ export function store(
     tree,
     target: hostTarget(),
     sdk,
+    compiler,
     profile,
     features: [...features].sort(),
   };
@@ -407,24 +626,22 @@ export function store(
   const noticesRecord = `${JSON.stringify(notices(skia), null, 2)}\n`;
   const existing = readManifest(dir);
   if (existing) {
-    if (
-      JSON.stringify(existing.libraries) === JSON.stringify(manifest.libraries)
-    ) {
-      // The same libraries, from an entry stored before entries carried
-      // their notices record: the record is this build's, so it is theirs.
-      if (!existsSync(join(dir, NOTICES_RECORD))) {
-        const partialRecord = join(
-          dir,
-          `${NOTICES_RECORD}.partial-${process.pid}`,
-        );
-        writeFileSync(partialRecord, noticesRecord);
-        renameSync(partialRecord, join(dir, NOTICES_RECORD));
-      }
-      return { dir, stored: false };
+    const differs = entryDifference(dir, existing, skia, manifest);
+    if (differs)
+      throw new Error(
+        `skia-cache: ${dir} already holds other libraries for the same key: ${differs}`,
+      );
+    // The same objects, from an entry stored before entries carried their
+    // notices record: the record is this build's, so it is theirs.
+    if (!existsSync(join(dir, NOTICES_RECORD))) {
+      const partialRecord = join(
+        dir,
+        `${NOTICES_RECORD}.partial-${process.pid}`,
+      );
+      writeFileSync(partialRecord, noticesRecord);
+      renameSync(partialRecord, join(dir, NOTICES_RECORD));
     }
-    throw new Error(
-      `skia-cache: ${dir} already holds other libraries for the same key`,
-    );
+    return { dir, stored: false };
   }
   const partial = `${dir}.partial-${process.pid}`;
   rmSync(partial, { recursive: true, force: true });

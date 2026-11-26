@@ -241,14 +241,22 @@ the `skia-defines.txt` it saved beside them. Measured on an M4 Pro, the build
 script took 8 seconds this way, and `just build` 40 seconds from an empty
 target.
 
-**Which entry.** One per tree, target, SDK, profile and skia-bindings feature
-set, the features being what `cargo tree` resolves for a call's flags. The
+**Which entry.** One per tree, target, SDK, compiler, profile and
+skia-bindings feature set, the features being what `cargo tree` resolves for
+a call's flags. The compiler is named by the first line `--version` prints
+for the C and the C++ compiler skia-bindings would run -- `CLANGCC`, else
+`CC`, else `clang`, and the same for C++ -- so an Xcode or Command Line
+Tools update that changes clang keys new entries whether or not it changes
+the SDK; a compiler variable holding a command with arguments, such as
+`ccache clang`, is never cached, since the line does not say what the
+arguments do. The
 SDK is named by the version its `SDKSettings.json` records, as
 `MacOSX27.2.sdk`, so every path to one SDK -- `MacOSX.sdk`, the symlinks
 beside it, the Command Line Tools' copy -- finds one entry; an SDK that
 records no version is never cached. Xcode's and the Command Line Tools'
-copies of one version share an entry: measured on 27.2, they compile Skia's
-CoreText and Metal sources to the same bytes. The
+copies of one version share an entry where their clangs print one version
+line, as both do on 27.2: measured there, they compile Skia's CoreText and
+Metal sources to the same bytes. The
 tree is `treeName`, so a change of patches misses the cache rather than
 linking a stale entry, and a superseded tree's entries are removed with the
 tree. Every cargo call in the justfile that builds skia-bindings goes through
@@ -262,7 +270,15 @@ cargo for its JSON messages, which name the out-dir skia-bindings' build script
 ran in and the features it was compiled with, and passes the rest of cargo's
 output through. A store that is refused says why on stderr and leaves the build
 passing or failing as cargo had it. Such a build's stdout is a pipe through the
-script, so a test harness there prints no colour.
+script, so a test harness there prints no colour. A build is stored only when
+its build script ran after the call started: one cargo found fresh may have
+been compiled by an earlier clang, and its log does not say which, so it is
+left unstored until skia-bindings next compiles. A second build of a key
+already held is compared by what its archives hold -- each member's
+contents, in order, without its date or the symbol index `ranlib` rebuilds,
+neither of which ever agrees between two builds -- and by its definitions
+file: where those agree it is `already held`, and otherwise it is refused,
+naming the first library and member that differ.
 
 **What the entry compiled.** An entry also keeps `notices.json`: the Skia
 tree and the projects its build compiled, from ninja's dependency record,

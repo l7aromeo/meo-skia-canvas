@@ -192,7 +192,9 @@ typecheck features=linux_features: ensure-deps
 # needs it, from a library-only build. `args` are cargo's feature
 # and profile flags as a recipe gives them, as in `just skia-cache-fill
 # --no-default-features --features metal`. Stored only once
-# scripts/check-patched-skia.mjs passes the build.
+# scripts/check-patched-skia.mjs passes the build, and only where this build
+# ran skia-bindings' build script: a set cargo finds fresh here is not
+# stored -- see `store` in scripts/skia-binaries.mjs.
 [doc("Compile Skia for a feature set and store it in the local cache.")]
 skia-cache-fill *args: ensure-deps
     node scripts/skia-cache.mjs fill {{ args }}

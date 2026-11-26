@@ -55,6 +55,7 @@ import {
   BINDINGS_LIBRARY,
   digest,
   entriesFor,
+  MANIFEST_VERSION,
   seedLog,
 } from "./skia-binaries.mjs";
 import { buildScriptLogs, buildScriptRuns } from "./cargo-build-dir.mjs";
@@ -666,7 +667,7 @@ function bindCases(root) {
   write(
     join(entry, "manifest.json"),
     JSON.stringify({
-      version: 1,
+      version: MANIFEST_VERSION,
       libraries: Object.fromEntries(
         Object.keys(libraries).map((name) => [name, digest(join(entry, name))]),
       ),
