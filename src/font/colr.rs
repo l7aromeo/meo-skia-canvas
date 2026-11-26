@@ -13,7 +13,9 @@
 //! inks none more than 8 from it. So on every platform this module walks a
 //! glyph's paint graph with skrifa, Fontations' own reader, and records it
 //! as a [`Picture`], and the text routes draw that picture in place of the
-//! platform's glyph -- see `node::typography::draw_colour_run`.
+//! platform's glyph -- see `node::typography::draw_colour_run`. Text in an
+//! SVG image set in such a face reaches it too: `image::colr_text` takes that
+//! text from the SVG module and draws it through a canvas's text route.
 //!
 //! What each callback draws follows Skia's painter for Fontations
 //! (`ColorPainter` in `skia/src/ports/SkTypeface_fontations.cpp` under the

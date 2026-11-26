@@ -3295,6 +3295,14 @@ impl<'a> Typesetter<'a> {
         )
     }
 
+    /// Whether the run sets a glyph in a face whose colour glyphs this
+    /// library draws itself -- see [`draw_colour_run`] -- laid out to answer
+    /// only where it can hold one, as [`Self::colour_features`] is.
+    pub(crate) fn holds_colour_glyphs(&self) -> bool {
+        self.can_hold(|face| colr_face(face).is_some())
+            && holds_colour_runs(&self.layout(&Paint::default()).paragraph)
+    }
+
     /// Whether the run holds a glyph the platform draws in its own colours
     /// -- see [`draws_own_colours`] -- for a run not kept. Laid out to
     /// answer only where it can hold one, as [`Self::colour_features`] is.

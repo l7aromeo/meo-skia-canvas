@@ -10,8 +10,10 @@ use skia_safe::{
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
+mod colr_text;
+
 use crate::{
-    color::{RgbaLinear, rgba_linear_to_skia_color},
+    color::{RgbaLinear, rgba_linear_to_skia_color, skia_color_to_rgba_linear},
     css,
     decode::bmp::space_of,
     error::Error,
@@ -693,9 +695,28 @@ impl Image {
 /// `usePseudos` stays at `['']`, which skips `:hover` and its neighbours --
 /// right for the same reason, since a still image never enters those states.
 pub struct Svg {
+    /// The document as Skia's module reads it: what sizes it, and what draws
+    /// it where `layers` does not.
     dom: svg::Dom,
+    /// The document cut around its text in colour faces, in paint order, or
+    /// `None` where it holds none -- see `colr_text`.
+    layers: Option<Vec<Layer>>,
     intrinsic: Size,
     autosized: bool,
+}
+
+/// One step of drawing a document cut around its colour text.
+enum Layer {
+    /// The module's drawing of one segment of the document.
+    Segment(svg::Dom),
+    /// A `<text>` drawn by the canvas's text route.
+    Text(colr_text::TextDraw),
+}
+
+/// A document as parsed, before its size is derived.
+pub(crate) struct ParsedSvg {
+    dom: svg::Dom,
+    layers: Option<Vec<Layer>>,
 }
 
 /// An [`ImageData`] as an image to draw, which is how JavaScript's
@@ -761,7 +782,7 @@ impl Svg {
     /// Returns [`Error::DecodeImage`] if the XML cannot be parsed.
     pub fn parse(xml: &str) -> Result<Self, Error> {
         start_skia();
-        Ok(Self::from_dom(Self::parse_shared(xml.as_bytes())?))
+        Ok(Self::from_parsed(Self::parse_shared(xml.as_bytes())?))
     }
 
     /// Parses SVG bytes against the shared font library: the font manager it
@@ -770,11 +791,20 @@ impl Svg {
     ///
     /// Both doors into this crate go through here -- [`Svg::parse`] and the
     /// Neon binding's `record_svg` -- so that a document's text is set in the
-    /// same faces whichever loaded it. The library also holds the system font
-    /// manager, which costs 6.6 ms to build on macOS: a door that built its
-    /// own on every parse paid that for each document.
-    pub(crate) fn parse_shared(xml: &[u8]) -> Result<svg::Dom, Error> {
-        SharedFonts::with_shared(|lib| {
+    /// same faces whichever loaded it, and so that the two cannot disagree
+    /// about what a document says: what is rewritten before Skia reads it --
+    /// see `rewrite_text` -- and what is cut out of it, is rewritten and cut
+    /// here and nowhere else. The library also holds the system font manager,
+    /// which costs 6.6 ms to build on macOS: a door that built its own on
+    /// every parse paid that for each document.
+    ///
+    /// Text set in a face with a `COLR` table is taken out of what the module
+    /// draws and drawn by the canvas -- see `colr_text`. Whether a `<text>`
+    /// is set in one is asked of the canvas's own layout, after the library
+    /// is released, since a layout takes the library itself. A segment that
+    /// fails to parse leaves the whole document to the module.
+    pub(crate) fn parse_shared(xml: &[u8]) -> Result<ParsedSvg, Error> {
+        let (rewritten, font_mgr) = SharedFonts::with_shared(|lib| {
             let generics = lib.generic_families();
             let claimed = lib.claimed_families();
             let obliques = lib.oblique_families();
@@ -782,31 +812,36 @@ impl Svg {
             // cannot be built before they are known. See `families_named`.
             let wanted = families_named(xml, &generics, &claimed);
             let (font_mgr, groups) = lib.svg_fonts(&wanted);
-            Self::parse_dom(
-                xml, font_mgr, &generics, &claimed, &obliques, &groups,
-            )
-        })
+            let rewritten = rewrite_text(
+                xml, &generics, &claimed, &obliques, &groups, &font_mgr,
+            );
+            (rewritten, font_mgr)
+        });
+        let bytes = rewritten.as_deref().unwrap_or(xml);
+        let dom = Self::dom_of(bytes, font_mgr.clone())?;
+        let layers = colr_text::plan(bytes)
+            .and_then(|plan| {
+                let colour = colr_text::set_in_colour(&plan.candidates);
+                plan.parts(bytes, &colour)
+            })
+            .and_then(|parts| {
+                parts
+                    .into_iter()
+                    .map(|part| match part {
+                        colr_text::Part::Segment(bytes) => {
+                            Self::dom_of(&bytes, font_mgr.clone())
+                                .ok()
+                                .map(Layer::Segment)
+                        }
+                        colr_text::Part::Text(text) => Some(Layer::Text(text)),
+                    })
+                    .collect()
+            });
+        Ok(ParsedSvg { dom, layers })
     }
 
-    /// Parses SVG bytes into a document, rewriting what has to be rewritten
-    /// before Skia reads it.
-    ///
-    /// Every parse goes through here, by way of [`Svg::parse_shared`], so
-    /// that the two doors cannot disagree about what a document says. They
-    /// did once: the rewrite of text positioning lengths landed on
-    /// `parse` alone would have left `loadImage` short by six per cent on
-    /// exactly the documents the crate side had just fixed.
-    pub(crate) fn parse_dom(
-        xml: &[u8],
-        font_mgr: FontMgr,
-        generics: &[(String, String)],
-        claimed: &[(String, String)],
-        obliques: &[ObliqueFamily],
-        groups: &StyleGroups,
-    ) -> Result<svg::Dom, Error> {
-        let rewritten =
-            rewrite_text(xml, generics, claimed, obliques, groups, &font_mgr);
-        let bytes = rewritten.as_deref().unwrap_or(xml);
+    /// `bytes` as Skia's module parses them.
+    fn dom_of(bytes: &[u8], font_mgr: FontMgr) -> Result<svg::Dom, Error> {
         svg::Dom::from_bytes(bytes, font_mgr).map_err(|_| Error::DecodeImage {
             reason: "could not parse SVG XML".to_string(),
         })
@@ -817,11 +852,22 @@ impl Svg {
     /// The Neon binding records the result into a `Picture` rather than a
     /// raster surface, so it needs the sizing without [`Svg::rasterize`]'s
     /// surface.
-    pub(crate) fn from_dom(mut dom: svg::Dom) -> Self {
+    pub(crate) fn from_parsed(parsed: ParsedSvg) -> Self {
+        let ParsedSvg {
+            mut dom,
+            mut layers,
+        } = parsed;
         let (intrinsic, autosized) = derive_intrinsic_size(&mut dom);
         descend(&dom.root());
+        for layer in layers.iter_mut().flatten() {
+            if let Layer::Segment(segment) = layer {
+                derive_intrinsic_size(segment);
+                descend(&segment.root());
+            }
+        }
         Self {
             dom,
+            layers,
             intrinsic,
             autosized,
         }
@@ -949,7 +995,13 @@ impl Svg {
         // Re-check: grep -n "color?: Color"
         // ~/.cargo/registry/src/*/skia-safe-*/src/modules/svg/node.rs
         // An SVG node's `color` is an `SkColor` and nothing wider.
-        self.dom.root().set_color(rgba_linear_to_skia_color(color));
+        let color = rgba_linear_to_skia_color(color);
+        self.dom.root().set_color(color);
+        for layer in self.layers.iter_mut().flatten() {
+            if let Layer::Segment(segment) = layer {
+                segment.root().set_color(color);
+            }
+        }
     }
 
     /// The surface [`Self::rasterize`] draws into: eight-bit sRGB, so that
@@ -1014,9 +1066,6 @@ impl Svg {
                 height: height as f32,
             });
         }
-        self.dom
-            .set_container_size(SkSize::new(width as f32, height as f32));
-
         let info = Self::surface_info(width, height);
         let mut surface =
             started::raster(&info, None, None).ok_or_else(|| {
@@ -1060,16 +1109,50 @@ impl Svg {
                 }
             }
 
-            self.dom.render(canvas);
+            self.render(canvas, SkSize::new(width as f32, height as f32));
         }
 
         Ok(Image::still(surface.image_snapshot()))
     }
 
-    /// The parsed document, for a caller that draws it somewhere other than a
-    /// raster surface.
-    pub(crate) fn dom_mut(&mut self) -> &mut svg::Dom {
-        &mut self.dom
+    /// Draws the document onto `canvas` with its viewport `container`: the
+    /// module's drawing of it, or, where it holds text in a colour face, each
+    /// segment of it and each such text in turn.
+    ///
+    /// The one way both doors draw a document, so that a text the canvas
+    /// draws is drawn by each.
+    pub(crate) fn render(
+        &mut self,
+        canvas: &skia_safe::Canvas,
+        container: SkSize,
+    ) {
+        self.dom.set_container_size(container);
+        let Some(layers) = self.layers.as_mut() else {
+            self.dom.render(canvas);
+            return;
+        };
+        // What `currentcolor` resolves to at the root: the override where
+        // one is set, which replaces the root's own `color`, and black, the
+        // initial value, where neither says.
+        let current = self
+            .dom
+            .root()
+            .color()
+            .map_or(RgbaLinear::from_srgb(0.0, 0.0, 0.0, 1.0), |color| {
+                skia_color_to_rgba_linear(*color)
+            });
+        let root = self.dom.root();
+        for layer in layers {
+            match layer {
+                Layer::Segment(segment) => {
+                    segment.set_container_size(container);
+                    segment.render(canvas);
+                }
+                Layer::Text(text) => {
+                    text.draw(canvas, &root, container, current)
+                }
+            }
+        }
     }
 }
 

@@ -26,7 +26,9 @@ use skia_safe::{
     typeface::TypefaceId,
 };
 
-pub(crate) use style_groups::{Fallback, Filing, StyleGroups, is_group_alias};
+pub(crate) use style_groups::{
+    Fallback, Filing, StyleGroups, family_of_group_alias, is_group_alias,
+};
 
 use crate::{
     cache_map::{CacheMap, CacheSet},
@@ -916,6 +918,31 @@ pub(crate) fn is_oblique_alias(name: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(OBLIQUE_ALIAS_LEAD))
 }
 
+/// The family a private alias stands for, as a canvas names it: the claimed
+/// name or generic keyword behind a [`private_alias`], or the family behind
+/// an [`oblique_alias`] or a `group_alias`, whose faces a canvas reaches by
+/// its `font-style` and `font-stretch`. `None` for a name that is no alias,
+/// and for an [`unmatched_name`], which stands for no family at all.
+pub(crate) fn family_behind_alias(name: &str) -> Option<&str> {
+    // A group is filed under the name its family's faces are, which is a
+    // private alias where the family is a generic's or a claimed name.
+    if let Some(filed) = family_of_group_alias(name) {
+        return if filed.starts_with(PRIVATE_ALIAS_PREFIX) {
+            family_behind_alias(filed)
+        } else {
+            Some(filed)
+        };
+    }
+    let rest = name.strip_prefix(PRIVATE_ALIAS_PREFIX)?;
+    if rest.starts_with(UNMATCHED_LEAD) {
+        return None;
+    }
+    Some(rest.strip_prefix(OBLIQUE_ALIAS_LEAD).unwrap_or(rest))
+}
+
+/// What every [`unmatched_name`] begins with after [`PRIVATE_ALIAS_PREFIX`].
+const UNMATCHED_LEAD: &str = "unmatched ";
+
 /// The name a generic family's faces are registered under in a collection,
 /// and asked for by: its keyword after [`PRIVATE_ALIAS_PREFIX`].
 ///
@@ -952,7 +979,7 @@ fn register_under(provider: &mut Filing, face: Typeface, alias: Option<&str>) {
 /// no family was registered under it -- so that a family list cannot reach
 /// the faces filed under a generic's or an [`oblique_alias`].
 pub(crate) fn unmatched_name(family: &str) -> String {
-    private_alias(&format!("unmatched {family}"))
+    private_alias(&format!("{UNMATCHED_LEAD}{family}"))
 }
 
 /// Whether `alias` is one the caller has already claimed.
@@ -2835,6 +2862,29 @@ mod tests {
         FontLibrary::with_shared(|lib| {
             lib.collections.each_ref().map(Option::is_some)
         })
+    }
+
+    #[test]
+    fn a_private_alias_names_the_family_behind_it() {
+        let italic =
+            FontStyle::new(Weight::NORMAL, Width::CONDENSED, Slant::Italic);
+        let generic = generic_name(
+            GenericFamily::from_css("sans-serif").expect("a generic keyword"),
+        );
+        for (alias, family) in [
+            (generic.clone(), Some("sans-serif")),
+            (oblique_alias("Faces"), Some("Faces")),
+            (style_groups::group_alias("Faces", italic), Some("Faces")),
+            // A group of a generic's faces is filed under the generic's alias.
+            (
+                style_groups::group_alias(&generic, italic),
+                Some("sans-serif"),
+            ),
+            (unmatched_name("Faces"), None),
+            ("Faces".to_string(), None),
+        ] {
+            assert_eq!(family_behind_alias(&alias), family, "{alias:?}");
+        }
     }
 
     #[test]

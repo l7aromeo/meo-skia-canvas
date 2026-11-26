@@ -1612,6 +1612,40 @@ so Linux takes it too. The font's 20 code points with no colour paint are
 drawn by the platform here and by Fontations' outlines in Chrome, and stand
 up to 215 apart on macOS.
 
+**Text in an SVG image set in a COLR face is drawn by the canvas's text
+route, as `fillText` draws it, wherever the document can be cut around the
+text; anywhere else it is Skia's SVG module's, through the platform's
+scaler.** The module draws `<text>` through the typeface, so on macOS 27.2 a
+COLRv0 glyph in an SVG drew nothing and a COLRv1 one CoreText's colours, and
+on Linux FreeType's (#663). A `<text>` holding a run in such a face is laid
+out here instead -- each addressable character where its `x`, `y`, `dx` and
+`dy` lists place it, each text chunk shifted by its `text-anchor` and its own
+advance, white space collapsed as `white-space: normal` collapses it -- and
+drawn with `fillText` under `geometricPrecision`, between the module's
+drawings of what precedes and follows it, each a parse of the document with
+everything outside it set to `display: none` (`src/image/colr_text.rs`).
+Against chrome-headless-shell 156 on macOS 27.2, with the fonts embedded,
+nine of eleven documents are Chrome's byte for byte: the two test fonts at 48
+and 72px, both anchors, position lists with a `tspan`'s `dx` and `dy`, white
+space across a `tspan`, `opacity`, `fill-opacity` and `currentcolor`, and a
+`font-weight` the face has no bold for. Under a `viewBox` scale of 2 the
+glyphs sit a device row from Chrome's, as `fillText` under the same scale
+does (#142); a text mixing a plain run and a colour one is Chrome's in the
+colour glyph and the module's in the plain run, whose glyph masks stand from
+Chrome's as the module's plain text does. A text this layout does not carry
+out is left to the module: one under a group whose `opacity`, `filter`,
+`clip-path`, `mask`, `mix-blend-mode` or `isolation` a cut would apply to
+part of its content, or under any container but `<g>`; one holding a
+`textPath`, or stating `rotate`, `textLength`, `writing-mode`, `direction`,
+`unicode-bidi`, `baseline-shift`, `dominant-baseline`, `alignment-baseline`,
+`text-decoration`, `letter-spacing`, `word-spacing`, `font-variant`,
+`font-feature-settings`, `font-variation-settings` or `text-rendering`; one
+stroked, filled from a gradient or a pattern, or positioned in percentages;
+and every text in a document that `<use>`s an element of its own flow, whose
+clone a cut would hide too. On a GPU canvas the document's vectors are the
+GPU's, these glyphs among them: a 48px COLRv1 glyph stands 106 pixels from
+`fillText` there, as a circle in an SVG stands 228 from the CPU canvas's.
+
 **On a GPU canvas a COLR colour glyph is an image made on the CPU, as Skia
 draws a colour glyph from the image its scaler context makes, so that the GPU
 canvas composites the bytes the CPU canvas does.** Composited through a layer

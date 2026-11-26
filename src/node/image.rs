@@ -403,8 +403,7 @@ pub(crate) fn record_svg(
     data: &Data,
     current_color: Option<Color>,
 ) -> Option<(Content, bool)> {
-    let dom = Svg::parse_shared(data).ok()?;
-    let mut parsed = Svg::from_dom(dom);
+    let mut parsed = Svg::from_parsed(Svg::parse_shared(data).ok()?);
     if let Some(color) = current_color {
         parsed.set_current_color(skia_color_to_rgba_linear(color));
     }
@@ -414,10 +413,7 @@ pub(crate) fn record_svg(
     let size = Size::new(intrinsic.width, intrinsic.height);
     let bounds = Rect::from_size(size);
     let mut compositor = PictureRecorder::new();
-    parsed.dom_mut().set_container_size(bounds.size());
-    parsed
-        .dom_mut()
-        .render(compositor.begin_recording(bounds, true));
+    parsed.render(compositor.begin_recording(bounds, true), bounds.size());
     Some(match compositor.finish_recording_as_picture(None) {
         Some(picture) => (Content::Vector(picture, size), autosized),
         None => (Content::Broken, autosized),

@@ -5039,6 +5039,13 @@ impl Context2D {
             )
     }
 
+    /// Whether `text`, laid out in the font set now, sets a glyph in a face
+    /// whose colour glyphs this library draws itself -- see
+    /// `typography::draw_colour_run`.
+    pub(crate) fn sets_colour_glyphs(&self, text: &str) -> bool {
+        Typesetter::new(&self.state, text, None).holds_colour_glyphs()
+    }
+
     /// One painting of a run of text -- see [`Self::draw_text`].
     fn paint_text(
         &mut self,

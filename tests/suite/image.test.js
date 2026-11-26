@@ -1258,3 +1258,115 @@ describe("a refusal takes the type the standard names", () => {
     );
   });
 });
+
+// Text in an SVG set in a face with a COLR table is drawn as fillText draws
+// it, from the glyph's paint graph, rather than by the platform's scaler:
+// CoreText on macOS 27.2 draws a COLRv0 glyph as nothing and one of COLRv1 in
+// its own colours, and FreeType and DirectWrite draw both apart from Chrome
+// (#663). The canvas draws the text under geometricPrecision, since the SVG
+// module draws text unhinted.
+describe("an SVG's text in a colour face", () => {
+  const W = 200,
+    H = 80;
+  const fonts = {
+    SvgTextColrV1:
+      "tests/assets/fonts/color-fonts/test_glyphs-glyf_colr_1_variable.ttf",
+    SvgTextColrV0: "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
+    SvgTextPlain: "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  };
+  for (const [family, path] of Object.entries(fonts))
+    FontLibrary.use(family, path);
+
+  /** A CPU canvas of this size and its context. */
+  const page = () => {
+    const canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    return canvas.getContext("2d");
+  };
+  /** The pixels of `body` as a document of this size, drawn as an image. */
+  const drawn = async (body) => {
+    const ctx = page();
+    const xml = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">${body}</svg>`;
+    ctx.drawImage(await loadImage(Buffer.from(xml)), 0, 0);
+    return ctx.getImageData(0, 0, W, H).data;
+  };
+  /** The pixels `draw` leaves on a canvas whose text is set unhinted. */
+  const painted = (draw) => {
+    const ctx = page();
+    ctx.textRendering = "geometricPrecision";
+    draw(ctx);
+    return ctx.getImageData(0, 0, W, H).data;
+  };
+  /** How many pixels stand more than a level apart, and by how much. */
+  const apart = (a, b) => {
+    let pixels = 0,
+      far = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      let d = 0;
+      for (let k = 0; k < 4; k++)
+        d = Math.max(d, Math.abs(a[i + k] - b[i + k]));
+      if (d > 1) pixels++;
+      far = Math.max(far, d);
+    }
+    return { pixels, far };
+  };
+  const inked = (data) => data.filter((_, i) => i % 4 === 3 && data[i]).length;
+  const agree = (got, expected, label) => {
+    assert.ok(inked(expected) > 0, `${label}: the canvas drew nothing`);
+    assert.deepEqual(
+      apart(got, expected).pixels,
+      0,
+      `${label}: ${JSON.stringify(apart(got, expected))}, the document inked ` +
+        `${inked(got)} pixels and the canvas ${inked(expected)}`,
+    );
+  };
+
+  test("is drawn as fillText draws it", async () => {
+    for (const [family, entity, text, size] of [
+      ["SvgTextColrV1", "&#xf0100;", "\u{f0100}", 72],
+      ["SvgTextColrV0", "AB", "AB", 48],
+    ]) {
+      const got = await drawn(
+        `<text x="10" y="70" font-family="${family}" font-size="${size}" ` +
+          `fill="rgb(40,90,160)">${entity}</text>`,
+      );
+      const expected = painted((ctx) => {
+        ctx.font = `${size}px ${family}`;
+        ctx.fillStyle = "rgb(40,90,160)";
+        ctx.fillText(text, 10, 70);
+      });
+      agree(got, expected, family);
+    }
+  });
+
+  // The control: text in a face with no COLR table is the SVG module's
+  // drawing, and agrees with fillText already.
+  test("leaves plain text to the SVG module, which agrees already", async () => {
+    const got = await drawn(
+      `<text x="10" y="60" font-family="SvgTextPlain" font-size="48" ` +
+        `fill="rgb(40,90,160)">AB</text>`,
+    );
+    const expected = painted((ctx) => {
+      ctx.font = "48px SvgTextPlain";
+      ctx.fillStyle = "rgb(40,90,160)";
+      ctx.fillText("AB", 10, 60);
+    });
+    agree(got, expected, "plain");
+  });
+
+  test("draws a text mixing colour and plain runs whole", async () => {
+    const got = await drawn(
+      `<text x="10" y="60" font-family="SvgTextPlain" font-size="40" ` +
+        `fill="#246">Ab<tspan font-family="SvgTextColrV1">&#xf0101;</tspan></text>`,
+    );
+    const expected = painted((ctx) => {
+      ctx.fillStyle = "#246";
+      ctx.font = "40px SvgTextPlain";
+      ctx.fillText("Ab", 10, 60);
+      const advance = ctx.measureText("Ab").width;
+      ctx.font = "40px SvgTextColrV1";
+      ctx.fillText("\u{f0101}", 10 + advance, 60);
+    });
+    agree(got, expected, "mixed");
+  });
+});
