@@ -169,6 +169,7 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 - `new_page` / `new_page_with` start another, and `page_count` / `page` select among them.
 - `EncodeOptions::page` picks which one an export encodes; PDF encodes all of them.
 - `EncodeOptions::page_range` picks a span of them, as `Option<Range<usize>>` -- zero-based and end-excluded, as a Rust range is, where `page` is zero-based too and the JavaScript `pageRange` counts from one and includes both ends. Each side counts the way its own language does. Naming it alongside `page` is an `Error::InvalidExportOption`, as is an empty range, a range past the last page, and a range on a format that encodes a single page.
+- A page keeps every draw that can still show, so one drawn over frame after frame without being cleared grows with each. `clear_rect` over the whole page, or a single opaque fill, `draw_image` or `put_image_data` covering it, releases everything drawn before; a background drawn in pieces does not. [Performance and memory](performance.md) has the conditions and the figures.
 - `Canvas::set_size(width, height)` resizes and **clears** the current page, which is what assigning `canvas.width` does in a browser -- the drawing is discarded rather than rescaled or cropped. Pages added earlier keep the size they had.
 
 ## Exports

@@ -3307,42 +3307,14 @@ impl Context2D {
             return;
         }
 
-        // if path will fill the whole canvas and paint/blend are fully
-        // opaque...
+        // A fill that covers the page opaquely replaces everything drawn
+        // before it -- see `Self::covers_the_page`.
         if matches!(style, PaintStyle::Fill | PaintStyle::StrokeAndFill)
-            && matches!(
-                &self.state.global_composite_operation,
-                BlendMode::SrcOver | BlendMode::Src | BlendMode::Clear
+            && self.covers_the_page(
+                self.state.fill_style.is_opaque(),
+                &path,
+                &self.state.matrix,
             )
-            && self.state.fill_style.is_opaque()
-            && self.state.global_alpha == 1.0
-            && self.state.clip.is_none()
-            // ...and nothing is waiting to composite it. Resetting the
-            // recorder below discards its save stack, and an open layer
-            // lives on that stack, so an opaque full-page fill inside one
-            // threw the layer away wholesale -- not merely its alpha. A
-            // 20x20 fill on a 20x20 page came out at 255 for *every* layer
-            // alpha, while 19.5 was correct, since only the full-page fill
-            // reached here. `global_alpha` above cannot stand in for this:
-            // a layer carries its own alpha, and the state inside it is
-            // usually 1.0.
-            && !self.layers.iter().any(|owns_layer| *owns_layer)
-            // ...and nothing stands between the fill and the page. A filter
-            // decides what the draw finally puts down, and it may put down
-            // less than the path covers -- or nothing at all. `MakeEmpty`
-            // produces no output, so a full-page fill through it erased the
-            // page and drew nothing in its place, while the same fill one
-            // pixel smaller left the page alone. A colour filter can take the
-            // alpha to zero, an offset can move the fill off the page, and a
-            // mask filter can eat its edges.
-            && self.state.skia_image_filter.is_none()
-            && self.state.skia_color_filter.is_none()
-            && self.state.skia_mask_filter.is_none()
-            && self.state.filter.is_none()
-            // ...and it holds the page where the transform puts it, rather
-            // than before: a full-size fill under `scale(0.5)` covers a
-            // quarter of the page.
-            && holds_on_the_device(&path, &self.state.matrix, self.bounds)
         {
             self.erase_the_page();
         }
@@ -3771,6 +3743,54 @@ impl Context2D {
 
         path.set_fill_type(prev_rule);
         is_in
+    }
+
+    /// Whether a draw makes every pixel of the page its own, so that nothing
+    /// drawn before it can show through: `opaque` where what it paints has
+    /// no translucent pixel, and `path`, under `matrix`, the area it covers.
+    /// The area is asked of the device, where the transform puts it: a
+    /// full-size fill under `scale(0.5)` covers a quarter of the page.
+    ///
+    /// It must also composite source-over, copy or clear at full alpha,
+    /// under no clip -- one that holds the page is none -- and with no
+    /// layer open. Erasing the page discards the recorder's save stack, and
+    /// an open layer lives on it, so a full-page opaque fill inside one
+    /// threw the layer away wholesale: a 20x20 fill on a 20x20 page came out
+    /// at 255 for every layer alpha, where 19.5 was right. A layer carries
+    /// its own alpha, which `global_alpha` inside it does not show.
+    ///
+    /// And through no filter, which decides what the draw finally puts
+    /// down: `MakeEmpty` puts down nothing, so a full-page fill through it
+    /// erased the page and drew nothing in its place. A colour filter can
+    /// take the alpha to zero, an offset can move the draw off the page,
+    /// and a mask filter can eat its edges.
+    ///
+    /// One draw, and not several that cover the page between them. At an
+    /// export density that puts their seam inside a device pixel, each
+    /// covers that pixel in part and what lies under them shows through:
+    /// red under two blue fills meeting at x = 301 shows by up to 63 levels
+    /// along the seam at densities 1.5 and 0.5, and not at all at 1 or 2.
+    /// The page's own edges are a device's at every density, so a draw
+    /// holding the page covers each of its pixels whole.
+    fn covers_the_page(
+        &self,
+        opaque: bool,
+        path: &Path,
+        matrix: &Matrix,
+    ) -> bool {
+        opaque
+            && matches!(
+                &self.state.global_composite_operation,
+                BlendMode::SrcOver | BlendMode::Src | BlendMode::Clear
+            )
+            && self.state.global_alpha == 1.0
+            && self.state.clip.is_none()
+            && !self.layers.iter().any(|owns_layer| *owns_layer)
+            && self.state.skia_image_filter.is_none()
+            && self.state.skia_color_filter.is_none()
+            && self.state.skia_mask_filter.is_none()
+            && self.state.filter.is_none()
+            && holds_on_the_device(path, matrix, self.bounds)
     }
 
     /// Drops everything drawn on the page so far, keeping the transform
@@ -4229,6 +4249,20 @@ impl Context2D {
             return;
         }
 
+        // An opaque image covering the page replaces everything drawn
+        // before it -- see `Self::covers_the_page` -- where its source lies
+        // inside it: past its edges a source rectangle samples nothing.
+        if image.is_opaque()
+            && lies_within(src_rect, image.width(), image.height())
+            && self.covers_the_page(
+                true,
+                &Path::rect(*dst_rect, None),
+                &self.state.matrix,
+            )
+        {
+            self.erase_the_page();
+        }
+
         // Under a filter the crate runs itself, the image is drawn unfiltered
         // and opaque as a group of its own, which runs the filter on its
         // pixels exactly and composites the result through the alpha and the
@@ -4525,6 +4559,16 @@ impl Context2D {
         if let Some(bitmap) =
             started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
+            // Pixels put over the whole page replace everything drawn before
+            // them, whatever their alpha: the destination is cleared first.
+            // Not with a layer open, whose contents they go into -- see
+            // `Self::covers_the_page`.
+            if lies_within(src_rect, info.width(), info.height())
+                && !self.layers.iter().any(|owns_layer| *owns_layer)
+                && holds(&Path::rect(*dst_rect, None), self.bounds)
+            {
+                self.erase_the_page();
+            }
             self.push(); // cache matrix & clip in self.state
             self.with_recorder(|mut recorder| {
                 recorder.append_unframed(|canvas, _| {
@@ -6074,6 +6118,14 @@ fn holds(path: &Path, rect: Rect) -> bool {
         && reach.right >= rect.right
         && reach.bottom >= rect.bottom
         && path.conservatively_contains_rect(rect)
+}
+
+/// Whether `rect` lies inside an image `width` by `height`.
+fn lies_within(rect: &Rect, width: i32, height: i32) -> bool {
+    rect.left >= 0.0
+        && rect.top >= 0.0
+        && rect.right <= width as f32
+        && rect.bottom <= height as f32
 }
 
 /// Whether `path`, put on the device by `matrix`, holds `rect` -- see

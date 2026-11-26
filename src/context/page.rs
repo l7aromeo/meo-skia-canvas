@@ -8053,12 +8053,14 @@ mod tests {
             resident,
         },
         context2d::Context2D,
+        export::EncodeOptions,
         filter::ImageFilter,
         gpu::completion::DISCARDED,
+        image::Image,
         paint::BlendMode as CompositeOperation,
         path::FillRule,
         pattern::PatternRepeat,
-        pixels::ImageDataExport,
+        pixels::{ImageData, ImageDataExport, PixelExportOptions},
     };
     use parking_lot::Mutex;
     use skia_safe::{
@@ -8191,6 +8193,143 @@ mod tests {
             .to_vec()
     }
 
+    /// A 64x64 image every pixel of which is opaque by its alpha type --
+    /// JPEG has no alpha channel -- and one with the same bytes as an
+    /// unpremultiplied RGBA image, which Skia cannot tell is opaque.
+    fn opaque_and_unmarked() -> (Image, Image) {
+        let options = CanvasOptions {
+            gpu: false,
+            ..CanvasOptions::default()
+        };
+        let mut source =
+            Canvas::with_options(64.0, 64.0, options).expect("a canvas");
+        let ctx = source.context();
+        ctx.set_fill_style(RgbaLinear::from_srgb8(30, 160, 90, 1.0));
+        ctx.fill_rect(0.0, 0.0, 64.0, 64.0);
+        let bytes = page_of(ctx);
+        let jpeg = source
+            .to_buffer(ImageFormat::Jpeg, &EncodeOptions::default())
+            .expect("a JPEG");
+        let opaque = Image::from_encoded(&jpeg).expect("decoded");
+        let unmarked = Image::from_pixels(
+            &bytes,
+            64,
+            64,
+            64 * 4,
+            PixelExportOptions::default(),
+        )
+        .expect("an image");
+        (opaque, unmarked)
+    }
+
+    /// An opaque image drawn over the whole page replaces what was drawn
+    /// before it, as an opaque full-page fill does: the recording is
+    /// dropped, and the page reads as a fresh one with only the image on
+    /// it. One that does not cover the page, that is not known to be
+    /// opaque, that is drawn translucent, or whose source rectangle reaches
+    /// past the image -- which samples nothing there -- keeps it.
+    #[test]
+    fn an_opaque_image_over_the_whole_page_drops_what_it_covers() {
+        let (opaque, unmarked) = opaque_and_unmarked();
+
+        let mut page = scattered();
+        let ctx = page.context();
+        let drops = drops_in(ctx, |ctx| ctx.draw_image(&opaque, 0.0, 0.0));
+        assert_eq!(drops, 1, "an opaque image over the page");
+        let after = page_of(ctx);
+        let mut fresh = Canvas::with_options(
+            64.0,
+            64.0,
+            CanvasOptions {
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = fresh.context();
+        ctx.draw_image(&opaque, 0.0, 0.0);
+        assert_eq!(after, page_of(ctx), "draws as a fresh page");
+
+        let kept: [Case; 5] = [
+            ("moved off one edge", &|ctx| {
+                ctx.draw_image(&opaque, 1.0, 0.0)
+            }),
+            ("not marked opaque", &|ctx| {
+                ctx.draw_image(&unmarked, 0.0, 0.0)
+            }),
+            ("translucent", &|ctx| {
+                ctx.set_global_alpha(0.5);
+                ctx.draw_image(&opaque, 0.0, 0.0);
+            }),
+            ("a source past the image", &|ctx| {
+                ctx.draw_image_region(
+                    &opaque, 0.0, 0.0, 128.0, 128.0, 0.0, 0.0, 64.0, 64.0,
+                );
+            }),
+            ("in a layer", &|ctx| {
+                ctx.save_layer_with(0.5, None, None);
+                ctx.draw_image(&opaque, 0.0, 0.0);
+            }),
+        ];
+        for (case, draw) in kept {
+            let mut page = scattered();
+            assert_eq!(drops_in(page.context(), draw), 0, "{case}");
+        }
+    }
+
+    /// `putImageData` over the whole page replaces what was drawn before
+    /// it whatever its pixels' alpha, since it clears what it writes over:
+    /// the recording is dropped, and the page reads as a fresh one with
+    /// only those pixels put on it. Put
+    /// short of an edge, or into an open layer, it keeps it.
+    #[test]
+    fn put_image_data_over_the_whole_page_drops_what_it_covers() {
+        let bytes: Vec<u8> = (0..64 * 64)
+            .flat_map(|i| [(i % 251) as u8, 40, 200, 100])
+            .collect();
+        let data = ImageData::from_pixels(
+            64,
+            64,
+            PixelExportOptions::default(),
+            bytes,
+        )
+        .expect("image data");
+
+        let mut page = scattered();
+        let ctx = page.context();
+        let drops = drops_in(ctx, |ctx| {
+            ctx.put_image_data(&data, 0.0, 0.0).expect("put");
+        });
+        assert_eq!(drops, 1, "put over the page");
+        let after = page_of(ctx);
+        let mut fresh = Canvas::with_options(
+            64.0,
+            64.0,
+            CanvasOptions {
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = fresh.context();
+        ctx.put_image_data(&data, 0.0, 0.0).expect("put");
+        assert_eq!(after, page_of(ctx), "reads as a fresh page");
+
+        let kept: [Case; 2] = [
+            ("short of an edge", &|ctx| {
+                ctx.put_image_data(&data, 0.0, 1.0).expect("put");
+            }),
+            ("into a layer", &|ctx| {
+                ctx.save_layer_with(0.5, None, None);
+                ctx.put_image_data(&data, 0.0, 0.0).expect("put");
+            }),
+        ];
+        for (case, draw) in kept {
+            let mut page = scattered();
+            assert_eq!(drops_in(page.context(), draw), 0, "{case}");
+        }
+    }
+
     /// Whether a fill covers the page is asked on the device, where the
     /// transform has put it: a 32-unit square scaled by 2 covers the page
     /// and drops what was under it, and a 64-unit one scaled by 0.5 covers
@@ -8266,6 +8405,40 @@ mod tests {
             let at = 4 * 64 * 4;
             assert_eq!(&page_of(ctx)[at..at + 4], [0, 0, 0, 255], "{case}");
         }
+    }
+
+    /// Two opaque fills that cover the page only between them drop nothing:
+    /// at density 1.5 their seam at x = 21 lands inside a device pixel,
+    /// which each covers in part, so the red drawn first shows there --
+    /// the page exported with the red under it differs from the one
+    /// without. A prune by the union of the later draws would lose it.
+    #[test]
+    fn fills_covering_the_page_only_together_keep_what_lies_under() {
+        let export = |under: bool| {
+            let options = CanvasOptions {
+                gpu: false,
+                ..CanvasOptions::default()
+            };
+            let mut canvas =
+                Canvas::with_options(64.0, 8.0, options).expect("a canvas");
+            let ctx = canvas.context();
+            if under {
+                ctx.set_fill_style(RgbaLinear::from_srgb8(255, 0, 0, 1.0));
+                ctx.fill_rect(0.0, 0.0, 64.0, 8.0);
+            }
+            let drops = drops_in(ctx, |ctx| {
+                ctx.set_fill_style(RgbaLinear::from_srgb8(0, 0, 255, 1.0));
+                ctx.fill_rect(0.0, 0.0, 21.0, 8.0);
+                ctx.fill_rect(21.0, 0.0, 43.0, 8.0);
+            });
+            assert_eq!(drops, 0, "under: {under}");
+            let options = EncodeOptions {
+                density: 1.5,
+                ..EncodeOptions::default()
+            };
+            canvas.to_buffer(ImageFormat::Raw, &options).expect("raw")
+        };
+        assert_ne!(export(true), export(false), "the red shows at the seam");
     }
 
     /// A deterministic image `rows` tall whose rows either repeat a noisy

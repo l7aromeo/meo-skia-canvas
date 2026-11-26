@@ -6519,4 +6519,24 @@ describe("a draw covering the page replaces what lies under it", () => {
       assert.deepEqual([...ctx.getImageData(0, 4, 1, 1).data], BLACK, name);
     }
   });
+
+  test("two fills covering the page only together keep what lies under", () => {
+    // At density 1.5 the seam at x = 21 falls inside a device pixel, which
+    // each fill covers only in part, so the red drawn first shows there:
+    // the export with red under the fills differs from the one without.
+    const pixels = (under) => {
+      const canvas = new Canvas(64, 8);
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      if (under) {
+        ctx.fillStyle = "red";
+        ctx.fillRect(0, 0, 64, 8);
+      }
+      ctx.fillStyle = "blue";
+      ctx.fillRect(0, 0, 21, 8);
+      ctx.fillRect(21, 0, 43, 8);
+      return canvas.toBufferSync("raw", { density: 1.5 });
+    };
+    assert.notDeepEqual(pixels(true), pixels(false));
+  });
 });
