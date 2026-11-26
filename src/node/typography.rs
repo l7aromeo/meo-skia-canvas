@@ -2790,6 +2790,9 @@ fn resolve_for_oblique(
         asked.width(),
         Slant::Upright,
     ));
+    // The families were named for the oblique -- see
+    // `FontLibrary::styled_names`.
+    FontLibrary::with_shared(|lib| lib.style_names(style));
     resolve(style)
 }
 
