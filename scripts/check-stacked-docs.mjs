@@ -74,6 +74,11 @@
 // Usage:  node scripts/check-stacked-docs.mjs [--cached | --range <git-range>]
 //         --cached          staged changes (the pre-commit case), the default
 //         --range a..b      a commit range (the CI case)
+//         --worktree a      the merge base of a and HEAD against the work
+//                           tree, untracked files included: what is
+//                           committed since, staged and not yet staged
+//                           (`just prepush`, run before a commit as often as
+//                           after one)
 //         --all             the whole tree, for triage only; never a gate
 //         --self-test       check the scanner, not the tree; runs nothing else
 //
@@ -105,8 +110,11 @@ const mode = args.includes("--self-test")
     ? "all"
     : args.includes("--range")
       ? "range"
-      : "cached";
+      : args.includes("--worktree")
+        ? "worktree"
+        : "cached";
 const range = args[args.indexOf("--range") + 1];
+const worktreeBase = args[args.indexOf("--worktree") + 1];
 
 const git = (...a) => execFileSync("git", a, { encoding: "utf8" });
 
@@ -197,8 +205,30 @@ if (mode === "all") {
 } else if (mode !== "self-test") {
   // The self-test checks the scanner rather than the tree, so the Rust pass
   // has nothing to contribute and its diff modes do not apply.
-  const diffArgs = mode === "cached" ? ["--cached"] : [range];
+  // `git diff <rev>` compares a revision with the work tree, which leaves out
+  // a file git does not track yet; every line of one is added.
+  const diffArgs =
+    mode === "cached"
+      ? ["--cached"]
+      : mode === "worktree"
+        ? [git("merge-base", worktreeBase, "HEAD").trim()]
+        : [range];
   const byFile = addedLines(diffArgs);
+  if (mode === "worktree") {
+    const untracked = git(
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "--",
+      "*.rs",
+    )
+      .split("\n")
+      .filter(Boolean);
+    for (const file of untracked) {
+      const count = readFileSync(file, "utf8").split("\n").length;
+      byFile.set(file, new Set(Array.from({ length: count }, (_, n) => n + 1)));
+    }
+  }
   let addedCount = 0;
   for (const added of byFile.values()) addedCount += added.size;
   rustScope = `${byFile.size} file${byFile.size === 1 ? "" : "s"}, ${addedCount} added line${addedCount === 1 ? "" : "s"}`;
@@ -606,7 +636,9 @@ if (!findings.length && !jsFindings.length) {
       ? "whole tree"
       : mode === "cached"
         ? "staged changes"
-        : range;
+        : mode === "worktree"
+          ? `${worktreeBase} to the work tree`
+          : range;
   console.log(
     `no stacked doc comments introduced (${scope}: ${rustScope}), ` +
       `none dropped in JavaScript or TypeScript (${jsFiles.length} files)`,

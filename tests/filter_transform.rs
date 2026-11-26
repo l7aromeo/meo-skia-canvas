@@ -7,6 +7,8 @@ use std::f32::consts::FRAC_PI_2;
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const SIDE: usize = 200;
 
 /// The centre every transform here turns or stretches about.
@@ -63,7 +65,7 @@ fn canvas(depth: PixelDepth, gpu: bool) -> Option<Canvas> {
         },
     )
     .expect("a canvas");
-    (!gpu || canvas.engine_kind() == EngineKind::Gpu).then_some(canvas)
+    (!gpu || common::on_gpu(&canvas)).then_some(canvas)
 }
 
 /// The canvas's premultiplied sRGB pixels as floats.
@@ -135,7 +137,7 @@ fn a_drop_shadow_lands_on_the_canvas_axes_under_any_transform() {
     // offset landed at 9.69, 10.93 under the 30-degree turn, and under the
     // quarter turn the diagonal is 0 and the shadow was not drawn at all.
     for depth in [PixelDepth::Uint8, PixelDepth::F32] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for (name, transform) in TRANSFORMS {
                 let Some(pixels) = square(depth, gpu, transform, |c| {
                     c.set_filter_css("drop-shadow(12px 4px 0 red)")
@@ -205,7 +207,7 @@ fn a_drop_shadows_blur_keeps_its_length_under_a_turn() {
     // Compared with the same canvas untransformed rather than with a
     // figure, since the edge of a disc is not a straight Gaussian edge.
     for depth in [PixelDepth::Uint8, PixelDepth::F32] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             let Some(upright) = shadow_edge(depth, gpu, TRANSFORMS[0].1) else {
                 continue;
             };
@@ -236,7 +238,7 @@ fn a_skia_image_filters_lengths_are_local_units() {
         (14.0, 4.0),
     ];
     for depth in [PixelDepth::Uint8, PixelDepth::F32] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for ((name, transform), (ex, ey)) in
                 TRANSFORMS.into_iter().zip(expected)
             {
@@ -271,7 +273,7 @@ fn a_drop_shadow_is_built_again_for_a_turn_the_other_way() {
     // Turning by 30 degrees either way leaves the transform's diagonal the
     // same and its skews opposite, so a filter kept by the diagonal alone
     // was the first turn's for the second.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas(PixelDepth::Uint8, gpu) else {
             continue;
         };
@@ -321,7 +323,7 @@ fn a_blur_skia_draws_keeps_its_length_under_a_quarter_turn() {
     // The square is the same turned a quarter, so its blur is too. Divided
     // by the transform's diagonal, which a quarter turn makes 0, the blur
     // was infinite and Skia drew the square unblurred.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(upright) = blurred_beside_skia(gpu, TRANSFORMS[0].1) else {
             continue;
         };
@@ -348,7 +350,7 @@ fn a_drop_shadow_is_cast_into_a_clip_from_outside_it() {
     // what the shadow is made from has to be read from past the clip by
     // as far as the shadow moves.
     for depth in [PixelDepth::Uint8, PixelDepth::F32] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             let Some(mut canvas) = canvas(depth, gpu) else {
                 continue;
             };
@@ -377,7 +379,7 @@ fn a_drop_shadow_lands_a_fraction_of_a_pixel_where_it_is_asked_to() {
     // Resampled bilinearly, which keeps the centroid. Chrome lands
     // `4.25px` at 4.5 unblurred and at 4.32 blurred by 2px.
     for depth in [PixelDepth::Uint8, PixelDepth::F32] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for blur in [0.0, 2.0] {
                 let filter = format!("drop-shadow(12.5px 4.25px {blur}px red)");
                 let Some(pixels) = square(depth, gpu, TRANSFORMS[0].1, |c| {
@@ -400,7 +402,7 @@ fn a_drop_shadow_lands_a_fraction_of_a_pixel_where_it_is_asked_to() {
 fn a_canvas_drawn_in_at_twice_its_size_casts_its_shadow_twice_as_far() {
     // Chrome: 24, 8. The shadow's lengths are the source canvas's pixels,
     // which the drawing scales.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas(PixelDepth::Uint8, gpu) else {
             continue;
         };
@@ -430,7 +432,7 @@ fn a_canvas_drawn_in_at_twice_its_size_casts_its_shadow_twice_as_far() {
 fn text_under_a_drop_shadow_is_drawn_as_it_is_unfiltered_under_a_turn() {
     // Through Skia's filter layer a turned draw was made unturned and turned
     // onto the page, and the glyphs' edges moved by up to 16 levels.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let drawn = |filter: &str| {
             let mut canvas = canvas(PixelDepth::Uint8, gpu)?;
             let ctx = canvas.context();

@@ -12,6 +12,8 @@ mod exact;
 use exact::{gaussian, profile};
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 /// The largest difference, in levels of an 8-bit alpha, between `alpha`
 /// and the exact blur of `rect` at `sigma` on a `size` canvas.
 fn worst(
@@ -64,7 +66,7 @@ const RECT: [f32; 4] = [12.0, 12.25, 36.0, 20.0];
 fn blurred(gpu: bool, sigma: f32) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -85,7 +87,7 @@ fn scaled(factor: f32) -> ((usize, usize), [f64; 4]) {
 
 #[test]
 fn a_blur_scales_with_the_density_it_is_exported_at() {
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in [0.5f32, 1.0, 2.0, 4.0] {
             let Some(mut canvas) = blurred(gpu, sigma) else {
                 continue;
@@ -123,7 +125,7 @@ fn a_blur_scales_with_the_density_it_is_exported_at() {
 
 #[test]
 fn a_blur_scales_with_the_canvas_it_is_drawn_into() {
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in [0.5f32, 1.0, 2.0, 4.0] {
             let Some(mut source) = blurred(gpu, sigma) else {
                 continue;
@@ -226,11 +228,11 @@ fn a_rounded_rect_or_text_blurs_at_density_two_as_drawn_twice_as_large() {
             }
         }
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for text in [false, true] {
             let mut exported = Canvas::new(100.0, 60.0);
             exported.set_gpu(gpu);
-            if gpu && exported.engine_kind() != EngineKind::Gpu {
+            if gpu && !common::on_gpu(&exported) {
                 continue;
             }
             draw(exported.context(), 1.0, text);
@@ -289,7 +291,7 @@ fn a_blur_past_the_coverage_cap_at_a_density_is_drawn_at_its_width() {
     {
         let mut canvas = Canvas::new(width, height);
         canvas.set_gpu(gpu);
-        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        if gpu && !common::on_gpu(&canvas) {
             continue;
         }
         let ctx = canvas.context();
@@ -367,12 +369,12 @@ fn a_paragraph_shadow_blurs_at_density_two_by_twice_its_sigma() {
         builder.add_text("Hamburg");
         builder.build(1000.0)
     };
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for oblique in [false, true] {
             let exported = |blur: f32| -> Option<Vec<f64>> {
                 let mut canvas = Canvas::new(width, 50.0);
                 canvas.set_gpu(gpu);
-                if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                if gpu && !common::on_gpu(&canvas) {
                     return None;
                 }
                 canvas.context().draw_paragraph(

@@ -36,6 +36,8 @@ use meo_skia_canvas::{
     prelude::*,
 };
 
+mod common;
+
 /// The bundled variable face the history scenes are set in.
 const OSWALD: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -51,17 +53,6 @@ const RALEWAY: &str = concat!(
 /// The page of issue #622: 96px text under a 2.4 scale, 230 device pixels,
 /// inside the range Ganesh drew as distance fields.
 const PAGE: (f32, f32) = (1008.0, 336.0);
-
-/// Whether this machine has a GPU engine, saying so where it has not.
-fn has_gpu() -> bool {
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    let gpu = probe.engine_kind() == EngineKind::Gpu;
-    if !gpu {
-        eprintln!("skipped: no GPU engine");
-    }
-    gpu
-}
 
 /// Registers `path`'s bytes under `family`.
 fn register(family: &str, path: &str) {
@@ -176,7 +167,7 @@ fn fnv(bytes: &[u8]) -> u64 {
 fn text_on_the_gpu_draws_as_the_cpu_draws_it_whatever_came_before() {
     const TEST: &str =
         "text_on_the_gpu_draws_as_the_cpu_draws_it_whatever_came_before";
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     register("HistoryOswald", OSWALD);
@@ -278,7 +269,7 @@ fn after_another_scale(
 
 #[test]
 fn text_after_a_larger_draw_of_it_draws_as_a_fresh_draw() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     register("HistoryOswald", OSWALD);
@@ -311,7 +302,7 @@ fn text_after_a_larger_draw_of_it_draws_as_a_fresh_draw() {
 /// elsewhere the test says it is skipped: no bundled face has bitmap glyphs.
 #[test]
 fn colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     if FontLibrary::new()

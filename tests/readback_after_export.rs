@@ -14,6 +14,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 /// Half-alpha red over a whole `side` by `side` page on `engine`.
 fn half_red(side: f32, gpu: bool) -> Result<Canvas, Error> {
     let mut canvas = Canvas::with_options(
@@ -38,7 +40,7 @@ fn read_alpha(canvas: &mut Canvas, side: f32) -> Result<u8, Error> {
 
 #[test]
 fn a_read_after_an_export_sees_the_page_once() -> Result<(), Error> {
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for side in [256.0, 257.0, 300.0] {
             for format in
                 [ImageFormat::Png, ImageFormat::Raw, ImageFormat::Webp]
@@ -70,7 +72,7 @@ fn a_cache_ahead_of_the_read_surface_replaces_what_it_holds()
     // A read leaves the surface at one layer; a second fill and an export
     // file the page at two. The next read starts from the cache, which
     // already holds the first layer, so the surface's own copy of it goes.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let mut canvas = half_red(300.0, gpu)?;
         read_alpha(&mut canvas, 300.0)?;
         let ctx = canvas.context();
@@ -95,7 +97,7 @@ fn a_read_between_exports_does_not_change_what_they_write() -> Result<(), Error>
 {
     // The read surface is what the next export files, so a read that drew
     // the cache twice would hand that on.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let mut canvas = half_red(300.0, gpu)?;
         let first =
             canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
@@ -115,7 +117,7 @@ fn a_page_read_at_a_density_places_later_drawing_once_scaled()
     // Each read brings the page surface up to date by replaying only what is
     // new, under the read's density. The scale compounded across those
     // replays, so the second read drew new layers at density four.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let mut canvas = Canvas::with_options(
             300.0,
             300.0,

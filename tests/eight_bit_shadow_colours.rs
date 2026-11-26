@@ -19,9 +19,7 @@
 
 use meo_skia_canvas::prelude::*;
 
-/// The engines a canvas is drawn by. Where no GPU is reachable the second
-/// is the raster backend again, which the test prints rather than fails.
-const ENGINES: [bool; 2] = [false, true];
+mod common;
 
 /// How far a shadow is cast from the shape casting it, and where a
 /// filtered fill is drawn: past the row of shapes.
@@ -201,29 +199,14 @@ fn misses(
     missed
 }
 
-/// The engines a canvas reports for each of [`ENGINES`], so that a run
-/// with no GPU says it tested the raster backend twice.
-fn engines() -> Vec<EngineKind> {
-    ENGINES
-        .iter()
-        .map(|&gpu| {
-            let mut canvas =
-                Canvas::with_options(1.0, 1.0, CanvasOptions::default())
-                    .expect("a canvas");
-            canvas.set_gpu(gpu);
-            canvas.engine_kind()
-        })
-        .collect()
-}
-
 /// Every grey at every alpha, off the bytes, cast or filtered by every
 /// route, stores the exact product, on both engines, drawn with either and
 /// read with either.
 #[test]
 fn every_shadow_stores_the_exact_product() {
-    println!("engines {:?}", engines());
+    let engines = common::engines();
     let missed =
-        misses(&Route::ALL, OFF_BYTE, &ENGINES, &ENGINES, |_, _| false);
+        misses(&Route::ALL, OFF_BYTE, &engines, &engines, |_, _| false);
     assert!(
         missed.is_empty(),
         "{} missed, first {:#?}",
@@ -238,9 +221,9 @@ fn every_shadow_stores_the_exact_product() {
 /// readback's or the parser's, not the blend's.
 #[test]
 fn a_shadow_of_whole_bytes_stores_their_product() {
-    let missed: Vec<String> = ENGINES
-        .iter()
-        .flat_map(|&gpu| {
+    let missed: Vec<String> = common::engines()
+        .into_iter()
+        .flat_map(|gpu| {
             misses(&Route::ALL, ON_BYTE, &[gpu], &[gpu], |_, _| false)
         })
         .collect();
@@ -265,7 +248,7 @@ fn a_shadow_under_a_global_alpha_stores_the_exact_product() {
     let mut missed = vec![];
     for global in GLOBAL_ALPHAS {
         for a in (0..=255).step_by(5) {
-            for gpu in ENGINES {
+            for gpu in common::engines() {
                 let mut canvas = Canvas::with_options(
                     2.0 * ROW,
                     1.0,

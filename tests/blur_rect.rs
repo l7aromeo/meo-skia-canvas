@@ -12,6 +12,8 @@ mod exact;
 use exact::profile;
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 /// How far an 8-bit alpha may lie from the exact blur on the CPU engine:
 /// half a level for rounding to a level, and a hundredth for the arithmetic
 /// before it. Measured at 0.500 in every case here.
@@ -101,12 +103,12 @@ fn worst(got: &[f64], want: &[f64], scale: f64) -> f64 {
 fn canvas(size: (f32, f32), gpu: bool) -> Option<Canvas> {
     let mut canvas = Canvas::new(size.0, size.1);
     canvas.set_gpu(gpu);
-    (!gpu || canvas.engine_kind() == EngineKind::Gpu).then_some(canvas)
+    (!gpu || common::on_gpu(&canvas)).then_some(canvas)
 }
 
 #[test]
 fn a_blurred_rectangle_is_its_exact_blur_at_every_sigma() {
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in SIGMAS {
             for density in [1u32, 2, 3] {
                 let size = extent(sigma);
@@ -155,7 +157,7 @@ fn a_blurred_rectangle_under_a_transform_that_keeps_it_one_is_exact() {
     // length is; the rectangle is where the transform puts it.
     let sigma = 6.0f32;
     let [x, y, w, h] = [10.25f32, 12.5, 40.0, 20.0];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for turn in [false, true] {
             let size = (220.0f32, 200.0f32);
             let Some(mut canvas) = canvas(size, gpu) else {
@@ -202,7 +204,7 @@ fn a_blurred_rectangle_on_a_float_canvas_is_exact_to_its_precision() {
     for (depth, tolerance) in
         [(PixelDepth::F16, HALF_FLOAT), (PixelDepth::F32, FULL_FLOAT)]
     {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for sigma in [2.0f32, 41.0] {
                 let size = extent(sigma);
                 let mut canvas = Canvas::with_options(
@@ -215,7 +217,7 @@ fn a_blurred_rectangle_on_a_float_canvas_is_exact_to_its_precision() {
                 )
                 .expect("a canvas");
                 canvas.set_gpu(gpu);
-                if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                if gpu && !common::on_gpu(&canvas) {
                     continue;
                 }
                 let ctx = canvas.context();
@@ -285,7 +287,7 @@ fn a_faint_blur_keeps_its_coverage_in_floats() {
         (PixelDepth::F16, HALF_FLOAT_SHARE, HALF_FLOAT_FLOOR),
         (PixelDepth::F32, FULL_FLOAT_SHARE, 0.0),
     ] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for sigma in [1e3f32, 1e4, 1e8, 1e12] {
                 let mut canvas = Canvas::with_options(
                     size.0,
@@ -297,7 +299,7 @@ fn a_faint_blur_keeps_its_coverage_in_floats() {
                 )
                 .expect("a canvas");
                 canvas.set_gpu(gpu);
-                if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                if gpu && !common::on_gpu(&canvas) {
                     continue;
                 }
                 let ctx = canvas.context();
@@ -358,7 +360,7 @@ fn a_rectangle_drawn_after_another_is_its_own_blur() {
             "rgba(0, 0, 0, 0.5)",
         ),
     ];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas(size, gpu) else {
             continue;
         };
@@ -521,7 +523,7 @@ fn a_wide_blurred_rectangle_has_no_seam_where_its_interior_meets_its_edges() {
     let sigma = 3.0f32;
     let [x, y, w, h] = [20.25f32, 20.5, 300.0, 200.0];
     let size = (340.0f32, 240.0f32);
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas(size, gpu) else {
             continue;
         };
@@ -592,7 +594,7 @@ fn a_clipped_blurred_rectangle_is_its_exact_blur_inside_the_clip() {
     let [x, y, w, h] = [40.25f32, 30.5, 80.0, 50.0];
     let size = (200.0f32, 140.0f32);
     let [cx, cy, cw, ch] = [60.0f32, 0.0, 140.0, 140.0];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas(size, gpu) else {
             continue;
         };
@@ -634,7 +636,7 @@ fn a_rectangle_blurred_past_any_length_draws_nothing() {
     // A sigma no pixel can resolve spreads the rectangle to nothing: its
     // exact blur rounds to zero everywhere. Its reach is far past what an
     // `i32` holds, which is made only where the canvas is.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) = canvas((80.0, 60.0), gpu) else {
             continue;
         };
@@ -708,7 +710,7 @@ fn page(size: (f32, f32), space: PixelColorSpace, gpu: bool) -> Option<Canvas> {
     )
     .expect("a canvas");
     canvas.set_gpu(gpu);
-    (!gpu || canvas.engine_kind() == EngineKind::Gpu).then_some(canvas)
+    (!gpu || common::on_gpu(&canvas)).then_some(canvas)
 }
 
 /// The premultiplied bytes of `canvas` in its own `space`, row by row.
@@ -741,7 +743,7 @@ fn a_blurred_rectangles_interior_stores_what_a_fill_of_its_colour_does() {
     let size = (40.0f32, 20.0f32);
     let width = size.0 as usize;
     let (blurred, filled) = ((10, 10), (30, 10));
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (space, name) in EIGHT_BIT_SPACES.into_iter().chain(UNPLACED_SPACES)
         {
             let Some(mut canvas) = page(size, space, gpu) else {
@@ -795,7 +797,7 @@ fn a_blurred_rectangle_is_a_fills_bytes_times_its_blur_inside_and_out() {
         [x, y, w, h].map(f64::from),
         f64::from(sigma),
     );
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (space, name) in EIGHT_BIT_SPACES {
             let Some(mut canvas) = page(size, space, gpu) else {
                 continue;
@@ -855,7 +857,7 @@ fn a_blurred_rectangle_on_float_pixels_keeps_its_alpha_as_given() {
         [x, y, w, h].map(f64::from),
         f64::from(sigma),
     );
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (space, depth) in
             [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3]
                 .into_iter()
@@ -872,7 +874,7 @@ fn a_blurred_rectangle_on_float_pixels_keeps_its_alpha_as_given() {
             )
             .expect("a canvas");
             canvas.set_gpu(gpu);
-            if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            if gpu && !common::on_gpu(&canvas) {
                 continue;
             }
             let ctx = canvas.context();

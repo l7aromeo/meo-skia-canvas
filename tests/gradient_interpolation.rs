@@ -54,7 +54,9 @@
 //! engines differ" is a reason that expires the moment they stop, and would
 //! then argue for deleting the pinning and quietly making the table
 //! hardware-dependent again.
-use meo_skia_canvas::{canvas::EngineKind, prelude::*};
+use meo_skia_canvas::prelude::*;
+
+mod common;
 
 /// Renders and returns unencoded RGBA.
 fn pixels(canvas: &mut Canvas) -> Vec<u8> {
@@ -712,9 +714,7 @@ fn hsl_and_hwb_are_different_spaces() {
 /// CPU and report a pass it had not earned.
 #[test]
 fn the_gpu_path_keeps_the_spaces_apart() {
-    let mut probe = Canvas::new(WIDTH, 4.0);
-    probe.set_gpu(true);
-    if probe.engine_kind() != EngineKind::Gpu {
+    if !common::has_gpu() {
         return;
     }
 
@@ -974,7 +974,7 @@ fn rec2020_sample(
         },
     )
     .expect("canvas");
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
