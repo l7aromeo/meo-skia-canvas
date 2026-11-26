@@ -48,9 +48,8 @@ install` there is no hash to compare and it says nothing, and a bare `node --tes
 run `bun install` first.
 
 **Building from source takes about an hour** and needs a Rust toolchain, ninja and CMake 3.9 or
-newer (libaom is built with it), and on x86_64 `yasm` or a NASM older than 3.0, because libaom's
-configure rejects NASM 3.x. Downloading the prebuilt binary for the current release is the fast
-path and is what CI does.
+newer (libaom is built with it), and on x86_64 NASM or `yasm`. Downloading the prebuilt binary
+for the current release is the fast path and is what CI does.
 
 Everything tracked is an ordinary git object, `docs/assets` included, so a plain clone is enough
 for the tests and the documentation images render locally without anything extra. `git-lfs` is
