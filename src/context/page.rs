@@ -83,6 +83,7 @@ use crate::{
     },
     pixels::PixelColorSpace,
     started,
+    unload::keep_loaded,
 };
 
 /// The PDF `Producer` field: per the spec, "the product that is converting
@@ -6728,6 +6729,7 @@ impl PageSequence {
         options: &ExportOptions,
         out: &mut dyn Sink,
     ) -> Result<(), String> {
+        keep_loaded();
         options.check_timing()?;
         let count = self.pages.len();
         let Some(first) = self.pages.first() else {
@@ -6842,6 +6844,7 @@ impl PageSequence {
         width: Option<usize>,
         options: ExportOptions,
     ) -> Result<(), String> {
+        keep_loaded();
         let padding = match width {
             Some(width) if width > MAX_FOLIO_WIDTH => {
                 return Err(format!(

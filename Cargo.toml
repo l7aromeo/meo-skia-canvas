@@ -370,6 +370,11 @@ libc = "0.2"
 allsorts = { version = "0.17", features = [
     "flate2_zlib",
 ], default-features = false }
+# `GetModuleHandleExW`, to pin the DLL this code is linked into for the
+# process's life -- see `unload`.
+windows-sys = { version = "0.61", features = [
+    "Win32_System_LibraryLoader",
+] }
 
 [dev-dependencies]
 anyhow = "1"

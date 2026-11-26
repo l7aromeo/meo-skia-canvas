@@ -112,6 +112,7 @@ use std::{
 use crate::{
     context::page::{ExportOptions, Page},
     gpu::{Engine, RenderingEngine, autorelease},
+    unload::keep_loaded,
 };
 
 /// What the owner is asked for.
@@ -272,6 +273,7 @@ static JOBS: OnceLock<Owners> = OnceLock::new();
 
 /// Starts the owners on the first export and returns their queues.
 fn jobs() -> &'static Owners {
+    keep_loaded();
     JOBS.get_or_init(|| {
         let wanted = thread::available_parallelism()
             .map(|cores| cores.get().min(OWNERS))
