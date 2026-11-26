@@ -7,7 +7,14 @@ const fs = require("fs"),
   path = require("path"),
   { execFileSync } = require("child_process"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
-  { Canvas, Image, ImageData, loadImage, backend } = require("../../lib"),
+  {
+    Canvas,
+    FontLibrary,
+    Image,
+    ImageData,
+    loadImage,
+    backend,
+  } = require("../../lib"),
   { skiaNode, core } = require("../../lib/classes/neon");
 
 const WHITE = [255, 255, 255, 255],
@@ -3168,6 +3175,78 @@ describe("a canvas's text gamma and contrast", () => {
         () => new Canvas(1, 1, options),
         JSON.stringify(options),
       );
+  });
+
+  // A canvas drawn into another replays its page, and the replay's glyphs
+  // take the source's contrast and gamma -- not Skia's defaults, nor the
+  // destination's: the copy's pixels are the source's own. Unhinted, since
+  // hinted macOS text takes no contrast; and once more with a canvas nested
+  // in the source, which then rasterizes at the draw -- the whole page, or
+  // under a clip that shows less than half of it, only the part it shows.
+  test("hold when the canvas is drawn into another", () => {
+    FontLibrary.use("ReplayOswald", [
+      path.join(
+        __dirname,
+        "../assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+      ),
+    ]);
+    const [W, H] = [160, 48];
+    // A third of the page's width, so a clipped draw rasterizes a part.
+    const PART = Math.floor(W / 3);
+    const make = (options) => {
+      const canvas = new Canvas(W, H, options);
+      canvas.gpu = false;
+      return canvas;
+    };
+    const read = (canvas) =>
+      canvas
+        .getContext("2d")
+        .getImageData(0, 0, W, H, { alphaType: "premultiplied" }).data;
+    const misses = [];
+    for (const options of [
+      {},
+      { textContrast: 0, textGamma: 3 },
+      { textContrast: 1, textGamma: 1 },
+    ])
+      for (const ink of ["black", "white", "rgb(40 90 160)"])
+        for (const [nested, clipped] of [
+          [false, false],
+          [true, false],
+          [true, true],
+        ])
+          for (const into of ["alike", "default"]) {
+            const source = make(options),
+              ctx = source.getContext("2d");
+            if (nested) ctx.drawImage(make(options), 0, 0);
+            ctx.textRendering = "geometricPrecision";
+            ctx.font = "36px ReplayOswald";
+            ctx.fillStyle = ink;
+            ctx.fillText("Wag", 8, 38);
+            const copy = make(into == "alike" ? options : {}),
+              to = copy.getContext("2d"),
+              shown = clipped ? PART : W;
+            to.beginPath();
+            to.rect(0, 0, shown, H);
+            to.clip();
+            to.drawImage(source, 0, 0);
+            const [own, copied] = [read(source), read(copy)];
+            assert.ok(
+              own.some((byte) => byte > 0),
+              "the run inks",
+            );
+            let most = 0;
+            // The columns the clip shows.
+            for (let i = 0; i < own.length; i++)
+              if ((i >> 2) % W < shown)
+                most = Math.max(most, Math.abs(own[i] - copied[i]));
+            if (most > 1)
+              misses.push(
+                `${JSON.stringify(options)} ${ink}` +
+                  `${nested ? " nested" : ""}${clipped ? " clipped" : ""}` +
+                  ` into ${into}: ${most}`,
+              );
+          }
+    assert.deepEqual(misses, []);
   });
 });
 
