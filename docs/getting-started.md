@@ -146,7 +146,7 @@ Start by installing:
 
 1. A recent version of `git` (older versions have difficulties with Skia's submodules)
 2. The [Rust compiler](https://www.rust-lang.org/tools/install) and cargo package manager using [`rustup`](https://rust-lang.github.io/rustup/)
-3. A C compiler toolchain (either LLVM/Clang or MSVC)
+3. A C compiler toolchain (either LLVM/Clang or MSVC). On Windows, LLVM as well as MSVC: Skia compiles there with LLVM's `clang-cl` against MSVC's headers, and MSVC's standard library refuses a `clang-cl` older than it supports with `error STL1000`, naming the Clang version it needs
 4. Python 3 (used by Skia's [build process](https://skia.org/docs/user/build/))
 5. The [Ninja](https://ninja-build.org) build system
 6. On Linux: Fontconfig and OpenSSL

@@ -221,18 +221,17 @@ jobs:
       - name: Install Ninja and just
         run: choco install ninja just
 
-      # skia-bindings compiles Skia with clang-cl from LLVM_HOME or
-      # `C:\Program Files\LLVM`, and bindgen needs libclang from the same
-      # place; without one it falls back to MSVC's `cl`. Installed only where
-      # the image does not carry it.
+      # skia-bindings compiles Skia with clang-cl and bindgen parses its
+      # headers with libclang, both from the newest LLVM release rather than
+      # the image's, whose clang an image's newer MSVC STL can refuse
+      # outright (STL1000). The script names the release, checks it against
+      # its attestation, and fails here when this image's STL will not take
+      # it, so a mismatch reads as that and not as an error inside Skia.
       - name: Use LLVM
         shell: bash
-        run: |
-          if [ -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
-            "/c/Program Files/LLVM/bin/clang-cl.exe" --version | head -1
-          else
-            choco install llvm --no-progress
-          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/use-llvm.sh
 
       # The patched Skia tree the Windows build compiles from -- rust-skia at
       # the Cargo.lock tag, Skia's DEPS and gn, and Windows's patches from
