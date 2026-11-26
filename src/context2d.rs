@@ -9114,7 +9114,7 @@ mod translucent_text_tests {
 
     use skia_safe::{Contains, Rect};
 
-    use super::{Canvas, CanvasOptions};
+    use super::{Canvas, CanvasOptions, Context2D, FontKerning};
     use crate::{
         canvas::EngineKind,
         context::{
@@ -9124,6 +9124,7 @@ mod translucent_text_tests {
         export::{EncodeOptions, ImageFormat},
         font::FontLibrary,
         gpu::RenderingEngine,
+        image::Image,
         paint::BlendMode,
         path::FillRule,
         pixels::{
@@ -9927,6 +9928,165 @@ mod translucent_text_tests {
             let apart = zip(&cpu, &gpu).filter(|(a, b)| a != b).count();
             assert_eq!(apart, 0, "{rgb:?} over a page {background}");
         }
+    }
+
+    #[test]
+    fn a_canvas_of_translucent_text_draws_as_its_own_pixels() {
+        // The HTML Standard composites a canvas drawn into another as its
+        // bitmap, so the run lands in the destination as the bytes its own
+        // page stores, whatever the destination holds and whatever blend it
+        // is drawn under: compared here with an image of those bytes.
+        let blends = [
+            BlendMode::SourceOver,
+            BlendMode::DestinationAtop,
+            BlendMode::SourceAtop,
+            BlendMode::Multiply,
+            BlendMode::ColorBurn,
+            BlendMode::Exclusion,
+        ];
+        let options = CanvasOptions {
+            gpu: false,
+            ..CanvasOptions::default()
+        };
+        let into = |blend, draw: &mut dyn FnMut(&mut Context2D)| {
+            let mut page =
+                Canvas::with_options(W, H, options.clone()).expect("a canvas");
+            let ctx = page.context();
+            ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+            ctx.set_fill_style_css("rgb(30,120,90)").expect("a colour");
+            ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            ctx.set_global_composite_operation(blend);
+            draw(ctx);
+            bytes(&mut page, 1, PixelColorSpace::Srgb)
+        };
+        let mut problems = vec![];
+        // The scenes' run, and one whose glyphs overlap, drawn a group of
+        // them at a time -- see `layer::ReplayedText::drawn_flat`.
+        let overlapping = |rgb: [u8; 3]| {
+            register();
+            let mut canvas =
+                Canvas::with_options(W, H, options.clone()).expect("a canvas");
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css("48px TranslucentOswald"));
+            ctx.set_font_kerning(FontKerning::None);
+            ctx.set_letter_spacing(-12.0);
+            ctx.set_fill_style_css(&named(rgb, 0.8, PixelColorSpace::Srgb))
+                .expect("a colour");
+            ctx.fill_text("Hello Wq", 10.3, 90.6, None);
+            canvas
+        };
+        let runs = COLOURS.into_iter().flat_map(|rgb| {
+            [
+                (
+                    rgb,
+                    "apart",
+                    canvas(
+                        false,
+                        PixelDepth::Uint8,
+                        rgb,
+                        plain(0.6),
+                        false,
+                        false,
+                    ),
+                ),
+                (rgb, "overlapping", overlapping(rgb)),
+                // At 0.3 the colour placed for grey's bytes is pre-blended in
+                // another bucket than the grey named -- see `layer::FlatRun`.
+                (
+                    rgb,
+                    "apart at 0.3",
+                    canvas(
+                        false,
+                        PixelDepth::Uint8,
+                        rgb,
+                        plain(0.3),
+                        false,
+                        false,
+                    ),
+                ),
+            ]
+        });
+        for (rgb, kind, mut run) in runs {
+            let data = run
+                .to_image_data(
+                    None,
+                    &ImageDataExport {
+                        pixels: PixelExportOptions {
+                            premultiplied: true,
+                            ..PixelExportOptions::default()
+                        },
+                        ..ImageDataExport::default()
+                    },
+                )
+                .expect("the page reads back");
+            let pixels = Image::from_pixels(
+                data.pixels(),
+                data.width(),
+                data.height(),
+                data.stride(),
+                PixelExportOptions {
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+            )
+            .expect("the bytes make an image");
+            // The image is the bytes the run's page stores, or the
+            // comparison below is with something else.
+            let mut alone =
+                Canvas::with_options(W, H, options.clone()).expect("a canvas");
+            alone.context().draw_image(&pixels, 0.0, 0.0);
+            assert_eq!(
+                bytes(&mut alone, 1, PixelColorSpace::Srgb),
+                data.pixels(),
+                "{rgb:?} {kind}: the image"
+            );
+            // The image of its page `drawImage` is handed for a canvas --
+            // see `node::image::Source::of`.
+            let image =
+                run.context().inner.source_image(false).expect("an image");
+            let whole = Rect::from_wh(W, H);
+            for blend in blends {
+                let expected = into(blend, &mut |ctx| {
+                    ctx.draw_image(&pixels, 0.0, 0.0);
+                });
+                let mut routes = vec![(
+                    "as its image",
+                    into(blend, &mut |ctx| {
+                        ctx.inner
+                            .draw_source_image(&image, &whole, &whole, false);
+                    }),
+                )];
+                // `draw_canvas` replays the source's draws, which under
+                // source-over land on the destination's own pixels, glyph by
+                // glyph, rather than compositing the source's: its own
+                // contract, documented there, and off the bytes with or
+                // without the route. Under every other blend here they are
+                // composited as one first.
+                if blend != BlendMode::SourceOver {
+                    routes.push((
+                        "with draw_canvas",
+                        into(blend, &mut |ctx| {
+                            ctx.draw_canvas(&mut run, 0.0, 0.0);
+                        }),
+                    ));
+                }
+                for (route, drawn) in routes {
+                    let apart: Vec<u8> = zip(&drawn, &expected)
+                        .filter(|(a, b)| a != b)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .collect();
+                    if !apart.is_empty() {
+                        problems.push(format!(
+                            "{rgb:?} {kind} {blend:?} {route}: {} bytes apart, most {}",
+                            apart.len(),
+                            apart.iter().max().unwrap_or(&0)
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }
 

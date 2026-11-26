@@ -243,7 +243,12 @@ makes of the named grey's coverage -- and a GPU canvas draws such a run
 through the colour filter above, which keeps the named colour's bucket. A run
 under a `drop-shadow()`, or casting a `shadowColor` shadow, is drawn the same
 way above its shadow, and one under `blur()` is blurred from its coverage
-times its alpha. A run in a gradient or a pattern, under a
+times its alpha. A canvas holding such a run, drawn into another with
+`drawImage`, lands the bytes its own page holds under every blend: its
+recording draws the run's glyphs through a colour shader in the named colour,
+which Skia's raster pipeline multiplies by the coverage rounded once, and
+which keeps the named colour's bucket. A run in a gradient or a pattern,
+under a
 blend that covers beyond the draw such as `copy`, dithered, holding colour
 glyphs, naming a line colour of its own, or under a filter the library
 leaves to Skia, such as `brightness()` alone, is blitted as Skia blits it,

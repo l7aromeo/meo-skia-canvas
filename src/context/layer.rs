@@ -2408,9 +2408,37 @@ impl ReplayedText {
     /// transform the run was drawn under and reaching the clip as
     /// `Context2D::draw_text` has it -- see [`reach_the_clip`] -- through a
     /// picture the blend composites where the blend covers beyond the draw.
+    /// A flat run's glyphs are the exception, recorded in
+    /// [`Self::flat_paint`], so that a canvas drawn as an image of its page
+    /// lands the bytes the page holds.
     pub(crate) fn recorded(&self) -> Option<&Picture> {
-        self.recording
-            .get_or_record(|| self.record(&self.paint, self.shadow.as_ref()))
+        self.recording.get_or_record(|| {
+            let shaded = self.flat_paint();
+            self.record(
+                shaded.as_ref().unwrap_or(&self.paint),
+                self.shadow.as_ref(),
+            )
+        })
+    }
+
+    /// The paint a flat run is recorded for pixels in -- see [`FlatRun`] --
+    /// so that a picture of the page lands the bytes the page itself does:
+    /// its colour at its alpha through a colour shader, which Skia's raster
+    /// pipeline multiplies by a glyph's coverage rounded once, the product
+    /// [`Self::drawn_flat`] lands, where the run's own paint is blitted as
+    /// `a * (c + 1) >> 8`. In the colour the run was named in, so that Skia
+    /// pre-blends the mask by the colour the plane is drawn in. `None` for
+    /// any other run, and for one under a blend of its own, which is not
+    /// drawn flat.
+    fn flat_paint(&self) -> Option<Paint> {
+        let flat = self.flat.as_ref().filter(|_| self.blend.is_none())?;
+        let named = flat.opaque.color4f();
+        let mut paint = flat.opaque.clone();
+        paint.set_shader(shaders::color_in_space(
+            Color4f::new(named.r, named.g, named.b, flat.alpha),
+            ColorSpace::new_srgb(),
+        ));
+        Some(paint)
     }
 
     /// The run as recorded for a document, recorded now if nothing has
