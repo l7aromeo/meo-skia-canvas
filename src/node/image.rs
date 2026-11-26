@@ -158,6 +158,9 @@ pub struct Source {
     /// composites through a route of its own -- see
     /// `Context2D::draw_source_image`. `false` for every other source.
     pub plays_apart_on_gpu: bool,
+    /// Whether the source is a canvas, which is drawn as one draw for each
+    /// kind of target -- see `Context2D::draw_split`.
+    pub canvas: bool,
 }
 
 impl Clone for Content {
@@ -188,6 +191,7 @@ impl Source {
                 content: image.content.clone(),
                 autosized: image.autosized,
                 plays_apart_on_gpu: false,
+                canvas: false,
             });
         }
         if let Ok(context) = value.downcast::<BoxedContext2D, _>(cx) {
@@ -204,6 +208,7 @@ impl Source {
                 autosized: false,
                 // Asked after the image, whose page files what was drawn.
                 plays_apart_on_gpu: ctx.plays_apart_on_gpu(),
+                canvas: true,
             });
         }
         None

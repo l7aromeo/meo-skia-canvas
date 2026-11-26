@@ -4589,6 +4589,23 @@ impl Context2D {
         })
     }
 
+    /// Draws one draw as entries of its own for each kind of target -- see
+    /// `layer::Split`: what `pixels` draws is played for pixels, and what
+    /// `document` draws is what a document backend writes. Each is filed as
+    /// it would be drawn alone, after everything drawn before it, and
+    /// nothing drawn after joins either.
+    pub(crate) fn draw_split(
+        &mut self,
+        pixels: impl FnOnce(&mut Self),
+        document: impl FnOnce(&mut Self),
+    ) {
+        let mut mark = self.recorder.borrow_mut().begin_split();
+        pixels(self);
+        let drawn = self.recorder.borrow_mut().take_split(&mut mark);
+        document(self);
+        self.recorder.borrow_mut().end_split(mark, drawn);
+    }
+
     /// [`Self::draw_source_image`], declared.
     fn draw_source_image_declared(
         &mut self,

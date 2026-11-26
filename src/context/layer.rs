@@ -118,6 +118,9 @@ pub enum Layer {
     /// hold such draws, drawn on a GPU canvas in the bytes the CPU draws them
     /// in -- see [`GradientDraw`].
     Gradient(Arc<GradientDraw>),
+    /// One draw filed as entries of its own for each kind of target -- see
+    /// [`Split`]. Shared, as a group is.
+    Split(Arc<Split>),
 }
 
 impl Layer {
@@ -142,6 +145,7 @@ impl Layer {
             }
             Layer::ReplayedText(text) => text.playback(canvas, target),
             Layer::Gradient(op) => op.playback(canvas, target),
+            Layer::Split(split) => split.playback(canvas, target),
         }
     }
 
@@ -172,6 +176,11 @@ impl Layer {
                 .iter()
                 .any(|(entry, _)| entry.plays_apart_on_gpu()),
             Layer::Clipped(piece) => piece.entry().plays_apart_on_gpu(),
+            // Only pixels are played on a GPU canvas.
+            Layer::Split(split) => split
+                .pixels
+                .iter()
+                .any(|(entry, _)| entry.plays_apart_on_gpu()),
             Layer::Picture(_)
             | Layer::Blur(_)
             | Layer::Targeted(_)
@@ -208,6 +217,8 @@ impl Layer {
             ),
             Layer::ReplayedText(text) => Some(text.reach()),
             Layer::Gradient(op) => Some(op.reach()),
+            // What its pixels reach, as for a pair.
+            Layer::Split(split) => split.pixels_reach(),
         }
     }
 
@@ -273,6 +284,13 @@ impl Layer {
             }
             Layer::Clipped(piece) => piece.entry.recorded_bytes(),
             Layer::Pattern(tile) => tile.plain.approximate_bytes_used(),
+            Layer::Split(split) => split
+                .pixels
+                .layers
+                .iter()
+                .chain(split.document.layers.iter())
+                .map(Layer::recorded_bytes)
+                .sum(),
             Layer::Deferred(deferred) => {
                 recorded(&deferred.pixels.picture)
                     + deferred
@@ -303,6 +321,12 @@ impl Layer {
                 .iter()
                 .for_each(|layer| layer.count_into(count)),
             Layer::Clipped(piece) => piece.entry.count_into(count),
+            Layer::Split(split) => split
+                .pixels
+                .layers
+                .iter()
+                .chain(split.document.layers.iter())
+                .for_each(|layer| layer.count_into(count)),
             Layer::Deferred(deferred) => {
                 deferred.pixels.picture.count_into(count);
                 if let Some(document) = &deferred.document {
@@ -4188,6 +4212,45 @@ impl Entries {
     }
 }
 
+/// One draw filed as entries of its own for each kind of target: what a
+/// page plays for pixels, and what a document backend writes.
+///
+/// A canvas drawn into another as an image is its own pixels on pixels --
+/// see `PageRecorder::image` -- and the entries it was drawn from in a
+/// document, which writes them as vectors and text. Each half is what the
+/// draw files on its own, so each plays as that draw would alone: a
+/// document takes its half entry by entry, as it takes a group's.
+#[derive(Clone, Debug)]
+pub struct Split {
+    /// What the draw files for pixels.
+    pub(crate) pixels: Entries,
+    /// What the draw files for a document.
+    pub(crate) document: Entries,
+}
+
+impl Split {
+    /// Plays the half `target` takes.
+    fn playback(&self, canvas: &SkCanvas, target: Target) {
+        let half = match target {
+            Target::Pixels => &self.pixels,
+            Target::Document => &self.document,
+        };
+        play_entries(&half.layers, &half.features, canvas, target);
+    }
+
+    /// What the pixels reach -- see [`Layer::reach`]: every entry's
+    /// rectangle joined, and `None` where one has none.
+    fn pixels_reach(&self) -> Option<Rect> {
+        self.pixels.layers.iter().try_fold(
+            Rect::new_empty(),
+            |mut reach, entry| {
+                reach.join(entry.reach()?);
+                Some(reach)
+            },
+        )
+    }
+}
+
 impl Group {
     /// What the group's chain can draw on a canvas whose transform is
     /// `device`, in that canvas's pixels: what its entries draw -- the
@@ -5000,6 +5063,8 @@ fn reads_the_page(entries: &[Layer], device: &Matrix) -> bool {
                 )
         }
         Layer::Gradient(draw) => draw.reads_the_page(device),
+        // Only pixels are played on a GPU canvas.
+        Layer::Split(split) => reads_the_page(&split.pixels.layers, device),
         Layer::Clipped(piece) => match piece.entry() {
             Layer::Gradient(draw) => draw.reads_the_page(device),
             _ => read_on_the_cpu(entry).is_some(),
@@ -6467,6 +6532,11 @@ fn offscreen_layers(entry: &Layer, features: VectorFeatures) -> usize {
         Layer::Targeted(pictures) => {
             pictures.0.approximate_op_count_nested(true)
         }
+        Layer::Split(split) => split
+            .pixels
+            .iter()
+            .map(|(entry, features)| offscreen_layers(entry, features))
+            .sum(),
         Layer::Deferred(deferred) => deferred
             .picture()
             .map_or(0, |picture| picture.approximate_op_count_nested(true)),
@@ -6649,6 +6719,10 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         Layer::Cut(_) => true,
         Layer::Group(group) => holds_a_cut(&group.contents.layers),
         Layer::Clipped(piece) => matches!(piece.entry, Layer::Cut(_)),
+        Layer::Split(split) => {
+            holds_a_cut(&split.pixels.layers)
+                || holds_a_cut(&split.document.layers)
+        }
         Layer::Picture(_)
         | Layer::Blur(_)
         | Layer::Targeted(_)
@@ -6661,12 +6735,13 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
 
 /// Whether `entries`, or a group among them, hold a pair of recordings --
 /// one for pixels and one for documents, which a page that keeps a
-/// recording for pixels files -- so that a picture of the page played for
-/// one target does not stand for the other: [`Page::picture`]'s holds the
-/// colours placed for pixels.
+/// recording for pixels files, or a [`Split`] -- so that a picture of the
+/// page played for one target does not stand for the other:
+/// [`Page::picture`]'s holds the colours placed for pixels, and a split's
+/// pixels.
 pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
-        Layer::Targeted(_) => true,
+        Layer::Targeted(_) | Layer::Split(_) => true,
         Layer::Deferred(deferred) => deferred.is_pair(),
         Layer::ReplayedText(text) => text.is_pair(),
         Layer::Gradient(op) => op.is_pair(),

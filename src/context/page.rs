@@ -49,8 +49,8 @@ use crate::{
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
             Entries, GradientDraw, GradientPiece, GradientPixels, Group, Layer,
-            LayerRec, OnGpu, PatternDraw, RecordedCount, ReplayedText, Target,
-            TileScope, holds_a_cut, in_document_space, play_entries,
+            LayerRec, OnGpu, PatternDraw, RecordedCount, ReplayedText, Split,
+            Target, TileScope, holds_a_cut, in_document_space, play_entries,
             tiles_exactly,
         },
         resident::{Place, SharedSurface},
@@ -338,6 +338,31 @@ impl Drop for PageId {
     }
 }
 
+/// Where a [`Split`] begins in the list its page files into -- see
+/// [`PageRecorder::begin_split`].
+pub(crate) struct SplitMark {
+    /// The page's erasures when the split began: a draw that erases the
+    /// page erases what lay before the mark, and leaves its entries first.
+    clears: u64,
+    /// How many layers were open, the innermost the list's.
+    depth: usize,
+    /// How many entries the list held.
+    at: usize,
+    /// What the innermost open layer's contents asked of a vector backend
+    /// before the split, which the split's pixels do not ask in its place.
+    features: Option<VectorFeatures>,
+    /// What the page said of how a GPU canvas plays it once the pixels were
+    /// filed -- [`PageRecorder::plays_apart_on_gpu`] and
+    /// [`PageRecorder::holds_reading_runs`] -- which the document's draws,
+    /// never played on one, do not change. Set by
+    /// [`PageRecorder::take_split`].
+    on_gpu: (bool, bool),
+    /// The page's erasures when the pixels were taken: where the document's
+    /// draws erase the page, the pixels' entries were counted in what was
+    /// erased, and are counted again in what replaces it.
+    taken_at: u64,
+}
+
 /// The draws made on one page, recorded rather than rasterised.
 ///
 /// Kept until the page is erased -- by `reset()`, an opaque fill covering the
@@ -436,7 +461,8 @@ pub struct PageRecorder {
     /// after one kept run 10.8% of the main thread on the GPU, where that
     /// page's one run needs no bound at all. A run opened before the page
     /// held one is not bounded, which ends a batch sooner and draws the
-    /// same pixels.
+    /// same pixels. A run in a split's document, which no GPU canvas plays,
+    /// does not set it -- see [`Self::take_split`].
     holds_reading_runs: bool,
     /// Whether the canvas the page belongs to plays it on the GPU, as its
     /// engine stands while it records -- see [`Self::set_plays_on_gpu`].
@@ -492,11 +518,19 @@ pub struct PageRecorder {
     /// Whether an entry filed on this page, or in a layer open on it, draws
     /// other bytes on a GPU canvas replaying a recording of it than on a
     /// CPU canvas -- see [`Layer::plays_apart_on_gpu`]. Set as each entry is
-    /// filed, so that asking costs nothing however many the page holds.
+    /// filed, so that asking costs nothing however many the page holds, and
+    /// put back as it was after a split's document is filed, which no GPU
+    /// canvas plays -- see [`Self::take_split`].
     plays_apart_on_gpu: bool,
     /// The image of the page made last, served again while the page is as
     /// it was -- see [`Self::image`].
     own_image: Option<OwnImage>,
+    /// How many times the page has been erased -- see [`Self::set_bounds`]
+    /// -- so that a split can tell its draw erased what lay beneath it --
+    /// see [`SplitMark`].
+    clears: u64,
+    /// Set while a split's document is drawn -- see [`Self::take_split`].
+    documenting: bool,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
     /// open `current` records the innermost one's contents, and what each
@@ -1220,6 +1254,8 @@ impl PageRecorder {
             replay_cost: 0,
             plays_apart_on_gpu: false,
             own_image: None,
+            clears: 0,
+            documenting: false,
             open: Vec::new(),
             recorded: RecordedCount::default(),
         }
@@ -1254,8 +1290,12 @@ impl PageRecorder {
 
     /// Notes the draw being recorded in the page's [`TileCuts`]: as
     /// declared, or, where nothing was, as a cut over its clip's device
-    /// bounds, or over the whole page where it has none.
+    /// bounds, or over the whole page where it has none. Nothing for a
+    /// split's document, which no tile plays -- see [`Self::take_split`].
     fn note_tile_cut(&mut self) {
+        if self.documenting {
+            return;
+        }
         let reach = self.tile_reach.unwrap_or_else(|| {
             TileReach::Cut(
                 self.clip
@@ -1379,6 +1419,7 @@ impl PageRecorder {
             // has nothing left to file.
             self.id = Self::mint_id();
         }
+        self.clears += 1;
 
         // Dropped rather than finished, as the page's own recordings are:
         // what a run holds is erased with the rest.
@@ -1850,6 +1891,120 @@ impl PageRecorder {
         };
         self.file_group(group, features);
         self.restore();
+    }
+
+    /// Begins one draw filed apart for each kind of target -- see
+    /// [`Split`]: files everything recorded so far, and marks where the
+    /// draw's entries will begin. What is drawn until [`Self::take_split`]
+    /// is the draw's pixels; what is drawn after it until
+    /// [`Self::end_split`] is its document's.
+    pub(crate) fn begin_split(&mut self) -> SplitMark {
+        self.seal();
+        SplitMark {
+            clears: self.clears,
+            depth: self.open.len(),
+            at: self.filed_len(),
+            features: self.open.last().map(|layer| layer.features),
+            on_gpu: (false, false),
+            taken_at: self.clears,
+        }
+    }
+
+    /// Takes what was filed since `mark`, the draw's pixels, from the page.
+    /// What is drawn until [`Self::end_split`] is for a document alone, and
+    /// notes no cut in the page's tiles, which only pixels are read from --
+    /// see [`TileCuts`].
+    pub(crate) fn take_split(&mut self, mark: &mut SplitMark) -> Entries {
+        self.seal();
+        mark.on_gpu = (self.plays_apart_on_gpu, self.holds_reading_runs);
+        mark.taken_at = self.clears;
+        self.documenting = true;
+        self.drain_since(mark)
+    }
+
+    /// Takes what was filed since `mark`, the draw's document, and files it
+    /// with `pixels` as one [`Layer::Split`], asking of a vector backend
+    /// what the document's entries ask.
+    pub(crate) fn end_split(&mut self, mark: SplitMark, pixels: Entries) {
+        self.seal();
+        self.documenting = false;
+        (self.plays_apart_on_gpu, self.holds_reading_runs) = mark.on_gpu;
+        let document = self.drain_since(&mark);
+        // The pixels' entries asked an open layer for their features as they
+        // were filed; the layer asks for what the split's document does.
+        if self.marked_list(&mark)
+            && let (Some(layer), Some(features)) =
+                (self.open.last_mut(), mark.features)
+        {
+            layer.features = features;
+        }
+        if pixels.layers.is_empty() && document.layers.is_empty() {
+            return;
+        }
+        if mark.taken_at != self.clears {
+            pixels.layers.iter().for_each(|entry| self.count(entry));
+        }
+        let features = document.all_features();
+        // Each entry was counted as it was filed.
+        self.file_counted(
+            Layer::Split(Arc::new(Split { pixels, document })),
+            features,
+        );
+    }
+
+    /// Files what the page holds unfiled -- its recording, the frame's run
+    /// -- and ends every run an entry filed next could join, so that what is
+    /// drawn next is filed in entries of its own.
+    ///
+    /// On the page [`Self::flush`] ends the blur and gradient runs as it
+    /// files; inside a layer the recording is filed without ending them, so
+    /// they are ended here. A cut draw joins only a piece of the frame's run
+    /// it was drawn in, and the run is closed here, so the next is another;
+    /// an isolated layer is only ever open on the page, which the flush
+    /// closes.
+    fn seal(&mut self) {
+        self.settle();
+        self.close_run();
+        self.file_current();
+        self.blur_run = None;
+        self.gradient_run = None;
+    }
+
+    /// How many entries the list the page files into holds: the innermost
+    /// open layer's, or the page's own.
+    fn filed_len(&self) -> usize {
+        match self.open.last() {
+            Some(layer) => layer.entries.len(),
+            None => self.layers.len(),
+        }
+    }
+
+    /// Whether the page files into the list `mark` was taken of: nothing
+    /// erased it since, and the layer it was taken in is still the
+    /// innermost.
+    fn marked_list(&self, mark: &SplitMark) -> bool {
+        mark.clears == self.clears && mark.depth == self.open.len()
+    }
+
+    /// Takes the entries filed since `mark` out of the list the page files
+    /// into: all of them where the page was erased since, which erased what
+    /// lay before the mark with it.
+    fn drain_since(&mut self, mark: &SplitMark) -> Entries {
+        let at = match self.marked_list(mark) {
+            true => mark.at,
+            false => 0,
+        };
+        let (layers, features) = match self.open.last_mut() {
+            Some(layer) => (
+                layer.entries.split_off(at),
+                layer.entry_features.split_off(at),
+            ),
+            None => (
+                Arc::make_mut(&mut self.layers).split_off(at),
+                Arc::make_mut(&mut self.features).split_off(at),
+            ),
+        };
+        Entries::new(layers, features)
     }
 
     /// Files `group` after what [`Self::file_current`] has filed.
@@ -2869,6 +3024,14 @@ impl PageRecorder {
     /// of it draws in other bytes than a CPU canvas -- see the field.
     pub fn plays_apart_on_gpu(&self) -> bool {
         self.plays_apart_on_gpu
+    }
+
+    /// Whether the page has filed a kept run read in the shader -- see
+    /// [`Self::holds_reading_runs`](PageRecorder#structfield.
+    /// holds_reading_runs).
+    #[cfg(test)]
+    pub(crate) fn holds_reading_runs(&self) -> bool {
+        self.holds_reading_runs
     }
 
     /// Charges this page for replaying a picture that costs `cost` of its own.
@@ -5581,8 +5744,9 @@ impl Page {
     /// can write as it is; each group composited at an opacity alone entry
     /// by entry -- opened at an opacity of 1, and written as a group of its
     /// own at any other where `splices` is the SVG document's -- see
-    /// [`Group::opacity`]; and each run of what it refuses as one image,
-    /// under the transform `canvas` carries.
+    /// [`Group::opacity`]; each split's document entry by entry -- see
+    /// [`Split`]; and each run of what it refuses as one image, under the
+    /// transform `canvas` carries.
     ///
     /// Nothing in `layers` blends in a way the backend refuses:
     /// [`Self::draw_as_document`] embeds every entry up to the last that
@@ -5610,11 +5774,14 @@ impl Page {
         // A group composited at an opacity alone is opened where that is 1,
         // and written as a group of its own at any other where the document
         // is an SVG one -- see [`Self::splice_group`].
+        // A split's document entries are taken one by one, as the page's
+        // are.
         let opens = |index: usize| match &layers[index] {
             Layer::Group(group) => match group.opacity() {
                 Some(alpha) => alpha == 1.0 || splicing,
                 None => false,
             },
+            Layer::Split(_) => true,
             _ => false,
         };
         // Consecutive refused layers go in as one image rather than one
@@ -5641,6 +5808,18 @@ impl Page {
                     canvas,
                     Target::Document,
                 );
+                continue;
+            }
+            if let Layer::Split(split) = &layers[index] {
+                self.play_as_document(
+                    canvas,
+                    &split.document.layers,
+                    &split.document.features,
+                    backend,
+                    embedding,
+                    splices.as_deref_mut(),
+                )?;
+                index += 1;
                 continue;
             }
             if let Layer::Group(group) = &layers[index]
@@ -11514,6 +11693,7 @@ mod tests {
                     Layer::Deferred(_) => "deferred",
                     Layer::ReplayedText(_) => "colour text",
                     Layer::Gradient(_) => "gradient",
+                    Layer::Split(_) => "split",
                 })
                 .collect();
             kinds.join(" ")

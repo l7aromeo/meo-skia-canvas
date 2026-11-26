@@ -1271,7 +1271,14 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
             // kind of source, not one bitmap case moves. The picture below is
             // the one that needs it.
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_source_image(image, &src, &dst, source.plays_apart_on_gpu);
+            let apart = source.plays_apart_on_gpu;
+            match source.canvas {
+                true => ctx.draw_split(
+                    |ctx| ctx.draw_source_image(image, &src, &dst, apart),
+                    |ctx| ctx.draw_source_image(image, &src, &dst, apart),
+                ),
+                false => ctx.draw_source_image(image, &src, &dst, apart),
+            }
         }
         Content::Vector(picture, size) => {
             // An SVG with no intrinsic size is scaled to the canvas instead,
@@ -1338,6 +1345,7 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             },
             autosized: false,
             plays_apart_on_gpu: false,
+            canvas: false,
         },
     };
 

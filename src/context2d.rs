@@ -4528,9 +4528,10 @@ fn place_capture(
         ),
         // Pixels replay nothing, so the destination is charged nothing for
         // them: they draw as any image's.
-        Captive::Pixels(image) => {
-            ctx.draw_source_image(image, src, dst, *apart)
-        }
+        Captive::Pixels(image) => ctx.draw_split(
+            |ctx| ctx.draw_source_image(image, src, dst, *apart),
+            |ctx| ctx.draw_source_image(image, src, dst, *apart),
+        ),
     }
 }
 
@@ -11074,5 +11075,556 @@ mod tile_read_tests {
             assert_eq!(at_two, 0, "gpu {gpu}: tiles served a read at 2");
             assert_eq!(at_one, 1, "gpu {gpu}: tiles did not serve a read at 1");
         }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    //! A draw filed apart for each kind of target -- see
+    //! `context::Context2D::draw_split` -- plays its pixels on pixels and
+    //! its document's draws in a document, and is filed as each half would
+    //! be alone among what is drawn before and after it: no run, clip
+    //! piece, blur or isolated layer begun before it takes in either half,
+    //! and none either half begins takes in what follows.
+    use super::*;
+    use crate::{
+        canvas::EngineKind,
+        context::{
+            layer::{Layer, Target, play_entries},
+            page::TILE_READS,
+        },
+        export::VectorFeatures,
+    };
+    use skia_safe::{AlphaType as SkAlphaType, ImageInfo};
+
+    const W: f32 = 120.0;
+    const H: f32 = 90.0;
+
+    type Draw = fn(&mut Context2D);
+
+    /// What a scene draws: before the split, its two halves, and after.
+    struct Scene {
+        name: &'static str,
+        before: Draw,
+        pixels: Draw,
+        document: Draw,
+        after: Draw,
+    }
+
+    /// `pixels` and `document` filed as one split draw on `ctx`, as
+    /// `Context2D::draw_split` files them -- through the facade, whose draws
+    /// the halves are made of.
+    fn split(ctx: &mut Context2D, pixels: Draw, document: Draw) {
+        let mut mark = None;
+        ctx.inner.with_recorder(|mut recorder| {
+            mark = Some(recorder.begin_split());
+        });
+        let mut mark = mark.expect("a mark");
+        pixels(ctx);
+        let mut drawn = None;
+        ctx.inner.with_recorder(|mut recorder| {
+            drawn = Some(recorder.take_split(&mut mark));
+        });
+        document(ctx);
+        let drawn = drawn.expect("the pixels");
+        ctx.inner.with_recorder(|mut recorder| {
+            recorder.end_split(mark, drawn);
+        });
+    }
+
+    fn canvas(gpu: bool, w: f32, h: f32) -> Canvas {
+        let mut canvas = Canvas::new(w, h);
+        canvas.set_gpu(gpu);
+        canvas
+    }
+
+    fn pixels_of(canvas: &mut Canvas) -> Vec<u8> {
+        let (w, h) = (canvas.width(), canvas.height());
+        canvas
+            .context()
+            .get_image_data(0.0, 0.0, w, h)
+            .expect("a read")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The page played for a document onto a CPU raster: what a document
+    /// backend is handed, drawn as pixels so that two can be compared.
+    fn document_of(canvas: &mut Canvas) -> Vec<u8> {
+        let mut page = None;
+        canvas.context().inner.with_recorder(|mut recorder| {
+            page = Some(recorder.page());
+        });
+        let page = page.expect("a page");
+        let info = ImageInfo::new(
+            (canvas.width() as i32, canvas.height() as i32),
+            skia_safe::ColorType::RGBA8888,
+            SkAlphaType::Premul,
+            Some(skia_safe::ColorSpace::new_srgb()),
+        );
+        let mut surface =
+            crate::started::raster(&info, None, None).expect("a surface");
+        play_entries(
+            &page.layers,
+            &page.features,
+            surface.canvas(),
+            Target::Document,
+        );
+        let mut bytes = vec![0; info.compute_min_byte_size()];
+        assert!(surface.read_pixels(
+            &info,
+            &mut bytes,
+            info.min_row_bytes(),
+            (0, 0)
+        ));
+        bytes
+    }
+
+    fn drawn(gpu: bool, draws: &[Draw]) -> Canvas {
+        let mut canvas = canvas(gpu, W, H);
+        let ctx = canvas.context();
+        for draw in draws {
+            draw(ctx);
+        }
+        canvas
+    }
+
+    fn red(ctx: &mut Context2D) {
+        ctx.set_fill_style_css("rgb(220 40 40 / 0.6)")
+            .expect("a colour");
+        ctx.fill_rect(10.3, 12.6, 60.0, 40.0);
+    }
+
+    fn blue(ctx: &mut Context2D) {
+        ctx.set_fill_style_css("rgb(40 60 220 / 0.7)")
+            .expect("a colour");
+        ctx.fill_rect(30.6, 20.2, 55.0, 50.0);
+    }
+
+    fn green(ctx: &mut Context2D) {
+        ctx.set_fill_style_css("rgb(40 200 80 / 0.5)")
+            .expect("a colour");
+        ctx.fill_rect(5.0, 40.4, 100.0, 30.0);
+    }
+
+    fn ground(ctx: &mut Context2D) {
+        ctx.set_fill_style_css("rgb(230 200 120)")
+            .expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+    }
+
+    /// A clip a fill crosses, which a page records the fills under as a run
+    /// and cuts the paths it crosses.
+    fn clip(ctx: &mut Context2D) {
+        ctx.begin_path();
+        ctx.arc(60.0, 45.0, 33.3, 0.0, std::f32::consts::TAU, false)
+            .expect("an arc");
+        ctx.clip(FillRule::NonZero);
+    }
+
+    fn clipped_ground(ctx: &mut Context2D) {
+        clip(ctx);
+        ground(ctx);
+        red(ctx);
+    }
+
+    fn blurred(ctx: &mut Context2D) {
+        ctx.set_filter_css("blur(3px)").expect("a filter");
+    }
+
+    fn blurred_ground(ctx: &mut Context2D) {
+        blurred(ctx);
+        ground(ctx);
+        red(ctx);
+    }
+
+    fn shadowed(ctx: &mut Context2D) {
+        ctx.set_shadow_color_css("rgb(0 0 0 / 0.5)")
+            .expect("a colour");
+        ctx.set_shadow_blur(4.0);
+        ctx.set_shadow_offset(3.0, 2.0);
+    }
+
+    fn shadowed_ground(ctx: &mut Context2D) {
+        shadowed(ctx);
+        ground(ctx);
+        red(ctx);
+    }
+
+    /// An opaque fill covering the page, which erases what lies beneath it.
+    fn cover(ctx: &mut Context2D) {
+        ctx.set_fill_style_css("rgb(250 250 250)")
+            .expect("a colour");
+        ctx.fill_rect(0.0, 0.0, W, H);
+        red(ctx);
+    }
+
+    fn layered(ctx: &mut Context2D) {
+        ground(ctx);
+        ctx.save_layer_with(0.6, None, None);
+        red(ctx);
+    }
+
+    fn unlayered(ctx: &mut Context2D) {
+        green(ctx);
+        ctx.restore();
+    }
+
+    fn gradient(ctx: &mut Context2D) {
+        let stop = |position, r, g, b| crate::shader::GradientStop {
+            position,
+            color: RgbaLinear::opaque(r, g, b),
+        };
+        let shader = Shader::linear_gradient(
+            Point { x: 3.7, y: 5.3 },
+            Point { x: 110.3, y: 80.9 },
+            &[stop(0.0, 1.0, 0.5, 0.0), stop(1.0, 0.0, 0.2, 1.0)],
+            crate::shader::GradientInterpolation::new(
+                crate::shader::GradientColorSpace::Destination,
+            ),
+        )
+        .expect("a gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.set_global_alpha(0.7);
+        ctx.fill_rect(20.3, 30.6, 50.0, 30.0);
+    }
+
+    fn gradient_ground(ctx: &mut Context2D) {
+        ground(ctx);
+        gradient(ctx);
+    }
+
+    /// Inside a layer the page's recording is filed among the layer's
+    /// entries without ending a run, so each run the page keeps is opened
+    /// there too.
+    fn layered_clipped(ctx: &mut Context2D) {
+        ground(ctx);
+        ctx.save_layer_with(0.6, None, None);
+        clip(ctx);
+        red(ctx);
+    }
+
+    fn layered_blurred(ctx: &mut Context2D) {
+        ground(ctx);
+        ctx.save_layer_with(0.6, None, None);
+        blurred(ctx);
+        red(ctx);
+    }
+
+    fn layered_shadowed(ctx: &mut Context2D) {
+        ground(ctx);
+        ctx.save_layer_with(0.6, None, None);
+        shadowed(ctx);
+        red(ctx);
+    }
+
+    fn layered_gradient(ctx: &mut Context2D) {
+        ground(ctx);
+        ctx.save_layer_with(0.6, None, None);
+        gradient(ctx);
+    }
+
+    fn gradient_unlayered(ctx: &mut Context2D) {
+        gradient(ctx);
+        ctx.restore();
+    }
+
+    const SCENES: &[Scene] = &[
+        Scene {
+            name: "plain",
+            before: ground,
+            pixels: red,
+            document: blue,
+            after: green,
+        },
+        Scene {
+            name: "a clip's run",
+            before: clipped_ground,
+            pixels: red,
+            document: blue,
+            after: green,
+        },
+        Scene {
+            name: "a blur's run",
+            before: blurred_ground,
+            pixels: red,
+            document: blue,
+            after: green,
+        },
+        Scene {
+            name: "shadowed draws",
+            before: shadowed_ground,
+            pixels: red,
+            document: blue,
+            after: green,
+        },
+        Scene {
+            name: "in a layer",
+            before: layered,
+            pixels: red,
+            document: blue,
+            after: unlayered,
+        },
+        Scene {
+            name: "gradients",
+            before: gradient_ground,
+            pixels: gradient,
+            document: blue,
+            after: gradient,
+        },
+        Scene {
+            name: "a clip's run in a layer",
+            before: layered_clipped,
+            pixels: red,
+            document: blue,
+            after: unlayered,
+        },
+        Scene {
+            name: "a blur's run in a layer",
+            before: layered_blurred,
+            pixels: red,
+            document: blue,
+            after: unlayered,
+        },
+        Scene {
+            name: "shadowed draws in a layer",
+            before: layered_shadowed,
+            pixels: red,
+            document: blue,
+            after: unlayered,
+        },
+        Scene {
+            name: "gradients in a layer",
+            before: layered_gradient,
+            pixels: gradient,
+            document: blue,
+            after: gradient_unlayered,
+        },
+    ];
+
+    /// Each half lands what it would drawn alone between what comes before
+    /// and after it, for its own target, on either engine.
+    #[test]
+    fn each_half_plays_as_drawn_alone_for_its_target() {
+        let mut wrong = Vec::new();
+        for gpu in [false, true] {
+            for scene in SCENES {
+                let mut alone =
+                    drawn(gpu, &[scene.before, scene.pixels, scene.after]);
+                if (alone.engine_kind() == EngineKind::Gpu) != gpu {
+                    continue;
+                }
+                let mut written =
+                    drawn(gpu, &[scene.before, scene.document, scene.after]);
+                let mut both = canvas(gpu, W, H);
+                let ctx = both.context();
+                (scene.before)(ctx);
+                split(ctx, scene.pixels, scene.document);
+                (scene.after)(ctx);
+                if pixels_of(&mut both) != pixels_of(&mut alone) {
+                    wrong.push(format!("gpu {gpu}, {}: pixels", scene.name));
+                }
+                if document_of(&mut both) != document_of(&mut written) {
+                    wrong.push(format!("gpu {gpu}, {}: document", scene.name));
+                }
+                let control = pixels_of(&mut written) != pixels_of(&mut alone);
+                assert!(
+                    control,
+                    "{}: the halves differ, or this tests nothing",
+                    scene.name
+                );
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// A half that erases the page -- an opaque fill covering it -- erases
+    /// what lay beneath the split for both targets, and leaves the split
+    /// first: a page holds one draw's halves only together.
+    #[test]
+    fn a_half_that_erases_the_page_erases_it_for_both() {
+        /// Which half erases, its pixels and its document, and what each
+        /// target then holds drawn alone.
+        type Case = (&'static str, Draw, Draw, [Draw; 2], [Draw; 2]);
+        let cases: [Case; 2] = [
+            ("the pixels", cover, blue, [cover, green], [blue, green]),
+            ("the document", red, cover, [red, green], [cover, green]),
+        ];
+        for (name, pixels, document, alone, written) in cases {
+            let mut both = canvas(false, W, H);
+            let ctx = both.context();
+            ground(ctx);
+            split(ctx, pixels, document);
+            green(ctx);
+            assert_eq!(
+                pixels_of(&mut both),
+                pixels_of(&mut drawn(false, &alone)),
+                "{name} erased the page: pixels"
+            );
+            assert_eq!(
+                document_of(&mut both),
+                document_of(&mut drawn(false, &written)),
+                "{name} erased the page: document"
+            );
+            let mut layers = Vec::new();
+            both.context().inner.with_recorder(|mut recorder| {
+                layers = recorder.page().layers.to_vec();
+            });
+            assert!(
+                matches!(layers.first(), Some(Layer::Split(_))),
+                "{name}: the split is first"
+            );
+        }
+    }
+
+    /// Shadowed alone: the shadow is not left set for the other half.
+    fn shadowed_red(ctx: &mut Context2D) {
+        ctx.save();
+        shadowed(ctx);
+        red(ctx);
+        ctx.restore();
+    }
+
+    /// Shadowed alone: the shadow is not left set for the other half.
+    fn shadowed_blue(ctx: &mut Context2D) {
+        ctx.save();
+        shadowed(ctx);
+        blue(ctx);
+        ctx.restore();
+    }
+
+    /// A layer holding a split asks a vector backend for what the split's
+    /// document asks, and not for what its pixels did.
+    #[test]
+    fn a_layer_asks_for_what_its_split_document_asks() {
+        let asked = |draw: &dyn Fn(&mut Context2D)| {
+            let mut canvas = canvas(false, W, H);
+            let ctx = canvas.context();
+            ground(ctx);
+            ctx.save_layer_with(0.6, None, None);
+            draw(ctx);
+            ctx.restore();
+            let mut asks = VectorFeatures::PLAIN;
+            canvas.context().inner.with_recorder(|mut recorder| {
+                asks = *recorder.page().features.last().expect("the layer");
+            });
+            asks
+        };
+        let cases: [(Draw, Draw); 2] =
+            [(shadowed_red, blue), (red, shadowed_blue)];
+        for (pixels, document) in cases {
+            let alone = asked(&|ctx| document(ctx));
+            assert_ne!(
+                asked(&|ctx| pixels(ctx)),
+                alone,
+                "the halves ask for different things, or this tests nothing"
+            );
+            assert_eq!(asked(&|ctx| split(ctx, pixels, document)), alone);
+        }
+    }
+
+    /// The document's draws change nothing of how the page's pixels are
+    /// read in tiles: a split read tile by tile is served by the tiles as
+    /// often, and lands the bytes, its pixels drawn alone do.
+    #[test]
+    fn a_split_document_notes_no_cut_in_the_tiles() {
+        const SIDE: f32 = 768.0;
+        const TILE: usize = 256;
+        let tiled = |canvas: &mut Canvas| {
+            let ctx = canvas.context();
+            let before = TILE_READS.get();
+            let mut read = Vec::new();
+            for ty in (0..SIDE as usize).step_by(TILE) {
+                for tx in (0..SIDE as usize).step_by(TILE) {
+                    read.extend(
+                        ctx.get_image_data(
+                            tx as f32,
+                            ty as f32,
+                            TILE as f32,
+                            TILE as f32,
+                        )
+                        .expect("a tile's read")
+                        .pixels()
+                        .iter()
+                        .copied(),
+                    );
+                }
+            }
+            (read, TILE_READS.get() - before)
+        };
+        // A path cut by a tile's side, which keeps reads off the tiles it
+        // touches.
+        fn cut_far(ctx: &mut Context2D) {
+            ctx.set_fill_style_css("rgb(40 60 220 / 0.7)")
+                .expect("a colour");
+            ctx.begin_path();
+            ctx.arc(600.3, 600.7, 120.0, 0.0, std::f32::consts::TAU, false)
+                .expect("an arc");
+            ctx.fill(FillRule::NonZero);
+        }
+        fn square(ctx: &mut Context2D) {
+            ctx.set_fill_style_css("rgb(220 40 40)").expect("a colour");
+            ctx.fill_rect(10.0, 10.0, 100.0, 100.0);
+        }
+        let mut alone = canvas(false, SIDE, SIDE);
+        square(alone.context());
+        let (bytes, served) = tiled(&mut alone);
+        let mut cut = canvas(false, SIDE, SIDE);
+        cut_far(cut.context());
+        let (_, cut_served) = tiled(&mut cut);
+        assert!(cut_served < served, "the cut keeps reads off tiles");
+        let mut both = canvas(false, SIDE, SIDE);
+        split(both.context(), square, cut_far);
+        assert_eq!(tiled(&mut both), (bytes, served));
+    }
+
+    const PALETTES: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf"
+    );
+
+    /// A run of colour glyphs under `multiply`: what a GPU canvas plays on
+    /// the CPU, read in the shader.
+    fn colour_run(ctx: &mut Context2D) {
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
+            crate::font::FontLibrary::new()
+                .register_font_from_path("SplitPalettes", PALETTES)
+                .expect("a bundled face registers");
+        }
+        assert!(ctx.set_font_css("40px SplitPalettes"));
+        ctx.set_global_composite_operation(BlendMode::Multiply);
+        ctx.set_fill_style_css("rgb(40 90 160 / 0.6)")
+            .expect("a colour");
+        ctx.fill_text("Abc", 10.3, 60.6, None);
+    }
+
+    /// The document's draws are never played on a GPU canvas, and change
+    /// nothing of what the page says of how one plays it.
+    #[test]
+    fn a_split_document_leaves_how_a_gpu_plays_the_page() {
+        let flags = |canvas: &mut Canvas| {
+            let mut flags = (false, false);
+            canvas.context().inner.with_recorder(|mut recorder| {
+                recorder.page();
+                flags = (
+                    recorder.plays_apart_on_gpu(),
+                    recorder.holds_reading_runs(),
+                );
+            });
+            flags
+        };
+        let mut gpu = canvas(true, W, H);
+        colour_run(gpu.context());
+        if gpu.engine_kind() != EngineKind::Gpu {
+            return;
+        }
+        assert_eq!(flags(&mut gpu), (true, true), "the run, drawn alone");
+        let mut both = canvas(true, W, H);
+        split(both.context(), red, colour_run);
+        assert_eq!(flags(&mut both), (false, false));
     }
 }
