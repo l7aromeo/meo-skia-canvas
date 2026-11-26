@@ -151,7 +151,7 @@ Start by installing:
 5. The [Ninja](https://ninja-build.org) build system
 6. On Linux: Fontconfig and OpenSSL
 7. CMake 3.9 or newer — libaom, the AV1 codec this library compiles in, is configured and built with it
-8. On x86_64: `yasm`, or a NASM older than 3.0 — libaom takes `yasm` first and rejects NASM 3.x at configure time
+8. On x86_64: NASM or `yasm` — libaom assembles its hot paths with one of them
 
 [Detailed instructions](https://github.com/rust-skia/rust-skia#building) for setting up these dependencies on different operating systems can be found in the ‘Building’ section of the Rust Skia documentation. The Dockerfiles in the [containers](https://github.com/l7aromeo/meo-skia-canvas/tree/main/containers) directory may also be useful for identifying needed dependencies. Once all the necessary compilers and libraries are present, running `npm run build` will give you a usable library (after a fairly lengthy compilation process).
 
