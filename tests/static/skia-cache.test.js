@@ -356,3 +356,276 @@ describe("an entry's SDK is named by its version", async () => {
     assert.deepStrictEqual(loggedSdk("", "linux"), { sdk: "none" });
   });
 });
+
+// A build through the script that misses the cache compiles Skia, and stores
+// what it compiled so the next build of that key links it (#638). cargo
+// names the out-dir and the features in its JSON messages, so such a build
+// asks for them and passes everything else through.
+describe("a build that misses the cache stores what it compiled", async () => {
+  const { PassThrough } = require("stream");
+  const { EventEmitter } = require("events");
+  const { reporting, messageSplitter, skiaBuild, runCargo } = await import(
+    pathToFileURL(SCRIPT).href
+  );
+  const FORMAT = "--message-format=json-render-diagnostics";
+  const BINDINGS =
+    "registry+https://github.com/rust-lang/crates.io-index#skia-bindings@0.156.0";
+  const script = {
+    reason: "build-script-executed",
+    package_id: BINDINGS,
+    out_dir: "/target/debug/build/skia-bindings/abc123/out",
+  };
+  const library = {
+    reason: "compiler-artifact",
+    package_id: BINDINGS,
+    features: ["binary-cache", "metal"],
+  };
+  const other = {
+    reason: "build-script-executed",
+    package_id:
+      "registry+https://github.com/rust-lang/crates.io-index#skia-bindings-extra@1.0.0",
+    out_dir: "/elsewhere/out",
+  };
+
+  test("a building subcommand asks for cargo's messages, ahead of its own arguments", () => {
+    assert.deepStrictEqual(
+      reporting(["test", "--features", "metal", "--", "--nocapture"]),
+      {
+        args: ["test", FORMAT, "--features", "metal", "--", "--nocapture"],
+        echo: false,
+      },
+    );
+    assert.deepStrictEqual(reporting(["b", "-r"]), {
+      args: ["b", FORMAT, "-r"],
+      echo: false,
+    });
+  });
+
+  test("a caller that asked for JSON itself is run as asked, and reads every line", () => {
+    for (const args of [
+      ["build", "--message-format=json-render-diagnostics", "--release"],
+      ["build", "--message-format", "json"],
+      ["build", "--message-format=short,json-diagnostic-short"],
+    ])
+      assert.deepStrictEqual(
+        reporting(args),
+        { args, echo: true },
+        args.join(" "),
+      );
+  });
+
+  test("a subcommand that builds nothing, or a format that is not JSON, is left alone", () => {
+    for (const args of [
+      ["tree"],
+      ["fmt"],
+      ["--version"],
+      ["build", "--message-format=short"],
+      ["build", "--message-format", "human"],
+    ])
+      assert.strictEqual(reporting(args), null, args.join(" "));
+    // After `--` an argument is the test binary's, not cargo's.
+    assert.deepStrictEqual(
+      reporting(["test", "--", "--message-format=short"])?.args,
+      ["test", FORMAT, "--", "--message-format=short"],
+    );
+  });
+
+  test("cargo's messages are kept and every other byte is passed through, however it is cut", () => {
+    const text = [
+      "running 1 test\n",
+      `${JSON.stringify(script)}\n`,
+      "test a ... ",
+      "ok\n",
+      "{ not a message }\n",
+      `${JSON.stringify({ no: "reason" })}\n`,
+      `${JSON.stringify(library)}\n`,
+      "",
+    ].join("");
+    for (const size of [1, 7, 64, text.length]) {
+      let written = "";
+      const split = messageSplitter((/** @type {string} */ part) => {
+        written += part;
+      });
+      for (let at = 0; at < text.length; at += size)
+        split.push(text.slice(at, at + size));
+      split.end();
+      assert.strictEqual(
+        written,
+        `running 1 test\ntest a ... ok\n{ not a message }\n${JSON.stringify({ no: "reason" })}\n`,
+        `cut every ${size}`,
+      );
+      assert.deepStrictEqual(
+        split.messages,
+        [script, library],
+        `cut every ${size}`,
+      );
+    }
+  });
+
+  test("output that does not open a line with `{` is written before the line ends", () => {
+    /** @type {string[]} */
+    const written = [];
+    const split = messageSplitter((/** @type {string} */ part) =>
+      written.push(part),
+    );
+    split.push("test a ... ");
+    assert.deepStrictEqual(written, ["test a ... "]);
+  });
+
+  test("the build named is skia-bindings', not a package whose name extends it", () => {
+    assert.deepStrictEqual(skiaBuild([other, script, library]), {
+      buildDir: "/target/debug/build/skia-bindings/abc123",
+      features: ["binary-cache", "metal"],
+    });
+    assert.strictEqual(skiaBuild([other, library]), null);
+    assert.strictEqual(skiaBuild([script]), null);
+  });
+
+  /**
+   * Runs `runCargo` against a cargo that writes `stdout` and exits with
+   * `code`, the cache answering `cached`, and says what it ran and stored.
+   * @param {string[]} args
+   * @param {object} cached
+   * @param {string} stdout
+   * @param {{ code?: number, refuse?: string }} [options]
+   */
+  async function drive(args, cached, stdout, { code = 0, refuse } = {}) {
+    /** @type {{ args: string[], options: any }[]} */
+    const ran = [];
+    /** @type {any[][]} */
+    const saved = [];
+    let written = "";
+    const source = process.env.SKIA_SOURCE_DIR;
+    process.env.SKIA_SOURCE_DIR = "/tree";
+    try {
+      const result = await runCargo(args, {
+        spawn: (
+          /** @type {string} */ _cargo,
+          /** @type {string[]} */ argv,
+          /** @type {any} */ options,
+        ) => {
+          ran.push({ args: argv, options });
+          const child = Object.assign(new EventEmitter(), {
+            stdout: options.stdio[1] === "pipe" ? new PassThrough() : null,
+          });
+          setImmediate(() => {
+            if (child.stdout) child.stdout.end(stdout);
+            setImmediate(() => child.emit("close", code, null));
+          });
+          return child;
+        },
+        cache: () => cached,
+        save: (/** @type {any[]} */ ...stored) => {
+          saved.push(stored);
+          if (refuse) throw new Error(refuse);
+        },
+        write: (/** @type {string} */ text) => {
+          written += text;
+        },
+      });
+      return { result, ran, saved, written };
+    } finally {
+      if (source === undefined) delete process.env.SKIA_SOURCE_DIR;
+      else process.env.SKIA_SOURCE_DIR = source;
+    }
+  }
+
+  const key = {
+    tree: "t",
+    target: "x",
+    sdk: "s",
+    profile: "dev",
+    features: ["metal"],
+  };
+  const messages = `${JSON.stringify(script)}\n${JSON.stringify(library)}\ntest a ... ok\n`;
+
+  test("a miss with a key asks for the messages and stores the build cargo names", async () => {
+    const { result, ran, saved, written } = await drive(
+      ["build", "--features", "metal"],
+      { why: "no entry", key },
+      messages,
+    );
+    assert.deepStrictEqual(ran[0].args, [
+      "build",
+      FORMAT,
+      "--features",
+      "metal",
+    ]);
+    assert.deepStrictEqual(saved, [
+      [
+        "/target/debug/build/skia-bindings/abc123",
+        "dev",
+        ["binary-cache", "metal"],
+      ],
+    ]);
+    assert.strictEqual(written, "test a ... ok\n");
+    assert.strictEqual(result.code, 0);
+  });
+
+  test("a caller's own JSON reaches it whole, and the build is still stored", async () => {
+    const { ran, saved, written } = await drive(
+      ["build", "--message-format=json-render-diagnostics"],
+      { why: "no entry", key },
+      messages,
+    );
+    assert.deepStrictEqual(ran[0].args, [
+      "build",
+      "--message-format=json-render-diagnostics",
+    ]);
+    assert.strictEqual(written, messages);
+    assert.strictEqual(saved.length, 1);
+  });
+
+  test("a failed command still stores the Skia its build script finished", async () => {
+    const { result, saved } = await drive(
+      ["test"],
+      { why: "no entry", key },
+      messages,
+      {
+        code: 101,
+      },
+    );
+    assert.strictEqual(saved.length, 1);
+    assert.strictEqual(result.code, 101);
+  });
+
+  test("a store that is refused leaves cargo's exit status as it was", async () => {
+    const { result, saved } = await drive(
+      ["build"],
+      { why: "no entry", key },
+      messages,
+      {
+        refuse: "the log names no patch",
+      },
+    );
+    assert.strictEqual(saved.length, 1);
+    assert.strictEqual(result.code, 0);
+  });
+
+  test("a hit links the entry and runs cargo as asked, storing nothing", async () => {
+    const { ran, saved } = await drive(
+      ["build"],
+      { env: { SKIA_LIBRARY_SEARCH_PATH: "/entry" }, dir: "/entry", key },
+      "",
+    );
+    assert.deepStrictEqual(ran[0].args, ["build"]);
+    assert.strictEqual(ran[0].options.stdio[1], "inherit");
+    assert.strictEqual(ran[0].options.env.SKIA_LIBRARY_SEARCH_PATH, "/entry");
+    assert.deepStrictEqual(saved, []);
+  });
+
+  test("a miss with no key, or a subcommand that builds nothing, runs cargo as asked", async () => {
+    for (const [args, cached] of [
+      [["build"], { why: "SKIA_DEBUG is set" }],
+      [["tree"], { why: "no entry", key }],
+    ]) {
+      const { ran, saved } = await drive(
+        /** @type {string[]} */ (args),
+        cached,
+        "",
+      );
+      assert.deepStrictEqual(ran[0].args, args);
+      assert.deepStrictEqual(saved, []);
+    }
+  });
+});

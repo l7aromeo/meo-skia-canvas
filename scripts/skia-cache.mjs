@@ -3,7 +3,7 @@
 // instead of compiling it again. What an entry is, and why it is linked the
 // way it is, is in scripts/skia-binaries.mjs.
 //
-//   node scripts/skia-cache.mjs cargo [+toolchain] <cargo args>  cargo, linking the cached Skia where an entry fits
+//   node scripts/skia-cache.mjs cargo [+toolchain] <cargo args>  cargo, linking the cached Skia where an entry fits, storing what it compiles where none does
 //   node scripts/skia-cache.mjs fill [cargo feature and profile args]  build Skia once and store it
 //   node scripts/skia-cache.mjs store <out-dir> <profile> <features>  store a build that already ran
 //   node scripts/skia-cache.mjs entry [cargo feature and profile args]  the entry those args would use
@@ -69,26 +69,184 @@ function refuseUnpatched() {
     );
 }
 
+/// cargo's subcommands, and their aliases, that build and take
+/// `--message-format`: through one of them a build that compiles Skia can
+/// name, in cargo's JSON, the out-dir it compiled in and the features it
+/// compiled with, so that it is stored.
+const REPORTING = new Set([
+  ...["build", "b", "check", "c", "clippy", "test", "t", "bench"],
+  ...["run", "r", "rustc", "rustdoc", "doc", "d"],
+]);
+
+/// The format a build that is to be stored runs with: diagnostics rendered
+/// on stderr as without it, and cargo's messages as JSON on stdout.
+const MESSAGES = "--message-format=json-render-diagnostics";
+
+/**
+ * How cargo given `args`, a subcommand and its arguments, is run so that its
+ * JSON messages can be read: `args` asking for them, or as they are where
+ * the caller asked for JSON itself -- `lib/prebuild.mjs` does, for
+ * cargo-cp-artifact -- in which case `echo` says every line, messages
+ * included, is the caller's to read. `null` where the subcommand builds
+ * nothing that could be stored, or the caller chose a format that is not
+ * JSON.
+ */
+export function reporting(args) {
+  const [command, ...rest] = args;
+  if (!REPORTING.has(command)) return null;
+  const end = rest.indexOf("--");
+  const own = end === -1 ? rest : rest.slice(0, end);
+  const at = own.findIndex((arg) => arg.startsWith("--message-format"));
+  if (at === -1) return { args: [command, MESSAGES, ...rest], echo: false };
+  const format = own[at].includes("=")
+    ? own[at].slice(own[at].indexOf("=") + 1)
+    : (own[at + 1] ?? "");
+  return format.split(",").some((kind) => kind.startsWith("json"))
+    ? { args, echo: true }
+    : null;
+}
+
+/**
+ * Splits what cargo writes on stdout into its JSON messages, kept in
+ * `messages`, and everything else -- a test's output, a program's -- passed
+ * to `write` as it arrives. A line is a message when it parses as an object
+ * with a `reason`, cargo's field for what a message reports; only a line
+ * that opens with `{` is held back until it ends, so other output is not
+ * delayed.
+ */
+export function messageSplitter(write) {
+  const messages = [];
+  let held = "";
+  let passing = false;
+  const parsed = (line) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  };
+  const settle = (line) => {
+    const message = parsed(line);
+    if (typeof message?.reason === "string") messages.push(message);
+    else write(line);
+  };
+  return {
+    messages,
+    push(chunk) {
+      let text = chunk;
+      while (text) {
+        const end = text.indexOf("\n");
+        const part = end === -1 ? text : text.slice(0, end + 1);
+        text = end === -1 ? "" : text.slice(end + 1);
+        if (passing || (!held && !part.startsWith("{"))) {
+          write(part);
+          passing = !part.endsWith("\n");
+        } else {
+          held += part;
+          if (held.endsWith("\n")) {
+            settle(held);
+            held = "";
+          }
+        }
+      }
+    },
+    end() {
+      if (held) settle(held);
+      held = "";
+    },
+  };
+}
+
+/**
+ * The unit directory skia-bindings' build script ran in, and the features
+ * skia-bindings was compiled with, as cargo's JSON `messages` name them, or
+ * `null` where they name neither.
+ */
+export function skiaBuild(messages) {
+  const isBindings = (m) => /[/#]skia-bindings[@#]/.test(m.package_id ?? "");
+  const script = messages.find(
+    (m) => m.reason === "build-script-executed" && isBindings(m),
+  );
+  const library = messages.find(
+    (m) => m.reason === "compiler-artifact" && isBindings(m),
+  );
+  if (!script || !library) return null;
+  return { buildDir: dirname(script.out_dir), features: library.features };
+}
+
+/**
+ * Stores the Skia a build compiled, from cargo's `messages`, through `save`,
+ * and says on stderr why where it does not. A refusal does not fail the
+ * build: the cargo command asked for succeeded or failed on its own terms,
+ * and the next build compiles again.
+ */
+function keep(messages, profile, save) {
+  const build = skiaBuild(messages);
+  if (!build) {
+    console.error(
+      "skia-cache: nothing stored: cargo reported no skia-bindings build",
+    );
+    return;
+  }
+  try {
+    save(build.buildDir, profile, build.features);
+  } catch (error) {
+    console.error(`skia-cache: not stored: ${error.message}`);
+  }
+}
+
 /**
  * Runs cargo with `args`, linking the cached Skia where an entry fits, and
- * says which on stderr. A miss builds as cargo always does.
+ * says which on stderr. A miss builds as cargo always does, and where the
+ * args have a key and the subcommand reports, stores the Skia it compiled --
+ * see `reporting` -- so the next build of that key links it. Resolves to how
+ * cargo exited. `spawn`, `cache` and `save` are cargo, `cacheEnv` and
+ * `storeChecked` but in a test.
+ *
+ * A stored build runs with cargo's stdout through this process, so that the
+ * messages naming the out-dir can be read; a test harness writing there sees
+ * a pipe rather than a terminal, and colours nothing.
  */
-function runCargo(args) {
+export function runCargo(
+  args,
+  {
+    spawn: run = spawn,
+    cache = cacheEnv,
+    save = storeChecked,
+    write = (text) => process.stdout.write(text),
+  } = {},
+) {
   refuseUnpatched();
   const toolchain = args[0]?.startsWith("+") ? [args[0]] : [];
   const rest = args.slice(toolchain.length);
-  const { env, dir, why } = cacheEnv(rest);
+  const { env, dir, why, key } = cache(rest);
+  const asked = env || !key ? null : reporting(rest);
   console.error(
-    env ? `skia-cache: linking ${dir}` : `skia-cache: compiling Skia (${why})`,
+    env
+      ? `skia-cache: linking ${dir}`
+      : `skia-cache: compiling Skia (${why})${asked ? ", to store" : ""}`,
   );
-  const child = spawn("cargo", [...toolchain, ...rest], {
-    stdio: "inherit",
+  const child = run("cargo", [...toolchain, ...(asked?.args ?? rest)], {
+    stdio: ["inherit", asked ? "pipe" : "inherit", "inherit"],
     env: { ...process.env, ...env },
   });
-  child.on("exit", (code, signal) => {
-    if (signal) process.kill(process.pid, signal);
-    process.exit(code ?? 1);
-  });
+  const split = asked ? messageSplitter(asked.echo ? () => {} : write) : null;
+  if (split) {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      if (asked.echo) write(chunk);
+      split.push(chunk);
+    });
+  }
+  return new Promise((done) =>
+    child.on("close", (code, signal) => {
+      if (split) {
+        split.end();
+        keep(split.messages, key.profile, save);
+      }
+      done({ code, signal });
+    }),
+  );
 }
 
 /**
@@ -115,20 +273,12 @@ function fill(args) {
       maxBuffer: 1 << 30,
     },
   );
-  const messages = json
-    .split("\n")
-    .filter((line) => line.startsWith("{"))
-    .map((line) => JSON.parse(line));
-  const isBindings = (m) => /[/#]skia-bindings[@#]/.test(m.package_id);
-  const script = messages.find(
-    (m) => m.reason === "build-script-executed" && isBindings(m),
-  );
-  const library = messages.find(
-    (m) => m.reason === "compiler-artifact" && isBindings(m),
-  );
-  if (!script || !library)
-    throw new Error("skia-cache: cargo built no skia-bindings");
-  storeChecked(dirname(script.out_dir), read.profile, library.features);
+  const split = messageSplitter(() => {});
+  split.push(json);
+  split.end();
+  const build = skiaBuild(split.messages);
+  if (!build) throw new Error("skia-cache: cargo built no skia-bindings");
+  storeChecked(build.buildDir, read.profile, build.features);
 }
 
 /** `store`, vouched for by check-patched-skia's own reading of the log. */
@@ -148,7 +298,11 @@ const main =
 if (main) {
   const [command, ...args] = process.argv.slice(2);
   try {
-    if (command === "cargo") runCargo(args);
+    if (command === "cargo")
+      runCargo(args).then(({ code, signal }) => {
+        if (signal) process.kill(process.pid, signal);
+        process.exit(code ?? 1);
+      });
     else if (command === "fill") fill(args);
     else if (command === "store") {
       const [buildDir, profile, features] = args;

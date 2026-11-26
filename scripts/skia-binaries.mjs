@@ -329,15 +329,17 @@ export function linkable(dir, tree, derive = recordFromLog) {
 }
 
 /**
- * The variables that link the entry for `args`, and that entry, or `null`
- * where there is none -- with the reason, for the caller to print.
+ * The variables that link the entry for `args`, and that entry, or none
+ * where there is none -- with the reason, for the caller to print, and the
+ * key where `args` have one, under which the build that compiles instead
+ * can be stored.
  */
 export function cacheEnv(args, env = process.env, root = ROOT) {
   const { key, why } = keyFor(args, env, root);
   if (!key) return { why };
   const dir = entryDir(key);
   const unlinkable = linkable(dir, env.SKIA_SOURCE_DIR);
-  if (unlinkable) return { why: unlinkable };
+  if (unlinkable) return { why: unlinkable, key };
   return {
     dir,
     env: {

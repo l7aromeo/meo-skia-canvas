@@ -29,10 +29,10 @@ set dotenv-command := "node scripts/skia-source.mjs env"
 # Every cargo call here that builds skia-bindings goes through this. Where the
 # local cache holds Skia compiled from this worktree's patched tree for the
 # call's features, skia-bindings links it and runs no ninja; otherwise cargo
-# runs as it is and compiles Skia. `just skia-cache-fill` stores a feature
-# set's Skia; scripts/skia-cache.mjs and scripts/skia-binaries.mjs say how an
-# entry is chosen and checked. A call written as plain `cargo` still builds,
-# only without the cache.
+# compiles Skia and the script stores what it compiled, for the next build of
+# those features to link. scripts/skia-cache.mjs and scripts/skia-binaries.mjs
+# say how an entry is chosen and checked. A call written as plain `cargo` still
+# builds, only without the cache.
 skia_cargo := "node scripts/skia-cache.mjs cargo"
 
 # On Linux, `metal` feature does not compile -- use feature subset.
@@ -187,7 +187,9 @@ typecheck features=linux_features: ensure-deps
 
 # Compile Skia once for a feature set and keep it in the local cache, for every
 # worktree's builds with those features to link instead of compiling it --
-# `skia_cargo` above, and scripts/skia-cache.mjs. `args` are cargo's feature
+# `skia_cargo` above, and scripts/skia-cache.mjs. A build through `skia_cargo`
+# that compiles stores its Skia too; this fills a set ahead of any build that
+# needs it, from a library-only build. `args` are cargo's feature
 # and profile flags as a recipe gives them, as in `just skia-cache-fill
 # --no-default-features --features metal`. Stored only once
 # scripts/check-patched-skia.mjs passes the build.

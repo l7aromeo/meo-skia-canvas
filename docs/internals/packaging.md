@@ -256,7 +256,13 @@ tree. Every cargo call in the justfile that builds skia-bindings goes through
 since one recipe can build several feature sets. It says on stderr whether it
 linked an entry or is compiling Skia, and why. `bun run build` reaches it
 through `lib/prebuild.mjs`. A plain `cargo` call, or one with no entry for its
-features, compiles Skia as before.
+features, compiles Skia as before. Through the script, a build that compiles
+stores what it compiled, so that the next build of that key links it: it asks
+cargo for its JSON messages, which name the out-dir skia-bindings' build script
+ran in and the features it was compiled with, and passes the rest of cargo's
+output through. A store that is refused says why on stderr and leaves the build
+passing or failing as cargo had it. Such a build's stdout is a pipe through the
+script, so a test harness there prints no colour.
 
 **What the entry compiled.** An entry also keeps `notices.json`: the Skia
 tree and the projects its build compiled, from ninja's dependency record,
@@ -275,7 +281,8 @@ record. Run with no `SKIA_SOURCE_DIR` where
 `skia-source.mjs env` would name a tree, the script refuses and names the
 command that sets it, rather than let skia-bindings build against rust-skia's
 unpatched Skia; `SKIA_CACHE_UNPATCHED=1` asks for that build on purpose. `just skia-cache-fill <cargo flags>` builds
-a feature set from source and stores it. An entry is about 70 MB.
+a feature set from source and stores it ahead of a build that needs it. An
+entry is about 70 MB.
 
 **Not rust-skia's prebuilt binaries.** skia-bindings also downloads archives,
 `file://` URLs included, but only with `SKIA_SOURCE_DIR` unset, keyed by
