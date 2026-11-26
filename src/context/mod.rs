@@ -1380,10 +1380,12 @@ impl Context2D {
     /// one opaque, or whose alpha rounds to no byte, which draws nothing;
     /// for a paint carrying a shader, a colour filter or dither, whose
     /// colour is not one flat colour, a mask filter, or a filter no chain
-    /// runs -- see [`Self::chains_text_filter`]; under a blend
-    /// that covers beyond the draw, which composites the run through a layer
-    /// of its own; and on a page whose pixels do not place the colour on the
-    /// bytes they store -- see [`ExactColour::bytes`].
+    /// runs -- see [`Self::chains_text_filter`]; and on a page whose pixels
+    /// do not place the colour on the bytes they store -- see
+    /// [`ExactColour::bytes`]. A run under a blend that covers beyond the
+    /// draw has one too, and is drawn through
+    /// [`layer::ReplayedText::flat_paint`] into the layer the blend
+    /// composites.
     fn flat_run(
         &self,
         paint: &Paint,
@@ -1403,11 +1405,7 @@ impl Context2D {
             && paint.mask_filter().is_none()
             && !paint.is_dither()
             && matches!(self.state.dye(style), Dye::Color(..));
-        let drawn = !colour
-            && !lines
-            && stored > 0.0
-            && stored < 1.0
-            && !covers_beyond_the_draw(self.state.global_composite_operation);
+        let drawn = !colour && !lines && stored > 0.0 && stored < 1.0;
         if !(flat && drawn) {
             return None;
         }
@@ -3060,10 +3058,7 @@ impl Context2D {
         // run's colour, its glyphs' own colours gone: those this library
         // draws, and those the platform draws -- asked last, since a run
         // not kept is laid out again to answer.
-        let holds_colour = matches!(
-            &entry,
-            Some(Layer::ReplayedText(run)) if run.flat.is_none()
-        );
+        let holds_colour = text.is_some_and(|text| text.colour.is_some());
         let coverage = match exact {
             Some(exact)
                 if reached.is_some()

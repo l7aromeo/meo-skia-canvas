@@ -9931,6 +9931,108 @@ mod translucent_text_tests {
     }
 
     #[test]
+    fn under_a_blend_beyond_the_draw_a_translucent_run_lands_as_its_image() {
+        // A blend that covers beyond the draw composites the run as one
+        // image of it, as the HTML Standard composites every draw: the run's
+        // bytes on transparent black, which are the exact product, through
+        // the blend -- compared here with an image of those bytes drawn
+        // under it. One line, since each draw under such a blend replaces
+        // what the one before it left.
+        let blends = [
+            BlendMode::SourceIn,
+            BlendMode::SourceOut,
+            BlendMode::DestinationIn,
+            BlendMode::DestinationOut,
+            BlendMode::DestinationAtop,
+            BlendMode::Copy,
+        ];
+        let page = |background: bool| {
+            let mut page = Canvas::with_options(
+                W,
+                H,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            if background {
+                let ctx = page.context();
+                ctx.set_fill_style_css("rgb(220,180,60)").expect("a colour");
+                ctx.fill_rect(0.0, 0.0, W / 2.0, H);
+                ctx.set_fill_style_css("rgba(30,120,90,0.7)")
+                    .expect("a colour");
+                ctx.fill_rect(W / 2.0, 0.0, W / 2.0, H);
+            }
+            page
+        };
+        let run = |canvas: &mut Canvas, rgb: [u8; 3], alpha: f32| {
+            register();
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css("44px TranslucentOswald"));
+            ctx.set_fill_style_css(&named(rgb, alpha, PixelColorSpace::Srgb))
+                .expect("a colour");
+            ctx.fill_text("Hamburgefonstiv", 10.3, 70.6, None);
+        };
+        let mut problems = vec![];
+        for rgb in COLOURS {
+            for alpha in [0.6, 0.3] {
+                let mut alone = page(false);
+                run(&mut alone, rgb, alpha);
+                let data = alone
+                    .to_image_data(
+                        None,
+                        &ImageDataExport {
+                            pixels: PixelExportOptions {
+                                premultiplied: true,
+                                ..PixelExportOptions::default()
+                            },
+                            ..ImageDataExport::default()
+                        },
+                    )
+                    .expect("the page reads back");
+                let image = Image::from_pixels(
+                    data.pixels(),
+                    data.width(),
+                    data.height(),
+                    data.stride(),
+                    PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                )
+                .expect("the bytes make an image");
+                for blend in blends {
+                    let mut drawn = page(true);
+                    drawn.context().set_global_composite_operation(blend);
+                    run(&mut drawn, rgb, alpha);
+                    let mut expected = page(true);
+                    let ctx = expected.context();
+                    ctx.set_global_composite_operation(blend);
+                    ctx.draw_image(&image, 0.0, 0.0);
+                    let (drawn, expected) = (
+                        bytes(&mut drawn, 1, PixelColorSpace::Srgb),
+                        bytes(&mut expected, 1, PixelColorSpace::Srgb),
+                    );
+                    let apart: Vec<u8> = zip(&drawn, &expected)
+                        .filter(|(a, b)| a != b)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .collect();
+                    if !apart.is_empty() {
+                        problems.push(format!(
+                            "{rgb:?} at {alpha} {blend:?}: {} bytes apart, \
+                             most {}",
+                            apart.len(),
+                            apart.iter().max().unwrap_or(&0)
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    #[test]
     fn a_canvas_of_translucent_text_draws_as_its_own_pixels() {
         // The HTML Standard composites a canvas drawn into another as its
         // bitmap, so the run lands in the destination as the bytes its own

@@ -2054,7 +2054,9 @@ pub struct ReplayedText {
     pub cast_before: bool,
     /// The run's one flat colour, where it is translucent, which an
     /// eight-bit page on the CPU paints from the run's coverage -- see
-    /// [`FlatRun`].
+    /// [`FlatRun`] -- and which the run's recording, and the layer a blend
+    /// of its own composites, draw through a colour shader -- see
+    /// [`Self::flat_paint`].
     pub flat: Option<FlatRun>,
     /// Where the thread that filed it counts the recordings
     /// [`Self::recorded`] makes -- see [`REPLAYED_WATCH`].
@@ -2372,8 +2374,17 @@ impl ReplayedText {
                     self.replay.as_ref().filter(|_| !self.shadow_alone)
                     && !self.drawn_flat(canvas, replay)
                 {
+                    // In the layer the blend opened, a flat run through the
+                    // paint its recording is drawn in -- see
+                    // [`Self::flat_paint`].
+                    let shaded =
+                        self.flat_paint().filter(|_| self.blend.is_some());
                     canvas.save();
-                    replay.draw(canvas, &self.matrix, &self.paint);
+                    replay.draw(
+                        canvas,
+                        &self.matrix,
+                        shaded.as_ref().unwrap_or(&self.paint),
+                    );
                     canvas.restore();
                 }
                 if self.blend.is_some() {
@@ -2427,17 +2438,24 @@ impl ReplayedText {
     /// pipeline multiplies by a glyph's coverage rounded once, the product
     /// [`Self::drawn_flat`] lands, where the run's own paint is blitted as
     /// `a * (c + 1) >> 8`. In the colour the run was named in, so that Skia
-    /// pre-blends the mask by the colour the plane is drawn in. `None` for
-    /// any other run, and for one under a blend of its own, which is not
-    /// drawn flat.
-    fn flat_paint(&self) -> Option<Paint> {
-        let flat = self.flat.as_ref().filter(|_| self.blend.is_none())?;
+    /// pre-blends the mask by the colour the plane is drawn in. A run under
+    /// a blend of its own is drawn in it too, into the layer the blend
+    /// composites, which starts transparent: over pixels already there the
+    /// pipeline composites the product before rounding it, as Skia's blit
+    /// does, which is why the page itself is drawn from the coverage.
+    /// `None` for any other run.
+    pub(crate) fn flat_paint(&self) -> Option<Paint> {
+        let flat = self.flat.as_ref()?;
         let named = flat.opaque.color4f();
         let mut paint = flat.opaque.clone();
         paint.set_shader(shaders::color_in_space(
             Color4f::new(named.r, named.g, named.b, flat.alpha),
             ColorSpace::new_srgb(),
         ));
+        // The blend the run's own paint is drawn through: under a blend that
+        // covers beyond the draw that is source-over, into the layer the
+        // blend composites, where the blend itself would leave nothing.
+        paint.set_blend_mode(self.paint.blend_mode_or(BlendMode::SrcOver));
         Some(paint)
     }
 

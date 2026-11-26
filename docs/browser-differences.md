@@ -247,12 +247,13 @@ times its alpha. A canvas holding such a run, drawn into another with
 `drawImage`, lands the bytes its own page holds under every blend: its
 recording draws the run's glyphs through a colour shader in the named colour,
 which Skia's raster pipeline multiplies by the coverage rounded once, and
-which keeps the named colour's bucket. A run in a gradient or a pattern,
-under a
-blend that covers beyond the draw such as `copy`, dithered, holding colour
-glyphs, naming a line colour of its own, or under a filter the library
-leaves to Skia, such as `brightness()` alone, is blitted as Skia blits it,
-and so is every run on a float canvas, where nothing is rounded to a byte.
+which keeps the named colour's bucket. A run under a blend that covers
+beyond the draw, such as `copy`, is drawn through the same shader into the
+layer the blend composites, which starts transparent. A run in a gradient or
+a pattern, dithered, holding colour glyphs, naming a line colour of its own,
+or under a filter the library leaves to Skia, such as `brightness()` alone,
+is blitted as Skia blits it, and so is every run on a float canvas, where
+nothing is rounded to a byte.
 
 **Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
 17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
