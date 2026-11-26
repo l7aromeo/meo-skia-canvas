@@ -282,7 +282,7 @@ fn premultiplied(pixels: &[u8]) -> Vec<u8> {
 /// the effect, the run took mid grey's edges, 24 levels off under `xor`.
 #[test]
 fn text_dyed_by_a_gradient_stores_the_cpus_bytes_at_its_edges() {
-    if !has_gpu() {
+    if !common::has_gpu() {
         return;
     }
     let dye = Shader::linear_gradient(
