@@ -3243,7 +3243,7 @@ fn system_color(name: &str) -> Option<[u8; 4]> {
 ///
 /// [section 6.1]: https://www.w3.org/TR/css-color-4/#named-colors
 /// [section 6.3]: https://www.w3.org/TR/css-color-4/#transparent-color
-const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
+pub(crate) const NAMED_COLORS: [(&str, [u8; 3]); 148] = [
     ("aliceblue", [240, 248, 255]),
     ("antiquewhite", [250, 235, 215]),
     ("aqua", [0, 255, 255]),
@@ -3458,6 +3458,14 @@ fn hex_or_named(css: &str) -> Option<Option<(Color4f, Declared)>> {
         .ok()?;
     let [r, g, b] = NAMED_COLORS[at].1;
     Some(Some(legacy([r, g, b, u8::MAX])))
+}
+
+/// Whether `name` is one of CSS Color 4's named colours -- see
+/// [`NAMED_COLORS`] -- spelled as its table spells it, in lower case.
+pub(crate) fn is_named_color(name: &str) -> bool {
+    NAMED_COLORS
+        .binary_search_by(|&(named, _)| named.cmp(name))
+        .is_ok()
 }
 
 /// `css` with every bracket still open at its end closed, as CSS Syntax 3

@@ -930,6 +930,84 @@ describe("an SVG's references", () => {
   });
 });
 
+describe("an SVG's paint", () => {
+  /** A 4x4 document whose square `body` paints, as a data URL. */
+  const document = (body) =>
+    "data:image/svg+xml;base64," +
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">${body}</svg>`,
+    ).toString("base64");
+
+  /** What `src` draws at (2, 2) on a 4x4 sRGB canvas. */
+  const drawn = async (src) => {
+    const canvas = new Canvas(4, 4);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(await loadImage(src), 0, 0);
+    return [...ctx.getImageData(2, 2, 1, 1).data];
+  };
+
+  /** What a `fillRect` in `css` reads at (2, 2) on the same canvas. */
+  const filled = (css) => {
+    const canvas = new Canvas(4, 4);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = css;
+    ctx.fillRect(0, 0, 4, 4);
+    return [...ctx.getImageData(2, 2, 1, 1).data];
+  };
+
+  // Skia's SVG module parses paints itself and reads hex, its own names,
+  // rgb() and rgba() alone, so every other form drew the initial black
+  // (#815). Each is drawn as the canvas draws the same text as a fillStyle,
+  // a colour outside sRGB clipped to it: Chrome 156 fills
+  // color(display-p3 0 1 0) 0, 255, 0 on an sRGB canvas.
+  test("is the colour it names, in each form a fillStyle reads", async () => {
+    const forms = [
+      "#00cc0080",
+      "rebeccapurple",
+      "transparent",
+      "rgb(0 204 0 / 50%)",
+      "hsl(120 100% 40%)",
+      "hwb(120 0% 20%)",
+      "lab(70 -60 50)",
+      "oklch(0.7 0.18 140)",
+      "color(srgb-linear 0 0.5 0)",
+      "color(display-p3 0 1 0)",
+      "color(display-p3 1 0.5 0 / 0.5)",
+    ];
+    const bodies = (value) => [
+      `<rect width="4" height="4" fill="${value}"/>`,
+      `<rect width="4" height="4" style="fill: ${value}"/>`,
+      `<g color="${value}"><rect width="4" height="4" fill="currentcolor"/></g>`,
+      `<defs><linearGradient id="g"><stop offset="0" stop-color="${value}"/>` +
+        `<stop offset="1" stop-color="${value}"/></linearGradient></defs>` +
+        `<rect width="4" height="4" fill="url(#g)"/>`,
+    ];
+    const off = [];
+    for (const form of forms) {
+      const expected = filled(form);
+      // A level apart where the colour is translucent: the document's
+      // premultiplied raster rounds once more than the fill does.
+      const allowed = expected[3] === 255 ? 0 : 1;
+      for (const body of bodies(form)) {
+        const got = await drawn(document(body));
+        if (got.some((channel, i) => Math.abs(channel - expected[i]) > allowed))
+          off.push(`${body}: ${got}, the canvas ${expected}`);
+      }
+    }
+    assert.deepEqual(off, []);
+  });
+
+  // The control: a paint Skia reads already is drawn as the fill is.
+  test("a hex paint Skia reads matches the fill", async () => {
+    assert.deepEqual(
+      await drawn(document(`<rect width="4" height="4" fill="#00cc00"/>`)),
+      filled("#00cc00"),
+    );
+  });
+});
+
 describe("a refusal takes the type the standard names", () => {
   /** The name and constructor of whatever `run` throws. */
   const thrown = (run) => {

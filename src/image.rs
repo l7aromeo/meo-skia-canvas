@@ -21,6 +21,7 @@ use crate::{
         oblique_alias, unmatched_name,
     },
     geometry::Size,
+    node::utils::{css_to_color4f, is_named_color},
     pixels::{ImageData, PixelColorSpace, PixelExportOptions},
     start_skia, started,
 };
@@ -1487,6 +1488,117 @@ const XLINK_HREF: &str = "xlink:href";
 /// the reference, as SVG 2 says it does.
 const SHADOWED_XLINK_HREF: &str = "data-shadowed-xlink-href";
 
+/// The properties whose value is a colour, as an attribute or a `style`
+/// declaration, that Skia's SVG module parses for itself.
+const COLOUR_PROPERTIES: [&str; 6] = [
+    "fill",
+    "stroke",
+    "stop-color",
+    "flood-color",
+    "lighting-color",
+    "color",
+];
+
+/// The CSS named colours Skia's SVG module has no entry for, which it draws
+/// as the initial black.
+///
+/// Measured against skia-safe 0.156.0, every name of CSS Color 4's table
+/// drawn through `SkSVGDOM` alone: `SkParse::FindNamedColor` holds the SVG
+/// 1.1 names, without CSS's `grey` spellings of the greys, its `lightgray`,
+/// or CSS Color 4's `rebeccapurple`. `transparent` is not a named colour and
+/// is rewritten with every other form.
+///
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+/// Re-check: cargo test skia_reads_every_named_colour_but_these
+const SKIA_UNNAMED: [&str; 8] = [
+    "darkgrey",
+    "darkslategrey",
+    "dimgrey",
+    "grey",
+    "lightgray",
+    "lightslategrey",
+    "rebeccapurple",
+    "slategrey",
+];
+
+/// The spelling of `currentcolor` Skia's SVG module matches, and the only
+/// one: `SkSVGAttributeParser::parseSVGColor` compares it case-sensitively,
+/// where a CSS keyword is ASCII case-insensitive.
+const SKIA_CURRENT_COLOR: &str = "currentColor";
+
+/// A colour property's value written as Skia's SVG module reads it, or
+/// `None` where it already reads it as CSS does.
+///
+/// Skia parses a paint itself and knows `#rgb`, `#rrggbb`, its own table of
+/// names in lower case, `rgb()` and `rgba()`; anything else -- `color()`,
+/// `oklch()`, `#rrggbbaa`, the space-separated `rgb()`, `transparent`,
+/// `Red` -- fails to parse and draws the initial black. So every colour but
+/// the two hex forms and the names Skia holds, which it reads exactly, is
+/// resolved through [`css_to_color4f`], the reader `fillStyle` uses, and
+/// written back as `rgba()` with eight-bit channels and the alpha as a
+/// number.
+///
+/// A colour outside sRGB is clipped to it here, as an eight-bit sRGB canvas
+/// clips a `fillStyle`, because `SkSVGColorType` is an eight-bit sRGB
+/// `SkColor` and holds nothing wider.
+///
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+/// Re-check: cargo test an_svg_paint_is_the_colour_it_names
+/// with this function answering `None`; it fails while
+/// `SkSVGAttributeParser` reads no CSS Color 4 form and `SkSVGColorType` is
+/// an `SkColor`.
+fn colour_for_skia(value: &str) -> Option<String> {
+    /// Steps in one eight-bit channel.
+    const LEVELS: f32 = 255.0;
+    let value = value.trim();
+    if value.eq_ignore_ascii_case(SKIA_CURRENT_COLOR) {
+        return (value != SKIA_CURRENT_COLOR)
+            .then(|| SKIA_CURRENT_COLOR.to_string());
+    }
+    let hex = value.strip_prefix('#').filter(|digits| {
+        matches!(digits.len(), 3 | 6)
+            && digits.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    let named = is_named_color(value) && !SKIA_UNNAMED.contains(&value);
+    if hex.is_some() || named {
+        return None;
+    }
+    let colour = css_to_color4f(value)?;
+    let [r, g, b] = [colour.r, colour.g, colour.b]
+        .map(|channel| (channel.clamp(0.0, 1.0) * LEVELS).round() as u8);
+    Some(format!("rgba({r}, {g}, {b}, {})", colour.a.clamp(0.0, 1.0)))
+}
+
+/// A `style` attribute with each colour declaration written as Skia reads
+/// it -- see [`colour_for_skia`] -- or `None` where none needs to be.
+///
+/// Every other declaration, and the separators between them, are kept as
+/// written.
+fn style_colours_for_skia(style: &str) -> Option<String> {
+    let mut changed = false;
+    let rewritten: Vec<String> = style
+        .split(';')
+        .map(|declaration| {
+            let Some((name, value)) = declaration.split_once(':') else {
+                return declaration.to_string();
+            };
+            let property = name.trim().to_ascii_lowercase();
+            match COLOUR_PROPERTIES
+                .contains(&property.as_str())
+                .then(|| colour_for_skia(value))
+                .flatten()
+            {
+                Some(colour) => {
+                    changed = true;
+                    format!("{name}:{colour}")
+                }
+                None => declaration.to_string(),
+            }
+        })
+        .collect();
+    changed.then(|| rewritten.join(";"))
+}
+
 /// The elements whose positioning attributes Skia will not let us write.
 ///
 /// Matched by bare name, with no namespace resolution, because that is what
@@ -1910,12 +2022,17 @@ fn rewrite_text(
             let range = borrowed_range(text, raw)?;
 
             let converted = if key == "style" {
-                // Only the family is rewritten; the rest of the declaration
-                // is passed through as written.
-                style_declaration(Some(raw), "font-family")
+                // The family and the colours are rewritten, in one splice
+                // since they share the attribute; the rest of the
+                // declaration is passed through as written.
+                let family = style_declaration(Some(raw), "font-family")
                     .zip(written.as_deref())
                     .filter(|(family, written)| family.trim() != *written)
-                    .map(|(family, written)| raw.replacen(family, written, 1))
+                    .map(|(family, written)| raw.replacen(family, written, 1));
+                style_colours_for_skia(family.as_deref().unwrap_or(raw))
+                    .or(family)
+            } else if COLOUR_PROPERTIES.contains(&key) {
+                colour_for_skia(raw)
             } else if key == "font-family" {
                 // A family stated in `style` too is the one Skia reads, so
                 // the attribute is left as it is.
@@ -2648,6 +2765,43 @@ fn labelled_bmp(image: SkImage, bytes: &[u8]) -> SkImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Skia's SVG module, given no rewrite, draws every CSS named colour but
+    /// [`SKIA_UNNAMED`] as CSS does, and each of those as something else.
+    /// Holds the list to what Skia's table is, in both directions: a name
+    /// Skia gains fails here as surely as one it loses.
+    #[test]
+    fn skia_reads_every_named_colour_but_these() {
+        use crate::node::utils::NAMED_COLORS;
+        use skia_safe::{Color, surfaces};
+        let drawn = |fill: &str| {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="{fill}"/></svg>"#
+            );
+            let dom = svg::Dom::from_str(&svg, FontMgr::new()).expect("parses");
+            let mut surface =
+                surfaces::raster_n32_premul((2, 2)).expect("surface");
+            surface.canvas().clear(Color::WHITE);
+            dom.render(surface.canvas());
+            let pixels = surface.image_snapshot();
+            let colour = pixels
+                .peek_pixels()
+                .expect("raster pixels")
+                .get_color((1, 1));
+            [colour.r(), colour.g(), colour.b()]
+        };
+        let wrong: Vec<&str> = NAMED_COLORS
+            .iter()
+            .filter(|(name, rgb)| {
+                (drawn(name) == *rgb) == SKIA_UNNAMED.contains(name)
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "Skia's table and SKIA_UNNAMED disagree over {wrong:?}"
+        );
+    }
     use crate::node::{
         image::{Content, record_svg},
         typography::FAKE_ITALIC_SKEW,

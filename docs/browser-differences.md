@@ -1055,6 +1055,17 @@ stays within a level of its fill on the same canvas:
 filters 149, 108, 204 in Chrome. On an sRGB canvas Chrome's filter and fill
 agree.
 
+**An SVG image's paint is drawn in sRGB, so a wide colour in it is clipped
+on a wide canvas, where Chrome keeps it.** Skia's SVG module holds a paint as
+an eight-bit sRGB `SkColor` and parses no CSS Color 4 form, so every colour
+property -- `fill`, `stroke`, `stop-color`, `flood-color`, `lighting-color`
+and `color`, as an attribute or in `style` -- is read here by the reader a
+`fillStyle` uses and written back as `rgba()` before Skia parses the
+document (`colour_for_skia` in `src/image.rs`). On an sRGB canvas that is
+the colour Chrome draws: `fill="color(display-p3 0 1 0)"` reads 0, 255, 0 in
+Chrome 156 and here. On a `display-p3` canvas Chrome reads that fill back as
+0, 255, 0 and here it reads sRGB green, 117, 251, 76.
+
 **`AccentColor` and `AccentColorText` are read; Chrome 156 refuses both.**
 CSS Color 4 section 6.2 lists them among the system colours, valued by the
 user agent like the rest, so a string naming one is a valid colour. Here they
