@@ -158,6 +158,13 @@ const SVG_SYNTHETIC_SLANT = {
   ...buildRsPatch("meo_svg_synthetic_slant"),
 };
 
+/// containers/skia-freetype-advance.patch, on Linux, the one platform whose
+/// build compiles Skia's FreeType port.
+const FREETYPE_ADVANCE = {
+  patch: "containers/skia-freetype-advance.patch",
+  ...buildRsPatch("meo_freetype_advance"),
+};
+
 /// containers/skia-patch-marker.patch, on every platform.
 const PATCH_MARKER = {
   patch: "containers/skia-patch-marker.patch",
@@ -194,6 +201,7 @@ export const PATCHED = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
   win32: [
@@ -449,6 +457,7 @@ const COMPILED_WITH = {
   "modules/svg/src/SkSVGText.cpp": null,
   "src/core/SkFontMgr.cpp": null,
   "src/ports/SkTypeface_win_dw.cpp": null,
+  "src/ports/SkFontHost_FreeType.cpp": null,
   "src/core/SkOpts.cpp": null,
   "src/opts/SkRasterPipeline_opts.h": null,
   "src/core/SkGraphics.cpp": null,

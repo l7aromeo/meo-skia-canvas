@@ -103,8 +103,10 @@ anywhere else. OpenType 1.9.1 rounds the normalised coordinate to 2.14 and
 nothing after: "It is recommended that at least 16 fractional bits of
 precision be maintained, and that any rounding be done at the last point
 before a value is used." So Oswald's "0" at weight 450 and 1000px measures
-526 on Linux and 525.52 on macOS, where Chrome 156 on macOS measures 525.516;
-Chrome on Linux was not measured. `ch` and `ic` take the advance from the
+526 on Linux and 525.52 on macOS, where Chrome 156 on macOS measures 525.516,
+and its "W" at weight 300 is 715 units on Linux and 714.625 on macOS: 11.44 at
+16px, where macOS measures 11.434006 and Chrome 156 on macOS 11.43399. Chrome
+on Linux was not measured. `ch` and `ic` take the advance from the
 face's tables and are the interpolation's on every platform. The `UPSTREAM`
 note at the width in `Typesetter::measure` carries the re-check.
 
@@ -115,11 +117,10 @@ corrects its matrix for the size FreeType chose only below 1px, so advances and
 outlines come from the truncated size while the font's metrics take the one
 asked for. In Oswald, `measureText("Hamburgefonstiv")` at each hundredth from
 17.00px to 18.00px steps by 0 at 36 of the 100 and by 0.0956 to 0.0973 at the
-rest, where on macOS every step is 0.0617 or 0.0618, and each width is within
-0.0005 of macOS's at `floor(size × 64) / 64`, the rest being FreeType's
-advances against CoreText's: 17.29px measures 106.69469 on Linux and 17.28125px
-106.69444 on macOS; 17.30px measures 106.79041 on Linux and 17.296875px
-106.79089 on macOS. Hinting on and off measure alike. Chrome on Linux takes its
+rest, where on macOS every step is 0.0617 or 0.0618, and each width is
+macOS's at `floor(size × 64) / 64`: 17.29px measures 106.69441 on Linux and
+17.28125px 106.69444 on macOS; 17.30px measures 106.79088 on Linux and
+17.296875px 106.79089 on macOS. Hinting on and off measure alike. Chrome on Linux takes its
 glyph advances from the same scaler -- Blink's `SkFontGetGlyphWidthForHarfBuzz`
 in `skia_text_metrics.cc` reads them from the Skia strike -- but does not step
 the same way: at a device scale of 1 it lays a web font out without subpixel
@@ -127,30 +128,30 @@ positioning, and that function then rounds each advance to a whole pixel. The
 next entry has the measurements. The `UPSTREAM` note at the size in
 `Context2D::set_font` carries the re-check.
 
-On Linux an advance comes out a fraction off its exact size, in every face
-whose units per em do not divide the size's 64ths into 16.16 fixed point
-exactly. Skia's FreeType scaler takes an unhinted advance from FreeType's
-`linearHoriAdvance` (`SkFontHost_FreeType.cpp`), which scales the font's units
-by the 16.16 `x_scale` that `FT_Set_Char_Size` rounds: at 16px in a face of
-1000 units, 1024 × 65536 / 1000 is 67,108.864 and is stored as 67,109. So a
-1000-unit ideograph advances 16 + 2/65536 px, about 3 × 10⁻⁵, where CoreText
-gives 16, as #695 found DirectWrite does, and the excess adds up along a line:
-past 512 glyphs it passes Chrome's 1/64 px layout unit. Measured at 16px with
-npm 7.1.0's linux-arm64-glibc binary, against this library on macOS:
+On Linux an advance is the glyph's font units times the size the face is set
+to, rounded once to 16.16, as HarfBuzz scales one. Skia's FreeType scaler takes
+an unhinted advance from FreeType's `linearHoriAdvance`
+(`SkFontHost_FreeType.cpp`), which scales the units by the 16.16 `x_scale` that
+`FT_Set_Char_Size` rounds: at 16px in a face of 1000 units, 1024 × 65536 / 1000
+is 67,108.864 and is stored as 67,109, so a 1000-unit ideograph advanced 16 +
+2/65536 px and the excess added up along a line (#695).
+`containers/skia-freetype-advance.patch` scales the glyph's unscaled advance
+instead, so a crate build against crates.io's Skia, which does not carry it,
+still takes FreeType's. At 16px, against this library on macOS:
 
-| face, text                                 | Linux      | macOS      |
-| ------------------------------------------ | ---------- | ---------- |
-| Noto Sans SC (1000 units), `漢`            | 16.0000305 | 16         |
-| Noto Sans SC, six `漢`                     | 96.0001831 | 96         |
-| Oswald (1000 units), `H`                   | 8.9760132  | 8.9759979  |
-| Amstelvar (2000 units), `H` at `"opsz" 14` | 13.9198151 | 13.9199982 |
-| Arial (2048 units), `Hamburgefonstiv`      | 120.945313 | 120.945313 |
+| face, text                                 | crates.io's Skia | patched    | macOS      |
+| ------------------------------------------ | ---------------- | ---------- | ---------- |
+| Noto Sans SC (1000 units), `漢`            | 16.0000305       | --         | 16         |
+| Recursive (1000 units), `I`                | 8.0000153        | 8          | 8          |
+| Recursive, six `I`                         | 48.0000916       | 48         | 48         |
+| Oswald (1000 units), `H`                   | 8.9760132        | 8.9759979  | 8.9759979  |
+| Amstelvar (2000 units), `H` at `"opsz" 14` | 13.9198151       | 13.9199982 | 13.9199982 |
 
-A face of 2000 units comes out under, its scale of 33,554.432 stored as
-33,554, and one of 2048 units is exact, its scale a whole number. Amstelvar at
-its default instance stands a further 0.0016 apart, the `HVAR` rounding
-recorded above. Skia hands HarfBuzz these same advances through its own font
-functions (`SkShaper_harfbuzz.cpp`), so no route here takes an exact one.
+The crates.io column is npm 7.1.0's linux-arm64-glibc binary for the faces
+#695 measured, and the unpatched tree on Linux x86-64 for Recursive; the
+patched column is Linux x86-64. A face whose units divide the size's 64ths
+exactly, as 2048 does, was exact either way. A variable face away from its
+default instance still takes `HVAR` in whole units, the entry above records.
 
 Chrome 158.0.8127.18 on Linux (Chrome for Testing's headless shell, in
 Playwright's `v1.65.0-noble` image on arm64) lays #695's ideograph out
@@ -176,8 +177,7 @@ pixels. Liberation Sans, a system face reached through fontconfig, measures
 fractional advances at both scales: `measureText("a")` at 16px is 8.8984375,
 its 1139 units of 2048 exactly. This library keeps every advance fractional on
 every platform, as Chrome does on macOS, so on Linux it stands apart from
-Chrome's whole pixels by more than the 16.16 excess does. The `UPSTREAM` note
-at the width in `Typesetter::measure` carries the re-check.
+Chrome's whole pixels at a scale of 1.
 
 A line fits a paragraph up to a hundredth narrower than it. With
 SkParagraph's rounding hack off, as every paragraph here is,

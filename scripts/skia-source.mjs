@@ -281,6 +281,20 @@ const EXACT_BLEND_DIVISION = join(
   "containers",
   "skia-exact-blend-division.patch",
 );
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_glyph_advances_its_units_times_the_size against crates.io's Skia on Linux; it holds that build to FreeType's 16.16 excess, and fails there once FreeType's advance is exact
+//
+// Skia's FreeType port (src/ports/SkFontHost_FreeType.cpp) takes a glyph's
+// unhinted advance from `linearHoriAdvance`: its units times a 16.16 scale
+// FreeType rounds once, so a 1000-unit em at 16px advances 16 + 2/65536, and
+// the error grows with every glyph on a line (#695). The patch scales the
+// glyph's unscaled advance by the size the face is set to -- the 26.6 one
+// the outlines are drawn at -- and rounds once to 16.16, as HarfBuzz scales
+// one. A variable face's advance still takes its `HVAR` delta rounded to a
+// whole unit, which is FreeType's `FT_LOAD_NO_SCALE` reading and not
+// Chrome's.
+const FREETYPE_ADVANCE = join("containers", "skia-freetype-advance.patch");
+
 // Not a fix: one function, `meo_skia_canvas_needs_its_patched_skia_see_SKIA_BINARIES_URL`,
 // in a file every build compiles. A crate build that names this repository's
 // archives in SKIA_BINARIES_URL calls it (`cfg(meo_skia_marker)`), so one that
@@ -313,6 +327,7 @@ export const PATCHES = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
@@ -344,6 +359,8 @@ export const WITHHELD = {
       "skia-bindings drops brotli on macOS, so there is nothing for it to link",
     [DWRITE_OBLIQUE]:
       "it changes Skia's DirectWrite port, which only Windows builds",
+    [FREETYPE_ADVANCE]:
+      "it changes Skia's FreeType port, which macOS builds without -- skia-safe takes `embed-freetype` on Linux only",
   },
   linux: {
     [METAL_UNTIMED_COMPILE]:
@@ -358,6 +375,8 @@ export const WITHHELD = {
       "it fixes a `freetype` build's link, and Windows builds without `freetype` (`CARGO_FEATURES` in lib/prebuild.mjs)",
     [ASYNC_TRANSFER_REUSE]:
       "skbug.com/40042671: the switch crashed Chromium's GPU process on Windows, with no cause found",
+    [FREETYPE_ADVANCE]:
+      "it changes Skia's FreeType port, which Windows builds without (`CARGO_FEATURES` in lib/prebuild.mjs)",
   },
 };
 

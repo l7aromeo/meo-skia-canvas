@@ -89,7 +89,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 8] = [
+const SKIA_PATCHES: [SkiaPatch; 9] = [
     // `containers/skia-atlas-placement.patch`: a path drawn into Ganesh's
     // path atlas relative to its own device top-left, rounded to a grid, and
     // only then moved by its whole-pixel location, so its coverage does not
@@ -146,6 +146,14 @@ const SKIA_PATCHES: [SkiaPatch; 8] = [
         cfg: "meo_svg_synthetic_slant",
         file: "modules/svg/src/SkSVGText.cpp",
         marker: "!Leans(font.getTypeface())",
+    },
+    // `containers/skia-freetype-advance.patch`: FreeType's unhinted advance
+    // is the glyph's units times the face's size, rounded once to 16.16,
+    // rather than the units times a 16.16 scale FreeType rounded first.
+    SkiaPatch {
+        cfg: "meo_freetype_advance",
+        file: "src/ports/SkFontHost_FreeType.cpp",
+        marker: "static_cast<int64_t>(SkScalarToFDot6(fScale.fX)) << 10",
     },
     // `containers/skia-patch-marker.patch`: no fix, one function a crate
     // build that names the patched archives links against, so a build that
