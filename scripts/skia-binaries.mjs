@@ -211,15 +211,29 @@ export function compilerKey(env = process.env, version = versionLine) {
       };
     const line = version(command);
     if (!line) return { why: `\`${command} --version\` named no version` };
+    // A line with no letter or digit keeps only its dots in the entry's
+    // directory name -- see `compilerName` -- and `..` is the directory
+    // above.
+    if (!NAMES_SOMETHING.test(line))
+      return {
+        why: `\`${command} --version\` printed ${JSON.stringify(line)}, which names no version`,
+      };
     compiler[role] = line;
   }
   return { compiler };
 }
 
 /// What a version line keeps in an entry's directory name. Every other run
-/// of characters becomes one `-`, so that the name cannot reach outside its
-/// directory; the manifest keeps the lines whole.
+/// of characters, a path separator of any platform among them, becomes one
+/// `-`, so that the name cannot reach outside its directory -- given a line
+/// that holds a letter or a digit, which `compilerKey` requires. The
+/// manifest keeps the lines whole.
 const NAME_KEEPS = /[^A-Za-z0-9.]+/g;
+
+/// What a version line has to hold for `compilerKey` to name a compiler by
+/// it: a letter or a digit, without which the name `compilerName` makes of
+/// it is dots alone, and `.` or `..` is no directory of its own.
+const NAMES_SOMETHING = /[A-Za-z0-9]/;
 
 /**
  * The directory name of `compiler`, as `compilerKey` gives it: the version

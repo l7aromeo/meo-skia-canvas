@@ -11,7 +11,7 @@
 
 const assert = require("assert");
 const { spawnSync } = require("child_process");
-const { join } = require("path");
+const { join, sep } = require("path");
 const { pathToFileURL } = require("url");
 const { describe, test } = require("node:test");
 
@@ -904,25 +904,42 @@ describe("an entry names its compiler, and two builds of one key are compared by
       one,
     );
     assert.ok(
-      one.includes("/Apple-clang-version-21.0.0-clang-2100.4.1.1/dev/"),
+      one.includes(
+        `${sep}Apple-clang-version-21.0.0-clang-2100.4.1.1${sep}dev${sep}`,
+      ),
       one,
     );
     assert.ok(
       entryDir(
         { ...key, compiler: { cc: apple, cxx: "g++ 14" } },
         root,
-      ).includes("/Apple-clang-version-21.0.0-clang-2100.4.1.1+g-14/"),
+      ).includes(
+        `${sep}Apple-clang-version-21.0.0-clang-2100.4.1.1+g-14${sep}`,
+      ),
     );
   });
 
   test("a version line cannot reach outside its directory", () => {
-    const sly = "../../../x";
-    const dir = entryDir({ ...key, compiler: { cc: sly, cxx: sly } }, root);
-    assert.ok(
-      dir.startsWith(join(root, "binaries", "t", key.target, key.sdk)),
-      dir,
-    );
-    assert.ok(dir.includes(`${key.sdk}/..-..-..-x/dev/`), dir);
+    const within = join(root, "binaries", "t", key.target, key.sdk);
+    for (const [sly, name] of [
+      ["../../../x", "..-..-..-x"],
+      ["..\\..\\..\\x", "..-..-..-x"],
+      ["C:\\x", "C-x"],
+    ]) {
+      const dir = entryDir({ ...key, compiler: { cc: sly, cxx: sly } }, root);
+      assert.ok(dir.startsWith(within + sep), dir);
+      assert.strictEqual(dir, join(within, name, "dev", "metal"), sly);
+    }
+  });
+
+  test("a version line of dots alone names no compiler", () => {
+    for (const line of ["..", ".", " .. ", "./.."]) {
+      assert.match(
+        compilerKey({}, () => line).why ?? "",
+        /which names no version/,
+        line,
+      );
+    }
   });
 
   // A build directory as skia-bindings leaves one: its log names the tree and
