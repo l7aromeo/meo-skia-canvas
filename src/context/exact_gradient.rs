@@ -298,6 +298,8 @@ impl GradientSpec {
             return None;
         }
         let converts = !ramp.toward.is_identity() || ramp.css != Css::None;
+        let opaque = alpha >= 1.0
+            && self.native().is_some_and(|native| native.is_opaque());
         EFFECTS.with(|effects| {
             let compiled = effects.as_ref()?.iter().find(|compiled| {
                 compiled.converts == converts && ramp.ts.len() <= compiled.size
@@ -316,6 +318,8 @@ impl GradientSpec {
                 .into(),
                 to_unit: layout.to_unit,
                 local: self.local,
+                highp,
+                opaque,
             })
         })
     }
@@ -394,6 +398,11 @@ pub(crate) struct Exact {
     to_unit: Matrix,
     /// The shader's local matrix -- see [`GradientSpec::local`].
     local: Option<Matrix>,
+    /// Whether the CPU draws it on its float pipeline.
+    highp: bool,
+    /// Whether the CPU's blitter takes its paint as opaque, and so draws
+    /// `source-over` as `src`: the native shader opaque and the alpha 1.
+    opaque: bool,
 }
 
 impl Exact {
@@ -439,6 +448,17 @@ impl Exact {
 }
 
 impl Exact {
+    /// Whether the CPU draws it on its float pipeline.
+    pub fn highp(&self) -> bool {
+        self.highp
+    }
+
+    /// Whether the CPU draws it `source-over` as `src` -- see
+    /// [`Self::opaque`](Exact).
+    pub fn opaque(&self) -> bool {
+        self.opaque
+    }
+
     /// Whether the effect can be placed under `matrix` -- see
     /// [`Self::placed`].
     pub fn places(&self, matrix: &Matrix) -> bool {
@@ -2468,7 +2488,7 @@ fn floats(data: &mut [u8], at: usize, values: &[f32]) {
 /// Whether the CPU's `div255` rounds to the nearest level, as NEON
 /// computes it, or is `(v + 255) >> 8`, as every other backend of
 /// `SkRasterPipeline_opts.h` computes it.
-const EXACT_SCALE: bool = cfg!(target_arch = "aarch64");
+pub(crate) const EXACT_SCALE: bool = cfg!(target_arch = "aarch64");
 
 /// Whether the CPU's `highp` store rounds a half level to the even one, as
 /// NEON's `vcvtnq` and x86's `cvtps` do, or up, as `round` in

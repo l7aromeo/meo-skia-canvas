@@ -22,7 +22,7 @@ use skia_safe::{
 use std::{
     cell::{Cell, OnceCell, RefCell},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 pub mod api;
@@ -32,6 +32,7 @@ pub(crate) mod chain_cache;
 pub(crate) mod exact_blur;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 pub(crate) mod exact_blur_gpu;
+pub(crate) mod exact_composite;
 pub(crate) mod exact_gradient;
 pub(crate) mod faint;
 pub(crate) mod fold;
@@ -230,8 +231,13 @@ const DEFAULT_MITER_LIMIT: f32 = 10.0;
 
 /// How far past a shape's edge its anti-aliasing can ink, in device pixels:
 /// the pixel the edge passes through, partly covered. Widens a draw's
-/// rectangle for the page's tiles -- see [`Context2D::tile_cut`].
+/// rectangle for the page's tiles -- see [`Context2D::tile_cut`] and
+/// [`drawn_bounds`].
 const AA_REACH: f32 = 1.0;
+
+/// How far past its path a hairline inks, in device pixels: Skia draws it a
+/// pixel wide, anti-aliased across the pixels either side of the path.
+const HAIRLINE_REACH: f32 = 1.0;
 
 /// The size of the Canvas API's initial font.
 ///
@@ -2276,7 +2282,8 @@ impl Context2D {
         pixels: &Paint,
         beyond: bool,
     ) -> Option<Arc<layer::GradientPath>> {
-        let (path, bounds) = dye.path?;
+        let (path, inked) = dye.path?;
+        let bounds = inked.with_outset((AA_REACH, AA_REACH));
         // A blend that changes what lies beyond the draw composites a
         // recording of it over the whole page -- see `render_to_canvas` --
         // which a path drawn through the blend does not.
@@ -2293,6 +2300,7 @@ impl Context2D {
         Some(Arc::new(layer::GradientPath {
             path: Mutex::new(path.clone()),
             bounds,
+            inked: OnceLock::new(),
             matrix: self.state.matrix,
             paint: drawn,
             pixels: self.faint().drawable(pixels).into_owned(),
@@ -3909,11 +3917,11 @@ impl Context2D {
                 gradient
                     .filter(|_| self.files_gradients())
                     .and_then(|spec| {
-                        let bounds =
-                            drawn_bounds(&path, &paint, style, &matrix, false);
+                        let inked =
+                            inked_bounds(&path, &paint, style, &matrix, false);
                         let dye = GradientDye {
                             spec,
-                            path: Some((&path, bounds)),
+                            path: Some((&path, inked)),
                             whole_pixels: false,
                         };
                         let shape = |canvas: &SkCanvas, paint: &Paint| {
@@ -3930,7 +3938,7 @@ impl Context2D {
                                 &paint,
                                 pixels,
                                 beyond,
-                                bounds,
+                                inked.with_outset((AA_REACH, AA_REACH)),
                                 false,
                                 &shape,
                                 &|_, _| {},
@@ -3972,7 +3980,7 @@ impl Context2D {
                     spec,
                     path: Some((
                         &path,
-                        drawn_bounds(
+                        inked_bounds(
                             &path,
                             &paint,
                             style,
@@ -6525,8 +6533,8 @@ pub enum CpuBytes<'a> {
 /// whole device pixels.
 pub struct GradientDye<'a> {
     pub spec: Arc<GradientSpec>,
-    /// The path drawn, where the draw is one, and what it reaches in device
-    /// pixels -- see [`drawn_bounds`]: kept, rather than a recording of it,
+    /// The path drawn, where the draw is one, and the device pixels it inks
+    /// -- see [`inked_bounds`]: kept, rather than a recording of it,
     /// so that a GPU canvas makes the effect for it where the page is played
     /// -- see `layer::GradientPath`.
     pub path: Option<(&'a Path, Rect)>,
@@ -7106,13 +7114,27 @@ thread_local! {
 }
 
 /// Where a fill or stroke of `path` in `paint` under `matrix` can put
-/// coverage, in device pixels: the path's bounds, widened by the stroke --
-/// half its width, times the miter limit where joins are mitred and the
-/// path has one, and the square root of two where caps are square -- or,
-/// where `outline` is set or a path effect makes the path drawn, the bounds
-/// of the outline Skia fills; and a pixel either side for anti-aliasing, two
-/// for a hairline.
+/// coverage, in device pixels: [`inked_bounds`], and a pixel either side for
+/// anti-aliasing -- see [`AA_REACH`].
 fn drawn_bounds(
+    path: &Path,
+    paint: &Paint,
+    style: PaintStyle,
+    matrix: &Matrix,
+    outline: bool,
+) -> Rect {
+    inked_bounds(path, paint, style, matrix, outline)
+        .with_outset((AA_REACH, AA_REACH))
+}
+
+/// The device pixels a fill or stroke of `path` in `paint` under `matrix`
+/// covers any part of, as the rectangle that rounds out to them: the path's
+/// bounds, widened by the stroke -- half its width, times the miter limit
+/// where joins are mitred and the path has one, and the square root of two
+/// where caps are square -- or, where `outline` is set or a path effect
+/// makes the path drawn, the bounds of the outline Skia fills; and a pixel
+/// either side of a hairline, which Skia draws a pixel wide about the path.
+fn inked_bounds(
     path: &Path,
     paint: &Paint,
     style: PaintStyle,
@@ -7150,7 +7172,7 @@ fn drawn_bounds(
         false => *path.bounds(),
     };
     let hairline = stroked && paint.stroke_width() <= 0.0;
-    let margin = if hairline { 2.0 } else { 1.0 };
+    let margin = if hairline { HAIRLINE_REACH } else { 0.0 };
     matrix.map_rect(local).0.with_outset((margin, margin))
 }
 

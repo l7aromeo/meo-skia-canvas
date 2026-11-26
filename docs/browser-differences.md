@@ -1751,12 +1751,24 @@ or rotated, through `source-over`, `multiply` and `color-dodge`, where
 Ganesh's own gradient parted 5,301 pixels by up to 35 levels under `multiply`
 at a scale of 2 and 5,766 by up to 66 under `color-dodge`.
 A canvas drawn as an image is its own pixels, which a GPU canvas composites
-on the CPU where its page holds such a draw (#703). What stays apart:
-those ties; along a path's edge, a byte Metal's half-precision composite
-rounds the other way, within 0.15 of a tie, and a byte llvmpipe's or NVIDIA's
-eight-bit composite rounds in two terms, within a level of the exact
-composite at any distance from a tie -- see the llvmpipe and NVIDIA entries;
-under `multiply` or a `globalAlpha`, a byte along the edge a level from the
+on the CPU where its page holds such a draw (#703). Under `source-over`
+a path's edge is composited in the CPU canvas's own eight-bit arithmetic --
+the coverage lerped toward the page for an opaque paint, scaled into the
+source first for any other, each step rounded as the CPU rounds it -- not in
+Ganesh's fixed-function stage, which on Metal rounds a byte the other way
+within 0.15 of a tie and on llvmpipe and NVIDIA rounds in two terms, a level
+off at any distance from one -- see the llvmpipe and NVIDIA entries
+(`exact_composite`, #783). On the canvas's own surface the draws that do
+not meet share one snapshot of the pixels they cover and are each drawn over
+it; inside a layer each reads its destination through a blender. Against
+Ganesh's own composite on Metal that costs 1.03 to 1.07 times for 60 to 200
+fills, 1.31 times for 2,000 small ones, and 1.13 times for 200 cast with a
+shadow, which take a snapshot each. What stays apart: those ties; a byte
+along the edge of an opaque gradient the CPU makes on its float pipeline --
+one interpolated in a space other than the page's -- which keeps Ganesh's
+composite; a pixel whose coverage itself stands a level from
+the CPU canvas's, as 3 along the bottom of a disc of radius 10.3 at
+(16.4, 16.7) do; under `multiply`, a byte along the edge a level from the
 CPU's, whose eight-bit pipeline rounds the blend before it scales it by the
 coverage where the GPU rounds once -- matching that order takes a blend
 reading the destination, #736's case; text's anti-aliased edge, which is
@@ -1810,13 +1822,15 @@ How it rounds a `source-over` composite: the source's term and the
 destination's each to the nearest byte, then added -- `round(s * a) +
 round(d * (1 - a))`, `s` the source's byte, `d` the destination's, `a` the
 alpha the source is drawn at. The CPU canvas scales an anti-aliased edge's
-colour by its coverage in one step and rounds once. So along a gradient
-path's edge, whose effect is masked by the CPU's coverage (#766), a source
-byte of 128 under a coverage of 41/255 over a backdrop of 220 has an exact
-composite of 205.21: the CPU canvas stores 205, and llvmpipe 21 + 185 = 206,
-20.58 and 184.63 rounded apart. Every one of the 85,762 edge bytes the
-edge tests in `tests/gpu_gradient.rs` draw under `source-over`, where the
-gradient's own byte is the CPU's, is that formula. It is
+colour by its coverage in one step and rounds once, so an edge left to this
+composite stands a level off: a source byte of 128 under a coverage of
+41/255 over a backdrop of 220 has an exact composite of 205.21, which the
+CPU canvas stores as 205 and llvmpipe as 21 + 185 = 206, 20.58 and 184.63
+rounded apart. A gradient path's edge is not left to it: it is composited in
+the CPU's arithmetic -- see the gradient entry (#783). Composited by the
+driver, every one of the 85,762 edge bytes the edge tests in
+`tests/gpu_gradient.rs` draw under `source-over`, where the gradient's own
+byte is the CPU's, was that formula. It is
 the driver's and not that route's: a plain draw on whole pixels at an alpha
 of `a / 255` -- an image at a `globalAlpha`, a flat fill at a `globalAlpha`,
 a fill of an `rgba()` colour -- stores it too, on all 540 bytes where it
@@ -1828,10 +1842,11 @@ cuts the source's term short first.** Measured on a GeForce GTX 1050 Ti,
 driver 580.178.04, through Vulkan: the fixed-function stage keeps twelve
 bits of fraction of the source's term, cuts off the rest, rounds what is
 left to a byte with a tie going down, and adds the destination's term
-rounded on its own. Every one of 30,340 distinct edge inputs of
-`tests/gpu_gradient.rs` fits that, and no width from ten to sixteen bits
-fits them all. A source byte of 128 under a coverage of 3/255 over a
-backdrop of 220 has an exact composite of 218.92: the CPU canvas and
+rounded on its own. Composited by the driver, every one of 30,340 distinct
+edge inputs of `tests/gpu_gradient.rs` fit that, and no width from ten to
+sixteen bits fit them all; a gradient path's edge is composited in the
+CPU's arithmetic instead (#783). A source byte of 128 under a coverage of
+3/255 over a backdrop of 220 has an exact composite of 218.92: the CPU canvas and
 llvmpipe store 219, and NVIDIA 218, the source's term 1.506 cut to 1.494.
 An image drawn on whole pixels at a `globalAlpha` shows the same, on all 540
 bytes where it and llvmpipe's formula differ, and did on the commit before

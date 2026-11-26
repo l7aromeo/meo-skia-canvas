@@ -50,9 +50,10 @@ use crate::{
             self, Depth, Step,
             pool::{self, LayerScope},
         },
-        chain_cache, coverage_of, covers_beyond_the_draw,
+        chain_cache, coverage_of, covers_beyond_the_draw, exact_composite,
         exact_gradient::{Exact, GradientSpec},
         faint::{Faint, composited},
+        inked_bounds,
         kept::CoverageInput,
         page::{ExportOptions, Page, own_image_type},
         run_mask::{self, Kept},
@@ -3232,6 +3233,9 @@ pub struct GradientPath {
     /// What the draw reaches, in the recording's device pixels: the path's
     /// bounds under `matrix`, widened as `context::drawn_bounds` widens them.
     pub bounds: Rect,
+    /// The recording's device pixels the CPU's coverage of the path can be
+    /// other than zero on, made on first use -- see [`Self::inked`].
+    pub inked: OnceLock<IRect>,
     /// The page's transform the path was drawn under.
     pub matrix: Matrix,
     /// The draw's paint with no shader and an alpha of 1, the effect
@@ -3257,6 +3261,31 @@ pub struct GradientPath {
     /// Whether `blend` changes what lies beyond the draw -- see
     /// [`OnGpu::Raster`].
     pub beyond: bool,
+}
+
+impl GradientPath {
+    /// The recording's device pixels the CPU's coverage of the path can be
+    /// other than zero on -- see `context::inked_bounds` -- which `bounds`
+    /// widens by a pixel of anti-aliasing either side. A stroke is bounded
+    /// by the outline Skia fills for it: the reach `bounds` allows a mitred
+    /// join, ten times its half width at the default limit, is a corner's
+    /// and not a curve's, and held that wide, the rectangles of a row of
+    /// stroked rings meet. Made where a GPU canvas plays the draw, so that a
+    /// CPU canvas never strokes the path twice.
+    pub fn inked(&self) -> IRect {
+        *self.inked.get_or_init(|| {
+            let style = self.paint.style();
+            let outline = style != PaintStyle::Fill;
+            inked_bounds(
+                &self.path.lock(),
+                &self.paint,
+                style,
+                &self.matrix,
+                outline,
+            )
+            .round_out()
+        })
+    }
 }
 
 /// Where an image of a [`GradientPath`]'s effect lies in an atlas: `at`, in
@@ -3444,17 +3473,25 @@ fn max_texture_size(_canvas: &SkCanvas) -> i32 {
 /// can be made.
 ///
 /// A rectangle on whole pixels is the effect itself. Any other path is an
-/// aliased rectangle over the pixels it reaches, its effect -- the atlas's
+/// aliased rectangle over the pixels it inks, its effect -- the atlas's
 /// image of it, or the effect itself for one the atlas does not hold --
 /// masked by the CPU's coverage of the path -- see [`draw_coverage`] -- so
 /// that its edge is the CPU canvas's, as its shadow and its blur already
 /// are, made on the CPU -- see `Context2D::chain_input`. Drawn through the
 /// path, it took Ganesh's anti-aliasing instead, up to 125 levels from the
 /// CPU canvas along a hard-stop conic's edge.
+///
+/// A `source-over` draw of an effect the CPU makes in eight bits is
+/// composited in the CPU's arithmetic, not Ganesh's -- see
+/// [`exact_composite`]: on the canvas's own surface it is held in `batch`,
+/// inside a layer it takes the blender. An opaque effect on whole pixels
+/// needs neither: it composites to itself, which the fixed-function blend
+/// stores exactly.
 fn drawn_with_effect(
     canvas: &SkCanvas,
     draw: &GradientPath,
     found: Option<&Found>,
+    mut batch: Option<&mut exact_composite::Batch>,
 ) -> bool {
     let effect = match found {
         Some(found) => found.effect.clone(),
@@ -3463,28 +3500,52 @@ fn drawn_with_effect(
     let Some(effect) = effect else {
         return false;
     };
+    let opaque = effect.opaque();
+    // A `highp` effect is composited on the CPU in float, which the eight-bit
+    // composite is not.
+    let exact_over = !effect.highp()
+        && draw.paint.as_blend_mode() == Some(BlendMode::SrcOver)
+        && !(draw.whole_pixels && opaque);
+    // A snapshot of the surface holds a layer's pixels only once the layer
+    // is drawn into it, so inside one a draw reads its destination itself.
+    let held = exact_over && !InLayer::open() && batch.is_some();
     let outer = canvas.local_to_device_as_3x3();
     // The canvas's whole-pixel offset from the page's device pixels.
     let shift =
         IPoint::new(outer.translate_x() as i32, outer.translate_y() as i32);
+    let inked = draw.inked().with_offset(shift);
     if draw.whole_pixels {
+        let Some(placed) = effect.placed(&draw.matrix, -shift) else {
+            return false;
+        };
+        if held && let Some(batch) = batch.as_deref_mut() {
+            batch.hold(canvas, inked, placed, None, opaque);
+            return true;
+        }
+        if let Some(batch) = batch.as_deref_mut() {
+            batch.flush_meeting(canvas, inked);
+        }
         // Drawn through the rectangle under the page's transform, at the
         // canvas's identity: its local matrix undoes the canvas's, so that
         // the effect is handed each device pixel.
-        let Some(shader) = Matrix::concat(&outer, &draw.matrix)
+        let device = Matrix::concat(&outer, &draw.matrix);
+        let Some(shader) = device
             .invert()
-            .and_then(|device| {
-                Some(
-                    effect
-                        .placed(&draw.matrix, -shift)?
-                        .with_local_matrix(&device),
-                )
-            })
+            .map(|device| placed.with_local_matrix(&device))
         else {
             return false;
         };
         let mut paint = draw.paint.clone();
-        paint.set_shader(shader);
+        if !(exact_over
+            && exact_composite::blended(
+                &mut paint,
+                shader.clone(),
+                None,
+                opaque,
+            ))
+        {
+            paint.set_shader(shader);
+        }
         canvas.save();
         canvas.concat(&draw.matrix);
         canvas.draw_path(&draw.path.lock(), &paint);
@@ -3523,15 +3584,38 @@ fn drawn_with_effect(
     let Some((effect, coverage)) = layers else {
         return false;
     };
+    // The pixels the draw can change. `reach` adds the slot's margin and
+    // `draw.area` a pixel of anti-aliasing, and a held rectangle that large
+    // meets its neighbours' and flushes the batch draw by draw. A path that
+    // inks nothing on the page changes nothing.
+    let Some(inked) = IRect::intersect(&inked, &on_canvas) else {
+        return true;
+    };
+    if held && let Some(batch) = batch.as_deref_mut() {
+        batch.hold(canvas, inked, effect, Some(coverage), opaque);
+        return true;
+    }
+    if let Some(batch) = batch {
+        batch.flush_meeting(canvas, inked);
+    }
     let mut paint = draw.paint.clone();
+    if !(exact_over
+        && exact_composite::blended(
+            &mut paint,
+            effect.clone(),
+            Some(coverage.clone()),
+            opaque,
+        ))
+    {
+        paint.set_shader(shaders::blend(BlendMode::DstIn, effect, coverage));
+    }
     paint
-        .set_shader(shaders::blend(BlendMode::DstIn, effect, coverage))
         .set_anti_alias(false)
         .set_style(PaintStyle::Fill)
         .set_path_effect(None);
     canvas.save();
     canvas.reset_matrix();
-    canvas.draw_irect(on_canvas, &paint);
+    canvas.draw_irect(inked, &paint);
     canvas.restore();
     true
 }
@@ -3609,20 +3693,26 @@ fn coverage_info(size: impl Into<ISize>) -> ImageInfo {
 /// Plays `pixels`, a draw dyed by a gradient as the page's pixels recording
 /// records it, onto `canvas`, a GPU canvas, as `gpu` says -- see [`OnGpu`]
 /// -- with what the run's atlas `found` for it. A draw made on the CPU, on
-/// a canvas whose pixels cannot be read, plays `pixels`.
+/// a canvas whose pixels cannot be read, plays `pixels`. A path the effect
+/// draws may be held in `batch` -- see [`drawn_with_effect`]; any other
+/// draw flushes it first.
 fn played_on_gpu(
     canvas: &SkCanvas,
     pixels: &GradientPixels,
     gpu: &OnGpu,
     found: Option<&Found>,
+    batch: &mut exact_composite::Batch,
 ) {
     let whole = on_whole_pixels(canvas);
+    if let OnGpu::Path(draw) = gpu
+        && whole
+        && drawn_with_effect(canvas, draw, found, Some(&mut *batch))
+    {
+        return;
+    }
+    // Any other draw may read or write what a held draw covers.
+    batch.flush(canvas);
     match gpu {
-        OnGpu::Path(draw)
-            if whole && drawn_with_effect(canvas, draw, found) =>
-        {
-            return;
-        }
         OnGpu::Effect { picture, .. } if whole => {
             picture.playback(canvas);
             return;
@@ -3780,6 +3870,7 @@ impl GradientDraw {
         };
         let found_for =
             |index: usize| found.get(index).and_then(Option::as_ref);
+        let mut batch = exact_composite::Batch::default();
         let mut index = 0;
         while index < self.draws.len() {
             // Draws one after another that the CPU makes over the GPU's
@@ -3826,6 +3917,9 @@ impl GradientDraw {
                         clip: None,
                     })
                     .collect();
+                if drawn.len() > 1 {
+                    batch.flush(canvas);
+                }
                 if drawn.len() > 1
                     && Format::of(canvas).is_some_and(|format| {
                         drawn_on_their_backdrop(canvas, &drawn, &format)
@@ -3847,10 +3941,12 @@ impl GradientDraw {
                     &piece.pixels,
                     &piece.gpu,
                     found_for(index),
+                    &mut batch,
                 ),
             }
             index += 1;
         }
+        batch.flush(canvas);
         canvas.restore();
     }
 
@@ -7480,6 +7576,7 @@ impl CutOp {
             false => vec![],
         };
         let draws = self.draws_for(target).iter().zip(&self.gpu);
+        let mut batch = exact_composite::Batch::default();
         for (index, (draw, on_gpu)) in draws.enumerate() {
             match on_gpu.as_ref().filter(|_| gpu) {
                 Some(on_gpu) => {
@@ -7489,14 +7586,17 @@ impl CutOp {
                         &GradientPixels::Recorded(draw.clone()),
                         on_gpu,
                         found.get(index).and_then(Option::as_ref),
+                        &mut batch,
                     );
                     canvas.restore();
                 }
                 None => {
+                    batch.flush(canvas);
                     canvas.draw_picture(draw, None, None);
                 }
             }
         }
+        batch.flush(canvas);
     }
 
     /// Draws the cut draws for `target` onto `canvas`, under whatever

@@ -670,6 +670,59 @@ describe("a gradient on a GPU canvas", () => {
         );
       },
     );
+
+  test(
+    "composites an anti-aliased edge source-over in the CPU canvas's bytes",
+    { skip },
+    () => {
+      // Ganesh composites in its fixed-function stage, which on Metal
+      // rounds a byte the other way near a tie, and on llvmpipe and NVIDIA
+      // rounds the source's term and the page's apart (#783). A triangle and
+      // a ring over a fill, opaque and at a globalAlpha, through a ramp; a
+      // pixel where the ramp filling the page already parts on its own, at
+      // a tie, is left out.
+      const ramp = (ctx) => {
+        const g = ctx.createLinearGradient(4, 0, 60, 0);
+        g.addColorStop(0, "rgb(250 200 0)");
+        g.addColorStop(1, "rgb(0 60 200)");
+        return g;
+      };
+      for (const alpha of [1, 0.6]) {
+        const over = (draw) => (ctx) => {
+          ctx.fillStyle = "rgb(200 220 240)";
+          ctx.fillRect(0, 0, 64, 64);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = ctx.strokeStyle = ramp(ctx);
+          draw(ctx);
+        };
+        const fill = over((ctx) => ctx.fillRect(0, 0, 64, 64)),
+          scene = over((ctx) => {
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(64, 10);
+            ctx.lineTo(10, 64);
+            ctx.fill();
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(40.3, 40.6, 14.2, 0, 2 * Math.PI);
+            ctx.stroke();
+          });
+        const [cpu, gpu] = [false, true].map((on) => drawn(on, 64, 64, scene)),
+          [cpuFill, gpuFill] = [false, true].map((on) =>
+            drawn(on, 64, 64, fill),
+          );
+        let differ = 0;
+        for (let i = 0; i < cpu.length; i++) {
+          const pixel = i & ~3,
+            tie = [0, 1, 2, 3].some(
+              (k) => cpuFill[pixel + k] !== gpuFill[pixel + k],
+            );
+          if (cpu[i] !== gpu[i] && !tie) differ++;
+        }
+        assert.equal(differ, 0, `at a globalAlpha of ${alpha}`);
+      }
+    },
+  );
 });
 
 // A canvas drawn with `drawImage` into a GPU canvas draws its colour glyphs
