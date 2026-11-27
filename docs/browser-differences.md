@@ -1931,8 +1931,9 @@ off at any distance from one -- see the llvmpipe and NVIDIA entries
 not meet share one snapshot of the pixels they cover and are each drawn over
 it; inside a layer each reads its destination through a blender. Against
 Ganesh's own composite on Metal that costs 1.03 to 1.07 times for 60 to 200
-fills, 1.31 times for 2,000 small ones, and 1.13 times for 200 cast with a
-shadow, which take a snapshot each. What stays apart: those ties; a byte
+fills and 1.31 times for 2,000 small ones. Fills cast with a shadow share
+the snapshot as well, wherever no shadow meets a fill drawn before it
+(#845). What stays apart: those ties; a byte
 along the edge of an opaque gradient the CPU makes on its float pipeline --
 one interpolated in a space other than the page's -- which keeps Ganesh's
 composite; a pixel whose coverage itself stands a level from

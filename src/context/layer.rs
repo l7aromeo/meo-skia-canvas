@@ -610,6 +610,10 @@ thread_local! {
     /// off, every run takes the GPU's own route, the reference the bytes a
     /// batch leaves beside its runs are held to.
     pub(crate) static BACKDROP_ROUTE: Cell<bool> = const { Cell::new(true) };
+    /// Whether [`play_entries`] holds gradient draws for one snapshot across
+    /// the page's runs on this thread: off, each run's are flushed as it
+    /// ends, the reference the bytes a page-long batch leaves are held to.
+    pub(crate) static PAGE_BATCH: Cell<bool> = const { Cell::new(true) };
     /// Whether [`played_on_a_root`] plays a layer's entries on a surface of
     /// their own on this thread: off, every layer's entries play inside it,
     /// where their runs are drawn by the GPU.
@@ -4192,7 +4196,7 @@ fn maps_whole_pixels(device: &Matrix) -> bool {
 
 impl GradientDraw {
     fn playback(&self, canvas: &SkCanvas, target: Target) {
-        self.played(canvas, target, None);
+        self.played(canvas, target, None, None);
     }
 
     /// The paths among `draws` whose effect a GPU canvas makes where the
@@ -4208,12 +4212,32 @@ impl GradientDraw {
     /// from what an atlas `found`, one for each draw, where one for more
     /// than this run was made -- see [`play_entries`] -- and from one of its
     /// own where not.
+    ///
+    /// The draws it holds for one snapshot -- see [`exact_composite::Batch`]
+    /// -- go into `page`, the batch of the page's playback, which flushes
+    /// them where something else meets them or the playback ends. A run
+    /// under a clip of its own holds them in a batch of its own instead,
+    /// flushed before its clip is lifted: a held draw is drawn under the
+    /// clip in force when it is flushed, so one held past the run would
+    /// lose the run's clip, and `page` is flushed first, before the clip
+    /// applies, for the same reason. Without `page` the run's batch is its
+    /// own whatever its clip.
     fn played(
         &self,
         canvas: &SkCanvas,
         target: Target,
         found: Option<&[Option<Found>]>,
+        page: Option<&mut exact_composite::Batch>,
     ) {
+        let mut run_batch = exact_composite::Batch::default();
+        let batch = match page {
+            Some(page) if self.clip.is_none() => page,
+            Some(page) => {
+                page.flush(canvas);
+                &mut run_batch
+            }
+            None => &mut run_batch,
+        };
         canvas.save();
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
@@ -4230,7 +4254,6 @@ impl GradientDraw {
         };
         let found_for =
             |index: usize| found.get(index).and_then(Option::as_ref);
-        let mut batch = exact_composite::Batch::default();
         let mut index = 0;
         while index < self.draws.len() {
             // Draws one after another that the CPU makes over the GPU's
@@ -4301,12 +4324,12 @@ impl GradientDraw {
                     &piece.pixels,
                     &piece.gpu,
                     found_for(index),
-                    &mut batch,
+                    batch,
                 ),
             }
             index += 1;
         }
-        batch.flush(canvas);
+        run_batch.flush(canvas);
         canvas.restore();
     }
 
@@ -7017,6 +7040,15 @@ fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
 /// one read back of the pixels they ink, with the entries between them that
 /// meet none of them -- see [`replayed_on_their_backdrop`] -- closing an
 /// open batch first, so that the read finds what it drew.
+///
+/// A GPU canvas's gradient draws composited for one snapshot -- see
+/// [`exact_composite::Batch`] -- are held across the page's gradient runs,
+/// not run by run, and drawn where another entry is about to draw over what
+/// they cover, and where the playback ends: a chain casting a shadow alone,
+/// followed by the run it is the shadow of, draws them only where its reach
+/// meets one, and any other entry draws them all first. Held run by run,
+/// 16 discs each casting a shadow took a snapshot each, where 16 casting
+/// none took one between them.
 pub(crate) fn play_entries(
     entries: &[Layer],
     features: &[VectorFeatures],
@@ -7057,13 +7089,16 @@ pub(crate) fn play_entries(
     // together -- see `BatchScope` -- the batch drawn before any other
     // entry plays.
     let mut batch = None;
+    let mut held = exact_composite::Batch::default();
     let mut at = 0;
     while at < entries.len() {
         if paced {
             // A batch of colour runs still open draws when it closes: closed
-            // first, so that the read back finds what it drew.
+            // first, so that the read back finds what it drew, and so do the
+            // draws held for a snapshot.
             if cpu_run_at(entries, at).is_some() {
                 batch = None;
+                held.flush(canvas);
             }
             let played = replayed_on_their_backdrop(
                 &entries[at..],
@@ -7074,6 +7109,12 @@ pub(crate) fn play_entries(
                 batch = None;
                 at += played;
                 continue;
+            }
+        }
+        if !matches!(entries[at], Layer::Gradient(_)) {
+            match cast_reach(&entries[at..], canvas) {
+                Some(reach) => held.flush_meeting(canvas, reach),
+                None => held.flush(canvas),
             }
         }
         match &entries[at] {
@@ -7116,7 +7157,14 @@ pub(crate) fn play_entries(
                 let mut from = 0;
                 for (k, op) in ops.iter().enumerate() {
                     let to = from + op.draws.len();
-                    op.played(canvas, target, Some(&found[from..to]));
+                    op.played(
+                        canvas,
+                        target,
+                        Some(&found[from..to]),
+                        Some(&mut held),
+                    );
+                    #[cfg(test)]
+                    run_played(&mut held, canvas);
                     from = to;
                     if let Some(features) =
                         features.get(at + k).filter(|_| paced)
@@ -7134,7 +7182,14 @@ pub(crate) fn play_entries(
         let run = match &entries[at] {
             Layer::Clipped(piece) if shares_the_clip(piece) => piece.run,
             entry => {
-                entry.playback(canvas, target);
+                match entry {
+                    Layer::Gradient(op) => {
+                        op.played(canvas, target, None, Some(&mut held));
+                        #[cfg(test)]
+                        run_played(&mut held, canvas);
+                    }
+                    entry => entry.playback(canvas, target),
+                }
                 if let Some(features) = features.get(at).filter(|_| paced) {
                     pacing::played(canvas, offscreen_layers(entry, *features));
                 }
@@ -7155,6 +7210,43 @@ pub(crate) fn play_entries(
             .collect();
         at += pieces.len();
         Clipped::play_run(&pieces, &pieces[0].clip, canvas, target, bounded);
+    }
+    held.flush(canvas);
+}
+
+/// What the entry leading `entries` can draw on `canvas`, in its device
+/// pixels, where it is a chain played alone: one followed by a gradient
+/// run, or by nothing, which [`play_shared_chains`] plays with no chain
+/// after it. A chain followed by anything else may be played with the
+/// chains after it, whose reaches this does not ask, so it is `None` for
+/// that, as for any entry that is not a chain.
+///
+/// The reach is the chain's whole, as far as its blurs' taps carry -- six
+/// of their sigmas, see [`Group::chain_reach_under`] -- not as far as an
+/// eight-bit page shows its tail, which is under half of that. An opaque
+/// shadow blurred by 20, a sigma of 10 and a reach of 61 pixels, cast
+/// beside a held fill moves the fill's bytes 28 pixels from the caster and
+/// not 30, so a reach 32 pixels narrower draws that page the same. It is
+/// kept whole on purpose: a fill in the band past what the bytes show
+/// costs an earlier flush and never a byte, where a reach cut to the bytes
+/// would rest on how the tail rounds over each backdrop.
+fn cast_reach(entries: &[Layer], canvas: &SkCanvas) -> Option<IRect> {
+    let [Layer::Group(group), rest @ ..] = entries else {
+        return None;
+    };
+    if !matches!(rest.first(), None | Some(Layer::Gradient(_))) {
+        return None;
+    }
+    group.chain_reach_under(&canvas.local_to_device_as_3x3())
+}
+
+/// After a gradient run plays into the page's batch: on a thread
+/// [`PAGE_BATCH`] is off on, the batch is flushed, as a batch of the run's
+/// own would be at its end.
+#[cfg(test)]
+fn run_played(held: &mut exact_composite::Batch, canvas: &SkCanvas) {
+    if !PAGE_BATCH.get() {
+        held.flush(canvas);
     }
 }
 
