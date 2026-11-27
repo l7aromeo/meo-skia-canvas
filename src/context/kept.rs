@@ -359,14 +359,6 @@ impl Stored for KeptChain {
     }
 }
 
-/// Every chain result kept, for every thread.
-static CHAINS: LazyLock<Mutex<Store<ChainKey, KeptChain>>> =
-    LazyLock::new(|| Mutex::new(Store::new(KEPT_BUDGET)));
-
-/// The chain keys seen once lately -- see [`Seen`].
-static SEEN_CHAINS: LazyLock<Mutex<Seen<ChainKey>>> =
-    LazyLock::new(|| Mutex::new(Seen::new()));
-
 /// A chain about to run on the CPU, by what decides its result: its key,
 /// and the pixels of its input that are not transparent by construction.
 pub(crate) struct ChainInput {
@@ -472,7 +464,7 @@ impl ChainInput {
         if !KEPT.get() {
             return None;
         }
-        let kept = CHAINS.lock().get(&self.key);
+        let kept = with_stores(|stores| stores.chains.lock().get(&self.key));
         let same = kept.as_ref().map(|kept| {
             rows_are(&self.input, &kept.input) && self.cast == kept.cast
         });
@@ -488,7 +480,7 @@ impl ChainInput {
     /// Keeps `output` as this input's result, once its key has been seen
     /// before -- see [`Seen`].
     pub(crate) fn keep(self, output: Image) {
-        if !seen_before(&SEEN_CHAINS, &self.key) {
+        if !with_stores(|stores| seen_before(&stores.seen_chains, &self.key)) {
             return;
         }
         let Some(input) = rows_copied(&self.input) else {
@@ -498,20 +490,22 @@ impl ChainInput {
         CAST_BYTES.set(
             CAST_BYTES.get() + self.cast.as_ref().map_or(0, |cast| cast.len()),
         );
-        CHAINS.lock().put(
-            self.key,
-            KeptChain {
-                input,
-                cast: self.cast,
-                output,
-            },
-        );
+        with_stores(|stores| {
+            stores.chains.lock().put(
+                self.key,
+                KeptChain {
+                    input,
+                    cast: self.cast,
+                    output,
+                },
+            );
+        });
     }
 
     /// [`Self::keep`], as at the key's second sighting.
     #[cfg(test)]
     pub(crate) fn keep_seen(self, output: Image) {
-        seen_before(&SEEN_CHAINS, &self.key);
+        with_stores(|stores| seen_before(&stores.seen_chains, &self.key));
         self.keep(output);
     }
 }
@@ -557,14 +551,6 @@ impl Stored for KeptCoverage {
         self.input.len() + self.output.bytes()
     }
 }
-
-/// Every coverage route result kept, for every thread.
-static COVERAGES: LazyLock<Mutex<Store<CoverageKey, KeptCoverage>>> =
-    LazyLock::new(|| Mutex::new(Store::new(KEPT_BUDGET)));
-
-/// The coverage keys seen once lately -- see [`Seen`].
-static SEEN_COVERAGES: LazyLock<Mutex<Seen<CoverageKey>>> =
-    LazyLock::new(|| Mutex::new(Seen::new()));
 
 /// A coverage about to be blurred and coloured, by what decides its result.
 pub(crate) struct CoverageInput {
@@ -617,7 +603,7 @@ impl CoverageInput {
         if !KEPT.get() {
             return None;
         }
-        let kept = COVERAGES.lock().get(&self.key);
+        let kept = with_stores(|stores| stores.coverages.lock().get(&self.key));
         #[cfg(test)]
         let refused = kept.as_ref().is_some_and(|k| *k.input != *self.input);
         let found =
@@ -634,34 +620,106 @@ impl CoverageInput {
     /// Keeps `output` as this coverage's result, once its key has been seen
     /// before -- see [`Seen`].
     pub(crate) fn keep(self, output: Outcome) {
-        if !seen_before(&SEEN_COVERAGES, &self.key) {
+        if !with_stores(|stores| seen_before(&stores.seen_coverages, &self.key))
+        {
             return;
         }
-        COVERAGES.lock().put(
-            self.key,
-            KeptCoverage {
-                input: self.input.into(),
-                output,
-                at: self.at,
-            },
-        );
+        with_stores(|stores| {
+            stores.coverages.lock().put(
+                self.key,
+                KeptCoverage {
+                    input: self.input.into(),
+                    output,
+                    at: self.at,
+                },
+            );
+        });
     }
 
     /// [`Self::keep`], as at the key's second sighting.
     #[cfg(test)]
     pub(crate) fn keep_seen(self, output: Outcome) {
-        seen_before(&SEEN_COVERAGES, &self.key);
+        with_stores(|stores| seen_before(&stores.seen_coverages, &self.key));
         self.keep(output);
     }
+}
+
+/// The kept results and the keys seen once lately, of each kind.
+struct Stores {
+    /// Every chain result kept.
+    chains: Mutex<Store<ChainKey, KeptChain>>,
+    /// The chain keys seen once lately -- see [`Seen`].
+    seen_chains: Mutex<Seen<ChainKey>>,
+    /// Every coverage route result kept.
+    coverages: Mutex<Store<CoverageKey, KeptCoverage>>,
+    /// The coverage keys seen once lately -- see [`Seen`].
+    seen_coverages: Mutex<Seen<CoverageKey>>,
+}
+
+impl Stores {
+    fn new() -> Self {
+        Self {
+            chains: Mutex::new(Store::new(KEPT_BUDGET)),
+            seen_chains: Mutex::new(Seen::new()),
+            coverages: Mutex::new(Store::new(KEPT_BUDGET)),
+            seen_coverages: Mutex::new(Seen::new()),
+        }
+    }
+}
+
+/// The stores every thread keeps its results in: pages are played back on
+/// rayon workers.
+static STORES: LazyLock<Stores> = LazyLock::new(Stores::new);
+
+#[cfg(test)]
+thread_local! {
+    /// Stores of this thread's own, which [`with_stores`] hands out in place
+    /// of [`STORES`] while an [`OwnKeptResults`] lives.
+    static OWN: std::cell::RefCell<Option<std::rc::Rc<Stores>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Stores of the calling thread's own for as long as the guard lives: for a
+/// test that counts what it takes. In the shared stores, a test drawing in
+/// parallel files entries that turn this one's away, and one that calls
+/// [`release_kept_results`] drops what this one kept between its pages.
+#[cfg(test)]
+pub(crate) struct OwnKeptResults;
+
+#[cfg(test)]
+impl OwnKeptResults {
+    pub(crate) fn new() -> Self {
+        OWN.with_borrow_mut(|own| *own = Some(std::rc::Rc::new(Stores::new())));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnKeptResults {
+    fn drop(&mut self) {
+        OWN.with_borrow_mut(|own| *own = None);
+    }
+}
+
+/// `work` on the calling thread's own stores while an [`OwnKeptResults`]
+/// lives, and on [`STORES`] otherwise.
+fn with_stores<R>(work: impl FnOnce(&Stores) -> R) -> R {
+    #[cfg(test)]
+    if let Some(own) = OWN.with_borrow(Option::clone) {
+        return work(&own);
+    }
+    work(&STORES)
 }
 
 /// Drops every kept result: with the page cache's release, when rendering
 /// has been idle.
 pub(crate) fn release_kept_results() {
-    CHAINS.lock().release();
-    COVERAGES.lock().release();
-    *SEEN_CHAINS.lock() = Seen::new();
-    *SEEN_COVERAGES.lock() = Seen::new();
+    with_stores(|stores| {
+        stores.chains.lock().release();
+        stores.coverages.lock().release();
+        *stores.seen_chains.lock() = Seen::new();
+        *stores.seen_coverages.lock() = Seen::new();
+    });
 }
 
 #[cfg(test)]
@@ -675,7 +733,8 @@ mod tests {
     };
 
     use super::{
-        ChainInput, CoverageInput, FOUND, Found, KEPT, SHARED, digest,
+        ChainInput, CoverageInput, FOUND, Found, KEPT, OwnKeptResults, SHARED,
+        digest,
     };
     use crate::{
         canvas::{Canvas, CanvasOptions},
@@ -707,6 +766,7 @@ mod tests {
         n: usize,
         kept: bool,
     ) -> Vec<u8> {
+        let _own = OwnKeptResults::new();
         KEPT.set(kept);
         let mut canvas = cpu_page(colour);
         let ctx = canvas.context();
@@ -799,6 +859,7 @@ mod tests {
         n: usize,
         kept: bool,
     ) -> Vec<u8> {
+        let _own = OwnKeptResults::new();
         KEPT.set(kept);
         let mut canvas = cpu_page(colour);
         let ctx = canvas.context();

@@ -11623,8 +11623,9 @@ mod shadow_run_tests {
     fn pages(pages: &[Page], filter: &str, kept: bool) -> Vec<Paged> {
         use crate::context::{
             chain::{CAST_LAYERS, CAST_REGION},
-            kept::{CAST_BYTES, FOUND, KEPT},
+            kept::{CAST_BYTES, FOUND, KEPT, OwnKeptResults},
         };
+        let _own = OwnKeptResults::new();
         FontLibrary::new()
             .use_paths(
                 Some(OSWALD),
