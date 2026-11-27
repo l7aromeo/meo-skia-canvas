@@ -73,6 +73,17 @@ impl VectorFeatures {
     /// [`Self::CANVAS_PATTERN`] is -- see `context::layer::tiles_exactly`.
     /// Never without [`Self::EXOTIC_SHADER`].
     pub(crate) const CANVAS_PATTERN_ALIGNED: Self = Self(1 << 10);
+    /// An eraser: a `putImageData`, or a `clearRect` that does not clear the
+    /// whole page, each of which erases a region it knows -- see
+    /// `context::layer::Erase` -- under `BlendMode::Clear`. A PDF writes it
+    /// as it writes that blend, and refuses it wherever it refuses
+    /// [`Self::BLEND_MODE`] -- see `context::page::pdf_cannot`. An SVG,
+    /// whose device writes no blend, writes what lies beneath the region
+    /// clipped away from it instead -- see `Page::play_as_document` in
+    /// `context::page` -- so that an eraser does not rasterize the page
+    /// beneath it, as a blend that needs a backdrop does. Never with
+    /// [`Self::BLEND_MODE`] for the eraser itself.
+    pub(crate) const ERASE: Self = Self(1 << 11);
     /// A sweep gradient, a gradient mixed in a working space of its own, a
     /// procedural shader, or a canvas's pattern, which is a picture shader.
     /// SVG names four paint servers and none of these is among them.
@@ -85,14 +96,16 @@ impl VectorFeatures {
     /// one, plain, translucent or nested.
     pub(crate) const LAYER: Self = Self(1 << 5);
     /// A blend Skia's PDF backend writes through a soft mask -- see
-    /// [`blend_features`]. Never without [`Self::BLEND_MODE`].
+    /// [`blend_features`]. Never without [`Self::BLEND_MODE`] or
+    /// [`Self::ERASE`].
     pub(crate) const MASKED_BLEND: Self = Self(1 << 7);
     /// A mask filter.
     pub(crate) const MASK_FILTER: Self = Self(1 << 2);
     /// A blend written through a soft mask, inside a group: a `saveLayer`,
     /// or a canvas drawn in through a layer. CoreGraphics renders one under
     /// a page scaled by a density other than 1 otherwise -- see
-    /// `context::page::pdf_cannot`. Never without [`Self::BLEND_MODE`].
+    /// `context::page::pdf_cannot`. Never without [`Self::BLEND_MODE`] or
+    /// [`Self::ERASE`].
     pub(crate) const NESTED_MASKED_BLEND: Self = Self(1 << 8);
     /// What the PDF backend gets wrong, which is a few blend modes and a
     /// canvas's pattern: a conic gradient, a shadow and a `blur()` all come
@@ -118,7 +131,8 @@ impl VectorFeatures {
             | Self::BLEND_MODE.0
             | Self::UNMATCHED_BLEND.0
             | Self::PICTURE_PAINT.0
-            | Self::LAYER.0,
+            | Self::LAYER.0
+            | Self::ERASE.0,
     );
     /// A blend past source-over that a PDF cannot write -- see
     /// [`blend_features`]. Never without [`Self::BLEND_MODE`].
@@ -149,13 +163,19 @@ impl VectorFeatures {
 
     /// What a group asks of a vector backend for holding draws that ask for
     /// this: [`Self::NESTED_MASKED_BLEND`] where one of them blends through
-    /// a soft mask, at any depth, and nothing else. What the group asks for
-    /// itself, and what its contents ask beside that, are the caller's to
-    /// add.
+    /// a soft mask, at any depth, and nothing else -- with the blend it came
+    /// from, [`Self::BLEND_MODE`], or [`Self::ERASE`] where the only one is
+    /// an eraser's, which an SVG writes without a backdrop. What the group
+    /// asks for itself, and what its contents ask beside that, are the
+    /// caller's to add.
     pub(crate) fn nested(self) -> Self {
         let masked = Self::MASKED_BLEND.with(Self::NESTED_MASKED_BLEND);
+        let blend = match self.refused_by(Self::BLEND_MODE) {
+            true => Self::BLEND_MODE,
+            false => Self::ERASE,
+        };
         match self.refused_by(masked) {
-            true => Self::NESTED_MASKED_BLEND.with(Self::BLEND_MODE),
+            true => Self::NESTED_MASKED_BLEND.with(blend),
             false => Self::PLAIN,
         }
     }
@@ -210,6 +230,13 @@ pub(crate) fn blend_features(
         | BlendMode::Modulate => masked,
         _ => blend,
     }
+}
+
+/// What an eraser asks of a vector backend -- see [`VectorFeatures::ERASE`]:
+/// `BlendMode::Clear`, which a PDF writes through a soft mask as
+/// [`blend_features`] says of it, as an erasure rather than a blend.
+pub(crate) fn eraser_features() -> VectorFeatures {
+    VectorFeatures::ERASE.with(VectorFeatures::MASKED_BLEND)
 }
 
 /// The resolution a canvas exports at [`EncodeOptions::density`] of 1.
