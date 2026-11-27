@@ -858,9 +858,8 @@ fn a_gradient_paths_edge_is_the_cpus() {
     }
 }
 
-/// A path wider than a run's atlas -- see `layer::atlas` -- takes an image
-/// of its own coverage, and the CPU's edge as well, cut where the page ends
-/// for one that crosses it.
+/// A path wider than a run's atlas -- see `layer::atlas` -- takes the CPU's
+/// edge as well, cut where the page ends for one that crosses it.
 #[test]
 fn a_gradient_path_past_the_atlas_takes_the_cpus_edge() {
     if !common::has_gpu() {
@@ -887,6 +886,38 @@ fn a_gradient_path_past_the_atlas_takes_the_cpus_edge() {
     assert_cpus_edge(size, "a ramp", &triangle, &smooth);
     assert_cpus_edge(size, "past the edge, a hard stop", &past, &hard);
     assert_cpus_edge(size, "past the edge, a ramp", &past, &smooth);
+}
+
+/// Paths wider than a run's atlas, several in one run, share an alpha
+/// atlas of their coverage -- see `layer::atlas` -- and each takes the CPU's
+/// edge from it, the one crossing the page's edge cut where the page ends.
+#[test]
+fn wide_gradient_paths_in_one_run_take_the_cpus_edge() {
+    if !common::has_gpu() {
+        return;
+    }
+    let size = (2600.0, 200.0);
+    let triangles = |ctx: &mut Context2D| {
+        for (i, right) in
+            [2590.4, 2210.7, 2900.4, 2450.1].into_iter().enumerate()
+        {
+            let top = 48.0 * i as f32 + 4.7;
+            ctx.begin_path();
+            ctx.move_to(10.5 + 3.3 * i as f32, top + 40.3);
+            ctx.line_to(1300.25, top);
+            ctx.line_to(right, top + 37.5);
+            ctx.fill(FillRule::NonZero);
+        }
+    };
+    let hard = || {
+        hard_stop(Point {
+            x: 1300.0,
+            y: 100.0,
+        })
+    };
+    let smooth = || ramp(size.0);
+    assert_cpus_edge(size, "a hard stop", &triangles, &hard);
+    assert_cpus_edge(size, "a ramp", &triangles, &smooth);
 }
 
 /// A gradient path's edge on a GPU canvas is the CPU canvas's wherever the

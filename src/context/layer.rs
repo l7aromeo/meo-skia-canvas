@@ -3525,6 +3525,19 @@ struct Slot {
 struct Found {
     effect: Option<Exact>,
     slot: Option<Slot>,
+    /// For a path wider than the effect's atlas, where the run's alpha atlas
+    /// holds its coverage.
+    wide: Option<WideSlot>,
+}
+
+/// Where the alpha atlas of a run's paths too wide for its effect atlas
+/// holds a path's coverage: `at`, in `mask`, holds the device pixel one up
+/// and one left of the path's `area`, as a [`Slot`]'s does. Such a path
+/// takes the effect itself, so only its coverage needs a place.
+#[derive(Clone)]
+struct WideSlot {
+    mask: Image,
+    at: IPoint,
 }
 
 /// How far an atlas slot reaches past the path's area on every side.
@@ -3537,13 +3550,14 @@ const ATLAS_WIDTH_PX: i32 = 2048;
 /// One image holding the effect of each of `draws` that needs one, drawn in
 /// one pass onto a surface made from `canvas`, and one of the CPU's
 /// coverage of each at the same place, drawn on the CPU and uploaded once;
-/// and, by index, what was found for each path: its effect, and where its
-/// images are -- none for one on whole pixels, which takes the effect
-/// itself, or for one that does not fit, which takes the effect itself
-/// through a coverage image of its own -- see [`drawn_with_effect`].
-/// `None` for a draw that is no path. With an image of its own for each
-/// draw, 2000 small gradient fills cost about eight times what Ganesh's own
-/// gradient did.
+/// one more holding the CPU's coverage of every path wider than that atlas,
+/// up to the GPU's own limit, which takes the effect itself; and, by index,
+/// what was found for each path: its effect, and where its images are --
+/// none for one on whole pixels, which takes the effect itself, or for one
+/// that fits neither, which takes the effect itself through a coverage
+/// image of its own -- see [`drawn_with_effect`]. `None` for a draw that is
+/// no path. With an image of its own for each draw, 2000 small gradient
+/// fills cost about eight times what Ganesh's own gradient did.
 fn atlas(
     canvas: &SkCanvas,
     draws: &[Option<&GradientPath>],
@@ -3562,9 +3576,12 @@ fn atlas(
         })
         .collect();
     let mut slots: Vec<Option<IPoint>> = vec![None; draws.len()];
+    let mut wide_slots: Vec<Option<IPoint>> = vec![None; draws.len()];
     let limit = max_texture_size(canvas);
     let width_limit = ATLAS_WIDTH_PX.min(limit);
     let (mut x, mut y, mut row, mut width) = (0, 0, 0, 0);
+    // The wide paths' shelf: as wide as the GPU takes.
+    let (mut wide_x, mut wide_y, mut wide_row, mut wide_width) = (0, 0, 0, 0);
     // The page's pixels from its origin to the farthest corner of a path
     // the atlas holds, which their coverage is drawn over.
     let mut extent = ISize::new(0, 0);
@@ -3580,20 +3597,34 @@ fn atlas(
             draw.area.width() + 2 * SLOT_MARGIN_PX,
             draw.area.height() + 2 * SLOT_MARGIN_PX,
         );
+        let reaching = ISize::new(
+            extent.width.max(draw.area.right),
+            extent.height.max(draw.area.bottom),
+        );
+        if w > limit || !DeviceCoverage::fits(reaching) {
+            continue;
+        }
         if w > width_limit {
+            if wide_x + w > limit {
+                (wide_x, wide_y, wide_row) = (0, wide_y + wide_row, 0);
+            }
+            let grown = ISize::new(
+                wide_width.max(wide_x + w),
+                wide_y + wide_row.max(h),
+            );
+            if grown.height > limit || !DeviceCoverage::fits(grown) {
+                continue;
+            }
+            extent = reaching;
+            wide_slots[index] = Some(IPoint::new(wide_x, wide_y));
+            (wide_x, wide_row, wide_width) =
+                (wide_x + w, wide_row.max(h), wide_width.max(wide_x + w));
             continue;
         }
         if x + w > width_limit {
             (x, y, row) = (0, y + row, 0);
         }
         if y + h > limit {
-            continue;
-        }
-        let reaching = ISize::new(
-            extent.width.max(draw.area.right),
-            extent.height.max(draw.area.bottom),
-        );
-        if !DeviceCoverage::fits(reaching) {
             continue;
         }
         extent = reaching;
@@ -3639,28 +3670,24 @@ fn atlas(
         }
         Some(surface.image_snapshot())
     });
-    // The CPU's coverage of each path the atlas holds, at the same slots.
+    // The CPU's coverage of each path the atlas holds, at the same slots,
+    // and of each wide path, at its slot in an atlas of their own.
+    let mut device = DeviceCoverage::new(extent);
     let mask = made.as_ref().and_then(|_| {
-        let mut surface =
-            started::raster(&coverage_info((width, height)), None, None)?;
-        surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-        let mut device = DeviceCoverage::new(extent)?;
-        for (draw, at) in draws.iter().zip(&slots) {
-            let (Some(draw), Some(at)) = (draw, at) else {
-                continue;
-            };
-            // The slot's pixel `at` is the page's pixel a margin outside
-            // the path's area.
-            let to = IPoint::new(at.x + SLOT_MARGIN_PX, at.y + SLOT_MARGIN_PX);
-            device.copy(draw, &mut surface, to)?;
-        }
-        Some(surface.image_snapshot())
+        coverage_atlas(draws, &slots, (width, height), &mut device)
     });
+    let wide_mask = coverage_atlas(
+        draws,
+        &wide_slots,
+        (wide_width, wide_y + wide_row),
+        &mut device,
+    );
     draws
         .iter()
         .zip(effects)
         .zip(slots)
-        .map(|((draw, effect), at)| {
+        .zip(wide_slots)
+        .map(|(((draw, effect), at), wide_at)| {
             draw.map(|_| Found {
                 effect,
                 slot: at.and_then(|at| {
@@ -3670,9 +3697,43 @@ fn atlas(
                         mask: mask.clone(),
                     })
                 }),
+                wide: wide_at.and_then(|at| {
+                    Some(WideSlot {
+                        mask: wide_mask.clone()?,
+                        at,
+                    })
+                }),
             })
         })
         .collect()
+}
+
+/// An alpha image `size` pixels of the CPU's coverage of each of `draws`
+/// with a slot in `slots`, drawn at the page's own pixels on `device` and
+/// copied in -- see [`DeviceCoverage`]. `None` where no draw has a slot, or
+/// any cannot be drawn.
+fn coverage_atlas(
+    draws: &[Option<&GradientPath>],
+    slots: &[Option<IPoint>],
+    size: (i32, i32),
+    device: &mut Option<DeviceCoverage>,
+) -> Option<Image> {
+    if slots.iter().all(Option::is_none) {
+        return None;
+    }
+    let device = device.as_mut()?;
+    let mut surface = started::raster(&coverage_info(size), None, None)?;
+    surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+    for (draw, at) in draws.iter().zip(slots) {
+        let (Some(draw), Some(at)) = (draw, at) else {
+            continue;
+        };
+        // The slot's pixel `at` is the page's pixel a margin outside the
+        // path's area.
+        let to = IPoint::new(at.x + SLOT_MARGIN_PX, at.y + SLOT_MARGIN_PX);
+        device.copy(draw, &mut surface, to)?;
+    }
+    Some(surface.image_snapshot())
 }
 
 /// The widest and tallest texture the GPU `canvas` draws on takes.
@@ -3697,9 +3758,11 @@ fn max_texture_size(_canvas: &SkCanvas) -> i32 {
 /// A rectangle on whole pixels is the effect itself. Any other path is an
 /// aliased rectangle over the pixels it inks, its effect -- the atlas's
 /// image of it, or the effect itself for one the atlas does not hold --
-/// masked by the CPU's coverage of the path -- see [`DeviceCoverage`] -- so
-/// that its edge is the CPU canvas's, as its shadow and its blur already
-/// are, made on the CPU -- see `Context2D::chain_input`. Drawn through the
+/// masked by the CPU's coverage of the path, from the run's atlas, its
+/// atlas of paths too wide for that, or an image of its own -- see
+/// [`DeviceCoverage`] -- so that its edge is the CPU canvas's, as its
+/// shadow and its blur already are, made on the CPU -- see
+/// `Context2D::chain_input`. Drawn through the
 /// path, it took Ganesh's anti-aliasing instead, up to 125 levels from the
 /// CPU canvas along a hard-stop conic's edge.
 ///
@@ -3791,17 +3854,32 @@ fn drawn_with_effect(
                 .to_shader(DECAL, nearest(), Some(&local))
                 .zip(mask.to_shader(DECAL, nearest(), Some(&local)))
         }
-        _ => coverage_image(draw, reach).and_then(|mask| {
-            let local = Matrix::translate((
-                on_canvas.left as f32,
-                on_canvas.top as f32,
-            ));
-            effect.placed(&draw.matrix, -shift).zip(mask.to_shader(
-                DECAL,
-                nearest(),
-                Some(&local),
-            ))
-        }),
+        _ => match found.and_then(|found| found.wide.as_ref()) {
+            // The wide atlas's slot `at` holds the page's pixel `reach`'s
+            // corner.
+            Some(WideSlot { mask, at }) => {
+                let local = Matrix::translate((
+                    (on_canvas.left - at.x) as f32,
+                    (on_canvas.top - at.y) as f32,
+                ));
+                effect.placed(&draw.matrix, -shift).zip(mask.to_shader(
+                    DECAL,
+                    nearest(),
+                    Some(&local),
+                ))
+            }
+            None => coverage_image(draw, reach).and_then(|mask| {
+                let local = Matrix::translate((
+                    on_canvas.left as f32,
+                    on_canvas.top as f32,
+                ));
+                effect.placed(&draw.matrix, -shift).zip(mask.to_shader(
+                    DECAL,
+                    nearest(),
+                    Some(&local),
+                ))
+            }),
+        },
     };
     let Some((effect, coverage)) = layers else {
         return false;
@@ -3852,10 +3930,12 @@ fn nearest() -> SamplingOptions {
 const DECAL: (TileMode, TileMode) = (TileMode::Decal, TileMode::Decal);
 
 /// The most bytes the surface of a [`DeviceCoverage`] takes, at one a
-/// pixel: an 8192 pixel square page's worth. Chosen rather than derived, so
-/// that a page up to that size draws its paths' edges through the effect,
-/// and a larger one holds no more than that while it plays. A path past it
-/// is drawn on the CPU, whose route is exact too -- see [`played_on_gpu`].
+/// pixel: an 8192 pixel square page's worth, and the most the alpha atlas
+/// of a run's paths too wide for its effect atlas takes. Chosen rather than
+/// derived, so that a page up to that size draws its paths' edges through
+/// the effect, and a larger one holds no more than that while it plays. A
+/// path past it is drawn on the CPU, whose route is exact too -- see
+/// [`played_on_gpu`].
 const DEVICE_COVERAGE_BYTES: usize = 8192 * 8192;
 
 /// An alpha surface whose pixel (x, y) is the page's device pixel (x, y),
@@ -3934,9 +4014,11 @@ impl DeviceCoverage {
 }
 
 /// The CPU's coverage of `draw`'s path over `reach`, the page's device
-/// pixels, as an alpha image of its own: for a draw the run's atlas does
-/// not hold -- see [`atlas`].
+/// pixels, as an alpha image of its own: for a draw neither of the run's
+/// atlases holds -- see [`atlas`].
 fn coverage_image(draw: &GradientPath, reach: IRect) -> Option<Image> {
+    #[cfg(test)]
+    COVERAGE_IMAGES.with(|made| made.set(made.get() + 1));
     let mut surface =
         started::raster(&coverage_info(reach.size()), None, None)?;
     surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
@@ -3946,6 +4028,13 @@ fn coverage_image(draw: &GradientPath, reach: IRect) -> Option<Image> {
         IPoint::new(draw.area.left - reach.left, draw.area.top - reach.top),
     )?;
     Some(surface.image_snapshot())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many coverage images of their own [`coverage_image`] has made
+    /// on this thread.
+    static COVERAGE_IMAGES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// An alpha image `size` pixels, which coverage is drawn into.
@@ -10602,6 +10691,65 @@ mod shared_chain_tests {
                  each elsewhere"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod wide_atlas_tests {
+    //! Which gradient paths too wide for a run's effect atlas share the
+    //! run's alpha atlas -- see [`atlas`] -- rather than each take an image
+    //! of its own coverage. Their bytes are held to the CPU canvas's in
+    //! `tests/gpu_gradient.rs`.
+
+    use super::COVERAGE_IMAGES;
+    use crate::prelude::*;
+
+    /// How many coverage images of their own `paths` triangles, each
+    /// `width` pixels across and one under the next, take when filled with
+    /// a ramp on a GPU page. `None` without a GPU.
+    fn images(paths: usize, width: f32) -> Option<usize> {
+        let page = (width + 40.0, 30.0 * paths as f32 + 20.0);
+        let mut canvas = Canvas::new(page.0, page.1);
+        canvas.set_gpu(true);
+        if canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let ctx = canvas.context();
+        let stop = |position, css| GradientStop {
+            position,
+            color: RgbaLinear::from_css(css).expect("a colour"),
+        };
+        let shader = Shader::linear_gradient(
+            Point { x: 10.0, y: 0.0 },
+            Point { x: width, y: 0.0 },
+            &[stop(0.0, "orange"), stop(1.0, "blue")],
+            GradientColorSpace::Srgb,
+        )
+        .expect("two stops describe a gradient");
+        ctx.set_fill_shader(&shader);
+        for i in 0..paths {
+            let top = 30.0 * i as f32 + 10.3;
+            ctx.begin_path();
+            ctx.move_to(10.5, top + 25.0);
+            ctx.line_to(width / 2.0 + 0.25, top);
+            ctx.line_to(width + 10.4, top + 22.2);
+            ctx.fill(FillRule::NonZero);
+        }
+        let before = COVERAGE_IMAGES.with(|made| made.get());
+        ctx.get_image_data(0.0, 0.0, page.0, page.1)
+            .expect("image data");
+        Some(COVERAGE_IMAGES.with(|made| made.get()) - before)
+    }
+
+    /// Paths past the effect atlas's width, in one run, share one alpha
+    /// atlas: none takes an image of its own coverage.
+    #[test]
+    fn wide_gradient_paths_share_one_coverage_atlas() {
+        let Some(made) = images(4, 2500.0) else {
+            eprintln!("skipped: no GPU engine");
+            return;
+        };
+        assert_eq!(made, 0, "coverage images of their own");
     }
 }
 
