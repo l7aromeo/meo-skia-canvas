@@ -1918,6 +1918,36 @@ The glyphs stay vector. Writing the form so that every reader agrees -- the
 layer's device given the page's transform and its form a matching matrix --
 is a change to Skia's PDF backend, tracked as #664. PDFium is not measured.
 
+**A page never cleared, into which canvases keep being drawn as images, holds
+one image of its own pixels for what it drew before, and an export at a
+density other than 1 draws that part from those pixels, scaled.** A canvas
+drawn into another with `drawImage` is its own pixels, which the
+page holds until it is erased, one image a draw. Once those images come to more
+than `RECORDED_IMAGE_PAGES` (4) times the bytes of the page's own pixels at
+density 1, with no `saveLayer` open, the page keeps its pixels as one image and
+lets the rest go (`PageRecorder::flatten`): a 400 by 300 canvas drawn at half
+alpha into one never cleared, 600 frames, grows 27 to 33 MB where 7.1.0 grew
+88.4 MB. `getImageData`, and a PNG or JPEG at density 1, are byte for byte what
+they were, on the CPU and on Metal (`a_flattened_page_draws_as_it_did`). At
+another density what the page drew before the flatten is that image scaled,
+where it was drawn at that density. A browser has no density to export at, so
+there is nothing to compare.
+
+A PDF or an SVG of such a page writes what it drew as vectors and text through
+every flatten, from the entries a document plays of each draw
+(`a_flattened_page_is_written_from_every_draw`), with one exception. A canvas
+whose entries cost more than `DOCUMENT_REPLAY_BUDGET` (64) replays is written
+into a document as its image, and the page counts that image. At a flatten
+where the page's image and the images its document holds would come to more
+than `RECORDED_IMAGE_PAGES` (4) pages at density 1, the document of everything
+drawn before that flatten becomes the page's image too, as pixels; what is
+drawn after it is vectors and text until the next such flatten. A page into
+which no canvas past that budget was drawn holds no such image, and keeps its
+whole document as vectors and text however many times it flattens.
+`a_page_drawn_into_past_the_replay_budget_levels_off` holds a page drawn into
+that way every frame to the budget, in the images it holds and in those its
+SVG writes. Without the bound it held one image a frame.
+
 **A canvas's pattern is written as PDF tiling where its tiles land on whole
 device pixels, and poppler draws seams between the tiles.** A draw dyed by a
 pattern of a canvas -- repeated both ways, the canvas whole pixels across,

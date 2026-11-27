@@ -535,7 +535,7 @@ pub struct PageRecorder {
     own_image: Option<OwnImage>,
     /// What a document plays of the page as it was last asked, by the
     /// page's identity and depth -- see [`Self::document_entries`].
-    projection: Option<((usize, usize), Entries)>,
+    projection: Option<Projection>,
     /// How many times the page has been erased -- see [`Self::set_bounds`]
     /// -- so that a split can tell its draw erased what lay beneath it --
     /// see [`SplitMark`].
@@ -1237,7 +1237,9 @@ impl PageRecorder {
 
     /// The bytes of the images the page's entries hold that their pictures
     /// do not count, without the image of the page itself -- what a page
-    /// lets go of when it flattens: see [`Self::flatten`].
+    /// flattens past: see [`Self::flatten`], which lets go of those held
+    /// for pixels and of those its document holds where keeping them would
+    /// leave it over its budget.
     pub(crate) fn held_entry_bytes(&self) -> usize {
         self.held_bytes
     }
@@ -1253,16 +1255,39 @@ impl PageRecorder {
     /// drawn, and a document still writes every round from its own entries,
     /// which it never sees the base of.
     ///
+    /// Except where those entries hold images themselves -- canvases drawn
+    /// in past `DOCUMENT_REPLAY_BUDGET`, which a document writes as their
+    /// images, see [`Entries::held`] -- and keeping them would leave the
+    /// page holding more than `budget` bytes of images with the base. Then
+    /// the document is the base as well: a PDF or an SVG writes what the
+    /// page drew before the flatten as its pixels, and what it draws after
+    /// as vectors and text. A page into which no canvas past that budget
+    /// was drawn holds no such image, and its document is kept whole
+    /// through every flatten.
+    ///
     /// `base` is drawn untransformed and unclipped onto the emptied page, so
     /// its pixels at density 1 are what they were. At another density the base
     /// is scaled, where the entries it replaced were drawn at that density.
     /// The transform and clip the page holds are kept for the next draw.
-    pub(crate) fn flatten(&mut self, base: &SkImage) {
+    pub(crate) fn flatten(&mut self, base: &SkImage, budget: usize) {
         #[cfg(test)]
         if !FLATTENS.get() {
             return;
         }
-        let document = self.document_entries();
+        let Projection { entries, held, .. } = self.projection();
+        let (document, document_held) = (entries.clone(), held.clone());
+        let held = HeldImage::of(base);
+        let keeps = held
+            .iter()
+            .chain(document_held.iter())
+            .map(|image| image.bytes)
+            .sum::<usize>()
+            <= budget;
+        // Past the budget, the document draws the base, and holds it.
+        let document_held = match keeps {
+            true => document_held,
+            false => held.iter().copied().collect(),
+        };
         // The document is what it was, and costs what it did to replay.
         let (matrix, clip, cost) =
             (self.matrix, self.clip.clone(), self.replay_cost);
@@ -1272,14 +1297,18 @@ impl PageRecorder {
         let put = base.clone();
         // Unframed, so under no transform or clip, onto the page just
         // emptied.
-        self.append_unframed(move |canvas, _| {
+        let drawn = move |canvas: &SkCanvas, _: Recording| {
             canvas.draw_image(&put, (0, 0), None);
-        });
+        };
+        self.append_unframed(drawn.clone());
         let pixels = self.take_split(&mut mark);
-        document
-            .iter()
-            .for_each(|(entry, asks)| self.file_entry(entry.clone(), asks));
-        self.end_split(mark, pixels, HeldImage::of(base));
+        match keeps {
+            true => document
+                .iter()
+                .for_each(|(entry, asks)| self.file_entry(entry.clone(), asks)),
+            false => self.append_unframed(drawn),
+        }
+        self.end_split(mark, pixels, held, document_held);
         self.set_state(matrix, &clip);
         // The base is the image of the page as it now stands.
         let page = self.page();
@@ -2057,17 +2086,22 @@ impl PageRecorder {
 
     /// Takes what was filed since `mark`, the draw's document, and files it
     /// with `pixels` as one [`Layer::Split`] holding `image`, asking of a
-    /// vector backend what the document's entries ask.
+    /// vector backend what the document's entries ask. `held` is what the
+    /// document holds besides -- see [`Entries::held`].
     pub(crate) fn end_split(
         &mut self,
         mark: SplitMark,
         pixels: Entries,
         image: Option<HeldImage>,
+        held: Arc<[HeldImage]>,
     ) {
         self.seal();
         self.documenting = false;
         (self.plays_apart_on_gpu, self.holds_reading_runs) = mark.on_gpu;
-        let document = self.drain_since(&mark);
+        let document = Entries {
+            held,
+            ..self.drain_since(&mark)
+        };
         // The pixels' entries asked an open layer for their features as they
         // were filed; the layer asks for what the split's document does.
         if self.marked_list(&mark)
@@ -2083,21 +2117,20 @@ impl PageRecorder {
             pixels.layers.iter().for_each(|entry| self.count(entry));
         }
         let features = document.all_features();
-        // Each entry was counted as it was filed; the image is counted here,
-        // once however many entries hold it.
-        if let Some(held) = image
-            && self.held.insert(held.id, held.bytes).is_none()
-        {
-            self.held_bytes += held.bytes;
-        }
-        self.file_counted(
-            Layer::Split(Arc::new(Split {
-                pixels,
-                document,
-                image,
-            })),
-            features,
-        );
+        let split = Layer::Split(Arc::new(Split {
+            pixels,
+            document,
+            image,
+        }));
+        // Each entry was counted as it was filed; the images are counted
+        // here, each once however many entries hold it.
+        let (counted, bytes) = (&mut self.held, &mut self.held_bytes);
+        split.held_images(&mut |held| {
+            if counted.insert(held.id, held.bytes).is_none() {
+                *bytes += held.bytes;
+            }
+        });
+        self.file_counted(split, features);
     }
 
     /// Files what the page holds unfiled -- its recording, the frame's run
@@ -3312,20 +3345,38 @@ impl PageRecorder {
     /// [`Entries::projected`] -- made once for each state of the page, as
     /// its image is.
     pub(crate) fn document_entries(&mut self) -> Entries {
+        self.projection().entries.clone()
+    }
+
+    /// The images [`Self::document_entries`] hold that their pictures do
+    /// not count, each once -- see [`Entries::held`].
+    pub(crate) fn document_held(&mut self) -> Arc<[HeldImage]> {
+        self.projection().held.clone()
+    }
+
+    /// What a document plays of the page as it stands, made where the page
+    /// has changed since it was last asked.
+    fn projection(&mut self) -> &Projection {
         let page = self.page();
         let key = (page.id, page.layers.len());
-        if let Some((held, entries)) = &self.projection
-            && *held == key
-        {
-            return entries.clone();
+        if self.projection.as_ref().is_none_or(|made| made.key != key) {
+            let entries = Entries {
+                apart: self.dual(),
+                ..Entries::shared(page.layers, page.features)
+            };
+            let entries = entries.projected().unwrap_or(entries);
+            let mut held = HashMap::new();
+            entries.held_images(&mut |image| {
+                held.insert(image.id, image);
+            });
+            self.projection = Some(Projection {
+                key,
+                held: held.into_values().collect(),
+                entries,
+            });
         }
-        let entries = Entries {
-            apart: self.dual(),
-            ..Entries::shared(page.layers, page.features)
-        };
-        let entries = entries.projected().unwrap_or(entries);
-        self.projection = Some((key, entries.clone()));
-        entries
+        // SAFETY: set to `Some` above where it was not already.
+        self.projection.as_ref().unwrap()
     }
 
     /// This page as an image for another canvas to draw: its own pixels, as
@@ -3403,6 +3454,19 @@ impl PageRecorder {
         });
         Some(image)
     }
+}
+
+/// What a document plays of a page, made once for each state of the page --
+/// see [`PageRecorder::document_entries`].
+#[derive(Debug)]
+struct Projection {
+    /// The page's identity and depth when it was made.
+    key: (usize, usize),
+    /// The page's entries, each split standing in as its document.
+    entries: Entries,
+    /// The images `entries` hold that their pictures do not count, each
+    /// once.
+    held: Arc<[HeldImage]>,
 }
 
 /// What [`PageRecorder::image`] made last, and the state of the page it was

@@ -352,25 +352,19 @@ impl Layer {
 
 impl Layer {
     /// Calls `each` with every image this entry holds that its pictures do
-    /// not count -- see [`Split::image`] -- once for each time it holds it:
-    /// the walk the count a page keeps as it files is held to.
-    #[cfg(debug_assertions)]
+    /// not count -- see [`Split::image`] and [`Entries::held`] -- once for
+    /// each time it holds it: the walk the count a page keeps as it files
+    /// is held to, and what a document of a canvas is found to hold.
     pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
-        let entries = |entries: &Entries, each: &mut dyn FnMut(HeldImage)| {
-            entries
-                .layers
-                .iter()
-                .for_each(|layer| layer.held_images(each));
-        };
         match self {
-            Layer::Group(group) => entries(&group.contents, each),
+            Layer::Group(group) => group.contents.held_images(each),
             Layer::Clipped(piece) => piece.entry.held_images(each),
             Layer::Split(split) => {
                 if let Some(held) = split.image {
                     each(held);
                 }
-                entries(&split.pixels, each);
-                entries(&split.document, each);
+                split.pixels.held_images(each);
+                split.document.held_images(each);
             }
             Layer::Picture(_)
             | Layer::Blur(_)
@@ -4198,6 +4192,14 @@ pub(crate) struct Entries {
     /// each kind of target, whose draws may not yet have forked them --
     /// see `page::Recorders` -- and so hold no pair to say so.
     pub(crate) apart: bool,
+    /// The images these entries draw that no picture of theirs counts and
+    /// no entry among them says it holds: a canvas a document of them
+    /// writes as its image, past `DOCUMENT_REPLAY_BUDGET` -- the image a
+    /// [`Split`] holds and its document draws too. Carried by what a
+    /// document plays of a page, which stands in for the split, so that a
+    /// page holding those entries counts the images, and so that a flatten
+    /// can tell what keeping them costs -- see `page::PageRecorder::flatten`.
+    pub(crate) held: Arc<[HeldImage]>,
 }
 
 impl FromIterator<(Layer, VectorFeatures)> for Entries {
@@ -4228,7 +4230,16 @@ impl Entries {
             layers,
             features,
             apart: false,
+            held: Arc::default(),
         }
+    }
+
+    /// Calls `each` with every image these entries hold that their
+    /// pictures do not count -- see [`Self::held`] and [`Split::image`] --
+    /// once for each time they hold it.
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        self.held.iter().for_each(|held| each(*held));
+        self.layers.iter().for_each(|layer| layer.held_images(each));
     }
 
     /// `layers` asking nothing of a vector backend.
@@ -4252,8 +4263,10 @@ impl Entries {
     }
 
     /// What a document plays of these entries, as entries of its own: each
-    /// [`Split`] stands in its place as its document's entries, and each
-    /// group holding one as a group of what its contents project to. `None`
+    /// [`Split`] stands in its place as its document's entries, the images
+    /// its document holds joining these entries' own -- see [`Self::held`]
+    /// -- and each group holding one as a group of what its contents
+    /// project to. `None`
     /// where nothing would change, so that entries holding no split are
     /// played as they are and shared rather than copied.
     ///
@@ -4264,6 +4277,7 @@ impl Entries {
         let mut changed = false;
         let mut layers = Vec::with_capacity(self.layers.len());
         let mut features = Vec::with_capacity(self.features.len());
+        let mut held = self.held.to_vec();
         for (layer, asks) in self.iter() {
             match layer {
                 // A split's document holds none of its own: it is drawn from
@@ -4272,6 +4286,7 @@ impl Entries {
                     changed = true;
                     layers.extend(split.document.layers.iter().cloned());
                     features.extend(split.document.features.iter().copied());
+                    held.extend(split.document.held.iter().copied());
                 }
                 Layer::Group(group) => match group.contents.projected() {
                     Some(contents) => {
@@ -4295,6 +4310,7 @@ impl Entries {
         }
         changed.then(|| Entries {
             apart: self.apart,
+            held: held.into(),
             ..Entries::new(layers, features)
         })
     }
@@ -4330,7 +4346,9 @@ pub struct Split {
     pub(crate) document: Entries,
     /// The image the draw holds that no other object reports: a canvas's
     /// own pixels, which its pictures keep alive and do not count -- see
-    /// [`Layer::recorded_bytes`].
+    /// [`Layer::recorded_bytes`]. A document past the replay budget draws
+    /// it too, and says so in its own [`Entries::held`], which outlives
+    /// the split wherever a document stands in for it.
     pub(crate) image: Option<HeldImage>,
 }
 

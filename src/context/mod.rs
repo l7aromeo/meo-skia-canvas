@@ -178,7 +178,10 @@ pub(crate) const DOCUMENT_REPLAY_BUDGET: usize = 64;
 /// canvases in levels off at a few pages, where it held a page for every
 /// draw. Below it what the page drew itself stays entries, which a read at
 /// another density draws at that density; past it they are the base's
-/// pixels, scaled there.
+/// pixels, scaled there. The images a document of the page holds count
+/// too -- canvases drawn in past [`DOCUMENT_REPLAY_BUDGET`] -- and a flatten
+/// that would keep more than this in them with the base writes the
+/// document as the base as well.
 pub(crate) const RECORDED_IMAGE_PAGES: usize = 4;
 
 /// What a document plays of a canvas drawn into another -- see
@@ -193,6 +196,10 @@ pub(crate) struct CanvasDocument {
     /// What replaying the entries costs -- see
     /// `PageRecorder::replay_cost`.
     pub(crate) cost: usize,
+    /// The images the entries hold that their pictures do not count, each
+    /// once -- see `layer::Entries::held` -- which a page writing them
+    /// holds too.
+    pub(crate) held: Arc<[HeldImage]>,
 }
 
 /// A colour matrix making a colour opaque and leaving its red, green and
@@ -4691,20 +4698,26 @@ impl Context2D {
     /// writes. Each is filed as it would be drawn alone, after everything
     /// drawn before it, and nothing drawn after joins either. The page
     /// counts `image` as held -- see [`PageRecorder::held_image_bytes`] --
-    /// since no other object reports its pixels while the page keeps it.
+    /// since no other object reports its pixels while the page keeps it,
+    /// and `held`, the images the document holds besides -- see
+    /// `layer::Entries::held`.
     pub(crate) fn draw_split(
         &mut self,
         image: &Image,
         pixels: impl FnOnce(&mut Self),
         document: impl FnOnce(&mut Self),
+        held: Arc<[HeldImage]>,
     ) {
         let mut mark = self.recorder.borrow_mut().begin_split();
         pixels(self);
         let drawn = self.recorder.borrow_mut().take_split(&mut mark);
         document(self);
-        self.recorder
-            .borrow_mut()
-            .end_split(mark, drawn, HeldImage::of(image));
+        self.recorder.borrow_mut().end_split(
+            mark,
+            drawn,
+            HeldImage::of(image),
+            held,
+        );
     }
 
     /// Draws a canvas, given as `image`, its own pixels -- see
@@ -4714,7 +4727,9 @@ impl Context2D {
     /// that a PDF or an SVG writes what the canvas drew as vectors and text.
     ///
     /// A canvas whose entries cost more than [`DOCUMENT_REPLAY_BUDGET`] to
-    /// replay is drawn as its image for a document too, as a raster.
+    /// replay is drawn as its image for a document too, as a raster, which
+    /// the document says it holds -- see `layer::Entries::held` -- as it
+    /// says it holds what the canvas's own entries do.
     pub(crate) fn draw_canvas_image(
         &mut self,
         image: &Image,
@@ -4723,10 +4738,15 @@ impl Context2D {
         dst_rect: &Rect,
         apart: bool,
     ) {
+        let replays = document.cost <= DOCUMENT_REPLAY_BUDGET;
+        let held = match replays {
+            true => document.held.clone(),
+            false => HeldImage::of(image).into_iter().collect(),
+        };
         self.draw_split(
             image,
             |ctx| ctx.draw_source_image(image, src_rect, dst_rect, apart),
-            |ctx| match document.cost <= DOCUMENT_REPLAY_BUDGET {
+            |ctx| match replays {
                 true => ctx.draw_picture_costing(
                     &|| {
                         document
@@ -4747,6 +4767,7 @@ impl Context2D {
                     ctx.recorder.borrow_mut().charge_replay(1);
                 }
             },
+            held,
         );
         self.flatten_past_budget();
     }
@@ -4772,7 +4793,7 @@ impl Context2D {
             return;
         }
         if let Some(base) = self.source_image() {
-            self.recorder.borrow_mut().flatten(&base);
+            self.recorder.borrow_mut().flatten(&base, budget);
         }
     }
 
@@ -4784,6 +4805,7 @@ impl Context2D {
             entries: recorder.document_entries(),
             bounds: self.bounds,
             cost: recorder.replay_cost(),
+            held: recorder.document_held(),
         }
     }
 

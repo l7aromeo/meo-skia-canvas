@@ -3812,7 +3812,9 @@ export interface CanvasDrawImage {
    * draws are replayed instead. An SVG or PDF export keeps text as text and
    * paths as paths either way, except that a `drawImage` whose replay would
    * mean replaying more canvases than a document allows for one draw is
-   * written as its pixels.
+   * written as its pixels. A page never cleared that comes to hold more of
+   * those images than four pages of its own pixels writes what it drew
+   * until then as those pixels too, and what it draws after as before.
    *
    * The replay is clipped to the destination rectangle, so anything that
    * spreads -- an `imageFilter` blur, a shadow -- stops at its edge instead of

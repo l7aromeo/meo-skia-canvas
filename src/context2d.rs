@@ -11131,7 +11131,7 @@ mod split_tests {
         document(ctx);
         let drawn = drawn.expect("the pixels");
         ctx.inner.with_recorder(|mut recorder| {
-            recorder.end_split(mark, drawn, None);
+            recorder.end_split(mark, drawn, None, Default::default());
         });
     }
 
@@ -11900,23 +11900,45 @@ mod document_route_tests {
 
     /// A canvas holding only a draw past the budget, written as an image,
     /// is drawn into a third as its own pixels, as one holding any other
-    /// canvas is, and the third holds that one image.
+    /// canvas is. The second's document writes the first as its image, so
+    /// the third holds that image as well as the second's, and counts both
+    /// -- whether the third's document holds the second's entries, as of an
+    /// eight-bit sRGB page, which keeps a recording for each kind of
+    /// target, or one picture of them, as of a float page, whose pictures
+    /// say nothing of what they hold.
     #[test]
     fn a_canvas_holding_a_draw_past_the_budget_is_drawn_as_its_pixels() {
-        let mut source = source();
-        source
-            .context()
-            .inner
-            .charge_replay(DOCUMENT_REPLAY_BUDGET + 1);
-        let mut middle = drawn_into(&mut source);
-        assert!(middle.context().inner.replay_cost() > 0, "a nesting cost");
-        let mut outer = drawn_into(&mut middle);
-        let mut held = 0;
-        outer.context().inner.with_recorder(|recorder| {
-            held = recorder.held_image_bytes();
-        });
-        let (w, h) = (SIDE.0 + 20.0, SIDE.1 + 20.0);
-        assert_eq!(held, (w * h) as usize * 4, "the middle's image alone");
+        for (depth, bytes) in [(PixelDepth::Uint8, 4), (PixelDepth::F16, 8)] {
+            let mut source = source();
+            source
+                .context()
+                .inner
+                .charge_replay(DOCUMENT_REPLAY_BUDGET + 1);
+            let (w, h) = (SIDE.0 + 20.0, SIDE.1 + 20.0);
+            let options = CanvasOptions {
+                color_type: depth,
+                gpu: false,
+                ..CanvasOptions::default()
+            };
+            let mut middle =
+                Canvas::with_options(w, h, options).expect("a canvas");
+            middle.context().draw_canvas(&mut source, 10.0, 10.0);
+            assert!(
+                middle.context().inner.replay_cost() > 0,
+                "{depth:?}: a nesting cost"
+            );
+            let mut outer = drawn_into(&mut middle);
+            let mut held = 0;
+            outer.context().inner.with_recorder(|recorder| {
+                held = recorder.held_image_bytes();
+            });
+            let both =
+                (w * h) as usize * bytes + (SIDE.0 * SIDE.1) as usize * 4;
+            assert_eq!(
+                held, both,
+                "{depth:?}: the middle's image and the source's"
+            );
+        }
     }
 
     /// A canvas drawn into one that is then drawn into a third leaves the
@@ -11981,7 +12003,9 @@ mod flatten_tests {
     //! as it did -- see `page::PageRecorder::flatten`.
     use super::*;
     use crate::{
-        context::{RECORDED_IMAGE_PAGES, page::FLATTENS},
+        context::{
+            DOCUMENT_REPLAY_BUDGET, RECORDED_IMAGE_PAGES, page::FLATTENS,
+        },
         export::{EncodeOptions, ImageFormat},
     };
 
@@ -12150,6 +12174,55 @@ mod flatten_tests {
         assert!(
             missing.is_empty(),
             "frames written without their text: {missing:?}"
+        );
+    }
+
+    /// A page into which a canvas past the replay budget is drawn every
+    /// frame levels off too. A document writes each such draw as the
+    /// canvas's image, which the page counts, and a flatten that would
+    /// leave the page holding more than the budget writes the document's
+    /// history before it as the base: so the images held, and those an SVG
+    /// of the page writes, stay within the budget, and the frames drawn
+    /// since the last flatten are still written as vectors and text.
+    #[test]
+    fn a_page_drawn_into_past_the_replay_budget_levels_off() {
+        let mut source = source(false);
+        let mut dest = destination(false);
+        let mut flattened = 0;
+        let mut last = 0;
+        for n in 0..FRAMES {
+            source
+                .context()
+                .inner
+                .charge_replay(DOCUMENT_REPLAY_BUDGET + 1);
+            frame(&mut source, &mut dest, n);
+            let now = held(&mut dest);
+            assert!(
+                now <= RECORDED_IMAGE_PAGES * PAGE,
+                "frame {n}: {now} bytes held, past {RECORDED_IMAGE_PAGES} pages"
+            );
+            if now < last {
+                flattened += 1;
+            }
+            last = now;
+        }
+        assert!(flattened >= 3, "{flattened} flattens in {FRAMES} frames");
+        let svg = dest
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("an SVG");
+        let svg = String::from_utf8_lossy(&svg);
+        let images = svg.matches("<image").count();
+        assert!(
+            images <= RECORDED_IMAGE_PAGES,
+            "{images} images written for {FRAMES} frames"
+        );
+        // Each it writes is one the page's document says it holds, which a
+        // canvas drawing this one counts.
+        let counted = dest.context().inner.document().held.len();
+        assert_eq!(images, counted, "images written and images counted");
+        assert!(
+            svg.contains(&format!("\tf{}\n", FRAMES - 1)),
+            "the last frame's text as text"
         );
     }
 }
