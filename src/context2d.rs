@@ -11163,12 +11163,13 @@ mod split_tests {
     use crate::{
         canvas::EngineKind,
         context::{
-            layer::{Layer, Target, play_entries},
+            layer::{Entries, HeldImage, Layer, Split, Target, play_entries},
             page::TILE_READS,
         },
         export::VectorFeatures,
     };
     use skia_safe::{AlphaType as SkAlphaType, ImageInfo};
+    use std::sync::Arc;
 
     const W: f32 = 120.0;
     const H: f32 = 90.0;
@@ -11188,6 +11189,18 @@ mod split_tests {
     /// `Context2D::draw_split` files them -- through the facade, whose draws
     /// the halves are made of.
     fn split(ctx: &mut Context2D, pixels: Draw, document: Draw) {
+        split_joining(ctx, pixels, document, Default::default(), false);
+    }
+
+    /// [`split`], its document holding `held` besides, joining the split
+    /// filed last where `joins` -- see `PageRecorder::end_split`.
+    fn split_joining(
+        ctx: &mut Context2D,
+        pixels: Draw,
+        document: Draw,
+        held: Arc<[HeldImage]>,
+        joins: bool,
+    ) {
         let mut mark = None;
         ctx.inner.with_recorder(|mut recorder| {
             mark = Some(recorder.begin_split());
@@ -11201,7 +11214,7 @@ mod split_tests {
         document(ctx);
         let drawn = drawn.expect("the pixels");
         ctx.inner.with_recorder(|mut recorder| {
-            recorder.end_split(mark, drawn, None, Default::default());
+            recorder.end_split(mark, drawn, None, held, joins);
         });
     }
 
@@ -11699,6 +11712,151 @@ mod split_tests {
         let mut both = canvas(true, W, H);
         split(both.context(), red, colour_run);
         assert_eq!(flags(&mut both), (false, false));
+    }
+
+    /// The kinds of the entries `canvas`'s page files, in order.
+    fn kinds(canvas: &mut Canvas) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        canvas.context().inner.with_recorder(|mut recorder| {
+            kinds = recorder
+                .page()
+                .layers
+                .iter()
+                .map(|layer| match layer {
+                    Layer::Split(_) => "split",
+                    _ => "other",
+                })
+                .collect();
+        });
+        kinds
+    }
+
+    /// An image held by a split's document that no picture counts, of
+    /// `bytes` -- see `layer::Entries::held`.
+    fn held(id: u32, bytes: usize) -> Arc<[HeldImage]> {
+        Arc::from([HeldImage { id, bytes }])
+    }
+
+    /// `ctx` drawing a ground, then two splits holding an image each in
+    /// their documents, joining each other where `joins`, then a fill.
+    fn pair(ctx: &mut Context2D, joins: bool) {
+        ground(ctx);
+        split_joining(ctx, red, blue, held(1, 100), joins);
+        split_joining(ctx, blue, green, held(2, 30), joins);
+        green(ctx);
+    }
+
+    /// Two splits that join are one entry, which plays what the two did on
+    /// each kind of target, and holds what each held, counted once each.
+    #[test]
+    fn a_joined_pair_plays_and_holds_what_the_two_did() {
+        let mut joined = canvas(false, W, H);
+        pair(joined.context(), true);
+        let mut apart = canvas(false, W, H);
+        pair(apart.context(), false);
+        assert_eq!(
+            kinds(&mut apart),
+            ["other", "split", "split", "other"],
+            "apart"
+        );
+        assert_eq!(kinds(&mut joined), ["other", "split", "other"], "joined");
+        assert_eq!(pixels_of(&mut joined), pixels_of(&mut apart), "pixels");
+        assert_eq!(
+            document_of(&mut joined),
+            document_of(&mut apart),
+            "document"
+        );
+        for canvas in [&mut joined, &mut apart] {
+            let mut bytes = 0;
+            let mut held = Vec::new();
+            canvas.context().inner.with_recorder(|mut recorder| {
+                bytes = recorder.held_entry_bytes();
+                held = recorder.document_held().iter().map(|h| h.id).collect();
+            });
+            held.sort_unstable();
+            assert_eq!(bytes, 130, "each image counted once");
+            assert_eq!(held, [1, 2], "the document holds both");
+        }
+    }
+
+    /// Two splits holding different images, or whose halves play on
+    /// different targets, stand apart.
+    #[test]
+    fn splits_unlike_each_other_do_not_join() {
+        let split = |image: u32, pixels: bool, document: bool| Split {
+            pixels: Entries {
+                apart: pixels,
+                ..Entries::plain(Vec::new())
+            },
+            document: Entries {
+                apart: document,
+                ..Entries::plain(Vec::new())
+            },
+            image: Some(HeldImage {
+                id: image,
+                bytes: 1,
+            }),
+        };
+        let mut first = split(1, false, false);
+        assert!(first.join(split(2, false, false)).is_err(), "an image");
+        assert!(first.join(split(1, true, false)).is_err(), "pixels");
+        assert!(first.join(split(1, false, true)).is_err(), "a document");
+        assert!(first.join(split(1, false, false)).is_ok(), "alike");
+    }
+
+    /// A split joins only the split filed straight before it: a draw filed
+    /// between, a read, an erase or a split that does not join each leave
+    /// the next to stand on its own.
+    #[test]
+    fn a_split_joins_only_the_split_filed_straight_before_it() {
+        type Between = fn(&mut Canvas);
+        let cases: [(&str, Between); 4] = [
+            ("a fill", |canvas| green(canvas.context())),
+            ("a read", |canvas| {
+                pixels_of(canvas);
+            }),
+            ("an erase", |canvas| {
+                canvas.context().clear_rect(0.0, 0.0, W, H)
+            }),
+            ("a split apart", |canvas| {
+                split_joining(
+                    canvas.context(),
+                    red,
+                    red,
+                    Default::default(),
+                    false,
+                )
+            }),
+        ];
+        let mut alone = canvas(false, W, H);
+        split_joining(alone.context(), blue, red, held(2, 1), true);
+        let alone = last_split(&mut alone);
+        for (name, between) in cases {
+            let mut canvas = canvas(false, W, H);
+            split_joining(canvas.context(), red, blue, held(1, 1), true);
+            between(&mut canvas);
+            split_joining(canvas.context(), blue, red, held(2, 1), true);
+            assert_eq!(last_split(&mut canvas), alone, "{name}");
+        }
+    }
+
+    /// How many entries the last split `canvas`'s page files holds, for
+    /// pixels and for a document.
+    fn last_split(canvas: &mut Canvas) -> (usize, usize) {
+        let mut lens = None;
+        canvas.context().inner.with_recorder(|mut recorder| {
+            lens =
+                recorder.page().layers.iter().rev().find_map(
+                    |layer| match layer {
+                        Layer::Split(split) => Some((
+                            split.pixels.layers.len(),
+                            split.document.layers.len(),
+                        )),
+                        _ => None,
+                    },
+                );
+        });
+        lens.expect("a split")
     }
 }
 
@@ -12705,5 +12863,338 @@ mod unlayered_tests {
             wrong.is_empty(),
             "unlayered apart from layered (case, bytes, most): {wrong:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod decoded_blit_tests {
+    //! A decoded image drawn unscaled at a whole pixel is drawn for pixels
+    //! through the image as a shader -- see
+    //! `context::Context2D::blits_decoded` -- and a document still writes the
+    //! encoded image as it did, a GPU canvas lands a JPEG as the CPU does
+    //! and any other image as it did, and a page of such draws in a row
+    //! files them as one entry.
+    use skia_safe::{
+        AlphaType, ColorSpace, ColorType, Data, EncodedImageFormat,
+        ImageInfo as SkImageInfo,
+    };
+
+    use super::*;
+    use crate::{
+        canvas::EngineKind,
+        context::{BLITS_DECODED, layer::Layer},
+        export::{EncodeOptions, ImageFormat},
+        started,
+    };
+
+    /// Each side of the encoded image.
+    const SIDE: i32 = 48;
+
+    /// A [`SIDE`]-square image with an alpha ramp, encoded as `format`.
+    fn encoded(format: EncodedImageFormat) -> Image {
+        let pixels: Vec<u8> = (0..SIDE * SIDE)
+            .flat_map(|i| {
+                let (row, column) = ((i / SIDE) as u8, (i % SIDE) as u8);
+                [row * 5, 255 - column * 5, row.wrapping_mul(7), column * 5]
+            })
+            .collect();
+        let info = SkImageInfo::new(
+            (SIDE, SIDE),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let bytes = started::raster_from_data(
+            &info,
+            Data::new_copy(&pixels),
+            SIDE as usize * 4,
+        )
+        .expect("a raster image")
+        .encode(None, format, Some(90))
+        .expect("encoded");
+        Image::from_encoded(bytes.as_bytes()).expect("decodes")
+    }
+
+    /// A page drawing decoded images unscaled at whole pixels among other
+    /// draws -- a fill before and after, one image under a clip and one at
+    /// a global alpha, one from a region of the image -- on `gpu`'s engine.
+    fn scene(gpu: bool) -> Canvas {
+        let (jpeg, png) = (
+            encoded(EncodedImageFormat::JPEG),
+            encoded(EncodedImageFormat::PNG),
+        );
+        let mut canvas = Canvas::new(160.0, 120.0);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(40,120,200)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 160.0, 120.0);
+        ctx.draw_image(&jpeg, 10.0, 10.0);
+        ctx.set_fill_style_css("rgba(200,80,30,0.6)")
+            .expect("a colour");
+        ctx.fill_rect(30.0, 30.0, 40.0, 40.0);
+        ctx.draw_image(&png, 60.0, 8.0);
+        ctx.save();
+        ctx.begin_path();
+        ctx.rect(70.0, 60.0, 30.0, 30.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.draw_image(&png, 64.0, 56.0);
+        ctx.restore();
+        ctx.set_global_alpha(0.5);
+        ctx.draw_image(&jpeg, 100.0, 60.0);
+        ctx.set_global_alpha(1.0);
+        ctx.draw_image_region(
+            &png, 8.0, 8.0, 24.0, 24.0, 120.0, 10.0, 24.0, 24.0,
+        );
+        ctx.fill_rect(5.0, 100.0, 150.0, 10.0);
+        canvas
+    }
+
+    /// `scene` written as `format`, the fork on where `blits`.
+    fn written(format: ImageFormat, blits: bool) -> Vec<u8> {
+        BLITS_DECODED.set(blits);
+        let bytes = scene(false)
+            .to_buffer(format, &EncodeOptions::default())
+            .expect("written");
+        BLITS_DECODED.set(true);
+        bytes
+    }
+
+    #[test]
+    fn a_document_writes_a_decoded_image_as_it_did() {
+        for format in [ImageFormat::Pdf, ImageFormat::Svg] {
+            let (forked, plain) =
+                (written(format, true), written(format, false));
+            assert!(
+                forked == plain,
+                "{format:?}: {} bytes forked, {} plain",
+                forked.len(),
+                plain.len()
+            );
+        }
+        let pdf = written(ImageFormat::Pdf, true);
+        assert!(
+            pdf.windows(9).any(|w| w == b"DCTDecode"),
+            "the JPEG passes through as a JPEG"
+        );
+    }
+
+    /// A page of `format`'s image alone, drawn at whole pixels at `alpha`
+    /// on a ground, on `gpu`'s engine, the fork on where `blits`: its
+    /// pixels, premultiplied, or `None` where a GPU was asked for and there
+    /// is none.
+    fn images(
+        format: EncodedImageFormat,
+        alpha: f32,
+        gpu: bool,
+        blits: bool,
+    ) -> Option<Vec<u8>> {
+        let image = encoded(format);
+        BLITS_DECODED.set(blits);
+        let mut canvas = Canvas::new(120.0, 64.0);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(40 120 200)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 60.0, 64.0);
+        ctx.set_global_alpha(alpha);
+        ctx.draw_image(&image, 4.0, 4.0);
+        ctx.draw_image(&image, 60.0, 8.0);
+        BLITS_DECODED.set(true);
+        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let data = canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    pixels: PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("pixels");
+        Some(data.pixels().to_vec())
+    }
+
+    /// How many bytes `a` and `b` hold apart, and the most any is.
+    fn apart(a: &[u8], b: &[u8]) -> (usize, u8) {
+        a.iter()
+            .zip(b)
+            .fold((0, 0), |(n, most), (a, b)| match a == b {
+                true => (n, most),
+                false => (n + 1, most.max(a.abs_diff(*b))),
+            })
+    }
+
+    /// A JPEG on a GPU canvas lands the CPU's bytes: drawn through the
+    /// image as a shader, the GPU samples the CPU's RGB decode, where drawn
+    /// as an image it uploads the JPEG's YUV planes and converts them
+    /// itself. At full alpha the bytes are the CPU's; below it, each scaled
+    /// channel is the GPU's float rounding, a level at most from the CPU's.
+    #[test]
+    fn a_gpu_canvas_lands_a_jpeg_as_the_cpu_does() {
+        let jpeg = EncodedImageFormat::JPEG;
+        let Some(forked) = images(jpeg, 1.0, true, true) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let cpu = images(jpeg, 1.0, false, true).expect("the CPU");
+        assert_eq!(apart(&forked, &cpu), (0, 0), "at full alpha");
+        let plain = images(jpeg, 1.0, true, false).expect("the GPU");
+        assert_ne!(apart(&plain, &cpu).0, 0, "the planes land apart");
+        let (forked, cpu) = (
+            images(jpeg, 0.5, true, true).expect("the GPU"),
+            images(jpeg, 0.5, false, true).expect("the CPU"),
+        );
+        assert!(apart(&forked, &cpu).1 <= 1, "at half alpha");
+    }
+
+    /// Any other decoded image lands on a GPU canvas as it did: the GPU
+    /// uploads the same pixels either way.
+    #[test]
+    fn a_gpu_canvas_lands_a_png_as_it_did() {
+        let png = EncodedImageFormat::PNG;
+        for alpha in [1.0, 0.5] {
+            let Some(forked) = images(png, alpha, true, true) else {
+                eprintln!("skipped: no GPU");
+                return;
+            };
+            let plain = images(png, alpha, true, false).expect("the GPU");
+            assert_eq!(apart(&forked, &plain), (0, 0), "at {alpha}");
+        }
+    }
+
+    /// The control: on the CPU the fork moves the bytes, at full alpha or
+    /// below it -- the sprite rows are exact at full alpha on arm64 -- which
+    /// the tests above would not notice if the fork never took.
+    #[test]
+    fn the_cpu_lands_a_decoded_image_apart_from_the_sprite_rows() {
+        for format in [EncodedImageFormat::JPEG, EncodedImageFormat::PNG] {
+            let moved = [1.0, 0.5].into_iter().any(|alpha| {
+                let forked = images(format, alpha, false, true);
+                forked != images(format, alpha, false, false)
+            });
+            assert!(moved, "{format:?}");
+        }
+    }
+
+    /// Tiles a sheet draws to a side of its page.
+    const SHEET_SIDE: i32 = 64;
+
+    /// Pixels to a side of each tile.
+    const TILE: i32 = 4;
+
+    /// Tiles to a side of the image, which the sheet draws in turn.
+    const IMAGE_TILES: i32 = SIDE / TILE;
+
+    /// `ctx` drawing tiles of `image` from `range`, of the
+    /// [`SHEET_SIDE`] squared a sheet holds, each unscaled at whole pixels
+    /// in its place.
+    fn tiles(ctx: &mut Context2D, image: &Image, range: std::ops::Range<i32>) {
+        for i in range {
+            let (column, row) = (i % SHEET_SIDE, i / SHEET_SIDE);
+            let (sx, sy) = (i % IMAGE_TILES, (i / IMAGE_TILES) % IMAGE_TILES);
+            let t = TILE as f32;
+            ctx.draw_image_region(
+                image,
+                sx as f32 * t,
+                sy as f32 * t,
+                t,
+                t,
+                column as f32 * t,
+                row as f32 * t,
+                t,
+                t,
+            );
+        }
+    }
+
+    /// The entries `canvas`'s page files, each as `split` or `other`.
+    fn kinds(canvas: &mut Canvas) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        canvas.context().inner.with_recorder(|mut recorder| {
+            kinds = recorder
+                .page()
+                .layers
+                .iter()
+                .map(|layer| match layer {
+                    Layer::Split(_) => "split",
+                    _ => "other",
+                })
+                .collect();
+        });
+        kinds
+    }
+
+    fn sheet_page() -> Canvas {
+        let side = (SHEET_SIDE * TILE) as f32;
+        let mut canvas = Canvas::new(side, side);
+        canvas.set_gpu(false);
+        canvas
+    }
+
+    /// A sheet of tiles drawn in a row is one entry, however many tiles.
+    #[test]
+    fn a_sheet_of_tiles_is_one_entry() {
+        let image = encoded(EncodedImageFormat::PNG);
+        let mut canvas = sheet_page();
+        tiles(canvas.context(), &image, 0..SHEET_SIDE * SHEET_SIDE);
+        assert_eq!(kinds(&mut canvas), ["split"]);
+    }
+
+    /// A fill drawn among the tiles stands between them, so that the tiles
+    /// before it and after it are an entry each.
+    #[test]
+    fn a_fill_among_the_tiles_splits_the_sheet() {
+        let image = encoded(EncodedImageFormat::PNG);
+        let mut canvas = sheet_page();
+        let ctx = canvas.context();
+        let half = SHEET_SIDE * SHEET_SIDE / 2;
+        tiles(ctx, &image, 0..half);
+        ctx.set_fill_style_css("rgb(200 80 30 / 0.6)")
+            .expect("a colour");
+        ctx.fill_rect(30.5, 30.5, 100.0, 100.0);
+        tiles(ctx, &image, half..2 * half);
+        assert_eq!(kinds(&mut canvas), ["split", "other", "split"]);
+    }
+
+    /// The sheet drawn as one entry lands the pixels and writes the
+    /// document it does drawn a tile at a time, a read after each ending
+    /// the run the next would join.
+    #[test]
+    fn a_sheet_joined_draws_as_its_tiles_apart() {
+        let image = encoded(EncodedImageFormat::JPEG);
+        let count = 256;
+        let mut joined = sheet_page();
+        tiles(joined.context(), &image, 0..count);
+        let mut apart = sheet_page();
+        for i in 0..count {
+            tiles(apart.context(), &image, i..i + 1);
+            apart
+                .context()
+                .get_image_data(0.0, 0.0, 1.0, 1.0)
+                .expect("a read");
+        }
+        assert_eq!(kinds(&mut joined).len(), 1, "joined");
+        assert_eq!(kinds(&mut apart).len(), count as usize, "apart");
+        let read = |canvas: &mut Canvas| {
+            let side = canvas.width();
+            canvas
+                .context()
+                .get_image_data(0.0, 0.0, side, side)
+                .expect("a read")
+                .pixels()
+                .to_vec()
+        };
+        assert!(read(&mut joined) == read(&mut apart), "pixels");
+        for format in [ImageFormat::Pdf, ImageFormat::Svg] {
+            let write = |canvas: &mut Canvas| {
+                canvas
+                    .to_buffer(format, &EncodeOptions::default())
+                    .expect("written")
+            };
+            assert!(write(&mut joined) == write(&mut apart), "{format:?}");
+        }
     }
 }

@@ -176,11 +176,7 @@ impl Layer {
                 .iter()
                 .any(|(entry, _)| entry.plays_apart_on_gpu()),
             Layer::Clipped(piece) => piece.entry().plays_apart_on_gpu(),
-            // Only pixels are played on a GPU canvas.
-            Layer::Split(split) => split
-                .pixels
-                .iter()
-                .any(|(entry, _)| entry.plays_apart_on_gpu()),
+            Layer::Split(split) => split.plays_apart_on_gpu(),
             Layer::Picture(_)
             | Layer::Blur(_)
             | Layer::Targeted(_)
@@ -359,13 +355,7 @@ impl Layer {
         match self {
             Layer::Group(group) => group.contents.held_images(each),
             Layer::Clipped(piece) => piece.entry.held_images(each),
-            Layer::Split(split) => {
-                if let Some(held) = split.image {
-                    each(held);
-                }
-                split.pixels.held_images(each);
-                split.document.held_images(each);
-            }
+            Layer::Split(split) => split.held_images(each),
             Layer::Picture(_)
             | Layer::Blur(_)
             | Layer::Targeted(_)
@@ -4266,6 +4256,16 @@ impl Entries {
         self.layers.iter().for_each(|layer| layer.held_images(each));
     }
 
+    /// Adds `next`'s entries after these, with the images it holds.
+    pub(crate) fn append(&mut self, next: Entries) {
+        Arc::make_mut(&mut self.layers).extend(next.layers.iter().cloned());
+        Arc::make_mut(&mut self.features).extend(next.features.iter().copied());
+        if !next.held.is_empty() {
+            self.held =
+                self.held.iter().chain(next.held.iter()).copied().collect();
+        }
+    }
+
     /// `layers` asking nothing of a vector backend.
     pub(crate) fn plain(layers: Vec<Layer>) -> Self {
         let features = vec![VectorFeatures::PLAIN; layers.len()];
@@ -4374,6 +4374,44 @@ pub struct Split {
     /// it too, and says so in its own [`Entries::held`], which outlives
     /// the split wherever a document stands in for it.
     pub(crate) image: Option<HeldImage>,
+}
+
+impl Split {
+    /// Whether a GPU canvas plays the split apart from a picture -- see
+    /// [`Layer::plays_apart_on_gpu`]: only its pixels are played there.
+    pub(crate) fn plays_apart_on_gpu(&self) -> bool {
+        self.pixels
+            .iter()
+            .any(|(entry, _)| entry.plays_apart_on_gpu())
+    }
+
+    /// Calls `each` with every image the split holds that its pictures do
+    /// not count -- see [`Self::image`] and [`Entries::held`] -- once for
+    /// each time it holds it.
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        if let Some(held) = self.image {
+            each(held);
+        }
+        self.pixels.held_images(each);
+        self.document.held_images(each);
+    }
+
+    /// Adds `next`'s entries after this split's own, each half to its
+    /// half, where the two can stand as one: they hold the same image, and
+    /// each half plays on the targets the other's does. Played, the joined
+    /// split draws what the two drew one after the other, since each half
+    /// is a list played in order. `Err` gives `next` back where they cannot.
+    pub(crate) fn join(&mut self, next: Split) -> Result<(), Split> {
+        if self.image != next.image
+            || self.pixels.apart != next.pixels.apart
+            || self.document.apart != next.document.apart
+        {
+            return Err(next);
+        }
+        self.pixels.append(next.pixels);
+        self.document.append(next.document);
+        Ok(())
+    }
 }
 
 /// An image a page's recording holds, by Skia's identity for it and the

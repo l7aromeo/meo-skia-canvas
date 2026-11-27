@@ -658,6 +658,19 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Which draw [`Context2D::draw_source_image`] makes of an image -- see
+/// `Context2D::blits_decoded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageDraw {
+    /// The image drawn once for every target.
+    Whole,
+    /// The pixels' half of a split draw, the image filling a rectangle as a
+    /// shader.
+    SplitPixels,
+    /// The document's half of a split draw, the image drawn as an image.
+    SplitDocument,
+}
+
 impl Context2D {
     /// Says whether the canvas plays the page on the GPU -- see
     /// [`PageRecorder::set_plays_on_gpu`].
@@ -4701,18 +4714,114 @@ impl Context2D {
             true => TileReach::Copied(self.tile_cut(*dst_rect, None)),
             false => TileReach::Sampled(self.tile_cut(*dst_rect, None)),
         };
-        self.declaring(reach, |this| {
-            this.draw_source_image_declared(image, src_rect, dst_rect, apart)
-        })
+        let blits = self.blits_decoded(image, src_rect, &placed);
+        self.declaring(reach, |this| match blits {
+            true => {
+                // Once for the draw, before either half: each half erasing
+                // would erase the other's.
+                if this.image_covers_the_page(image, src_rect, dst_rect) {
+                    this.erase_the_page();
+                }
+                this.draw_split(
+                    image,
+                    |this| {
+                        this.draw_source_image_declared(
+                            image,
+                            src_rect,
+                            dst_rect,
+                            apart,
+                            ImageDraw::SplitPixels,
+                        )
+                    },
+                    |this| {
+                        this.draw_source_image_declared(
+                            image,
+                            src_rect,
+                            dst_rect,
+                            apart,
+                            ImageDraw::SplitDocument,
+                        )
+                    },
+                    // A decoded image's pixels are Skia's lazy decode, which
+                    // the page does not hold, and the document draws the
+                    // same image.
+                    Arc::from([]),
+                    true,
+                )
+            }
+            false => this.draw_source_image_declared(
+                image,
+                src_rect,
+                dst_rect,
+                apart,
+                ImageDraw::Whole,
+            ),
+        });
+        if blits {
+            self.flatten_past_budget();
+        }
     }
 
-    /// Draws one draw of a canvas's `image` as entries of its own for each
-    /// kind of target -- see `layer::Split`: what `pixels` draws is played
-    /// for pixels, and what `document` draws is what a document backend
-    /// writes. Each is filed as it would be drawn alone, after everything
-    /// drawn before it, and nothing drawn after joins either. The page
-    /// counts `image` as held -- see [`PageRecorder::held_image_bytes`] --
-    /// since no other object reports its pixels while the page keeps it,
+    /// Whether a draw of `image` from `src_rect`, placed on the page by
+    /// `placed`, is one Skia's CPU raster copies through its sprite rows, so
+    /// that pixels draw it through the image as a shader instead -- see
+    /// [`Self::draw_source_image_declared`].
+    ///
+    /// An image decoded from encoded bytes holds Skia's N32 colour type, the
+    /// page's own byte order, and Skia draws such an image onto an N32 page
+    /// unscaled at a whole-pixel offset through `SkBlendARGB32` and
+    /// `blit_row_s32a_opaque`, which divide by 256 where the composite
+    /// divides by 255: on x86 at every alpha, on arm64 below full alpha, a
+    /// level apart from the exact bytes at many translucent pixels (#828).
+    /// A shader draw takes Skia's raster pipeline, whose `srcover` is
+    /// exact, and on the CPU lands every other placement in the same bytes
+    /// as `drawImageRect`, so a page replayed later under a scale or a
+    /// fractional offset is unchanged. On Ganesh it does too, but for a
+    /// JPEG: drawn as an image, Ganesh uploads its YUV planes and converts
+    /// them, where the shader samples the CPU's RGB decode and lands the
+    /// CPU's bytes.
+    ///
+    /// Only an encoded image: a canvas's own pixels and an image made from
+    /// pixels are already in the other byte order -- see
+    /// `page::own_image_type` -- and take the pipeline. Not under a mask
+    /// filter, which a rectangle filled by the shader applies to the
+    /// rectangle rather than to the image's alpha, nor under a shadow or an
+    /// image filter, which are drawn through routes of their own.
+    fn blits_decoded(
+        &self,
+        image: &Image,
+        src_rect: &Rect,
+        placed: &Matrix,
+    ) -> bool {
+        #[cfg(test)]
+        if !BLITS_DECODED.get() {
+            return false;
+        }
+        let whole = |v: f32| v.fract() == 0.0;
+        image.encoded_data().is_some()
+            && placed.is_translate()
+            && whole(placed.translate_x())
+            && whole(placed.translate_y())
+            && [src_rect.left, src_rect.top, src_rect.right, src_rect.bottom]
+                .into_iter()
+                .all(whole)
+            && lies_within(src_rect, image.width(), image.height())
+            && self.state.skia_mask_filter.is_none()
+            && self.state.skia_image_filter.is_none()
+            && self.state.filter.is_none()
+            && !self.casts_shadow()
+    }
+
+    /// Draws one draw of `image` as entries of its own for each kind of
+    /// target -- see `layer::Split`: what `pixels` draws is played for
+    /// pixels, and what `document` draws is what a document backend writes.
+    /// Each is filed as it would be drawn alone, after everything drawn
+    /// before it, and no other draw drawn after joins either -- but where
+    /// `joins`, a split drawn straight after that joins too adds its entries
+    /// to this one's -- see `PageRecorder::end_split`. The page counts
+    /// `image` as held where its pixels are in main memory -- see
+    /// [`PageRecorder::held_image_bytes`] and `HeldImage::of` -- since no
+    /// other object reports a canvas's pixels while the page keeps them,
     /// and `held`, the images the document holds besides -- see
     /// `layer::Entries::held`.
     pub(crate) fn draw_split(
@@ -4721,6 +4830,7 @@ impl Context2D {
         pixels: impl FnOnce(&mut Self),
         document: impl FnOnce(&mut Self),
         held: Arc<[HeldImage]>,
+        joins: bool,
     ) {
         let mut mark = self.recorder.borrow_mut().begin_split();
         pixels(self);
@@ -4731,6 +4841,7 @@ impl Context2D {
             drawn,
             HeldImage::of(image),
             held,
+            joins,
         );
     }
 
@@ -4783,6 +4894,7 @@ impl Context2D {
                 }
             },
             held,
+            false,
         );
         self.flatten_past_budget();
     }
@@ -4824,6 +4936,26 @@ impl Context2D {
         }
     }
 
+    /// Whether a draw of `image` from `src_rect` into `dst_rect` replaces
+    /// everything drawn before it, as an opaque fill over the page does --
+    /// see [`Self::covers_the_page`]: an opaque image covering the page,
+    /// its source inside it, since past its edges a source rectangle
+    /// samples nothing.
+    fn image_covers_the_page(
+        &self,
+        image: &Image,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) -> bool {
+        image.is_opaque()
+            && lies_within(src_rect, image.width(), image.height())
+            && self.covers_the_page(
+                true,
+                &Path::rect(*dst_rect, None),
+                &self.state.matrix,
+            )
+    }
+
     /// [`Self::draw_source_image`], declared.
     fn draw_source_image_declared(
         &mut self,
@@ -4831,6 +4963,7 @@ impl Context2D {
         src_rect: &Rect,
         dst_rect: &Rect,
         apart: bool,
+        drawn: ImageDraw,
     ) {
         let scaling = ScalingOperation::for_matrix(&Matrix::concat(
             &self.state.matrix,
@@ -4840,6 +4973,31 @@ impl Context2D {
         let paint = self.paint_for_image();
         let features = self.vector_features(&paint, None);
         let sampling = self.state.sampling_filter.sampling_for(scaling);
+        // The image drawn through `paint`: as an image, or as a rectangle
+        // the image fills as a shader for the pixels of a draw Skia would
+        // otherwise copy through its sprite rows -- see
+        // [`Self::blits_decoded`].
+        let blit = |canvas: &SkCanvas, paint: &Paint| {
+            if drawn != ImageDraw::SplitPixels {
+                canvas.draw_image_rect_with_sampling_options(
+                    image,
+                    Some((src_rect, Strict)),
+                    dst_rect,
+                    sampling,
+                    paint,
+                );
+                return;
+            }
+            let to_dst = Matrix::rect_2_rect(src_rect, dst_rect, None)
+                .unwrap_or_else(Matrix::new_identity);
+            let mut filled = paint.clone();
+            filled.set_shader(image.to_shader(
+                (TileMode::Clamp, TileMode::Clamp),
+                sampling,
+                Some(&to_dst),
+            ));
+            canvas.draw_rect(dst_rect, &filled);
+        };
 
         // A shadow the chain casts is filed as a group of its own before the
         // image, which is then drawn as it is casting none -- see
@@ -4848,13 +5006,7 @@ impl Context2D {
         // its alpha before the filter rather than after.
         let cast_apart = self.casts_shadow() && {
             let draw = |canvas: &SkCanvas, paint: &Paint, _: Pass| {
-                canvas.draw_image_rect_with_sampling_options(
-                    image,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    sampling,
-                    &self.faint().drawable(paint),
-                );
+                blit(canvas, &self.faint().drawable(paint));
             };
             self.files_shadow_through_chain(
                 &paint, features, None, apart, &draw,
@@ -4868,16 +5020,9 @@ impl Context2D {
             return;
         }
 
-        // An opaque image covering the page replaces everything drawn
-        // before it -- see `Self::covers_the_page` -- where its source lies
-        // inside it: past its edges a source rectangle samples nothing.
-        if image.is_opaque()
-            && lies_within(src_rect, image.width(), image.height())
-            && self.covers_the_page(
-                true,
-                &Path::rect(*dst_rect, None),
-                &self.state.matrix,
-            )
+        // A split draw erased the page before its halves.
+        if drawn == ImageDraw::Whole
+            && self.image_covers_the_page(image, src_rect, dst_rect)
         {
             self.erase_the_page();
         }
@@ -4898,13 +5043,7 @@ impl Context2D {
                 drawn.set_image_filter(None).set_alpha_f(1.0);
                 let mut recorder = PictureRecorder::new();
                 let canvas = recorder.begin_recording(*dst_rect, false);
-                canvas.draw_image_rect_with_sampling_options(
-                    image,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    sampling,
-                    &drawn,
-                );
+                blit(canvas, &drawn);
                 recorder.finish_recording_as_picture(None)
             };
             // Recorded for each recording where the pixels draw the paint's
@@ -4984,13 +5123,7 @@ impl Context2D {
             None,
             apart.then_some(CpuBytes::Source),
             |canvas, paint, _| {
-                canvas.draw_image_rect_with_sampling_options(
-                    image,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    sampling,
-                    &self.faint().drawable(paint),
-                );
+                blit(canvas, &self.faint().drawable(paint));
             },
         );
     }
@@ -6617,6 +6750,11 @@ thread_local! {
     /// are held against.
     pub(crate) static REPLAYS_BLENDED_TEXT: Cell<bool> =
         const { Cell::new(true) };
+    /// Whether a decoded image's pixels may be drawn through it as a shader
+    /// -- see [`Context2D::blits_decoded`]: off, every draw of one is filed
+    /// as it is for a document, which the tests of that route are held
+    /// against.
+    pub(crate) static BLITS_DECODED: Cell<bool> = const { Cell::new(true) };
     /// Whether a translucent run in one flat colour is kept whole to be
     /// drawn again where it is played -- see [`TextRun::exact`]: off, it is
     /// recorded as it is drawn, the reference every target but an eight-bit

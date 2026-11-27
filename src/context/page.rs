@@ -513,6 +513,14 @@ pub struct PageRecorder {
     /// The frame the last entry filed, a [`GradientDraw`], was opened in
     /// while it can still be joined, as `blur_run` is for a [`BlurOp`].
     gradient_run: Option<u64>,
+    /// Whether the last split filed joins, and can still be joined, as
+    /// `gradient_run` says of a [`GradientDraw`]: until the page is taken --
+    /// see [`Self::filed_page`] -- by a read, an export or a cache keyed by
+    /// its length, and until a split that does not join is filed. Not ended
+    /// by [`Self::flush`], which each split's own [`Self::seal`] calls. A
+    /// split joins only the last entry of the list, which an entry filed
+    /// since, an erase among them, is not.
+    split_run: bool,
     /// The image-filtered draws the last `GradientDraw` filed as an isolated
     /// layer holds, counted as [`Self::filled_with_filtered`] counts those
     /// of an isolated layer in `current` -- see [`Self::append_gradient`].
@@ -1340,7 +1348,7 @@ impl PageRecorder {
                 .for_each(|(entry, asks)| self.file_entry(entry.clone(), asks)),
             false => self.append_unframed(VectorFeatures::PLAIN, drawn),
         }
-        self.end_split(mark, pixels, held, document_held);
+        self.end_split(mark, pixels, held, document_held, false);
         self.set_state(matrix, &clip);
         // The base is the image of the page as it now stands.
         let page = self.page();
@@ -1428,6 +1436,7 @@ impl PageRecorder {
             plays_on_gpu: false,
             cut_run: None,
             gradient_run: None,
+            split_run: false,
             gradient_filtered: 0,
             run: None,
             spare: None,
@@ -2144,12 +2153,22 @@ impl PageRecorder {
     /// with `pixels` as one [`Layer::Split`] holding `image`, asking of a
     /// vector backend what the document's entries ask. `held` is what the
     /// document holds besides -- see [`Entries::held`].
+    ///
+    /// Where `joins`, and the last entry filed is a split that joins too,
+    /// with nothing filed, read or erased since, the draw's entries join
+    /// that split's -- see [`Split::join`] -- rather than standing in one of
+    /// their own: a page drawing a sheet of thousands of tiles in a row
+    /// files one entry for them, where a split each held thousands, each
+    /// ending the run a draw after it could join. Taking the page ends the
+    /// run -- see [`Self::filed_page`] -- so that no split a page taken
+    /// holds, or a cache keyed by the page's length has drawn, grows.
     pub(crate) fn end_split(
         &mut self,
         mark: SplitMark,
         pixels: Entries,
         image: Option<HeldImage>,
         held: Arc<[HeldImage]>,
+        joins: bool,
     ) {
         self.seal();
         self.documenting = false;
@@ -2173,11 +2192,11 @@ impl PageRecorder {
             pixels.layers.iter().for_each(|entry| self.count(entry));
         }
         let features = document.all_features();
-        let split = Layer::Split(Arc::new(Split {
+        let split = Split {
             pixels,
             document,
             image,
-        }));
+        };
         // Each entry was counted as it was filed; the images are counted
         // here, each once however many entries hold it.
         let (counted, bytes) = (&mut self.held, &mut self.held_bytes);
@@ -2186,7 +2205,50 @@ impl PageRecorder {
                 *bytes += held.bytes;
             }
         });
-        self.file_counted(split, features);
+        let joined = joins && self.split_run;
+        self.split_run = joins;
+        let split = match joined {
+            true => match self.join_split(split, features) {
+                Ok(()) => return,
+                Err(split) => split,
+            },
+            false => split,
+        };
+        self.file_counted(Layer::Split(Arc::new(split)), features);
+    }
+
+    /// Joins `split`, asking `features` of a vector backend, to the split
+    /// filed last in the list the page files into -- see
+    /// [`Self::end_split`] -- where that is one no page taken still holds.
+    /// `Err` gives `split` back where it files apart.
+    fn join_split(
+        &mut self,
+        split: Split,
+        features: VectorFeatures,
+    ) -> Result<(), Split> {
+        let gpu = split.plays_apart_on_gpu();
+        let (entries, entry_features) = match self.open.last_mut() {
+            Some(layer) => (&mut layer.entries, &mut layer.entry_features),
+            None => (
+                Arc::make_mut(&mut self.layers),
+                Arc::make_mut(&mut self.features),
+            ),
+        };
+        let Some(Layer::Split(last)) = entries.last_mut() else {
+            return Err(split);
+        };
+        let Some(last) = Arc::get_mut(last) else {
+            return Err(split);
+        };
+        last.join(split)?;
+        if let Some(last) = entry_features.last_mut() {
+            *last = last.with(features);
+        }
+        if let Some(layer) = self.open.last_mut() {
+            layer.features = layer.features.with(features);
+        }
+        self.plays_apart_on_gpu = self.plays_apart_on_gpu || gpu;
+        Ok(())
     }
 
     /// Files what the page holds unfiled -- its recording, the frame's run
@@ -3361,6 +3423,7 @@ impl PageRecorder {
     /// it, are filed first where no layer is open; while one is, everything
     /// before the outermost was filed when it opened.
     fn filed_page(&mut self) -> Page {
+        self.split_run = false;
         if self.open.is_empty() {
             self.settle();
             self.split_run();
