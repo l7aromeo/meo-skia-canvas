@@ -27,7 +27,11 @@ const V1_GLYPH: &str = "\u{f0101}";
 /// canvas. The two draw the same glyphs through the same painter: the canvas
 /// onto its eight-bit sRGB bytes, the document into `Svg::rasterize`'s half
 /// floats, rounded to bytes once when the image is drawn, so a pixel, on a
-/// glyph's edge or inside it, can land a level apart.
+/// glyph's edge or inside it, can land a level apart. Inside a glyph drawn at
+/// an alpha of 0.4, both sides land that alpha as 102, 0.4 of 255 exactly;
+/// the level is in the glyph's own colours scaled by it, which the half
+/// floats carry unrounded and the canvas lands on its bytes by its own
+/// rounding. It is precision, not a fault.
 ///
 /// Compared premultiplied, as the canvas stores them: read back
 /// unpremultiplied, a level is up to 255 levels of colour at an alpha of 1
