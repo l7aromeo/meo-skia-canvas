@@ -13208,9 +13208,11 @@ mod pattern_memory_tests {
     //! own pixels past its budget, as it does a canvas drawn into it.
     use super::*;
     use crate::{
-        canvas::EngineKind, context::RECORDED_IMAGE_PAGES,
+        canvas::EngineKind,
+        context::{RECORDED_IMAGE_PAGES, layer::TileSource},
         pattern::PatternRepeat,
     };
+    use std::sync::Arc;
 
     /// The pages' side.
     const SIDE: (f32, f32) = (120.0, 80.0);
@@ -13408,6 +13410,151 @@ mod pattern_memory_tests {
             "the source's image and the image its page held"
         );
         assert_eq!(rasters(&mut dest), 0, "no raster before a playback");
+    }
+
+    /// A source with edges a raster made again has to reproduce.
+    fn edged_source() -> Canvas {
+        let mut source = cpu(SIDE);
+        let ctx = source.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.2, 0.5, 0.9));
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        ctx.set_fill_style(RgbaLinear::opaque(0.9, 0.3, 0.1));
+        ctx.fill_rect(10.3, 7.7, 50.5, 30.2);
+        source
+    }
+
+    /// The tile a canvas's pattern is rasterized from.
+    fn tile(pattern: &Pattern) -> Arc<TileSource> {
+        pattern.inner.tiling().expect("a canvas's pattern").0
+    }
+
+    /// `dest` erased, which begins a generation of its page.
+    fn erase(dest: &mut Canvas) {
+        let ctx = dest.context();
+        ctx.reset_transform();
+        ctx.clear_rect(0.0, 0.0, SIDE.0, SIDE.1);
+    }
+
+    /// `dest` erased, then filled with `pattern` under `scale`, read whole.
+    fn erase_and_fill(
+        dest: &mut Canvas,
+        pattern: &Pattern,
+        scale: f32,
+    ) -> Vec<u8> {
+        erase(dest);
+        let ctx = dest.context();
+        ctx.scale(scale, scale);
+        ctx.set_fill_pattern(pattern);
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        ctx.get_image_data(0.0, 0.0, SIDE.0, SIDE.1)
+            .expect("a read")
+            .pixels()
+            .to_vec()
+    }
+
+    /// A pattern the page stops drawing lets go of its raster once a
+    /// generation of the page has passed without it, and drawn again makes
+    /// it again and lands the bytes it did, at density 1 and at density 2.
+    /// Without the release, a pattern waiting to be collected kept its
+    /// raster however long it waited.
+    #[test]
+    fn a_pattern_no_page_draws_lets_go_of_its_raster_and_lands_the_same() {
+        for scale in [1.0, 2.0] {
+            let mut source = edged_source();
+            let mut dest = cpu(SIDE);
+            let pattern = dest
+                .context()
+                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+            let tile = tile(&pattern);
+            let first = erase_and_fill(&mut dest, &pattern, scale);
+            let made = tile.raster_id();
+            assert!(made.is_some(), "scale {scale}: a raster made");
+            erase(&mut dest);
+            assert_eq!(tile.raster_id(), made, "scale {scale}: kept a frame");
+            erase(&mut dest);
+            assert_eq!(tile.raster_id(), None, "scale {scale}: let go of");
+            assert_eq!(rasters(&mut dest), 0, "scale {scale}: none counted");
+            let again = erase_and_fill(&mut dest, &pattern, scale);
+            assert!(
+                tile.raster_id().is_some() && tile.raster_id() != made,
+                "scale {scale}: made again"
+            );
+            let apart = first.iter().zip(&again).filter(|(a, b)| a != b);
+            assert_eq!(apart.count(), 0, "scale {scale}: bytes apart");
+            assert!(
+                first.chunks(4).any(|px| px != &first[..4]),
+                "scale {scale}: the scene has more than one colour"
+            );
+        }
+    }
+
+    /// A pattern drawn after every erase keeps the raster it made first,
+    /// rather than rasterizing its page again each frame.
+    #[test]
+    fn a_pattern_drawn_after_every_erase_keeps_its_raster() {
+        let mut source = edged_source();
+        let mut dest = cpu(SIDE);
+        let pattern = dest
+            .context()
+            .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        let tile = tile(&pattern);
+        erase_and_fill(&mut dest, &pattern, 1.0);
+        let made = tile.raster_id();
+        for n in 0..4 {
+            erase_and_fill(&mut dest, &pattern, 1.0);
+            assert_eq!(tile.raster_id(), made, "frame {n}: the first raster");
+        }
+    }
+
+    /// A pattern one page has let go of keeps its raster while another
+    /// page still holds a draw of it, and lets go of it once that page has
+    /// too.
+    #[test]
+    fn a_pattern_another_page_holds_keeps_its_raster() {
+        let mut source = edged_source();
+        let (mut one, mut other) = (cpu(SIDE), cpu(SIDE));
+        let pattern = one
+            .context()
+            .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        let tile = tile(&pattern);
+        erase_and_fill(&mut one, &pattern, 1.0);
+        let made = tile.raster_id();
+        erase_and_fill(&mut other, &pattern, 1.0);
+        (0..2).for_each(|_| erase(&mut one));
+        assert_eq!(tile.raster_id(), made, "held by the other page");
+        (0..2).for_each(|_| erase(&mut other));
+        assert_eq!(tile.raster_id(), None, "held by neither");
+    }
+
+    /// Patterns kept alive -- as JavaScript keeps each until it is
+    /// collected -- filled one a frame into a page never cleared, hold the
+    /// rasters of those drawn since the flatten before last, not one a
+    /// frame: the page lets each go at a flatten, and the pattern its
+    /// raster a flatten later. Without the release they held all
+    /// `FRAMES`.
+    #[test]
+    fn patterns_kept_alive_on_a_page_never_cleared_hold_few_rasters() {
+        let mut source = cpu(SIDE);
+        let mut inner = nesting_inner();
+        let mut dest = cpu(SIDE);
+        let mut tiles = Vec::new();
+        for n in 0..FRAMES {
+            change(&mut source, &mut inner, n, false);
+            let ctx = dest.context();
+            let pattern = ctx
+                .create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+            ctx.set_global_alpha(0.5);
+            ctx.set_fill_pattern(&pattern);
+            ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+            ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a pixel");
+            tiles.push(tile(&pattern));
+        }
+        let held: usize = tiles.iter().map(|tile| tile.raster_bytes()).sum();
+        assert!(
+            held <= 2 * (RECORDED_IMAGE_PAGES + 1) * PAGE,
+            "{} pages of rasters held by {FRAMES} patterns",
+            held / PAGE
+        );
     }
 
     /// A GPU page draws a pattern from a texture that lasts the one

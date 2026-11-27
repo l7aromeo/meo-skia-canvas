@@ -1964,10 +1964,14 @@ density it was made at and only once it is made on the CPU, toward the same
 budget (`TileSource::budget_bytes`). A 400 by 300 CPU canvas filled at half
 alpha with a new pattern of a 400 by 300 CPU canvas each frame, collected after
 each frame, grows 9 MB over 300 frames where it grew 144 MB, and 15 MB where
-the source holds a drawn canvas, where it grew 284 MB. Run as one synchronous
-loop it still grows about a page a frame until the loop yields: each pattern
-object keeps its own raster and pixels until Node finalizes it, which waits for
-the event loop.
+the source holds a drawn canvas, where it grew 284 MB. A pattern lets go of its
+raster once no page has drawn it for a generation of the page's content, and
+makes it again, the same bytes, if it is drawn again
+(`TileSource::release_unheld`). Run as one synchronous loop, the plain source
+grows 18 MB over 300 frames where it grew 143 MB. A source holding a drawn
+canvas still grows about a page a frame until the loop yields, 150 MB where it
+grew 287 MB: each pattern object keeps that source's own pixels until Node
+finalizes it, which waits for the event loop.
 
 A PDF or an SVG of such a page writes what it drew as vectors and text through
 every flatten, from the entries a document plays of each draw

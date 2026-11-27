@@ -1827,7 +1827,9 @@ const SCALE_SLACK: f32 = 1.0 / 1024.0;
 /// counted there: the images its page holds and the one it paints a
 /// document with -- see [`Self::held_images`] -- and the raster it makes,
 /// which a page counts once however many of its draws the pattern dyes --
-/// see [`Self::count_raster_into`] and [`Self::budget_bytes`].
+/// see [`Self::count_raster_into`] and [`Self::budget_bytes`]. The raster is
+/// let go of once no page holds the pattern, and made again if it is drawn
+/// again -- see [`Self::release_unheld`].
 #[derive(Debug)]
 pub struct TileSource {
     page: Page,
@@ -1841,7 +1843,8 @@ pub struct TileSource {
     /// page it was taken as never changes, so that filing a draw dyed by it
     /// does not walk the page again.
     held: Box<[HeldImage]>,
-    /// The raster made last on the CPU, and the density it was made at.
+    /// The raster made last on the CPU, and the density it was made at;
+    /// `None` before the first and once no page holds the pattern.
     raster: Mutex<Option<(u32, Image)>>,
     /// Each page's counts the pattern was filed into, once each, held
     /// weakly: of rasters, which a raster made or replaced moves by its
@@ -1919,25 +1922,53 @@ impl TileSource {
     /// toward the page's budget -- see [`Self::budget_bytes`] -- now, or
     /// once the first is made. Once for each page, however many times it
     /// is asked with its counts, since a page holds one raster of the
-    /// pattern however many of its draws it dyes.
+    /// pattern however many of its draws it dyes. Whether the page holds it
+    /// now and did not before.
     pub(crate) fn count_raster_into(
         &self,
         rasters: &RecordedCount,
         budget: &RecordedCount,
-    ) {
+    ) -> bool {
         // The raster's lock first, as `Self::raster` takes the two, so that
         // no raster is made between the bytes added and the counts held.
         let raster = self.raster.lock();
         let mut counts = self.counted_by.lock();
         counts.retain(|(held, _)| !held.is_gone());
         if counts.iter().any(|(held, _)| held.holds(rasters)) {
-            return;
+            return false;
         }
         counts.push((rasters.weak(), budget.weak()));
         if let Some((_, image)) = raster.as_ref() {
             rasters.add(HeldImage::of(image).map_or(0, |held| held.bytes));
             budget.add(self.page_bytes());
         }
+        true
+    }
+
+    /// Lets go of the raster where no page holds the pattern any longer --
+    /// none of the counts it was filed into is left -- so that a pattern
+    /// waiting to be collected holds no page of pixels that nothing draws.
+    /// The next draw makes it again, the same bytes, since the page it is
+    /// made from never changes. Called by a page as it lets the pattern go
+    /// -- see `PageRecorder::set_bounds` -- and a no-op while another page
+    /// holds it.
+    pub(crate) fn release_unheld(&self) {
+        // The raster's lock first, as `Self::raster` takes the two.
+        let mut raster = self.raster.lock();
+        let mut counts = self.counted_by.lock();
+        counts.retain(|(held, _)| !held.is_gone());
+        if counts.is_empty() {
+            *raster = None;
+        }
+    }
+
+    /// The identity of the raster the pattern holds, if it holds one.
+    #[cfg(test)]
+    pub(crate) fn raster_id(&self) -> Option<u32> {
+        self.raster
+            .lock()
+            .as_ref()
+            .map(|(_, image)| image.unique_id())
     }
 
     /// The page rasterized at `density` for a pattern drawn on `canvas`.

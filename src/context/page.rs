@@ -601,6 +601,15 @@ pub struct PageRecorder {
     /// and begun again with it: what the page flattens past -- see
     /// [`Self::held_entry_bytes`].
     raster_budget: RecordedCount,
+    /// The patterns this generation's entries draw from, each once, held
+    /// weakly -- added to as `rasters` is -- and those the generation
+    /// before drew from. Emptying the page lets go of the rasters of the
+    /// earlier generation's patterns that this one did not draw again and
+    /// that no other page holds -- see [`TileSource::release_unheld`] -- a
+    /// generation late, so that a pattern drawn after every erase keeps its
+    /// raster rather than rasterizing its page again each frame.
+    patterns: Vec<Weak<TileSource>>,
+    patterns_before: Vec<Weak<TileSource>>,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
     /// open `current` records the innermost one's contents, and what each
@@ -1452,9 +1461,12 @@ impl PageRecorder {
                 *bytes += held.bytes;
             }
         });
-        let (rasters, budget) = (&self.rasters, &self.raster_budget);
+        let (rasters, budget, patterns) =
+            (&self.rasters, &self.raster_budget, &mut self.patterns);
         entry.tile_sources(&mut |source| {
-            source.count_raster_into(rasters, budget)
+            if source.count_raster_into(rasters, budget) {
+                patterns.push(Arc::downgrade(source));
+            }
         });
     }
 
@@ -1528,6 +1540,8 @@ impl PageRecorder {
             held_bytes: 0,
             rasters: RecordedCount::default(),
             raster_budget: RecordedCount::default(),
+            patterns: Vec::new(),
+            patterns_before: Vec::new(),
             open: Vec::new(),
             recorded: RecordedCount::default(),
         }
@@ -1681,11 +1695,14 @@ impl PageRecorder {
 
     /// Erases the page's content, in place.
     ///
-    /// All three callers clear at the size the page already has --
-    /// `reset()`, an opaque fill that covers the canvas, and a `clearRect`
-    /// that does -- and a resize goes through [`Self::update_bounds`]
-    /// instead. The page keeps everything but what it recorded: its
-    /// recordings are dropped unfinished, and the next draw begins new ones.
+    /// Every caller clears at the size the page already has -- `reset()`,
+    /// an opaque fill that covers the canvas, a `clearRect` that does, and
+    /// [`Self::flatten`] -- and a resize goes through
+    /// [`Self::update_bounds`] instead. The page keeps everything but what
+    /// it recorded: its recordings are dropped unfinished, and the next draw
+    /// begins new ones. A pattern the generation before this one drew from,
+    /// and this one did not, lets go of its raster here where no other page
+    /// holds it -- see [`Self::patterns`](PageRecorder#structfield.patterns).
     /// Finishing a recording optimizes it and bounds every draw in it, for a
     /// picture nothing would keep: finishing one holding 200 rects cost 11.7
     /// microseconds more than dropping it, and one holding 2,000 cost 115
@@ -1737,6 +1754,18 @@ impl PageRecorder {
         self.held_bytes = 0;
         self.rasters = RecordedCount::default();
         self.raster_budget = RecordedCount::default();
+        // The counts the earlier generation's patterns held are gone, so
+        // those this one did not draw again and no other page holds let
+        // go of their rasters.
+        let drawn = std::mem::take(&mut self.patterns);
+        let before = std::mem::replace(&mut self.patterns_before, drawn);
+        before
+            .iter()
+            .filter(|source| {
+                !self.patterns_before.iter().any(|now| now.ptr_eq(source))
+            })
+            .filter_map(Weak::upgrade)
+            .for_each(|source| source.release_unheld());
         // What a replay walks is what the page holds, which is now nothing.
         self.replay_cost = 0;
         self.changed = false;
