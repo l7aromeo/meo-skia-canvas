@@ -865,12 +865,12 @@ describe("Canvas", () => {
     });
 
     test("a clipped nested draw costs the region, not the page", () => {
-      // Rasterizing the visible region drew the source's deferred image into
-      // a region-sized surface, and Skia answers that by materializing the
-      // whole page and copying the sliver out -- so every op in the source
-      // ran however little of it showed. Replaying the picture into that
-      // surface lets Skia cull against its bounds instead. The cost stops
-      // scaling with the source and starts scaling with the clip.
+      // A canvas drawn into another is its own pixels, composited once for
+      // each state of its page and served again while the page is unchanged
+      // -- see `PageRecorder::image` -- so a source drawn again and again
+      // costs each draw the clip's work, not the source's. Before, each draw
+      // rasterized the source's picture: drawn whole into a region-sized
+      // surface, every op in the source ran however little of it showed.
       //
       // A ratio rather than a duration, so a uniformly slow machine cancels
       // out. The defect made the heavy side 66 times the light one, and it
@@ -2594,12 +2594,12 @@ describe("page ranges", () => {
 });
 
 describe("a canvas drawn into a canvas", () => {
-  // Drawing one canvas into another hands over a deferred image: cheap to
-  // make, and backed by the source's picture rather than its pixels. Nesting
-  // that carried the whole source along each time, so copying a page into a
-  // fresh canvas and drawing it back doubled the work of the eventual
-  // rasterization every round while the recording grew by a constant. Twelve
-  // rounds took 3.85 seconds where eleven took 1.87 and ten took 0.94.
+  // Drawing one canvas into another hands over its own pixels, which the
+  // destination holds as any image's. A picture handed over instead carried
+  // the whole source along each time, so copying a page into a fresh canvas
+  // and drawing it back doubled the work of the eventual rasterization every
+  // round while the recording grew by a constant: twelve rounds took 3.85
+  // seconds where eleven took 1.87 and ten took 0.94.
   //
   // Timed rather than counted, because there is nothing to count: the
   // recording is the same size either way, and Skia's own nested op count

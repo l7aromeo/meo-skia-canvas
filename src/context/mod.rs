@@ -12,7 +12,6 @@ use skia_safe::{
     canvas::SrcRectConstraint::Strict,
     color_filters, dash_path_effect,
     font_style::{FontStyle, Width},
-    image_filter::MapDirection,
     image_filters,
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
@@ -41,6 +40,7 @@ pub mod layer;
 pub mod page;
 pub(crate) mod resident;
 pub(crate) mod run_mask;
+pub(crate) mod tile_cuts;
 pub mod typesetting;
 
 #[cfg(test)]
@@ -85,11 +85,12 @@ use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
-    DrawnIn, Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
-    coverage_files, reach_the_clip,
+    DrawnIn, Entries, ExactColour, Group, HeldImage, Layer, LayerRec,
+    LazyPicture, Replay, Target, coverage_files, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
+use tile_cuts::TileReach;
 use typesetting::{TextSettings, Typesetting, Typography};
 
 /// A shadow cast by one run of a paragraph's text -- see
@@ -152,6 +153,57 @@ const TRANSPARENT: Color = Color::TRANSPARENT;
 /// that count within a tenth.
 pub(crate) const CONTEXT_BYTES: usize = 4_800;
 
+/// The most a canvas's entries may cost to replay -- see
+/// `PageRecorder::replay_cost` -- for a document to write a draw of the
+/// canvas from them rather than from its image.
+///
+/// A canvas drawn into a copy of itself and the copy drawn back holds its
+/// entries twice for each round, so a document written from them replays
+/// twice as much each round. Past this, the draw is written as its pixels,
+/// and what the page holds from earlier rounds stays as it was, so the
+/// document stops doubling. A canvas nested in a chain, or drawn into
+/// another many times, costs one replay for each, and stays vector up to
+/// this many.
+///
+/// One replay is a whole page, so the bound is on pages replayed, not on
+/// what each holds. For a page holding one rectangle and one line of text,
+/// in a debug build: an SVG of 154 KB written in 34 ms at the last round
+/// this lets through, and 1.3 MB in 278 ms where it was 1,024.
+pub(crate) const DOCUMENT_REPLAY_BUDGET: usize = 64;
+
+/// How many pages of its own pixels a page's entries may hold in images of
+/// other canvases, and in the rasters of the patterns of them they draw
+/// from, before the page lets go of them -- see `PageRecorder::flatten`.
+///
+/// Chosen rather than derived: past it a page holds one page of pixels for
+/// what it drew, so a page never cleared that keeps drawing changing
+/// canvases in, or filling with patterns of them, levels off at a few
+/// pages, where it held a page for every draw. Below it what the page drew
+/// itself stays entries, which a read at another density draws at that
+/// density; past it they are the base's pixels, scaled there. The images a
+/// document of the page holds count too -- canvases drawn in past
+/// [`DOCUMENT_REPLAY_BUDGET`] -- and a flatten that would keep more than
+/// this in them with the base writes the document as the base as well.
+pub(crate) const RECORDED_IMAGE_PAGES: usize = 4;
+
+/// What a document plays of a canvas drawn into another -- see
+/// `Context2D::draw_canvas_image`.
+#[derive(Clone, Debug)]
+pub(crate) struct CanvasDocument {
+    /// The canvas's entries as a document plays them -- see
+    /// `layer::Entries::projected`.
+    pub(crate) entries: Entries,
+    /// The canvas's bounds, which a picture of the entries records within.
+    pub(crate) bounds: Rect,
+    /// What replaying the entries costs -- see
+    /// `PageRecorder::replay_cost`.
+    pub(crate) cost: usize,
+    /// The images the entries hold that their pictures do not count, each
+    /// once -- see `layer::Entries::held` -- which a page writing them
+    /// holds too.
+    pub(crate) held: Arc<[HeldImage]>,
+}
+
 /// A colour matrix making a colour opaque and leaving its red, green and
 /// blue alone: Skia's 4x5 row-major layout (`SkColorMatrix`), one row per
 /// output channel, the fifth column a constant, the alpha row taking the
@@ -178,6 +230,11 @@ const MAX_TEXTURE_TILES: f32 = 4_000_000.0;
 /// a ratio of miter length to stroke width, that is a size in pixels.
 const DEFAULT_MITER_LIMIT: f32 = 10.0;
 
+/// How far past a shape's edge its anti-aliasing can ink, in device pixels:
+/// the pixel the edge passes through, partly covered. Widens a draw's
+/// rectangle for the page's tiles -- see [`Context2D::tile_cut`].
+const AA_REACH: f32 = 1.0;
+
 /// The size of the Canvas API's initial font.
 ///
 /// HTML gives it as `10px sans-serif`, which is the whole reason unstyled
@@ -196,14 +253,14 @@ impl Finalize for Context2D {
 pub struct Context2D {
     pub bounds: Rect,
     /// The canvas's color space, fixed when the canvas is built. The page's
-    /// image is tagged with it -- see `Context2D::image`.
+    /// image is in it -- see `Context2D::source_image`.
     pub canvas_color_space: ColorSpace,
     /// The canvas's pixel format.
     ///
     /// Read when this page is handed to another canvas as a source, to pick
-    /// the depth that image carries -- see
-    /// `PageRecorder::image_flattened`. Fixed when the canvas is built;
-    /// there is no setter for it, so a copy here cannot go stale.
+    /// the format its image is made in -- see `PageRecorder::image`. Fixed
+    /// when the canvas is built; there is no setter for it, so a copy here
+    /// cannot go stale.
     pub canvas_color_type: ColorType,
     /// The text contrast and gamma the canvas rasterizes glyphs with, fixed
     /// when it is built: what an export or a readback of the page takes, and
@@ -244,98 +301,11 @@ pub struct Context2D {
     /// to drops a page's pixels and never these. See
     /// [`Context2D::report_resident`].
     beside_page: External,
-}
-
-/// A picture-backed image with its pixels taken now.
-///
-/// The fallback hands back the deferred image, which is slow rather than
-/// wrong: it draws the same pixels and keeps carrying its picture. Nothing
-/// reaches it. `make_raster_image` on a picture image replays into a raster
-/// canvas it allocates itself and needs no context to do it, and no size
-/// refuses -- 1x1, 30000 square and 100000x8 all rasterize, and a zero
-/// dimension is rejected before a page exists. The assertion says so where a
-/// future reader would otherwise have to rediscover it.
-fn flatten_image(image: &Image) -> Image {
-    image
-        .make_raster_image(None, skia_safe::image::CachingHint::Allow)
-        .unwrap_or_else(|| {
-            debug_assert!(false, "a picture-backed image must rasterize");
-            image.clone()
-        })
-}
-
-/// One region of `image`, as pixels.
-///
-/// Drawn into a surface rather than asked for with `make_subset` and
-/// `make_raster_image`. Those answer `None` for a picture-backed image with no
-/// context to rasterize through, and the fallback then hands back the deferred
-/// image -- which is the one thing this must not do, because the whole point
-/// is to stop a picture travelling any further. Silently, too: every pixel
-/// still lands in the right place and only the clock says anything is wrong.
-///
-/// The surface takes the source image's own format, so a `display-p3` or
-/// float source keeps its gamut and depth through here. `raster_n32_premul`
-/// would narrow every source to eight-bit sRGB.
-///
-/// `picture` is replayed into that surface where there is one, and the
-/// deferred image is drawn only where there is not. Both put the same bytes
-/// in the surface -- hashes of the whole page match on a plain draw, a
-/// rotation, a scale and a blur -- but drawing the image goes through
-/// `SkBitmapDevice::drawImageRect`, which calls `getROPixels`, and that has
-/// no notion of a source rectangle: it materializes the *whole* page and the
-/// region is copied out of the result, so every op in the source runs
-/// however little of it shows. Replaying lets Skia cull against the surface
-/// bounds, which makes the cost the region's rather than the page's. On a
-/// 1400-square source behind a 180x24 clip, replaying holds 0.33ms at forty
-/// ops, 0.34 at two thousand and 0.38 at twenty thousand, where drawing the
-/// image climbs 0.68, 5.36, 45.26.
-///
-/// Both paths hold the same memory -- sixty draws grow the process by 84MB
-/// either way -- so the choice buys time and not footprint.
-///
-/// The picture replays under its canvas's text contrast and gamma, as that
-/// canvas's own pixels do, so the region's glyphs have their edges.
-fn rasterize_region(
-    image: &Image,
-    picture: Option<&SourcePicture>,
-    region: IRect,
-) -> Option<Image> {
-    let info = image.image_info().with_dimensions(region.size());
-    let props =
-        picture.map(|source| text_surface_props(source.text.0, source.text.1));
-    let mut surface = started::raster(&info, None, props.as_ref())?;
-
-    match picture {
-        Some(source) => {
-            let canvas = surface.canvas();
-            canvas.translate((-region.left as f32, -region.top as f32));
-            canvas.draw_picture(&source.picture, None, None);
-        }
-        // No picture to replay: a source reaching here by another door still
-        // has to be stopped from travelling as one.
-        None => {
-            surface.canvas().draw_image_rect(
-                image,
-                Some((
-                    &Rect::from(region),
-                    skia_safe::canvas::SrcRectConstraint::Fast,
-                )),
-                Rect::from_size(region.size()),
-                &Paint::default(),
-            );
-        }
-    }
-    Some(surface.image_snapshot())
-}
-
-/// A source canvas's picture, for a draw that rasterizes it -- see
-/// [`Context2D::draw_nested_image`] -- with what it is replayed under.
-#[derive(Clone, Debug)]
-pub struct SourcePicture {
-    pub picture: Picture,
-    /// The source canvas's text contrast and gamma, which its own pixels
-    /// rasterize glyphs under -- see [`text_surface_props`].
-    pub text: (f32, f32),
+    /// What the draw being recorded is, for the page's tiles -- see
+    /// `tile_cuts` -- declared by each draw entry point while it records
+    /// and handed to the recorder with it. `None` between draws, which the
+    /// recorder takes as a cut over the clip.
+    tile_reach: Option<TileReach>,
 }
 
 #[derive(Clone)]
@@ -690,6 +660,19 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Which draw [`Context2D::draw_source_image`] makes of an image -- see
+/// `Context2D::blits_decoded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageDraw {
+    /// The image drawn once for every target.
+    Whole,
+    /// The pixels' half of a split draw, the image filling a rectangle as a
+    /// shader.
+    SplitPixels,
+    /// The document's half of a split draw, the image drawn as an image.
+    SplitDocument,
+}
+
 impl Context2D {
     /// Says whether the canvas plays the page on the GPU -- see
     /// [`PageRecorder::set_plays_on_gpu`].
@@ -733,6 +716,7 @@ impl Context2D {
             state: State::default(),
             external,
             beside_page: External::default(),
+            tile_reach: None,
         }
     }
 
@@ -741,7 +725,10 @@ impl Context2D {
     /// only by its small JavaScript object: its page's pixels, a GPU page's
     /// multisample buffer with them -- see
     /// `page::RecordingSurface::budgeted_bytes` -- its recording -- see
-    /// [`PageRecorder::recorded_bytes`] -- and itself, [`CONTEXT_BYTES`].
+    /// [`PageRecorder::recorded_bytes`] -- the images the recording holds
+    /// that no other object reports, and the rasters of the patterns it
+    /// draws from -- see [`PageRecorder::held_image_bytes`] -- and itself,
+    /// [`CONTEXT_BYTES`].
     ///
     /// Called by the binding as the context is made, after a read, which
     /// builds the page surface or its tiles and files what was drawn, and
@@ -759,8 +746,10 @@ impl Context2D {
     /// finalized, and the engine is told so until then.
     pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
         let recorder = self.recorder.borrow();
-        let (pixels, recorded) =
-            (recorder.budgeted_bytes(), recorder.recorded_bytes());
+        let (pixels, recorded) = (
+            recorder.budgeted_bytes(),
+            recorder.recorded_bytes() + recorder.held_image_bytes(),
+        );
         drop(recorder);
         self.external.hold(cx, pixels);
         self.beside_page.hold(cx, recorded + CONTEXT_BYTES);
@@ -777,7 +766,104 @@ impl Context2D {
     where
         F: FnOnce(std::cell::RefMut<'a, PageRecorder>),
     {
-        f(self.recorder.borrow_mut());
+        let mut recorder = self.recorder.borrow_mut();
+        recorder.declare_tile_reach(self.tile_reach);
+        f(recorder);
+    }
+
+    /// Runs `f` with the draws it records declared as `reach` -- see
+    /// `tile_cuts` -- and the declaration before it put back after.
+    fn declaring<R>(
+        &mut self,
+        reach: TileReach,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let was = self.tile_reach.replace(reach);
+        let made = f(self);
+        self.tile_reach = was;
+        made
+    }
+
+    /// Whether the clip lets a draw keep the page's tiles: none, or a
+    /// rectangle in device space, which a tile cuts no differently from
+    /// the page -- see `tile_cuts`.
+    fn clip_keeps_tiles(&self) -> bool {
+        self.state
+            .clip
+            .as_ref()
+            .is_none_or(|clip| clip.is_rect().is_some())
+    }
+
+    /// Whether `style` paints with a colour, which a tile makes pixel by
+    /// pixel as the page does, rather than a shader sampled through the
+    /// inverse of the transform -- see `tile_cuts`.
+    fn painted_solid(&self, style: PaintStyle) -> bool {
+        let dye = match style {
+            PaintStyle::Stroke => &self.state.stroke_style,
+            _ => &self.state.fill_style,
+        };
+        matches!(dye, Dye::Color(..))
+    }
+
+    /// Whether a filter stands between a draw and the page, which the tiles
+    /// were not measured through.
+    fn filtered_for_tiles(&self) -> bool {
+        !self.state.filter.is_none()
+            || self.state.skia_image_filter.is_some()
+            || self.state.skia_color_filter.is_some()
+            || self.state.skia_mask_filter.is_some()
+    }
+
+    /// The device rectangle of a draw whose own is not known, for the page's
+    /// tiles: its clip's, or the page's without one.
+    fn tile_cut_unbounded(&self) -> Rect {
+        self.state
+            .clip
+            .as_ref()
+            .map_or(self.bounds, |clip| *clip.bounds())
+    }
+
+    /// The device rectangle a draw of `local` reaches, for the page's tiles
+    /// -- see `tile_cuts`: where `stroked` names the path stroked, what
+    /// [`drawn_bounds`] gives its stroke, and otherwise `local` widened by
+    /// a pixel of anti-aliasing; then by the shadow it casts, and kept
+    /// within the clip. A filtered draw reaches what its clip does, since a
+    /// filter may move what it draws anywhere.
+    fn tile_cut(&self, local: Rect, stroked: Option<&Path>) -> Rect {
+        let mut reach = match self.filtered_for_tiles() {
+            true => self.bounds,
+            false => {
+                let matrix = &self.state.matrix;
+                let mut device = match stroked {
+                    Some(path) => drawn_bounds(
+                        path,
+                        &self.state.paint,
+                        PaintStyle::Stroke,
+                        matrix,
+                        false,
+                    ),
+                    None => matrix
+                        .map_rect(local)
+                        .0
+                        .with_outset((AA_REACH, AA_REACH)),
+                };
+                if self.casts_shadow() {
+                    let sigma = self.state.shadow_blur / 2.0;
+                    let blur = sigma * REACH_SIGMAS as f32;
+                    let shadow = device
+                        .with_offset(self.state.shadow_offset)
+                        .with_outset((blur, blur));
+                    device.join(shadow);
+                }
+                device
+            }
+        };
+        if let Some(clip) = &self.state.clip
+            && !reach.intersect(*clip.bounds())
+        {
+            reach = Rect::new_empty();
+        }
+        reach
     }
 
     /// Records `f` into every recording the page keeps -- see
@@ -1043,13 +1129,14 @@ impl Context2D {
     /// The paint a page's pixels recording draws text in `paint` with, where
     /// the page keeps one, its CanvasKit colour filter built for those
     /// pixels -- see [`Self::pixels_paint`]: on an eight-bit sRGB page the
-    /// colour nearest its own that stores the exact product -- see
-    /// [`ExactColour::nearest_text_paint`] -- on any other eight-bit page the
-    /// placed colour as a plain paint colour where Skia lands it and the
-    /// glyph contrast stays -- see [`ExactColour::verified_text_paint`] --
-    /// and otherwise `paint` over a colour shader of its own colour, opaque,
-    /// with [`ExactColour::dye`] replacing that colour -- or, before a
-    /// colour filter `paint` already carries,
+    /// colour nearest its own that stores the exact product, drawn through a
+    /// filter keeping its own glyph contrast where that colour's differs --
+    /// see [`ExactColour::nearest_text_paint`] -- on any other eight-bit page
+    /// the placed colour as a plain paint colour where Skia lands it and
+    /// the glyph contrast stays -- see [`ExactColour::verified_text_paint`]
+    /// -- and otherwise `paint` over a colour shader of its own colour,
+    /// opaque, with [`ExactColour::dye`] replacing that colour -- or,
+    /// before a colour filter `paint` already carries,
     /// [`ExactColour::dye_keeping_plain_luminance`]. Without a shader Skia
     /// folds a colour filter into the paint's colour, through the
     /// conversion the dye exists to avoid; and a colour shader answers the
@@ -1265,6 +1352,57 @@ impl Context2D {
         ))
     }
 
+    /// The flat colour of a run of text drawn in `paint` for `style`, where
+    /// the run is translucent in one, for an eight-bit page on the CPU to
+    /// paint the run from its coverage -- see [`layer::FlatRun`]. `None`
+    /// for a run that names a line colour of its own (`lines`), drawn in
+    /// two colours; for one opaque, or whose alpha rounds to no byte, which
+    /// draws nothing; for a paint carrying a shader, a colour filter or
+    /// dither, whose colour is not one flat colour, a mask filter, or a
+    /// filter no chain runs -- see [`Self::chains_text_filter`]; and on a
+    /// page whose pixels do not place the colour on the bytes they store --
+    /// see [`ExactColour::bytes`]. A run under a blend that covers beyond
+    /// the draw has one too, and is drawn from its coverage into the layer
+    /// the blend composites -- through [`layer::ReplayedText::flat_paint`]
+    /// on a GPU page. A run holding colour glyphs this library draws has one
+    /// for its plain glyphs, its colour glyphs drawn in their own colours
+    /// in their place among them -- see `typography::held_groups`.
+    fn flat_run(
+        &self,
+        paint: &Paint,
+        style: PaintStyle,
+        lines: bool,
+    ) -> Option<layer::FlatRun> {
+        #[cfg(test)]
+        if !REPLAYS_TRANSLUCENT_TEXT.get() {
+            return None;
+        }
+        let alpha = paint.alpha_f();
+        let stored = layer::byte_alpha(alpha);
+        let flat = paint.shader().is_none()
+            && paint.color_filter().is_none()
+            && (paint.image_filter().is_none() || self.chains_text_filter())
+            && paint.mask_filter().is_none()
+            && !paint.is_dither()
+            && matches!(self.state.dye(style), Dye::Color(..));
+        let drawn = !lines && stored > 0.0 && stored < 1.0;
+        if !(flat && drawn) {
+            return None;
+        }
+        let exact = self.exact_colour(style).filter(|exact| exact.bytes)?;
+        // Source-over, whatever the draw's blend: the plane its coverage is
+        // read from starts transparent, and under `source-in`,
+        // `destination-in` or `destination-out` the run drawn onto it in
+        // its own blend left it so.
+        let mut opaque = paint.clone();
+        opaque.set_alpha_f(1.0).set_blend_mode(BlendMode::SrcOver);
+        Some(layer::FlatRun {
+            exact,
+            alpha,
+            opaque,
+        })
+    }
+
     /// `color`, unpremultiplied in `space`, converted exactly into the page's
     /// space and placed on the bytes an eight-bit page stores it as -- see
     /// [`ExactColour::at`] -- tagged with the page's space, on a page that
@@ -1315,17 +1453,20 @@ impl Context2D {
         F: Fn(&SkCanvas, &Paint, Pass),
     {
         let lines = text.as_ref().is_some_and(|text| text.lines);
-        if self.files_through_pattern(paint, features, replay, lines, &f)
-            || self.files_through_chain(
-                paint,
-                exact,
-                features,
-                text.as_ref(),
-                cpu_bytes.is_some(),
-                &f,
-                None,
-            )
-        {
+        if self.files_through_pattern(paint, features, replay, lines, &f) {
+            // What the pattern holds, the page now holds too.
+            self.flatten_past_budget();
+            return;
+        }
+        if self.files_through_chain(
+            paint,
+            exact,
+            features,
+            text.as_ref(),
+            cpu_bytes.is_some(),
+            &f,
+            None,
+        ) {
             return;
         }
         let paint_for = |recording: Recording| match (recording, exact) {
@@ -1451,10 +1592,17 @@ impl Context2D {
         };
         let replayed = text
             .as_ref()
-            .and_then(|text| text.colour.clone().or(text.blended.clone()));
+            .and_then(|text| text.colour.clone().or(text.redrawn.clone()));
+        // A flat run under a filter is filed for the chain that runs it,
+        // which records it without the filter; drawn here, the filter is
+        // the paint's, which the run's coverage would leave out.
+        let flat = text
+            .as_ref()
+            .filter(|_| paint.image_filter().is_none())
+            .and_then(|text| text.flat.clone());
         if let Some(run) = replayed
             && self.files_as_replayed_text(
-                paint, exact, features, run, lines, casts, &draw,
+                paint, exact, features, run, flat, lines, casts, &draw,
             )
         {
             return;
@@ -1583,6 +1731,17 @@ impl Context2D {
     fn chains_text(&self) -> bool {
         self.draw_chain(true, false).is_some()
             || self.casts_shadow_through_chain()
+    }
+
+    /// Whether a run of text drawn now has its filter run by a chain, which
+    /// records it without its paint's filter: its filter's own -- see
+    /// [`Self::draw_chain`] -- or, where its shadow is cast apart through a
+    /// chain, the chain of the whole filter it is then run through as a run
+    /// casting none -- see [`Self::render_to_canvas`].
+    fn chains_text_filter(&self) -> bool {
+        self.draw_chain(true, false).is_some()
+            || (self.casts_shadow_through_chain()
+                && self.exact_steps().is_some())
     }
 
     /// Files a draw's `shadowColor` shadow as a group of its own, cast
@@ -1730,6 +1889,7 @@ impl Context2D {
                     document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
                     cast_before: false,
+                    flat: None,
                     #[cfg(test)]
                     watch: None,
                 }))
@@ -1841,6 +2001,72 @@ impl Context2D {
                 document,
             }],
             clip: None,
+        }))
+    }
+
+    /// `entry`, a run of text a chain draws, as a [`layer::ReplayedText`]
+    /// where the run is translucent in one flat colour -- see
+    /// [`TextRun::flat`] -- so that the chain's layer on an eight-bit page
+    /// on the CPU draws it from its coverage as the page does, and a filter
+    /// changes only what it adds: under a `drop-shadow()`, a run drawn as
+    /// Skia blits it stood a level off the same run unfiltered on 230 to
+    /// 1,935 pixels of a run of 13 to 60px in orange, blue and grey -- see
+    /// `a_translucent_runs_shadow_rounds_its_alpha_once`. `recorded` makes
+    /// a paint the chain records the run in, of `pixels` for its pixels and
+    /// of `paint` for a document. Any other entry is handed back, a run
+    /// holding colour glyphs among them, whose own entry keeps its flat
+    /// colour -- see `colour_entry` in [`Self::files_through_chain`].
+    fn flat_entry(
+        &self,
+        entry: Layer,
+        text: Option<&TextRun>,
+        recorded: &dyn Fn(&Paint) -> Paint,
+        pixels: &Paint,
+        paint: &Paint,
+    ) -> Layer {
+        let Some((run, flat)) = text
+            .filter(|text| text.colour.is_none())
+            .and_then(|text| text.redrawn.clone().zip(text.flat.clone()))
+        else {
+            return entry;
+        };
+        // A flat run is filed only on a page that keeps a recording for
+        // each kind of target -- see `Self::flat_run` -- so its entry is a
+        // pair, recorded or to be recorded when first played.
+        let (recording, document) = match entry {
+            Layer::Targeted(pair) => {
+                let (pixels, document) = Arc::unwrap_or_clone(pair);
+                (
+                    LazyPicture::from(Some(pixels)),
+                    layer::ReplayedRecording::recorded(document),
+                )
+            }
+            Layer::Deferred(_) => (
+                LazyPicture::default(),
+                layer::ReplayedRecording::later(recorded(paint), None),
+            ),
+            entry => return entry,
+        };
+        Layer::ReplayedText(Arc::new(layer::ReplayedText {
+            matrix: self.state.matrix,
+            replay: Some(run),
+            paint: recorded(pixels),
+            inked: Rect::new_empty(),
+            shadow: None,
+            shadow_alone: self.shadow_alone,
+            blend: None,
+            recording,
+            whole: LazyPicture::default(),
+            bounds: self.bounds,
+            document: Some(document),
+            clip: None,
+            cast_before: false,
+            flat: Some(layer::FlatRun {
+                opaque: recorded(&flat.opaque),
+                ..flat
+            }),
+            #[cfg(test)]
+            watch: None,
         }))
     }
 
@@ -2154,6 +2380,7 @@ impl Context2D {
         exact: Option<&Paint>,
         features: VectorFeatures,
         run: Replay,
+        flat: Option<layer::FlatRun>,
         lines: bool,
         casts: bool,
         draw: &D,
@@ -2252,6 +2479,7 @@ impl Context2D {
             // Where the run casts a shadow and does not cast it itself, it
             // was cast just before, through a chain.
             cast_before: self.casts_shadow() && !casts,
+            flat,
             #[cfg(test)]
             watch: layer::REPLAYED_WATCH.with_borrow(Clone::clone),
         });
@@ -2710,6 +2938,15 @@ impl Context2D {
             false => paint,
             true => exact.unwrap_or(paint),
         };
+        // A run holding colour glyphs keeps its flat colour, as
+        // [`Self::flat_entry`] keeps a plain run's, so that the chain's layer
+        // draws its plain glyphs from their coverage too.
+        let colour_flat = text.and_then(|text| text.flat.clone()).map(|flat| {
+            layer::FlatRun {
+                opaque: recorded(&flat.opaque),
+                ..flat
+            }
+        });
         let colour_entry =
             |run: Replay, recorded_as: Picture, document: Option<Picture>| {
                 Layer::ReplayedText(Arc::new(layer::ReplayedText {
@@ -2726,6 +2963,7 @@ impl Context2D {
                     document: document.map(layer::ReplayedRecording::recorded),
                     clip: None,
                     cast_before: false,
+                    flat: colour_flat.clone(),
                     #[cfg(test)]
                     watch: None,
                 }))
@@ -2791,6 +3029,9 @@ impl Context2D {
             }
             (entry, _) => entry,
         }
+        .map(|entry| {
+            self.flat_entry(entry, text, &recorded, pixels_paint, paint)
+        })
         .map(|entry| self.chain_input(cpu_bytes, entry));
         // A run of text in one flat colour that the coverage route could
         // play, or whose `drop-shadow()` is cast from its coverage, is drawn
@@ -2819,7 +3060,7 @@ impl Context2D {
         // run's colour, its glyphs' own colours gone: those this library
         // draws, and those the platform draws -- asked last, since a run
         // not kept is laid out again to answer.
-        let holds_colour = matches!(entry, Some(Layer::ReplayedText(_)));
+        let holds_colour = text.is_some_and(|text| text.colour.is_some());
         let coverage = match exact {
             Some(exact)
                 if reached.is_some()
@@ -3142,6 +3383,7 @@ impl Context2D {
             document: document.map(layer::ReplayedRecording::recorded),
             clip: None,
             cast_before: false,
+            flat: None,
             #[cfg(test)]
             watch: None,
         }))
@@ -3558,11 +3800,43 @@ impl Context2D {
         style: PaintStyle,
         rule: Option<PathFillType>,
     ) {
-        let mut path = path.unwrap_or_else(|| {
+        let path = path.unwrap_or_else(|| {
             // the current path has already incorporated its transform state
             let inverse = self.state.matrix.invert().unwrap_or_default();
             self.path.snapshot().make_transform(&inverse)
         });
+        // A rectangle filled with a colour under a scale and a translation
+        // is made pixel by pixel from device coordinates, in a tile as in
+        // the page; any other path's edge a tile's side would clip, and a
+        // shader is sampled through a transform the tile's offset rounds
+        // otherwise -- see `tile_cuts`.
+        let rect = style == PaintStyle::Fill
+            && path.is_rect().is_some()
+            && self.state.matrix.is_scale_translate()
+            && self.clip_keeps_tiles()
+            && !self.filtered_for_tiles();
+        let stroked = (style != PaintStyle::Fill).then_some(&path);
+        let reach = match (rect, self.painted_solid(style)) {
+            (true, true) => TileReach::Safe,
+            (false, true) => {
+                TileReach::Cut(self.tile_cut(*path.bounds(), stroked))
+            }
+            (_, false) => {
+                TileReach::Sampled(self.tile_cut(*path.bounds(), stroked))
+            }
+        };
+        self.declaring(reach, |this| {
+            this.draw_path_declared(path, style, rule)
+        });
+    }
+
+    /// [`Self::draw_path`], declared.
+    fn draw_path_declared(
+        &mut self,
+        mut path: Path,
+        style: PaintStyle,
+        rule: Option<PathFillType>,
+    ) {
         path.set_fill_type(rule.unwrap_or(PathFillType::Winding));
 
         // A flat rectangle's shadow is a blurred rectangle, filed as a
@@ -4090,6 +4364,19 @@ impl Context2D {
     /// it, and a turned rectangle whose bounding box holds the page leaves
     /// its corners.
     pub fn clear_rect(&mut self, rect: &Rect) {
+        // A rectangle under a scale and a translation, made pixel by pixel
+        // -- see `tile_cuts`.
+        let reach = match self.state.matrix.is_scale_translate()
+            && self.clip_keeps_tiles()
+        {
+            true => TileReach::Safe,
+            false => TileReach::Cut(self.tile_cut(*rect, None)),
+        };
+        self.declaring(reach, |this| this.clear_rect_declared(rect))
+    }
+
+    /// [`Self::clear_rect`], declared.
+    fn clear_rect_declared(&mut self, rect: &Rect) {
         let whole = self.state.clip.is_none()
             && !self.layers.iter().any(|owns_layer| *owns_layer)
             && holds_on_the_device(
@@ -4176,6 +4463,28 @@ impl Context2D {
         source: VectorFeatures,
         cost: usize,
     ) {
+        // A recording replayed into the page, whose paths a tile's sides
+        // would clip -- see `tile_cuts`.
+        let reach = TileReach::Cut(self.tile_cut(*dst_rect, None));
+        self.declaring(reach, |this| {
+            this.draw_picture_costing_declared(
+                picture, entries, bounds, src_rect, dst_rect, source, cost,
+            )
+        })
+    }
+
+    /// [`Self::draw_picture_costing`], declared.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_picture_costing_declared(
+        &mut self,
+        picture: &dyn Fn() -> Option<Picture>,
+        entries: Option<Entries>,
+        bounds: Rect,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        source: VectorFeatures,
+        cost: usize,
+    ) {
         self.recorder.borrow_mut().charge_replay(cost);
         let recorded = OnceCell::new();
         let picture = || recorded.get_or_init(picture).as_ref();
@@ -4207,16 +4516,21 @@ impl Context2D {
             .with(source.nested())
             .with(carried);
 
-        // Drawn through its paint as a group of our own wherever the blend
-        // composites only where the source lands, which `render_to_canvas`
-        // draws as it is: its shadow first, as a group of its own offset
-        // from it, then the source. The group composites the source as its
-        // own pixels do -- its draws with one another on transparent black,
-        // then what they make onto this page, once -- through a layer that
-        // keeps the alpha exact on pixels and is an opacity in a document,
-        // which opens one at full alpha and writes its entries as they are,
-        // unless the source holds a blend -- a put's `Clear` among them --
-        // which a document keeps inside the layer -- see `LayerRec::open_on`
+        // Drawn through its paint as a group of our own, its shadow first, as
+        // a group of its own offset from it, then the source, wherever the
+        // blend composites only where the source lands. Under a blend that
+        // changes the page beyond what is drawn, a group's layer covers the
+        // clip as the blend does, so a source with no shadow and no filter is
+        // a group as well; one with either is drawn through
+        // `render_to_canvas`, which records the shadow and the source apart
+        // and composites each over the whole page. The group composites the
+        // source as its own pixels do -- its draws with one another on
+        // transparent black, then what they make onto this page, once
+        // -- through a layer that keeps the alpha exact on pixels and
+        // is an opacity in a document, which opens one at full alpha
+        // and writes its entries as they are, unless the source holds a
+        // blend -- a put's `Clear` among them -- which a document keeps
+        // inside the layer -- see `LayerRec::open_on`
         // and `Group::opacity`. Replayed straight
         // onto the page, a source's `put_image_data`, drawn under
         // `BlendMode::Clear`, erased what this page held beneath it, and its
@@ -4234,7 +4548,14 @@ impl Context2D {
         // destination crops by coverage rather than cutting its paths --
         // see `Group::confine`.
         let drawn = self.faint().drawable(&paint).into_owned();
-        if !covers_beyond_the_draw(self.state.global_composite_operation) {
+        let plain = || {
+            self.paint_for_shadow(&paint).is_none()
+                && paint.image_filter().is_none()
+                && self.exact_steps().is_none()
+        };
+        if !covers_beyond_the_draw(self.state.global_composite_operation)
+            || plain()
+        {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
             let Some(contents) = entries.or_else(|| {
                 picture().map(|picture| {
@@ -4329,7 +4650,8 @@ impl Context2D {
             None,
             None,
             |canvas, paint, _| {
-                // Only a blend that covers beyond the draw comes here, and the
+                // Only a blend that covers beyond the draw, with a shadow or a
+                // filter, comes here, and the
                 // paint carrying it makes Skia draw the picture through a
                 // temporary layer, which keeps the source's own compositing to
                 // itself, as drawing the source's pixels -- which is what the
@@ -4349,115 +4671,6 @@ impl Context2D {
         );
     }
 
-    /// Draws `image`, rasterizing only the part of it this draw can show.
-    ///
-    /// For a source that carries a nested picture and would otherwise be
-    /// rasterized whole. The subset is expanded to whatever a filter reads,
-    /// and both rectangles move with it, so the pixels that land on the page
-    /// are the ones that would have landed there anyway. `apart` as for
-    /// [`Self::draw_source_image`].
-    pub fn draw_nested_image(
-        &mut self,
-        image: &Image,
-        picture: Option<&SourcePicture>,
-        src_rect: &Rect,
-        dst_rect: &Rect,
-        apart: bool,
-    ) {
-        let whole = |this: &mut Self| {
-            this.draw_source_image(
-                &flatten_image(image),
-                src_rect,
-                dst_rect,
-                apart,
-            );
-        };
-        let Some(subset) = self.visible_source_rect(src_rect, dst_rect) else {
-            return whole(self);
-        };
-
-        // The destination the subset covers, so the drawing does not move.
-        let Some(to_dst) = Matrix::rect_2_rect(src_rect, dst_rect, None) else {
-            return whole(self);
-        };
-        let sub = Rect::from(subset);
-        let dst = to_dst.map_rect(sub).0;
-
-        match rasterize_region(image, picture, subset) {
-            Some(part) => {
-                let src = Rect::from_wh(sub.width(), sub.height());
-                self.draw_source_image(&part, &src, &dst, apart)
-            }
-            // Whole rather than deferred: a picture that keeps travelling is
-            // the defect this exists to stop.
-            None => whole(self),
-        }
-    }
-
-    /// The part of a source image this draw can actually put on the page, or
-    /// `None` when that is most of it or cannot be worked out.
-    ///
-    /// Only asked when a source is about to be rasterized because it carries
-    /// nesting -- see `node::image::Source::of`. Rasterizing the whole page to
-    /// show a sliver of it is what this avoids: a 1200x1200 source clipped to
-    /// 200x20 produced 5.49 MB and used about 0.09 of it.
-    ///
-    /// The clip alone is not the answer. A filter reads outside the pixels it
-    /// writes, so cropping to the visible rectangle would starve a blur at its
-    /// edges and leave a seam. `filter_bounds` run backwards asks the filter
-    /// itself how far it reaches, which is the only source of that number that
-    /// stays right when the filter changes.
-    fn visible_source_rect(
-        &mut self,
-        src_rect: &Rect,
-        dst_rect: &Rect,
-    ) -> Option<IRect> {
-        let matrix = self.state.matrix;
-        let page = Rect::from_size(self.bounds.size());
-        // The clip is kept in device space, and its absence means the page.
-        let clip = self
-            .state
-            .clip
-            .as_ref()
-            .map_or(page, |path| path.bounds().to_owned());
-
-        let mut visible = matrix.map_rect(dst_rect).0;
-        if !visible.intersect(clip) || !visible.intersect(page) {
-            return None;
-        }
-
-        // What the filter needs read in, rather than what it writes out.
-        let paint = self.paint_for_image();
-        let wanted = match paint.image_filter() {
-            Some(filter) => filter.filter_bounds(
-                RoundOut::<IRect>::round_out(&visible),
-                &matrix,
-                MapDirection::Reverse,
-                None,
-            ),
-            None => RoundOut::<IRect>::round_out(&visible),
-        };
-
-        // Back to the image's own pixels: device -> user -> source.
-        let to_user = matrix.invert()?;
-        let to_source = Matrix::rect_2_rect(dst_rect, src_rect, None)?;
-        let mut needed =
-            to_source.map_rect(to_user.map_rect(Rect::from(wanted)).0).0;
-        if !needed.intersect(*src_rect) {
-            return None;
-        }
-        let needed = RoundOut::<IRect>::round_out(&needed);
-
-        // Only worth the subset when it saves most of the work. Below that the
-        // rasterization is the same size and the extra step is loss.
-        let whole = src_rect.width() * src_rect.height();
-        let part = needed.width() as f32 * needed.height() as f32;
-        match whole > 0.0 && part / whole < 0.5 {
-            true => Some(needed),
-            false => None,
-        }
-    }
-
     pub fn draw_image(
         &mut self,
         image: &Image,
@@ -4471,21 +4684,297 @@ impl Context2D {
     /// page holds what a GPU canvas replaying a recording of it draws in
     /// other bytes than a CPU canvas -- see `PageRecorder::plays_apart_on_gpu`.
     ///
-    /// The image of a canvas is backed by its page's picture, and a GPU
-    /// canvas replays that picture as Skia's own draws: two colour glyphs
-    /// there land up to 81 levels from the CPU's bytes and a conic's hard
-    /// stop 255, where drawn on the canvas itself, or drawn into this one
-    /// with `drawCanvas`, they choose at playback how a GPU canvas draws them
-    /// in those bytes. So where `apart`, the draw is filed as a draw a GPU
-    /// canvas makes on the CPU, at its own device pixels, and composites --
-    /// see `layer::OnGpu::Raster` -- and a CPU canvas and a document play it
-    /// as recorded, so that what either stores or writes for it is unchanged.
+    /// The image of a canvas is its own pixels -- see
+    /// [`Self::source_image`] -- and Ganesh composites an image in its own
+    /// arithmetic: the two colour glyphs of `gpu-gradient.test.js` drawn in
+    /// place landed 45 bytes from the CPU canvas's, where drawn on the
+    /// canvas itself, or drawn into this one with `drawCanvas`, they choose
+    /// at playback how a GPU canvas draws them in those bytes. So where
+    /// `apart`, the draw is filed as a draw a GPU canvas makes on the CPU, at
+    /// its own device pixels, and composites -- see `layer::OnGpu::Raster` --
+    /// and a CPU canvas and a document play it as recorded, so that what
+    /// either stores or writes for it is unchanged.
     pub fn draw_source_image(
         &mut self,
         image: &Image,
         src_rect: &Rect,
         dst_rect: &Rect,
         apart: bool,
+    ) {
+        // An image moved by whole pixels and not scaled is copied onto the
+        // page's pixels, in a tile as in the page; any other placement is
+        // sampled through a transform the tile's offset rounds otherwise --
+        // see `tile_cuts`. Asked of the placement Skia draws with: an image
+        // moved part of a pixel is drawn into a rectangle whose far edge is
+        // summed in single precision -- 230.7 + 64 spans 64.000015 -- and
+        // so under a scale a hair off one.
+        let placed = Matrix::concat(
+            &self.state.matrix,
+            &Matrix::rect_2_rect(src_rect, dst_rect, None)
+                .unwrap_or_else(Matrix::new_identity),
+        );
+        let whole = |v: f32| v.fract() == 0.0;
+        let reach = match placed.is_translate()
+            && whole(placed.translate_x())
+            && whole(placed.translate_y())
+            && self.clip_keeps_tiles()
+            && !self.filtered_for_tiles()
+            && !self.casts_shadow()
+        {
+            true => TileReach::Copied(self.tile_cut(*dst_rect, None)),
+            false => TileReach::Sampled(self.tile_cut(*dst_rect, None)),
+        };
+        let blits = self.blits_decoded(image, src_rect, &placed);
+        self.declaring(reach, |this| match blits {
+            true => {
+                // Once for the draw, before either half: each half erasing
+                // would erase the other's.
+                if this.image_covers_the_page(image, src_rect, dst_rect) {
+                    this.erase_the_page();
+                }
+                this.draw_split(
+                    image,
+                    |this| {
+                        this.draw_source_image_declared(
+                            image,
+                            src_rect,
+                            dst_rect,
+                            apart,
+                            ImageDraw::SplitPixels,
+                        )
+                    },
+                    |this| {
+                        this.draw_source_image_declared(
+                            image,
+                            src_rect,
+                            dst_rect,
+                            apart,
+                            ImageDraw::SplitDocument,
+                        )
+                    },
+                    // A decoded image's pixels are Skia's lazy decode, which
+                    // the page does not hold, and the document draws the
+                    // same image.
+                    Arc::from([]),
+                    true,
+                )
+            }
+            false => this.draw_source_image_declared(
+                image,
+                src_rect,
+                dst_rect,
+                apart,
+                ImageDraw::Whole,
+            ),
+        });
+        if blits {
+            self.flatten_past_budget();
+        }
+    }
+
+    /// Whether a draw of `image` from `src_rect`, placed on the page by
+    /// `placed`, is one Skia's CPU raster copies through its sprite rows, so
+    /// that pixels draw it through the image as a shader instead -- see
+    /// [`Self::draw_source_image_declared`].
+    ///
+    /// An image decoded from encoded bytes holds Skia's N32 colour type, the
+    /// page's own byte order, and Skia draws such an image onto an N32 page
+    /// unscaled at a whole-pixel offset through `SkBlendARGB32` and
+    /// `blit_row_s32a_opaque`, which divide by 256 where the composite
+    /// divides by 255: on x86 at every alpha, on arm64 below full alpha, a
+    /// level apart from the exact bytes at many translucent pixels (#828).
+    /// A shader draw takes Skia's raster pipeline, whose `srcover` is
+    /// exact, and on the CPU lands every other placement in the same bytes
+    /// as `drawImageRect`, so a page replayed later under a scale or a
+    /// fractional offset is unchanged. On Ganesh it does too, but for a
+    /// JPEG: drawn as an image, Ganesh uploads its YUV planes and converts
+    /// them, where the shader samples the CPU's RGB decode and lands the
+    /// CPU's bytes.
+    ///
+    /// Only an encoded image: a canvas's own pixels and an image made from
+    /// pixels are already in the other byte order -- see
+    /// `page::own_image_type` -- and take the pipeline. Not under a mask
+    /// filter, which a rectangle filled by the shader applies to the
+    /// rectangle rather than to the image's alpha, nor under a shadow or an
+    /// image filter, which are drawn through routes of their own.
+    fn blits_decoded(
+        &self,
+        image: &Image,
+        src_rect: &Rect,
+        placed: &Matrix,
+    ) -> bool {
+        #[cfg(test)]
+        if !BLITS_DECODED.get() {
+            return false;
+        }
+        let whole = |v: f32| v.fract() == 0.0;
+        image.encoded_data().is_some()
+            && placed.is_translate()
+            && whole(placed.translate_x())
+            && whole(placed.translate_y())
+            && [src_rect.left, src_rect.top, src_rect.right, src_rect.bottom]
+                .into_iter()
+                .all(whole)
+            && lies_within(src_rect, image.width(), image.height())
+            && self.state.skia_mask_filter.is_none()
+            && self.state.skia_image_filter.is_none()
+            && self.state.filter.is_none()
+            && !self.casts_shadow()
+    }
+
+    /// Draws one draw of `image` as entries of its own for each kind of
+    /// target -- see `layer::Split`: what `pixels` draws is played for
+    /// pixels, and what `document` draws is what a document backend writes.
+    /// Each is filed as it would be drawn alone, after everything drawn
+    /// before it, and no other draw drawn after joins either -- but where
+    /// `joins`, a split drawn straight after that joins too adds its entries
+    /// to this one's -- see `PageRecorder::end_split`. The page counts
+    /// `image` as held where its pixels are in main memory -- see
+    /// [`PageRecorder::held_image_bytes`] and `HeldImage::of` -- since no
+    /// other object reports a canvas's pixels while the page keeps them,
+    /// and `held`, the images the document holds besides -- see
+    /// `layer::Entries::held`.
+    pub(crate) fn draw_split(
+        &mut self,
+        image: &Image,
+        pixels: impl FnOnce(&mut Self),
+        document: impl FnOnce(&mut Self),
+        held: Arc<[HeldImage]>,
+        joins: bool,
+    ) {
+        let mut mark = self.recorder.borrow_mut().begin_split();
+        pixels(self);
+        let drawn = self.recorder.borrow_mut().take_split(&mut mark);
+        document(self);
+        self.recorder.borrow_mut().end_split(
+            mark,
+            drawn,
+            HeldImage::of(image),
+            held,
+            joins,
+        );
+    }
+
+    /// Draws a canvas, given as `image`, its own pixels -- see
+    /// `PageRecorder::image` -- and `document`, what a document plays of it:
+    /// the image for pixels and the canvas's own entries for a document,
+    /// one draw for each kind of target -- see [`Self::draw_split`] -- so
+    /// that a PDF or an SVG writes what the canvas drew as vectors and text.
+    ///
+    /// A canvas whose entries cost more than [`DOCUMENT_REPLAY_BUDGET`] to
+    /// replay is drawn as its image for a document too, as a raster, which
+    /// the document says it holds -- see `layer::Entries::held` -- as it
+    /// says it holds what the canvas's own entries do.
+    pub(crate) fn draw_canvas_image(
+        &mut self,
+        image: &Image,
+        document: &CanvasDocument,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        apart: bool,
+    ) {
+        let replays = document.cost <= DOCUMENT_REPLAY_BUDGET;
+        let held = match replays {
+            true => document.held.clone(),
+            false => HeldImage::of(image).into_iter().collect(),
+        };
+        self.draw_split(
+            image,
+            |ctx| ctx.draw_source_image(image, src_rect, dst_rect, apart),
+            |ctx| match replays {
+                true => ctx.draw_picture_costing(
+                    &|| {
+                        document
+                            .entries
+                            .picture(document.bounds, Target::Document)
+                    },
+                    Some(document.entries.clone()),
+                    document.bounds,
+                    src_rect,
+                    dst_rect,
+                    document.entries.all_features(),
+                    document.cost,
+                ),
+                // Charged one, so that a draw of this page into another
+                // takes its pixels, as of any page holding a canvas -- see
+                // `PageRecorder::replay_cost`.
+                false => {
+                    ctx.draw_source_image(image, src_rect, dst_rect, apart);
+                    ctx.recorder.borrow_mut().charge_replay(1);
+                }
+            },
+            held,
+            false,
+        );
+        self.flatten_past_budget();
+    }
+
+    /// Flattens the page -- see `PageRecorder::flatten` -- where the images
+    /// its entries hold, with the rasters of the patterns they draw from,
+    /// come to more than [`RECORDED_IMAGE_PAGES`] of its own pixels at
+    /// density 1 and no layer is open: a layer's entries are
+    /// composited when it closes, and the base would have to stand beneath
+    /// them.
+    fn flatten_past_budget(&self) {
+        if self.layers.iter().any(|opened| *opened) {
+            return;
+        }
+        let page = ImageInfo::new(
+            self.bounds.size().to_floor(),
+            self.canvas_color_type,
+            AlphaType::Premul,
+            None,
+        );
+        let budget =
+            RECORDED_IMAGE_PAGES.saturating_mul(page.compute_min_byte_size());
+        if self.recorder.borrow().held_entry_bytes() <= budget {
+            return;
+        }
+        if let Some(base) = self.source_image() {
+            self.recorder.borrow_mut().flatten(&base, budget);
+        }
+    }
+
+    /// What a document plays of this canvas, for another canvas to draw
+    /// it -- see [`Self::draw_canvas_image`].
+    pub(crate) fn document(&self) -> CanvasDocument {
+        let mut recorder = self.recorder.borrow_mut();
+        CanvasDocument {
+            entries: recorder.document_entries(),
+            bounds: self.bounds,
+            cost: recorder.replay_cost(),
+            held: recorder.document_held(),
+        }
+    }
+
+    /// Whether a draw of `image` from `src_rect` into `dst_rect` replaces
+    /// everything drawn before it, as an opaque fill over the page does --
+    /// see [`Self::covers_the_page`]: an opaque image covering the page,
+    /// its source inside it, since past its edges a source rectangle
+    /// samples nothing.
+    fn image_covers_the_page(
+        &self,
+        image: &Image,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) -> bool {
+        image.is_opaque()
+            && lies_within(src_rect, image.width(), image.height())
+            && self.covers_the_page(
+                true,
+                &Path::rect(*dst_rect, None),
+                &self.state.matrix,
+            )
+    }
+
+    /// [`Self::draw_source_image`], declared.
+    fn draw_source_image_declared(
+        &mut self,
+        image: &Image,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        apart: bool,
+        drawn: ImageDraw,
     ) {
         let scaling = ScalingOperation::for_matrix(&Matrix::concat(
             &self.state.matrix,
@@ -4495,6 +4984,31 @@ impl Context2D {
         let paint = self.paint_for_image();
         let features = self.vector_features(&paint, None);
         let sampling = self.state.sampling_filter.sampling_for(scaling);
+        // The image drawn through `paint`: as an image, or as a rectangle
+        // the image fills as a shader for the pixels of a draw Skia would
+        // otherwise copy through its sprite rows -- see
+        // [`Self::blits_decoded`].
+        let blit = |canvas: &SkCanvas, paint: &Paint| {
+            if drawn != ImageDraw::SplitPixels {
+                canvas.draw_image_rect_with_sampling_options(
+                    image,
+                    Some((src_rect, Strict)),
+                    dst_rect,
+                    sampling,
+                    paint,
+                );
+                return;
+            }
+            let to_dst = Matrix::rect_2_rect(src_rect, dst_rect, None)
+                .unwrap_or_else(Matrix::new_identity);
+            let mut filled = paint.clone();
+            filled.set_shader(image.to_shader(
+                (TileMode::Clamp, TileMode::Clamp),
+                sampling,
+                Some(&to_dst),
+            ));
+            canvas.draw_rect(dst_rect, &filled);
+        };
 
         // A shadow the chain casts is filed as a group of its own before the
         // image, which is then drawn as it is casting none -- see
@@ -4503,13 +5017,7 @@ impl Context2D {
         // its alpha before the filter rather than after.
         let cast_apart = self.casts_shadow() && {
             let draw = |canvas: &SkCanvas, paint: &Paint, _: Pass| {
-                canvas.draw_image_rect_with_sampling_options(
-                    image,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    sampling,
-                    &self.faint().drawable(paint),
-                );
+                blit(canvas, &self.faint().drawable(paint));
             };
             self.files_shadow_through_chain(
                 &paint, features, None, apart, &draw,
@@ -4523,16 +5031,9 @@ impl Context2D {
             return;
         }
 
-        // An opaque image covering the page replaces everything drawn
-        // before it -- see `Self::covers_the_page` -- where its source lies
-        // inside it: past its edges a source rectangle samples nothing.
-        if image.is_opaque()
-            && lies_within(src_rect, image.width(), image.height())
-            && self.covers_the_page(
-                true,
-                &Path::rect(*dst_rect, None),
-                &self.state.matrix,
-            )
+        // A split draw erased the page before its halves.
+        if drawn == ImageDraw::Whole
+            && self.image_covers_the_page(image, src_rect, dst_rect)
         {
             self.erase_the_page();
         }
@@ -4553,13 +5054,7 @@ impl Context2D {
                 drawn.set_image_filter(None).set_alpha_f(1.0);
                 let mut recorder = PictureRecorder::new();
                 let canvas = recorder.begin_recording(*dst_rect, false);
-                canvas.draw_image_rect_with_sampling_options(
-                    image,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    sampling,
-                    &drawn,
-                );
+                blit(canvas, &drawn);
                 recorder.finish_recording_as_picture(None)
             };
             // Recorded for each recording where the pixels draw the paint's
@@ -4639,13 +5134,7 @@ impl Context2D {
             None,
             apart.then_some(CpuBytes::Source),
             |canvas, paint, _| {
-                canvas.draw_image_rect_with_sampling_options(
-                    image,
-                    Some((src_rect, Strict)),
-                    dst_rect,
-                    sampling,
-                    &self.faint().drawable(paint),
-                );
+                blit(canvas, &self.faint().drawable(paint));
             },
         );
     }
@@ -4662,19 +5151,10 @@ impl Context2D {
         self.recorder.borrow_mut().page_for_export(opts, engine)
     }
 
-    pub fn image(&self) -> Option<Image> {
+    /// This canvas's own pixels as an image for another canvas to draw --
+    /// see `PageRecorder::image`.
+    pub fn source_image(&self) -> Option<Image> {
         self.recorder.borrow_mut().image(
-            self.canvas_color_type,
-            &self.canvas_color_space,
-            self.canvas_text,
-        )
-    }
-
-    /// This canvas as an image for another canvas to draw, rasterized on the
-    /// spot when `flatten`. See `PageRecorder::image_flattened`.
-    pub fn source_image(&self, flatten: bool) -> Option<Image> {
-        self.recorder.borrow_mut().image_flattened(
-            flatten,
             self.canvas_color_type,
             &self.canvas_color_space,
             self.canvas_text,
@@ -4706,16 +5186,6 @@ impl Context2D {
     /// `source_image` beside this.
     pub fn picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().page().picture(None)
-    }
-
-    /// [`Self::picture`], with the text contrast and gamma this canvas
-    /// rasterizes glyphs under, for a draw that rasterizes it -- see
-    /// [`Self::draw_nested_image`].
-    pub fn source_picture(&self) -> Option<SourcePicture> {
-        self.picture().map(|picture| SourcePicture {
-            picture,
-            text: self.canvas_text,
-        })
     }
 
     /// The page's own list of entries, for another canvas to draw this one
@@ -4834,6 +5304,22 @@ impl Context2D {
     /// has no way to report that and ignores it; the Rust API turns it into
     /// an error rather than claiming a write that did not happen.
     pub fn blit_pixels_raw(
+        &mut self,
+        info: ImageInfo,
+        buffer: Data,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) -> bool {
+        // Pixels copied in place, untransformed and unclipped -- see
+        // `tile_cuts`.
+        let reach = TileReach::Safe;
+        self.declaring(reach, |this| {
+            this.blit_pixels_raw_declared(info, buffer, src_rect, dst_rect)
+        })
+    }
+
+    /// [`Self::blit_pixels_raw`], declared.
+    fn blit_pixels_raw_declared(
         &mut self,
         info: ImageInfo,
         buffer: Data,
@@ -5052,6 +5538,34 @@ impl Context2D {
         width: Option<f32>,
         style: PaintStyle,
     ) {
+        // Glyphs filled with a colour under a scale and a translation,
+        // shadowed or not, came out alike in a tile and in the page;
+        // stroked, rotated or under a path's clip they are kept off the
+        // tiles over the clip, and in a shader wherever it touches one --
+        // see `tile_cuts`.
+        let glyphs = style == PaintStyle::Fill
+            && self.state.matrix.is_scale_translate()
+            && self.clip_keeps_tiles()
+            && !self.filtered_for_tiles();
+        let reach = match (glyphs, self.painted_solid(style)) {
+            (true, true) => TileReach::Safe,
+            (false, true) => TileReach::Cut(self.tile_cut_unbounded()),
+            (_, false) => TileReach::Sampled(self.tile_cut_unbounded()),
+        };
+        self.declaring(reach, |this| {
+            this.draw_text_declared(text, x, y, width, style)
+        })
+    }
+
+    /// [`Self::draw_text`], declared.
+    fn draw_text_declared(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        width: Option<f32>,
+        style: PaintStyle,
+    ) {
         if !self.paints_run_whole() {
             self.paint_text(text, x, y, width, style);
             return;
@@ -5183,15 +5697,24 @@ impl Context2D {
             // The run kept whole, where it is drawn in a blend that reads the
             // page in the shader, to draw its glyphs where the page is played
             // back as that canvas draws them -- see
-            // `typography::glyph_draws`.
+            // `typography::glyph_draws` -- and where it is translucent in one
+            // flat colour, which an eight-bit page on the CPU paints from its
+            // coverage -- see `layer::FlatRun`. Whether the platform draws a
+            // glyph of it in its own colours is asked last, since a run not
+            // kept is laid out again to answer.
             #[cfg(test)]
             let replays = REPLAYS_BLENDED_TEXT.get();
             #[cfg(not(test))]
             let replays = true;
-            let blended = (replays
-                && !blends_by_coefficients(
-                    self.state.global_composite_operation,
-                ))
+            let op = self.state.global_composite_operation;
+            let lines = typesetter.names_a_line_colour();
+            let flat =
+                self.flat_run(&paint, style, lines).filter(|_| match &kept {
+                    Some(kept) => !kept.draws_own_colours(),
+                    None => !typesetter.draws_own_colours(),
+                });
+            let redrawn = ((replays && !blends_by_coefficients(op))
+                || flat.is_some())
             .then(|| {
                 let (run, offset, condensation) =
                     typesetter.replayed(kept.as_deref());
@@ -5272,7 +5795,7 @@ impl Context2D {
                 features,
                 replay,
                 Some(TextRun {
-                    lines: typesetter.names_a_line_colour(),
+                    lines,
                     reached: &reached,
                     kept: kept.as_ref().map(|kept| kept.drawn()),
                     anchor: kept.as_ref().map_or_else(
@@ -5287,7 +5810,8 @@ impl Context2D {
                     ),
                     defer: Some(&defer),
                     colour,
-                    blended,
+                    redrawn,
+                    flat,
                     own_colours: &own_colours,
                 }),
                 self.state.dye(style).gradient().map(|spec| {
@@ -5947,11 +6471,16 @@ pub struct TextRun<'a> {
     /// itself, to draw them where the page is played back -- see
     /// [`Context2D::files_as_replayed_text`].
     pub colour: Option<Replay>,
-    /// The run kept whole where it is drawn in a blend that reads the page
-    /// in the shader, to draw its glyphs where the page is played back, as
-    /// that canvas draws them -- see `typography::glyph_draws` and
-    /// [`Context2D::files_as_replayed_text`].
-    pub blended: Option<Replay>,
+    /// The run kept whole to draw again where the page is played back --
+    /// see [`Context2D::files_as_replayed_text`]: where it is drawn in a
+    /// blend that reads the page in the shader, so that its glyphs are drawn
+    /// as that canvas draws them -- see `typography::glyph_draws` -- and
+    /// where it is translucent in one flat colour -- see [`Self::flat`].
+    pub redrawn: Option<Replay>,
+    /// The run's flat colour, where it is translucent in one, which an
+    /// eight-bit page on the CPU paints from its coverage -- see
+    /// [`layer::FlatRun`].
+    pub flat: Option<layer::FlatRun>,
     /// Whether the run holds a glyph the platform draws in its own colours
     /// -- see `font::platform_colour` -- asked only where the coverage route
     /// could otherwise take the run.
@@ -6239,10 +6768,21 @@ thread_local! {
     pub(crate) static REPLAYED_RECORDED_AT_ONCE: Cell<bool> =
         const { Cell::new(false) };
     /// Whether a run drawn in a blend that reads the page is kept whole to
-    /// be drawn again where it is played -- see [`TextRun::blended`]: off,
+    /// be drawn again where it is played -- see [`TextRun::redrawn`]: off,
     /// it is recorded as it is drawn, the mutant the tests of that route
     /// are held against.
     pub(crate) static REPLAYS_BLENDED_TEXT: Cell<bool> =
+        const { Cell::new(true) };
+    /// Whether a decoded image's pixels may be drawn through it as a shader
+    /// -- see [`Context2D::blits_decoded`]: off, every draw of one is filed
+    /// as it is for a document, which the tests of that route are held
+    /// against.
+    pub(crate) static BLITS_DECODED: Cell<bool> = const { Cell::new(true) };
+    /// Whether a translucent run in one flat colour is kept whole to be
+    /// drawn again where it is played -- see [`TextRun::exact`]: off, it is
+    /// recorded as it is drawn, the reference every target but an eight-bit
+    /// page on the CPU is held to.
+    pub(crate) static REPLAYS_TRANSLUCENT_TEXT: Cell<bool> =
         const { Cell::new(true) };
 }
 
@@ -6586,9 +7126,10 @@ thread_local! {
 /// Where a fill or stroke of `path` in `paint` under `matrix` can put
 /// coverage, in device pixels: the path's bounds, widened by the stroke --
 /// half its width, times the miter limit where joins are mitred and the
-/// square root of two where caps are square -- or, where `outline` is set or
-/// a path effect makes the path drawn, the bounds of the outline Skia fills;
-/// and a pixel either side for anti-aliasing, two for a hairline.
+/// path has one, and the square root of two where caps are square -- or,
+/// where `outline` is set or a path effect makes the path drawn, the bounds
+/// of the outline Skia fills; and a pixel either side for anti-aliasing, two
+/// for a hairline.
 fn drawn_bounds(
     path: &Path,
     paint: &Paint,
@@ -6606,8 +7147,12 @@ fn drawn_bounds(
         false if stroked => {
             let reach = [
                 1.0,
+                // A single open segment -- a move and a line -- has no join
+                // for a miter to reach past.
                 match paint.stroke_join() {
-                    PaintJoin::Miter => paint.stroke_miter(),
+                    PaintJoin::Miter if path.count_verbs() > 2 => {
+                        paint.stroke_miter()
+                    }
                     _ => 1.0,
                 },
                 match paint.stroke_cap() {
@@ -6639,6 +7184,57 @@ mod tests {
         pixels::PixelDepth,
     };
     use skia_safe::Contains;
+
+    /// A stroke's reach takes the miter limit only where the path has a
+    /// join for a miter to reach past, and still holds the outline Skia
+    /// fills: a single open segment reaches its half width and a pixel, and
+    /// a corner of 30 degrees reaches past that by its miter.
+    #[test]
+    fn a_stroke_reaches_its_miter_only_where_it_has_a_join() {
+        let mut paint = Paint::default();
+        paint.set_style(PaintStyle::Stroke);
+        paint.set_stroke_width(4.0);
+        paint.set_stroke_join(PaintJoin::Miter);
+        paint.set_stroke_miter(10.0);
+        let turn = 30f32.to_radians();
+        let path = |points: &[(f32, f32)]| {
+            let mut builder = PathBuilder::new();
+            builder.move_to(points[0]);
+            points[1..].iter().for_each(|&p| {
+                builder.line_to(p);
+            });
+            builder.detach()
+        };
+        let line = path(&[(10.0, 10.0), (100.0, 10.0)]);
+        let corner = path(&[
+            (10.0, 10.0),
+            (100.0, 10.0),
+            (100.0 - 90.0 * turn.cos(), 10.0 + 90.0 * turn.sin()),
+        ]);
+        let identity = Matrix::new_identity();
+        let reach = |path: &Path| {
+            drawn_bounds(path, &paint, PaintStyle::Stroke, &identity, false)
+        };
+        let outline = |path: &Path| {
+            let mut filled = PathBuilder::new();
+            fill_path_with_paint(path, &paint, &mut filled, None, None);
+            *filled.detach().bounds()
+        };
+
+        assert_eq!(reach(&line), Rect::new(7.0, 7.0, 103.0, 13.0));
+        for (name, path) in [("line", &line), ("corner", &corner)] {
+            assert!(
+                reach(path).contains(outline(path)),
+                "{name}: {:?} does not hold the outline {:?}",
+                reach(path),
+                outline(path),
+            );
+        }
+        assert!(
+            outline(&corner).right > 100.0 + 2.0 + 1.0,
+            "the corner's miter reaches past its half width and a pixel",
+        );
+    }
 
     /// An sRGB page keeps a recording for pixels only where it composites
     /// in eight bits, while `keeps_two_recordings` -- which places a
@@ -8488,7 +9084,11 @@ mod tests {
     /// each frame's draws in its own picture, as a page always has: the run
     /// is drawn into the page's recording when its frame ends, and the page
     /// is one picture however many frames it was drawn under -- or one pair
-    /// of them, on a page that keeps a recording for pixels.
+    /// of them, on a page that keeps a recording for pixels. A run of text
+    /// translucent in one flat colour is an entry of its own, drawn again
+    /// where it is played -- see `layer::FlatRun` -- so its frame is filed
+    /// in pieces, the draws before it one and the run another -- see
+    /// `layer::Clipped`.
     #[test]
     fn a_page_no_cut_or_read_splits_is_one_picture() {
         let steps = [
@@ -8504,10 +9104,32 @@ mod tests {
             Step::Restore,
             Step::Fill(95.0),
         ];
-        let mut canvas = program(&steps, false, true).canvas;
-        let page = canvas.page(0).expect("a page").inner.page();
-        assert_eq!(page.layers.len(), 1, "the page's entries");
-        assert!(!recordings(&page.layers[0]).is_empty(), "a picture");
+        let kinds = |flat: bool| {
+            REPLAYS_TRANSLUCENT_TEXT.set(flat);
+            let mut canvas = program(&steps, false, true).canvas;
+            REPLAYS_TRANSLUCENT_TEXT.set(true);
+            let page = canvas.page(0).expect("a page").inner.page();
+            let kind = |entry: &layer::Layer| match entry {
+                layer::Layer::ReplayedText(_) => "text",
+                entry if !recordings(entry).is_empty() => "picture",
+                _ => "other",
+            };
+            page.layers
+                .iter()
+                .map(|entry| match entry {
+                    layer::Layer::Clipped(piece) => {
+                        format!("clipped {}", kind(piece.entry()))
+                    }
+                    entry => kind(entry).to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(false), ["picture"], "the page's entries");
+        assert_eq!(
+            kinds(true),
+            ["picture", "clipped picture", "clipped text", "picture"],
+            "the page's entries, its run flat"
+        );
     }
 
     #[test]

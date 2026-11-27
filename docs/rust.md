@@ -198,7 +198,7 @@ The three are read only by the formats that animate. Setting them on a PNG or a 
 
 ## Windows
 
-Behind the `window` feature, plus a GPU backend -- `gui` needs a renderer, so `window` alone does not build.
+Behind the `window` feature, plus a GPU backend -- `gui` needs a renderer, so a build with `window` and neither `metal` nor `vulkan` stops at a `compile_error!` naming the backend to add.
 
 ```rust
 use meo_skia_canvas::prelude::*;
@@ -242,7 +242,7 @@ Swap `metal` for `vulkan` on Linux and Windows.
 
 - `CanvasOptions::gpu` asks for the GPU: `true` (the default) uses it when a backend is compiled in _and_ runtime-reachable, and falls back to the raster backend otherwise. `Canvas::set_gpu` changes it after construction.
 - `Canvas::engine_kind()` reports what asking actually got -- `EngineKind::Cpu` or `EngineKind::Gpu`. `Canvas::gpu()` reports what was asked for.
-- The GPU path requires the `vulkan` (Linux / Windows) or `metal` (macOS) feature; without either, everything renders on the raster backend.
+- The GPU path requires the `vulkan` (Linux / Windows) or `metal` (macOS) feature; without either, everything renders on the raster backend. On macOS `vulkan` without `metal` builds, `window` included, but no CI job runs it there, so whether it reaches a GPU is untested. With both, Metal is the backend.
 - `BackendInfo::query()` reports what this build on this machine offers before a canvas exists: `renderer`, `api`, `device`, `driver`, `threads`, `gpu_available`, and an `error` naming why the GPU declined, which is what tells a build with no GPU support apart from a driver that refused. The device and driver strings come from the driver and are for logs, not for matching on.
 - The two backends are not bit-identical. The GPU composites through 4x MSAA by default, so coverage lands in quarter steps where the raster backend computes it exactly; sub-pixel geometry is where the two differ most. `EncodeOptions::msaa` changes the sample count, and `0` or `1` mean none.
 

@@ -65,7 +65,10 @@ use crate::{
     gpu::{RenderingEngine, pacing},
     node::{
         filter::MASK_BLUR_MAX_SIGMA,
-        typography::{DrawnText, RunPaint, WholeRuns},
+        typography::{
+            ColourGlyphsIn, DrawnText, HeldGroup, RunPaint, WholeRuns,
+            held_groups,
+        },
         utils::{color_space_name, skia_paint_color_onto_own},
     },
     pixels::PixelColorSpace,
@@ -115,6 +118,9 @@ pub enum Layer {
     /// hold such draws, drawn on a GPU canvas in the bytes the CPU draws them
     /// in -- see [`GradientDraw`].
     Gradient(Arc<GradientDraw>),
+    /// One draw filed as entries of its own for each kind of target -- see
+    /// [`Split`]. Shared, as a group is.
+    Split(Arc<Split>),
 }
 
 impl Layer {
@@ -139,6 +145,7 @@ impl Layer {
             }
             Layer::ReplayedText(text) => text.playback(canvas, target),
             Layer::Gradient(op) => op.playback(canvas, target),
+            Layer::Split(split) => split.playback(canvas, target),
         }
     }
 
@@ -169,6 +176,7 @@ impl Layer {
                 .iter()
                 .any(|(entry, _)| entry.plays_apart_on_gpu()),
             Layer::Clipped(piece) => piece.entry().plays_apart_on_gpu(),
+            Layer::Split(split) => split.plays_apart_on_gpu(),
             Layer::Picture(_)
             | Layer::Blur(_)
             | Layer::Targeted(_)
@@ -205,6 +213,8 @@ impl Layer {
             ),
             Layer::ReplayedText(text) => Some(text.reach()),
             Layer::Gradient(op) => Some(op.reach()),
+            // What its pixels reach, as for a pair.
+            Layer::Split(split) => split.pixels_reach(),
         }
     }
 
@@ -270,6 +280,13 @@ impl Layer {
             }
             Layer::Clipped(piece) => piece.entry.recorded_bytes(),
             Layer::Pattern(tile) => tile.plain.approximate_bytes_used(),
+            Layer::Split(split) => split
+                .pixels
+                .layers
+                .iter()
+                .chain(split.document.layers.iter())
+                .map(Layer::recorded_bytes)
+                .sum(),
             Layer::Deferred(deferred) => {
                 recorded(&deferred.pixels.picture)
                     + deferred
@@ -300,6 +317,12 @@ impl Layer {
                 .iter()
                 .for_each(|layer| layer.count_into(count)),
             Layer::Clipped(piece) => piece.entry.count_into(count),
+            Layer::Split(split) => split
+                .pixels
+                .layers
+                .iter()
+                .chain(split.document.layers.iter())
+                .for_each(|layer| layer.count_into(count)),
             Layer::Deferred(deferred) => {
                 deferred.pixels.picture.count_into(count);
                 if let Some(document) = &deferred.document {
@@ -323,17 +346,69 @@ impl Layer {
     }
 }
 
-/// The bytes the pictures of one generation of a page's recording hold --
-/// see [`PageRecorder::recorded_bytes`](super::page::PageRecorder::recorded_bytes)
-/// -- added to as each entry is filed and as each picture recorded when first
-/// played is recorded. Shared with those pictures, which an export can
-/// record on another thread.
+impl Layer {
+    /// Calls `each` with every image this entry holds that its pictures do
+    /// not count -- see [`Split::image`] and [`Entries::held`] -- once for
+    /// each time it holds it: the walk the count a page keeps as it files
+    /// is held to, and what a document of a canvas is found to hold.
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        match self {
+            Layer::Group(group) => group.contents.held_images(each),
+            Layer::Clipped(piece) => piece.entry.held_images(each),
+            Layer::Split(split) => split.held_images(each),
+            Layer::Pattern(draw) => draw.source.held_images(each),
+            Layer::Picture(_)
+            | Layer::Blur(_)
+            | Layer::Targeted(_)
+            | Layer::Cut(_)
+            | Layer::Gradient(_)
+            | Layer::Deferred(_)
+            | Layer::ReplayedText(_) => {}
+        }
+    }
+
+    /// Calls `each` with the page of every pattern this entry draws from --
+    /// see [`TileSource`] -- once for each time it draws from it.
+    pub(crate) fn tile_sources(&self, each: &mut dyn FnMut(&Arc<TileSource>)) {
+        match self {
+            Layer::Group(group) => group
+                .contents
+                .layers
+                .iter()
+                .for_each(|layer| layer.tile_sources(each)),
+            Layer::Clipped(piece) => piece.entry.tile_sources(each),
+            Layer::Split(split) => split
+                .pixels
+                .layers
+                .iter()
+                .chain(split.document.layers.iter())
+                .for_each(|layer| layer.tile_sources(each)),
+            Layer::Pattern(draw) => each(&draw.source),
+            Layer::Picture(_)
+            | Layer::Blur(_)
+            | Layer::Targeted(_)
+            | Layer::Cut(_)
+            | Layer::Gradient(_)
+            | Layer::Deferred(_)
+            | Layer::ReplayedText(_) => {}
+        }
+    }
+}
+
+/// The bytes one generation of a page's recording holds of one kind: its
+/// pictures -- see
+/// [`PageRecorder::recorded_bytes`](super::page::PageRecorder::recorded_bytes)
+/// -- or the rasters of the patterns its entries draw from -- see
+/// [`TileSource::count_raster_into`]. Added to as each entry is filed and as
+/// each picture or raster made when first played is made, and moved as a
+/// raster is replaced. Shared with those pictures and patterns, which an
+/// export can play on another thread.
 ///
 /// `Relaxed` throughout: the count is a figure told to the JavaScript
 /// engine, and nothing is published through it -- no thread reads a picture
-/// because it read the count. Every addition to one atomic falls in a single
+/// because it read the count. Every change to one atomic falls in a single
 /// order, so none is lost; a report made while another thread records may
-/// miss that one picture, which the next report counts.
+/// miss that one picture or raster, which the next report counts.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RecordedCount(Arc<AtomicUsize>);
 
@@ -353,7 +428,8 @@ impl RecordedCount {
     }
 }
 
-/// A [`RecordedCount`] held weakly, by a [`LazyPicture`] filed into it.
+/// A [`RecordedCount`] held weakly, by a [`LazyPicture`] or a [`TileSource`]
+/// filed into it.
 #[derive(Debug)]
 struct WeakCount(Weak<AtomicUsize>);
 
@@ -371,6 +447,14 @@ impl WeakCount {
     fn add(&self, bytes: usize) {
         if let Some(count) = self.0.upgrade() {
             count.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Moves the count from `was` bytes to `now`, where it still counts.
+    fn adjust(&self, was: usize, now: usize) {
+        if let Some(count) = self.0.upgrade() {
+            count.fetch_add(now, Ordering::Relaxed);
+            count.fetch_sub(was, Ordering::Relaxed);
         }
     }
 }
@@ -735,6 +819,12 @@ thread_local! {
     pub(crate) static COVERAGE_ROUTE: Cell<bool> = const { Cell::new(true) };
     /// How many blurred draws played on this thread took the coverage route.
     pub(crate) static COVERAGE_RUNS: Cell<usize> = const { Cell::new(0) };
+    /// How many translucent runs played on this thread were drawn from their
+    /// coverage -- see [`FlatRun`].
+    pub(crate) static FLAT_RUNS: Cell<usize> = const { Cell::new(0) };
+    /// The device pixels the planes of the translucent runs drawn from their
+    /// coverage on this thread were read over, joined.
+    pub(crate) static FLAT_REGION: Cell<Option<IRect>> = const { Cell::new(None) };
     /// How many shadows played on this thread were cast from a run's opaque
     /// copy -- see [`chain::Cast`].
     pub(crate) static CAST_RUNS: Cell<usize> = const { Cell::new(0) };
@@ -925,7 +1015,7 @@ const PLACED_MARGIN_LEVELS: f64 = 0.5 - GPU_HALF_ROUNDING_LEVELS;
 /// Skia rounds a paint's own colour
 /// (`SkRasterPipeline::append_constant_color`): a fraction of 255, so that it
 /// multiplies onto a whole byte.
-fn byte_alpha(alpha: f32) -> f32 {
+pub(crate) fn byte_alpha(alpha: f32) -> f32 {
     let levels = f32::from(u8::MAX);
     (alpha.clamp(0.0, 1.0) * levels + 0.5).trunc() / levels
 }
@@ -1273,6 +1363,75 @@ thread_local! {
     /// [`PLAIN_UNCONVERTED_SKSL`] compiled, once per thread.
     static PLAIN_UNCONVERTED: Option<RuntimeEffect> =
         RuntimeEffect::make_for_color_filter(PLAIN_UNCONVERTED_SKSL, None).ok();
+    /// [`PLAIN_WHERE_OPAQUE_SKSL`] compiled, once per thread.
+    static PLAIN_WHERE_OPAQUE: Option<RuntimeEffect> =
+        RuntimeEffect::make_for_color_filter(PLAIN_WHERE_OPAQUE_SKSL, None).ok();
+    /// The filters [`plain_where_opaque`] has made on this thread, kept for
+    /// the reason [`PLAIN_SHADERS`] keeps its shaders: a kept run keeps its
+    /// blobs for a paint only while the next draw's compares equal to it.
+    static PLAIN_WHERE_OPAQUE_KEPT:
+        RefCell<KeptSets<[u32; 6], Option<ColorFilter>, DYE_SETS, DYE_WAYS>> =
+        const { RefCell::new(KeptSets::new()) };
+}
+
+/// The SkSL of [`plain_where_opaque`]: `plain` where the colour handed in
+/// is opaque, and the premultiplied `product` at the colour's alpha
+/// otherwise, premultiplied in and out as a runtime colour filter's colour
+/// is. Skia asks a paint's colour filter for the colour a glyph mask's
+/// contrast is set from with its colour shader's colour made opaque --
+/// `SkShaderBase::asLuminanceColor` from `SkPaintPriv::ComputeLuminanceColor`
+/// -- and draws the shader's colour through it times the paint's alpha --
+/// `SkColorFilterShader`.
+///
+/// The product is handed over on its bytes rather than as a colour to
+/// multiply by the alpha here: the GPU carries a shader's output unrounded,
+/// so a colour placed at the edge of the span storing the product -- grey
+/// 127.09 at 77 levels, 38.375 -- stood 0.375 of a level off the byte 38 a
+/// fill stores, and partial coverage of it crossed a rounding boundary on
+/// 632 of 8,484 pixels of a 44px Oswald run.
+const PLAIN_WHERE_OPAQUE_SKSL: &str = "uniform float3 plain; \
+    uniform float3 product; \
+    float4 main(float4 c) { \
+        return c.a == 1 ? float4(plain, 1) : float4(product, c.a); }";
+
+/// A colour filter painting `product`, premultiplied, for a translucent
+/// draw over a colour shader, and answering `plain` when Skia asks it for
+/// the colour a glyph mask's contrast is set from -- see
+/// [`PLAIN_WHERE_OPAQUE_SKSL`]. Kept per thread, as [`plain_colour_shader`]
+/// keeps its shaders.
+fn plain_where_opaque(
+    plain: [f32; 3],
+    product: [f32; 3],
+) -> Option<ColorFilter> {
+    let key = [
+        plain[0], plain[1], plain[2], product[0], product[1], product[2],
+    ]
+    .map(f32::to_bits);
+    let hash = key
+        .iter()
+        .enumerate()
+        .fold(0u64, |hash, (i, bits)| {
+            hash ^ u64::from(*bits).rotate_left(11 * i as u32)
+        })
+        .wrapping_mul(GOLDEN_RATIO_64);
+    if let Some(filter) = PLAIN_WHERE_OPAQUE_KEPT
+        .with_borrow(|kept| kept.get(hash, &key).cloned())
+    {
+        return filter;
+    }
+    let uniforms: Vec<u8> = plain
+        .into_iter()
+        .chain(product)
+        .flat_map(f32::to_ne_bytes)
+        .collect();
+    let filter = PLAIN_WHERE_OPAQUE.with(|effect| {
+        let effect = effect.as_ref()?;
+        (effect.uniform_size() == uniforms.len()).then_some(())?;
+        effect.make_color_filter(Data::new_copy(&uniforms), None)
+    });
+    PLAIN_WHERE_OPAQUE_KEPT
+        .with_borrow_mut(|kept| kept.file(hash, key, filter.clone()));
+    filter
 }
 
 impl ExactColour {
@@ -1420,14 +1579,28 @@ impl ExactColour {
     /// bucket wherever one of them is in it. Over 65,025 greys and alphas
     /// off the byte grid, `(c + 0.37) / 255` at `(a + 0.61) / 255`,
     /// [`Self::at`]'s colour left the bucket for 2,710 and this one for
-    /// 637, 456 of them at an alpha under 32 levels: there the glyph's
-    /// interior stores the exact product and its edges take the contrast of
-    /// the next bucket.
+    /// 637, 456 of them at an alpha under 32 levels.
     ///
-    /// The colour is handed over as it is, as [`Self::verified_paint`] hands
-    /// its own over on such a page: Skia lands an sRGB paint colour on an
-    /// sRGB page unconverted -- see [`unconverted`]. `None` on any other
-    /// page, and for a paint with a colour filter of its own.
+    /// Where it leaves the bucket, the paint is a colour shader of the plain
+    /// colour, opaque, at the paint's alpha, through [`plain_where_opaque`]:
+    /// Skia asks the filter for the contrast colour with the shader's colour
+    /// opaque, and draws the shader's colour through it at the alpha, so the
+    /// glyph takes the plain colour's contrast and stores the product's
+    /// bytes. The filter tells the two apart by alpha, not by whether Skia
+    /// converts a uniform as [`Self::keeping_plain_luminance`]'s does:
+    /// onto sRGB Skia leaves the uniform unconverted for the draw as well,
+    /// and that filter would paint the plain colour. On 44px Oswald in grey
+    /// 128 at 0.3, a GPU page stores 48 of 8,484 covered pixels a level off
+    /// the exact product through the filter, 47 of them in alpha, which the
+    /// GPU carries in half precision -- see [`GPU_HALF_ROUNDING_LEVELS`];
+    /// the placed colour as the paint's own stored 2,822 off, by up to 8
+    /// levels.
+    ///
+    /// Elsewhere the colour is handed over as it is, as
+    /// [`Self::verified_paint`] hands its own over on such a page: Skia
+    /// lands an sRGB paint colour on an sRGB page unconverted -- see
+    /// [`unconverted`]. `None` on any other page, and for a paint with a
+    /// colour filter of its own.
     pub fn nearest_text_paint(&self, paint: &Paint) -> Option<Paint> {
         if !self.bytes
             || self.pixels != PixelColorSpace::Srgb
@@ -1441,12 +1614,31 @@ impl ExactColour {
         if stored == 0.0 {
             return self.verified_paint(paint);
         }
-        let [r, g, b] = [0, 1, 2].map(|i| {
-            let product = (f64::from(placed.rgb[i]) * stored).round();
+        let products =
+            [0, 1, 2].map(|i| (f64::from(placed.rgb[i]) * stored).round());
+        let rgb = [0, 1, 2].map(|i| {
             let plain = f64::from(self.rgb[i]) * levels;
-            (nearest_storing(plain, product, stored) / levels) as f32
+            (nearest_storing(plain, products[i], stored) / levels) as f32
         });
         let mut paint = paint.clone();
+        let named = paint.color4f();
+        let plain = [named.r, named.g, named.b];
+        // Where none of the colours storing the product is in the plain
+        // colour's bucket, the run is drawn over a colour shader of the
+        // plain colour, through a filter that paints the product and
+        // answers the plain colour when Skia asks for the glyph contrast.
+        if stored < levels && contrast_bucket(rgb) != contrast_bucket(plain) {
+            let product = products.map(|p| (p / levels) as f32);
+            let filter = plain_where_opaque(plain, product)?;
+            paint
+                .set_shader(plain_colour_shader(Color4f::new(
+                    named.r, named.g, named.b, 1.0,
+                )))
+                .set_color_filter(filter)
+                .set_alpha_f(alpha);
+            return Some(paint);
+        }
+        let [r, g, b] = rgb;
         paint.set_color4f(Color4f::new(r, g, b, alpha), &self.space);
         Some(paint)
     }
@@ -1635,24 +1827,153 @@ const SCALE_SLACK: f32 = 1.0 / 1024.0;
 /// resampled, and on a platform whose native colour type is BGRA8888 a
 /// translucent edge blits a level apart from the page's -- see
 /// `a_picture_shader_tile_blits_as_rgba`.
+///
+/// What it holds is held by every page a draw dyed by it is filed into, and
+/// counted there: the images its page holds and the one it paints a
+/// document with -- see [`Self::held_images`] -- and the raster it makes,
+/// which a page counts once however many of its draws the pattern dyes --
+/// see [`Self::count_raster_into`] and [`Self::budget_bytes`]. The raster is
+/// let go of once no page holds the pattern, and made again if it is drawn
+/// again -- see [`Self::release_unheld`].
 #[derive(Debug)]
 pub struct TileSource {
     page: Page,
     /// What the page is rasterized with: its own colour space, format and
     /// glyph settings. The density is set for each raster.
     options: ExportOptions,
-    /// The raster made last on the CPU, and the density it was made at.
+    /// The images the pattern holds that no picture counts, each once: the
+    /// one it paints a document with besides the page, where it holds one
+    /// -- a nesting canvas's own pixels, see `CanvasPattern::of_page` --
+    /// and those the page holds. Collected as the pattern is made, since the
+    /// page it was taken as never changes, so that filing a draw dyed by it
+    /// does not walk the page again.
+    held: Box<[HeldImage]>,
+    /// The raster made last on the CPU, and the density it was made at;
+    /// `None` before the first and once no page holds the pattern.
     raster: Mutex<Option<(u32, Image)>>,
+    /// Each page's counts the pattern was filed into, once each, held
+    /// weakly: of rasters, which a raster made or replaced moves by its
+    /// bytes, and of the pages they take toward the page's budget, which
+    /// the first raster made adds to -- see [`Self::count_raster_into`].
+    counted_by: Mutex<Vec<(WeakCount, WeakCount)>>,
 }
 
 impl TileSource {
-    /// `page`, rasterized with `options` at whatever density a draw asks.
-    pub fn new(page: Page, options: ExportOptions) -> Self {
+    /// `page`, rasterized with `options` at whatever density a draw asks,
+    /// beside `image`, which the pattern holds besides the page.
+    pub(crate) fn new(
+        page: Page,
+        options: ExportOptions,
+        image: Option<HeldImage>,
+    ) -> Self {
+        let mut held: Vec<HeldImage> = image.into_iter().collect();
+        page.layers.iter().for_each(|layer| {
+            layer.held_images(&mut |image| {
+                if !held.iter().any(|seen| seen.id == image.id) {
+                    held.push(image);
+                }
+            })
+        });
         Self {
             page,
             options,
+            held: held.into(),
             raster: Mutex::new(None),
+            counted_by: Mutex::default(),
         }
+    }
+
+    /// Calls `each` with every image the pattern holds that no picture
+    /// counts, each once: the one it paints a document with, and those its
+    /// page holds -- see [`Layer::held_images`] -- which the canvas it was
+    /// made from stops counting once it moves on.
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        self.held.iter().for_each(|image| each(*image));
+    }
+
+    /// The bytes of the raster the pattern makes on the CPU at density 1.
+    fn page_bytes(&self) -> usize {
+        let dims = self.page.scaled_dimensions(1.0);
+        self.options
+            .compositing_info(dims, &self.options.surface_color_space)
+            .compute_min_byte_size()
+    }
+
+    /// What the pattern's raster takes toward the budget of a page holding
+    /// it, which is in pages of its own pixels at density 1 -- see
+    /// `RECORDED_IMAGE_PAGES`: the raster's bytes at density 1 once one is
+    /// made on the CPU, whatever density it was made at, so that a page
+    /// read at density 3 is not let go of for the nine pages a raster made
+    /// there takes; nothing before, and nothing for a pattern drawn only on
+    /// the GPU, whose rasters last one playback -- see [`TileScope`].
+    pub(crate) fn budget_bytes(&self) -> usize {
+        match self.raster.lock().is_some() {
+            true => self.page_bytes(),
+            false => 0,
+        }
+    }
+
+    /// The bytes of the raster the pattern holds, 0 before it makes one.
+    pub(crate) fn raster_bytes(&self) -> usize {
+        self.raster
+            .lock()
+            .as_ref()
+            .and_then(|(_, image)| HeldImage::of(image))
+            .map_or(0, |held| held.bytes)
+    }
+
+    /// Has a page hold the pattern's raster: `rasters` its bytes now and
+    /// the change each raster made after brings, and `budget` what it takes
+    /// toward the page's budget -- see [`Self::budget_bytes`] -- now, or
+    /// once the first is made. Once for each page, however many times it
+    /// is asked with its counts, since a page holds one raster of the
+    /// pattern however many of its draws it dyes. Whether the page holds it
+    /// now and did not before.
+    pub(crate) fn count_raster_into(
+        &self,
+        rasters: &RecordedCount,
+        budget: &RecordedCount,
+    ) -> bool {
+        // The raster's lock first, as `Self::raster` takes the two, so that
+        // no raster is made between the bytes added and the counts held.
+        let raster = self.raster.lock();
+        let mut counts = self.counted_by.lock();
+        counts.retain(|(held, _)| !held.is_gone());
+        if counts.iter().any(|(held, _)| held.holds(rasters)) {
+            return false;
+        }
+        counts.push((rasters.weak(), budget.weak()));
+        if let Some((_, image)) = raster.as_ref() {
+            rasters.add(HeldImage::of(image).map_or(0, |held| held.bytes));
+            budget.add(self.page_bytes());
+        }
+        true
+    }
+
+    /// Lets go of the raster where no page holds the pattern any longer --
+    /// none of the counts it was filed into is left -- so that a pattern
+    /// waiting to be collected holds no page of pixels that nothing draws.
+    /// The next draw makes it again, the same bytes, since the page it is
+    /// made from never changes. Called by a page as it lets the pattern go
+    /// -- see `PageRecorder::set_bounds` -- and a no-op while another page
+    /// holds it.
+    pub(crate) fn release_unheld(&self) {
+        // The raster's lock first, as `Self::raster` takes the two.
+        let mut raster = self.raster.lock();
+        let mut counts = self.counted_by.lock();
+        counts.retain(|(held, _)| !held.is_gone());
+        if counts.is_empty() {
+            *raster = None;
+        }
+    }
+
+    /// The identity of the raster the pattern holds, if it holds one.
+    #[cfg(test)]
+    pub(crate) fn raster_id(&self) -> Option<u32> {
+        self.raster
+            .lock()
+            .as_ref()
+            .map(|(_, image)| image.unique_id())
     }
 
     /// The page rasterized at `density` for a pattern drawn on `canvas`.
@@ -1696,7 +2017,22 @@ impl TileSource {
         };
         let image =
             self.page.rasterized(&options, RenderingEngine::CPU).ok()?;
+        let bytes = |raster: Option<&Image>| {
+            raster.and_then(HeldImage::of).map_or(0, |held| held.bytes)
+        };
+        let (first, was, now) = (
+            held.is_none(),
+            bytes(held.as_ref().map(|(_, image)| image)),
+            bytes(Some(&image)),
+        );
         *held = Some((density, image.clone()));
+        let page = self.page_bytes();
+        self.counted_by.lock().iter().for_each(|(rasters, budget)| {
+            rasters.adjust(was, now);
+            if first {
+                budget.add(page);
+            }
+        });
         Some(image)
     }
 
@@ -1959,10 +2295,53 @@ pub struct ReplayedText {
     /// reading the page back for the run draws on the CPU with it -- see
     /// [`replayed_on_their_backdrop`].
     pub cast_before: bool,
+    /// The run's one flat colour, where it is translucent, which an
+    /// eight-bit page on the CPU paints from the run's coverage -- see
+    /// [`FlatRun`] -- and which the run's recording, and the layer a blend
+    /// of its own composites, draw through a colour shader -- see
+    /// [`Self::flat_paint`].
+    pub flat: Option<FlatRun>,
     /// Where the thread that filed it counts the recordings
     /// [`Self::recorded`] makes -- see [`REPLAYED_WATCH`].
     #[cfg(test)]
     pub watch: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+/// A translucent run of text in one flat colour, kept so that an eight-bit
+/// page on the CPU lands each pixel's alpha on the exact product of the
+/// paint's alpha and the glyph's coverage, `round(a * c / 255)`, and each
+/// premultiplied channel on the colour times that, rounded once, as a GPU
+/// canvas does.
+///
+/// Skia's raster blit of a glyph mask onto eight bits a channel multiplies
+/// the two as `a * (c + 1) >> 8` (Skia M156, `blit_mask_d32_a8_general` in
+/// `src/opts/SkBlitMask_opts.h`, through `SkAlphaMulQ` and
+/// `SkAlpha255To256`), a level under the exact product on about one covered
+/// pixel in ten of a run at 0.3; Chrome's software canvas lands the same, and
+/// its accelerated one the exact product -- see `docs/browser-differences.md`.
+/// So on such a page the run is drawn opaque into a plane of the page's own
+/// type, whose alpha is its coverage, coloured from it -- see
+/// `chain::coverage::coloured` -- and composited through the run's blend and
+/// the page's clip, as a blurred run is from its coverage -- see
+/// [`CoverageRun`]: a group of its glyphs at a time where glyphs share a
+/// pixel, so that the later is composited over the earlier, as the raster
+/// composites a blob's glyphs -- see `typography::held_groups`.
+///
+/// The plane is drawn in [`Self::opaque`], the colour the run was named in,
+/// and not the colour [`ReplayedText::paint`] places for the page's bytes:
+/// Skia pre-blends a glyph mask by the paint's colour -- see
+/// `chain::coverage::Plane` -- and the placed colour for grey at 0.3 is in
+/// another table's bucket, which left 2,815 of 8,484 pixels of a 44px Oswald
+/// run off the product Skia's blit makes of the named grey's coverage.
+#[derive(Clone, Debug)]
+pub struct FlatRun {
+    /// The colour, held exactly in the page's space.
+    pub exact: ExactColour,
+    /// The alpha the run is drawn at, `globalAlpha` included.
+    pub alpha: f32,
+    /// The run's paint in the colour it was named in, opaque, through
+    /// source-over: what the run's coverage is drawn in.
+    pub opaque: Paint,
 }
 
 #[cfg(test)]
@@ -2108,6 +2487,131 @@ impl ReplayedText {
         Some(IRect::intersect(&inked.round_out(), &clip).unwrap_or_default())
     }
 
+    /// Draws `replay`, the run, onto `canvas` from its coverage, where it is
+    /// translucent in one flat colour and `canvas` is an eight-bit page on
+    /// the CPU in the colour's space -- see [`FlatRun`] -- and reports
+    /// whether it did. Under a blend that covers beyond the draw, `canvas`
+    /// is drawing into the layer the blend composites, which starts
+    /// transparent, and the run is drawn there as on a page of its own: its
+    /// groups composited one over another as the page composites them, where
+    /// through [`Self::flat_paint`] Skia composites a glyph over one beneath
+    /// it before rounding the product, a level off on the pixels two glyphs
+    /// share.
+    fn drawn_flat(&self, canvas: &SkCanvas, replay: &Replay) -> bool {
+        let Some(flat) = &self.flat else {
+            return false;
+        };
+        // Under a perspective no plane is made, and nothing is drawn here: a
+        // run's colour glyphs drawn before that is known would be drawn
+        // again with the rest.
+        if !coverage_plays(canvas, &flat.exact, false)
+            || canvas.local_to_device_as_3x3().has_perspective()
+        {
+            return false;
+        }
+        // The run's draws held rather than made -- a group of its glyphs at
+        // a time, no two of which ink a pixel in common, and the colour
+        // glyphs this library draws in their place among them -- and what
+        // each can ink in the page's device pixels: from the blobs a raster
+        // keeps, so that nothing builds them again -- see `RunPaint::paint`.
+        canvas.save();
+        let groups = held_groups(canvas, || {
+            self.draw_run(canvas, replay, &flat.opaque, true);
+        });
+        canvas.restore();
+        // Skia bounds a glyph at the font's own size, unhinted, and FreeType
+        // hints it at the size it is drawn -- see [`Self::ink_under`]. A run
+        // of colour glyphs alone has no plain glyph to draw from its
+        // coverage, and is drawn as it stands.
+        let Some(ink) = groups
+            .iter()
+            .filter(|group| !group.coloured())
+            .map(HeldGroup::bounds)
+            .reduce(Rect::join2)
+            .map(|ink| {
+                ink.with_outset((HINTED_INK_DRIFT, HINTED_INK_DRIFT))
+                    .round_out()
+            })
+        else {
+            return false;
+        };
+        // The colour placed for a fill at the alpha -- see
+        // [`ExactColour::at`] -- so that each pixel is a fill's
+        // premultiplied bytes times the coverage, rounded once: what a GPU
+        // canvas draws the run's paint as, and what a fill of the colour
+        // stores where the run covers a pixel whole.
+        let (rgb, gain) =
+            (flat.exact.at(flat.alpha).0.rgb, byte_alpha(flat.alpha));
+        // Through the run's blend alone: its paint carries the colour, and
+        // on a page in another space than sRGB a colour filter that places
+        // it -- see `Context2D::exact_text_paint` -- which would recolour
+        // the coloured image again.
+        let mut through = Paint::default();
+        through
+            .set_anti_alias(true)
+            .set_blend_mode(self.paint.blend_mode_or(BlendMode::SrcOver));
+        let composited = |draw: &dyn Fn(&SkCanvas)| {
+            chain::coverage::unblurred(
+                canvas,
+                ink,
+                chain::coverage::Plane::Alpha,
+                draw,
+            )
+            .and_then(|coverage| {
+                #[cfg(test)]
+                FLAT_REGION.set(Some(
+                    FLAT_REGION.get().map_or(coverage.region(), |region| {
+                        IRect::join(&region, &coverage.region())
+                    }),
+                ));
+                chain::coverage::coloured(
+                    canvas,
+                    &coverage.unblurred(),
+                    rgb,
+                    gain,
+                )
+            })
+            .map(|outcome| outcome.composite(canvas, &through))
+            .is_some()
+        };
+        // A group of the run's glyphs at a time, no two of which ink a pixel
+        // in common, each from its own coverage and composited over the
+        // groups before it, as a raster composites a blob's glyphs one after
+        // another: drawn as one coverage, glyphs that overlap would cover
+        // their shared pixels once where the page covers them twice -- 79
+        // levels from Oswald's run at -12px of letter spacing. A run whose
+        // glyphs share no pixel is one group.
+        //
+        // A group that inks nothing the clip shows composites nothing, which
+        // drawing it as it stands leaves alone too. `false` where no group
+        // composited, a plane not made among the reasons.
+        // Counted rather than asked with `any`, which would stop at the
+        // first group composited and leave the rest undrawn.
+        //
+        // Colour glyphs are drawn as they stand, in their place in the run:
+        // each composites through a layer of its own in the run's paint --
+        // see `ColourRun::draw` -- over the groups before it and under the
+        // groups after, as Skia composites a run of them. Drawn, they count
+        // as drawn, so that a run whose plain glyphs the clip hides is not
+        // drawn again with its colour glyphs on top.
+        let drawn = groups
+            .iter()
+            .filter(|group| match group.coloured() {
+                true => {
+                    group.draw(canvas);
+                    true
+                }
+                false => composited(&|plane| group.draw(plane)),
+            })
+            .count()
+            > 0;
+        #[cfg(test)]
+        if drawn {
+            FLAT_RUNS.set(FLAT_RUNS.get() + 1);
+        }
+        drawn
+    }
+
     fn playback(&self, canvas: &SkCanvas, target: Target) {
         // Its runs join a batch only where nothing of its own lies between
         // them and the page: no clip, no layer for a blend, no shadow
@@ -2139,9 +2643,20 @@ impl ReplayedText {
                 }
                 if let Some(replay) =
                     self.replay.as_ref().filter(|_| !self.shadow_alone)
+                    && !self.drawn_flat(canvas, replay)
                 {
+                    // In the layer the blend opened, where the coverage does
+                    // not play -- a GPU page -- a flat run through the paint
+                    // its recording is drawn in -- see [`Self::flat_paint`].
+                    let shaded =
+                        self.flat_paint().filter(|_| self.blend.is_some());
                     canvas.save();
-                    replay.draw(canvas, &self.matrix, &self.paint);
+                    self.draw_run(
+                        canvas,
+                        replay,
+                        shaded.as_ref().unwrap_or(&self.paint),
+                        shaded.is_some(),
+                    );
                     canvas.restore();
                 }
                 if self.blend.is_some() {
@@ -2176,9 +2691,75 @@ impl ReplayedText {
     /// transform the run was drawn under and reaching the clip as
     /// `Context2D::draw_text` has it -- see [`reach_the_clip`] -- through a
     /// picture the blend composites where the blend covers beyond the draw.
+    /// A flat run's glyphs are the exception, recorded in
+    /// [`Self::flat_paint`], so that a canvas drawn as an image of its page
+    /// lands the bytes the page holds.
     pub(crate) fn recorded(&self) -> Option<&Picture> {
-        self.recording
-            .get_or_record(|| self.record(&self.paint, self.shadow.as_ref()))
+        self.recording.get_or_record(|| {
+            let shaded = self.flat_paint();
+            self.record(
+                shaded.as_ref().unwrap_or(&self.paint),
+                self.shadow.as_ref(),
+                shaded.is_some(),
+            )
+        })
+    }
+
+    /// Draws `replay`, the run, onto `canvas` in `paint`, under the
+    /// transform it was drawn under. Where `flat`, `paint` is one a flat
+    /// run's plain glyphs are drawn in -- [`FlatRun::opaque`] or
+    /// [`Self::flat_paint`] -- and its colour glyphs are drawn in the run's
+    /// own paint, as every other draw of the run draws them -- see
+    /// [`ColourGlyphsIn`].
+    fn draw_run(
+        &self,
+        canvas: &SkCanvas,
+        replay: &Replay,
+        paint: &Paint,
+        flat: bool,
+    ) {
+        let _colours = flat.then(|| ColourGlyphsIn::hold(self.paint.clone()));
+        replay.draw(canvas, &self.matrix, paint);
+    }
+
+    /// The paint a flat run is recorded for pixels in -- see [`FlatRun`] --
+    /// so that a picture of the page lands the bytes the page itself does:
+    /// its colour through an opaque colour shader, at its alpha as the
+    /// paint's, which Skia's raster pipeline multiplies by a glyph's coverage
+    /// rounded once, the product [`Self::drawn_flat`] lands, where the run's
+    /// own paint is blitted as `a * (c + 1) >> 8`. In the colour the run was
+    /// named in, so that Skia pre-blends the mask by the colour the plane is
+    /// drawn in. A run under a blend of its own is drawn in it too, into the
+    /// layer the blend composites, where that layer is not drawn from the
+    /// coverage -- on a GPU page. Over pixels already there the pipeline
+    /// composites the product before rounding it, as Skia's blit does,
+    /// which is why an eight-bit page on the CPU, and a layer on one, is
+    /// drawn from the coverage. `None` for any other run.
+    ///
+    /// The alpha is the paint's rather than the shader's because a glyph its
+    /// scaler makes an image of is drawn in the paint's colour, faded by the
+    /// paint's alpha alone, the shader unread: on macOS every glyph of a face
+    /// CoreText reports as holding colour glyphs, such as one with a `COLR`
+    /// table, its plain glyphs too (`SkTypeface_Mac::onFilterRec`). With the
+    /// alpha in the shader such a run at 0.6 landed opaque, 102 levels off
+    /// its own page; in the paint, where an anti-aliased edge of the image is
+    /// rounded once more than the coverage rounds it, within two levels on
+    /// macOS, and a glyph mask lands the exact product either way.
+    pub(crate) fn flat_paint(&self) -> Option<Paint> {
+        let flat = self.flat.as_ref()?;
+        let named = flat.opaque.color4f();
+        let mut paint = flat.opaque.clone();
+        paint
+            .set_shader(shaders::color_in_space(
+                Color4f::new(named.r, named.g, named.b, 1.0),
+                ColorSpace::new_srgb(),
+            ))
+            .set_alpha_f(flat.alpha);
+        // The blend the run's own paint is drawn through: under a blend that
+        // covers beyond the draw that is source-over, into the layer the
+        // blend composites, where the blend itself would leave nothing.
+        paint.set_blend_mode(self.paint.blend_mode_or(BlendMode::SrcOver));
+        Some(paint)
     }
 
     /// The run as recorded for a document, recorded now if nothing has
@@ -2205,21 +2786,23 @@ impl ReplayedText {
             }
             return self.whole.get_or_record(|| {
                 let _inline = inline();
-                self.record(&self.paint, self.shadow.as_ref())
+                self.record(&self.paint, self.shadow.as_ref(), false)
             });
         };
         document.picture.get_or_record(|| {
             let _inline = inline();
-            self.record(&document.paint, document.shadow.as_ref())
+            self.record(&document.paint, document.shadow.as_ref(), false)
         })
     }
 
     /// The run recorded in `paint`, `shadow` beneath it, for
-    /// [`Self::recorded`].
+    /// [`Self::recorded`]: its colour glyphs in the run's own paint where
+    /// `flat` -- see [`Self::draw_run`].
     fn record(
         &self,
         paint: &Paint,
         shadow: Option<&ReplayedShadow>,
+        flat: bool,
     ) -> Option<Picture> {
         #[cfg(test)]
         if let Some(watch) = &self.watch {
@@ -2239,7 +2822,7 @@ impl ReplayedText {
             }
             if !self.shadow_alone {
                 canvas.save();
-                replay.draw(canvas, &self.matrix, paint);
+                self.draw_run(canvas, replay, paint, flat);
                 reach_the_clip(canvas);
                 canvas.restore();
             }
@@ -2481,9 +3064,9 @@ fn drawn_on_its_backdrop(
 ///
 /// A canvas drawn as an image whose page holds such a draw, or colour
 /// glyphs, is kept here as well (#703), always made on the CPU on a GPU
-/// canvas -- see [`OnGpu::Raster`]: its image is backed by its page's
-/// picture, which Ganesh would replay as Skia's own draws, and only a
-/// raster made on the CPU plays that picture in the CPU's bytes -- see
+/// canvas -- see [`OnGpu::Raster`]: its image is the page's own pixels,
+/// which Ganesh would composite in its own arithmetic, and only a raster
+/// made on the CPU composites them in the CPU's bytes -- see
 /// [`Layer::plays_apart_on_gpu`].
 #[derive(Clone, Debug)]
 pub struct GradientDraw {
@@ -2607,8 +3190,9 @@ pub enum OnGpu {
     /// other mapping than onto whole pixels -- a canvas drawn into another
     /// under a scale, say -- the image would be resampled, so the draw is
     /// made on the CPU instead: over the GPU's pixels, `beyond` saying as
-    /// for [`OnGpu::Raster`] what it composites over, or, inside a layer,
-    /// whose pixels cannot be read, over transparent and composited through
+    /// for [`OnGpu::Raster`] what it composites over, or, inside a layer
+    /// whose pixels cannot be read -- one not played on a root of its own,
+    /// see [`played_on_a_root`] -- over transparent and composited through
     /// `blend` -- `over`, the draw recorded with `SrcOver`, where `blend` is
     /// another.
     Effect {
@@ -3172,7 +3756,12 @@ fn recorded_over(draw: &GradientPath, cull: Rect) -> Option<Picture> {
 /// by a translation of whole pixels, under which an image sampled at its
 /// texels' centres lands on the pixels it was made for.
 fn on_whole_pixels(canvas: &SkCanvas) -> bool {
-    let device = canvas.local_to_device_as_3x3();
+    maps_whole_pixels(&canvas.local_to_device_as_3x3())
+}
+
+/// Whether `device` is a translation of whole pixels -- see
+/// [`on_whole_pixels`].
+fn maps_whole_pixels(device: &Matrix) -> bool {
     device.is_translate()
         && [device.translate_x(), device.translate_y()]
             .iter()
@@ -3291,6 +3880,24 @@ impl GradientDraw {
             index += 1;
         }
         canvas.restore();
+    }
+
+    /// Whether a GPU canvas playing the run under `device` draws any of it
+    /// on the CPU over the pixels it reads -- see [`played_on_gpu`]: a draw
+    /// made on the CPU always; a path whose effect cannot be made; and,
+    /// where `device` does not map the recording's device pixels onto whole
+    /// ones, a path or a draw recorded with an image of the effect, which
+    /// would be resampled there.
+    pub(crate) fn reads_the_page(&self, device: &Matrix) -> bool {
+        let whole = maps_whole_pixels(device);
+        self.draws.iter().any(|piece| match &piece.gpu {
+            OnGpu::Raster { .. } => true,
+            OnGpu::Path(draw) => {
+                !whole || draw.spec.exact(&draw.page, draw.alpha).is_none()
+            }
+            OnGpu::Effect { .. } => !whole,
+            OnGpu::Alone | OnGpu::Native => false,
+        })
     }
 
     /// What the run reaches, under the transform it is played back under:
@@ -3512,6 +4119,17 @@ pub struct LayerRec {
 }
 
 impl LayerRec {
+    /// Whether the layer composites through a blend that changes the page
+    /// beyond what it holds -- see `covers_beyond_the_draw` -- on either
+    /// target.
+    fn covers_beyond(&self) -> bool {
+        [&self.pixels_paint, &self.paint]
+            .into_iter()
+            .flatten()
+            .filter_map(Paint::as_blend_mode)
+            .any(covers_beyond_the_draw)
+    }
+
     /// Opens the layer on `canvas`, under whatever transform and clip it
     /// carries, compositing as `target` needs: on pixels through the paint
     /// [`composited`] hands over, which keeps the alpha exact; in a
@@ -3799,6 +4417,14 @@ pub(crate) struct Entries {
     /// each kind of target, whose draws may not yet have forked them --
     /// see `page::Recorders` -- and so hold no pair to say so.
     pub(crate) apart: bool,
+    /// The images these entries draw that no picture of theirs counts and
+    /// no entry among them says it holds: a canvas a document of them
+    /// writes as its image, past `DOCUMENT_REPLAY_BUDGET` -- the image a
+    /// [`Split`] holds and its document draws too. Carried by what a
+    /// document plays of a page, which stands in for the split, so that a
+    /// page holding those entries counts the images, and so that a flatten
+    /// can tell what keeping them costs -- see `page::PageRecorder::flatten`.
+    pub(crate) held: Arc<[HeldImage]>,
 }
 
 impl FromIterator<(Layer, VectorFeatures)> for Entries {
@@ -3829,6 +4455,25 @@ impl Entries {
             layers,
             features,
             apart: false,
+            held: Arc::default(),
+        }
+    }
+
+    /// Calls `each` with every image these entries hold that their
+    /// pictures do not count -- see [`Self::held`] and [`Split::image`] --
+    /// once for each time they hold it.
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        self.held.iter().for_each(|held| each(*held));
+        self.layers.iter().for_each(|layer| layer.held_images(each));
+    }
+
+    /// Adds `next`'s entries after these, with the images it holds.
+    pub(crate) fn append(&mut self, next: Entries) {
+        Arc::make_mut(&mut self.layers).extend(next.layers.iter().cloned());
+        Arc::make_mut(&mut self.features).extend(next.features.iter().copied());
+        if !next.held.is_empty() {
+            self.held =
+                self.held.iter().chain(next.held.iter()).copied().collect();
         }
     }
 
@@ -3864,6 +4509,179 @@ impl Entries {
         self.features
             .iter()
             .fold(VectorFeatures::PLAIN, |all, features| all.with(*features))
+    }
+
+    /// What a document plays of these entries, as entries of its own: each
+    /// [`Split`] stands in its place as its document's entries, the images
+    /// its document holds joining these entries' own -- see [`Self::held`]
+    /// -- and each group holding one as a group of what its contents
+    /// project to. `None`
+    /// where nothing would change, so that entries holding no split are
+    /// played as they are and shared rather than copied.
+    ///
+    /// A page drawn into another as an image of its own pixels is written
+    /// by a document from these: what the page drew, as vectors and text,
+    /// and none of the pixels a split plays for a raster.
+    pub(crate) fn projected(&self) -> Option<Entries> {
+        let mut changed = false;
+        let mut layers = Vec::with_capacity(self.layers.len());
+        let mut features = Vec::with_capacity(self.features.len());
+        let mut held = self.held.to_vec();
+        for (layer, asks) in self.iter() {
+            match layer {
+                // A split's document holds none of its own: it is drawn from
+                // what another page projected, or from an image.
+                Layer::Split(split) => {
+                    changed = true;
+                    layers.extend(split.document.layers.iter().cloned());
+                    features.extend(split.document.features.iter().copied());
+                    held.extend(split.document.held.iter().copied());
+                }
+                Layer::Group(group) => match group.contents.projected() {
+                    Some(contents) => {
+                        changed = true;
+                        layers.push(Layer::Group(Arc::new(Group {
+                            contents,
+                            ..Group::clone(group)
+                        })));
+                        features.push(asks);
+                    }
+                    None => {
+                        layers.push(layer.clone());
+                        features.push(asks);
+                    }
+                },
+                _ => {
+                    layers.push(layer.clone());
+                    features.push(asks);
+                }
+            }
+        }
+        changed.then(|| Entries {
+            apart: self.apart,
+            held: held.into(),
+            ..Entries::new(layers, features)
+        })
+    }
+
+    /// The entries recorded as one picture of `bounds`, as `target` plays
+    /// them: what a draw of them needs where it is not drawn entry by entry
+    /// -- see `Context2D::draw_picture_costing`.
+    pub(crate) fn picture(
+        &self,
+        bounds: Rect,
+        target: Target,
+    ) -> Option<Picture> {
+        let mut recorder = PictureRecorder::new();
+        let canvas = recorder.begin_recording(bounds, true);
+        play_entries(&self.layers, &self.features, canvas, target);
+        recorder.finish_recording_as_picture(None)
+    }
+}
+
+/// One draw filed as entries of its own for each kind of target: what a
+/// page plays for pixels, and what a document backend writes.
+///
+/// A canvas drawn into another as an image is its own pixels on pixels --
+/// see `PageRecorder::image` -- and the entries it was drawn from in a
+/// document, which writes them as vectors and text. Each half is what the
+/// draw files on its own, so each plays as that draw would alone: a
+/// document takes its half entry by entry, as it takes a group's.
+#[derive(Clone, Debug)]
+pub struct Split {
+    /// What the draw files for pixels.
+    pub(crate) pixels: Entries,
+    /// What the draw files for a document.
+    pub(crate) document: Entries,
+    /// The image the draw holds that no other object reports: a canvas's
+    /// own pixels, which its pictures keep alive and do not count -- see
+    /// [`Layer::recorded_bytes`]. A document past the replay budget draws
+    /// it too, and says so in its own [`Entries::held`], which outlives
+    /// the split wherever a document stands in for it.
+    pub(crate) image: Option<HeldImage>,
+}
+
+impl Split {
+    /// Whether a GPU canvas plays the split apart from a picture -- see
+    /// [`Layer::plays_apart_on_gpu`]: only its pixels are played there.
+    pub(crate) fn plays_apart_on_gpu(&self) -> bool {
+        self.pixels
+            .iter()
+            .any(|(entry, _)| entry.plays_apart_on_gpu())
+    }
+
+    /// Calls `each` with every image the split holds that its pictures do
+    /// not count -- see [`Self::image`] and [`Entries::held`] -- once for
+    /// each time it holds it.
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        if let Some(held) = self.image {
+            each(held);
+        }
+        self.pixels.held_images(each);
+        self.document.held_images(each);
+    }
+
+    /// Adds `next`'s entries after this split's own, each half to its
+    /// half, where the two can stand as one: they hold the same image, and
+    /// each half plays on the targets the other's does. Played, the joined
+    /// split draws what the two drew one after the other, since each half
+    /// is a list played in order. `Err` gives `next` back where they cannot.
+    pub(crate) fn join(&mut self, next: Split) -> Result<(), Split> {
+        if self.image != next.image
+            || self.pixels.apart != next.pixels.apart
+            || self.document.apart != next.document.apart
+        {
+            return Err(next);
+        }
+        self.pixels.append(next.pixels);
+        self.document.append(next.document);
+        Ok(())
+    }
+}
+
+/// An image a page's recording holds, by Skia's identity for it and the
+/// bytes of its pixels, so that one image drawn many times counts once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HeldImage {
+    /// `SkImage::uniqueID`, which no other image alive shares.
+    pub(crate) id: u32,
+    /// The bytes its pixels take, at the rows Skia keeps them in.
+    pub(crate) bytes: usize,
+}
+
+impl HeldImage {
+    /// `image` as a recording holding it counts it: `None` for an image
+    /// whose pixels are not in main memory, which this library makes none
+    /// of for a recording to hold.
+    pub(crate) fn of(image: &Image) -> Option<Self> {
+        let pixmap = image.peek_pixels()?;
+        Some(Self {
+            id: image.unique_id(),
+            bytes: pixmap.compute_byte_size(),
+        })
+    }
+}
+
+impl Split {
+    /// Plays the half `target` takes.
+    fn playback(&self, canvas: &SkCanvas, target: Target) {
+        let half = match target {
+            Target::Pixels => &self.pixels,
+            Target::Document => &self.document,
+        };
+        play_entries(&half.layers, &half.features, canvas, target);
+    }
+
+    /// What the pixels reach -- see [`Layer::reach`]: every entry's
+    /// rectangle joined, and `None` where one has none.
+    fn pixels_reach(&self) -> Option<Rect> {
+        self.pixels.layers.iter().try_fold(
+            Rect::new_empty(),
+            |mut reach, entry| {
+                reach.join(entry.reach()?);
+                Some(reach)
+            },
+        )
     }
 }
 
@@ -4185,7 +5003,7 @@ impl Group {
         let outer = Matrix::concat(&layer.local_to_device_as_3x3(), back);
         self.draw_chained_as(layer, target, back, |layer| {
             if target == Target::Pixels
-                && self.played_at_source(layer, &outer, None)
+                && self.played_at_source(layer, &outer, None, None)
             {
                 return;
             }
@@ -4197,21 +5015,27 @@ impl Group {
 
     /// Draws the group onto `canvas` from a surface of its own -- see
     /// [`Self::played_at_source`] -- with no layer around it, where `rec`
-    /// composites nothing that surface's pixels do not already hold: at an
-    /// opacity of one, through no filter, over no backdrop and within no
-    /// bounds of its own. Whether it did; where it did not, nothing was
-    /// drawn.
+    /// does nothing to the surface's pixels but composite them through its
+    /// paint: over no backdrop, within no bounds of its own, and through a
+    /// paint that is a blend mode, an alpha and a colour filter at most,
+    /// with no image filter, shader or mask. Whether it did; where it did
+    /// not, nothing was drawn.
     ///
     /// The surface already composites the group's entries apart from what
-    /// lies beneath them, which is all such a layer does. Drawn into the
-    /// layer instead, its pixels landed through the layer's own restore,
-    /// which on a raster on the CPU takes Skia's `N32` sprite row whatever
-    /// the surface was made in -- see [`own_image_type`]: a canvas drawn in
-    /// at a whole pixel stood 415 bytes a level apart from its own pixels
-    /// drawn as an image on an x86-64 machine.
+    /// lies beneath them, which is what such a layer does before it
+    /// composites through its paint, so the surface is drawn through that
+    /// paint instead, as the layer would composite -- see [`composited`].
+    /// Drawn into the layer instead, its pixels landed through the layer's
+    /// own restore, which on a raster on the CPU takes Skia's `N32` sprite
+    /// row whatever the surface was made in -- see [`own_image_type`]: a
+    /// canvas drawn in at a whole pixel stood 415 bytes a level apart from
+    /// its own pixels drawn as an image on an x86-64 machine, and one drawn
+    /// in under `destination-atop` 1,567.
     ///
     /// The destination confines the surface as it confines the layer: as a
-    /// clip where it holds what the group draws, and where it cuts it, by
+    /// clip where it holds what the group draws -- none at all under a blend
+    /// that changes the page beyond what is drawn, which the clip would
+    /// confine and the draw needs no clip for -- and where it cuts it, by
     /// multiplying the surface by its coverage before it is drawn, as the
     /// layer is multiplied before it closes. Clipped by that coverage
     /// instead, a crop to a fractional destination stood a level from the
@@ -4224,9 +5048,18 @@ impl Group {
         rec: &LayerRec,
         base: &Matrix,
     ) -> bool {
-        let plain = rec.opacity() == Some(1.0)
+        // The paint a page's pixels composite the layer through, as
+        // `LayerRec::open_on` takes it.
+        let paint = rec.pixels_paint.as_ref().or(rec.paint.as_ref());
+        let through = paint.is_none_or(|paint| {
+            paint.as_blend_mode().is_some()
+                && paint.image_filter().is_none()
+                && paint.shader().is_none()
+                && paint.mask_filter().is_none()
+        });
+        let plain = through
+            && rec.backdrop.is_none()
             && rec.bounds.is_none()
-            && rec.pixels_paint.is_none()
             && rec.pixels_backdrop.is_none()
             && !rec.one_image;
         if !plain || !blur_mask::draws_on_cpu(canvas) {
@@ -4240,10 +5073,19 @@ impl Group {
         canvas.save();
         canvas.set_matrix(&to_device.into());
         let crop = self.crop(canvas, Target::Pixels, &to_device);
-        if crop.is_none() {
+        // With no crop the destination holds what the group draws, so its
+        // clip confines nothing of the draw, and under a blend that changes
+        // the page beyond what is drawn it would confine the blend.
+        if crop.is_none() && !rec.covers_beyond() {
             self.confine(canvas, Target::Pixels, &to_device);
         }
-        let drawn = self.played_at_source(canvas, base, crop.as_ref());
+        let paint = paint.map(composited);
+        let drawn = self.played_at_source(
+            canvas,
+            base,
+            crop.as_ref(),
+            paint.as_deref(),
+        );
         canvas.restore();
         drawn
     }
@@ -4260,7 +5102,11 @@ impl Group {
     /// pixels are then drawn at the origin, under whatever clip `canvas`
     /// holds, and the destination, a crop of the source, among it -- or,
     /// where `crop` is given, the surface is multiplied by that coverage
-    /// first. Skia's analytic anti-aliasing covers a curve by where it lies on
+    /// first. They are drawn through `paint` where it is given: as an image,
+    /// or, where its blend changes what lies beyond what is drawn -- see
+    /// `covers_beyond_the_draw` -- as a shader of the image, transparent
+    /// past its edges, filling the clip, as a layer composites over all it
+    /// covers. Skia's analytic anti-aliasing covers a curve by where it lies on
     /// the raster it fills and cuts the coverage of a path its clip cuts --
     /// see `skia_covers_a_curve_by_where_it_lies` and [`CutOp`] -- so drawn
     /// straight into a layer, the source's curves were covered by where the
@@ -4289,6 +5135,7 @@ impl Group {
         canvas: &SkCanvas,
         outer: &Matrix,
         crop: Option<&Coverage>,
+        paint: Option<&Paint>,
     ) -> bool {
         let Some(source) = self.source else {
             return false;
@@ -4344,7 +5191,23 @@ impl Group {
             .unwrap_or_else(|| surface.image_snapshot());
         canvas.save();
         canvas.reset_matrix();
-        canvas.draw_image(&played, origin, None);
+        let beyond = paint
+            .and_then(Paint::as_blend_mode)
+            .is_some_and(covers_beyond_the_draw);
+        match (paint, beyond) {
+            (Some(paint), true) => {
+                let mut fill = paint.clone();
+                fill.set_shader(played.to_shader(
+                    (TileMode::Decal, TileMode::Decal),
+                    SamplingOptions::default(),
+                    &Matrix::translate(origin),
+                ));
+                canvas.draw_paint(&fill);
+            }
+            (paint, _) => {
+                canvas.draw_image(&played, origin, paint);
+            }
+        }
         canvas.restore();
         drop(played);
         if let Some(key) = key {
@@ -4582,7 +5445,8 @@ impl Group {
                 // rounded its alpha to a byte before the blur and again
                 // after. A translucent run's `drop-shadow()` is cast from it
                 // drawn opaque for the same reason, the run itself still
-                // drawn translucent over it -- see `chain::Cast`.
+                // drawn translucent over it, as the page draws it -- see
+                // `chain::Cast` and [`FlatRun`].
                 let opaque = coverage
                     .as_deref()
                     .filter(|_| eight_bits(canvas))
@@ -4662,22 +5526,25 @@ impl Group {
                 let to_device = Matrix::concat(&base, &self.matrix);
                 canvas.set_matrix(&to_device.into());
                 // The destination confines what is drawn and not what the
-                // layer's filter makes of it, so under a filter it is a clip
-                // inside the layer, where a shadow can still be cast past it.
-                // Where it cuts what is drawn, the layer is multiplied by it
-                // before it closes, which is as much inside the layer, and
-                // leaves both the draws and the layer's composite whole --
-                // see `Self::crop`.
+                // layer's filter makes of it, nor what its blend does to the
+                // page beyond what is drawn, so under a filter or such a
+                // blend it is a clip inside the layer, where a shadow can
+                // still be cast past it and the layer still composites over
+                // all the clip covers. Where it cuts what is drawn, the layer
+                // is multiplied by it before it closes, which is as much
+                // inside the layer, and leaves both the draws and the
+                // layer's composite whole -- see `Self::crop`.
                 let filtered = rec
                     .paint
                     .as_ref()
                     .is_some_and(|paint| paint.image_filter().is_some());
+                let inside = filtered || rec.covers_beyond();
                 let crop = self.crop(canvas, target, &to_device);
-                if crop.is_none() && !filtered {
+                if crop.is_none() && !inside {
                     self.confine(canvas, target, &to_device);
                 }
                 rec.open_on(canvas, target, within);
-                if crop.is_none() && filtered {
+                if crop.is_none() && inside {
                     self.confine(canvas, target, &to_device);
                 }
                 canvas.set_matrix(&entries.into());
@@ -4693,7 +5560,7 @@ impl Group {
                 // `Self::played_at_source`.
                 let placed = !rooted
                     && target == Target::Pixels
-                    && self.played_at_source(canvas, &base, None);
+                    && self.played_at_source(canvas, &base, None, None);
                 if !rooted && !placed {
                     let in_layer = InLayer::enter();
                     play_entries(
@@ -4743,12 +5610,15 @@ fn in_own_type(surface: &mut Surface) -> Option<Image> {
 }
 
 /// Plays `contents` into the layer open on `canvas` by way of a surface of
-/// their own, where they hold a run drawn on the CPU over the pixels it
-/// reads -- see [`replayed_on_their_backdrop`] -- which inside the layer
-/// could not read them: `SkCanvas::readPixels` reads the canvas's root
-/// device, never an open layer, and the run would be drawn by the GPU
-/// itself, its overlapping glyphs blended as one. Whether it played them;
-/// where it did not, nothing was drawn.
+/// their own, where they hold a draw made on the CPU over the pixels it
+/// reads -- see [`reads_the_page`] -- which inside the layer could not
+/// read them: `SkCanvas::readPixels` reads the canvas's root device, never
+/// an open layer. A run would then be drawn by the GPU itself, its
+/// overlapping glyphs blended as one -- see [`replayed_on_their_backdrop`]
+/// -- and a draw dyed by a gradient made on the CPU over transparent and
+/// composited into the layer, rounding twice where the page rounds once --
+/// see [`drawn_on_their_backdrop`]. Whether it played them; where it did
+/// not, nothing was drawn.
 ///
 /// The surface covers the layer's bounds -- the canvas's device clip
 /// bounds while the layer is open -- in the canvas's colour type and space,
@@ -4766,12 +5636,13 @@ fn in_own_type(surface: &mut Surface) -> Option<Image> {
 /// anti-aliased path's included, shapes the copy as it shaped the entries.
 ///
 /// What it costs past the layer: the surface, a copy of the layer's size,
-/// and the read backs its runs take, which a page drawn directly pays as
+/// and the read backs its draws take, which a page drawn directly pays as
 /// well. Where the device makes no surface, the surface is memory, and the
 /// entries play there as on a CPU page, the copy then uploading it.
 ///
-/// Only on the GPU, which alone draws such a run over a read back, and not
-/// under a perspective, where it is not read back either.
+/// Only on the GPU, which alone makes such a draw over a read back, and not
+/// under a perspective, under which the page reads none back either -- see
+/// [`drawn_on_their_backdrop`] and [`replayed_on_their_backdrop`].
 fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
     #[cfg(test)]
     if !OWN_ROOTS.get() {
@@ -4780,7 +5651,7 @@ fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
     let device = canvas.local_to_device_as_3x3();
     if !blur_mask::on_gpu(canvas)
         || device.has_perspective()
-        || !reads_the_page(&contents.layers)
+        || !reads_the_page(&contents.layers, &device)
     {
         return false;
     }
@@ -4825,15 +5696,28 @@ fn played_on_a_root(canvas: &SkCanvas, contents: &Entries) -> bool {
     true
 }
 
-/// Whether `entries` hold a run drawn on the CPU over the pixels it reads --
-/// see [`read_on_the_cpu`] -- themselves, a run painted as one image among
-/// them, or in a group they hold, whose layer [`played_on_a_root`] plays in
-/// turn.
-fn reads_the_page(entries: &[Layer]) -> bool {
-    entries.iter().any(|entry| {
-        read_on_the_cpu(entry).is_some()
-            || matches!(entry, Layer::Group(group)
-                if reads_the_page(&group.contents.layers))
+/// Whether `entries`, played under `device`, hold a draw a GPU canvas makes
+/// on the CPU over the pixels it reads, themselves or in a group they hold,
+/// whose entries play under the group's own transform: a run -- see
+/// [`read_on_the_cpu`] -- a run painted as one image among them, or a draw
+/// dyed by a gradient -- see [`GradientDraw::reads_the_page`].
+fn reads_the_page(entries: &[Layer], device: &Matrix) -> bool {
+    entries.iter().any(|entry| match entry {
+        Layer::Group(group) => {
+            read_on_the_cpu(entry).is_some()
+                || reads_the_page(
+                    &group.contents.layers,
+                    &Matrix::concat(device, &group.contents_matrix),
+                )
+        }
+        Layer::Gradient(draw) => draw.reads_the_page(device),
+        // Only pixels are played on a GPU canvas.
+        Layer::Split(split) => reads_the_page(&split.pixels.layers, device),
+        Layer::Clipped(piece) => match piece.entry() {
+            Layer::Gradient(draw) => draw.reads_the_page(device),
+            _ => read_on_the_cpu(entry).is_some(),
+        },
+        entry => read_on_the_cpu(entry).is_some(),
     })
 }
 
@@ -6296,6 +7180,11 @@ fn offscreen_layers(entry: &Layer, features: VectorFeatures) -> usize {
         Layer::Targeted(pictures) => {
             pictures.0.approximate_op_count_nested(true)
         }
+        Layer::Split(split) => split
+            .pixels
+            .iter()
+            .map(|(entry, features)| offscreen_layers(entry, features))
+            .sum(),
         Layer::Deferred(deferred) => deferred
             .picture()
             .map_or(0, |picture| picture.approximate_op_count_nested(true)),
@@ -6478,6 +7367,10 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         Layer::Cut(_) => true,
         Layer::Group(group) => holds_a_cut(&group.contents.layers),
         Layer::Clipped(piece) => matches!(piece.entry, Layer::Cut(_)),
+        Layer::Split(split) => {
+            holds_a_cut(&split.pixels.layers)
+                || holds_a_cut(&split.document.layers)
+        }
         Layer::Picture(_)
         | Layer::Blur(_)
         | Layer::Targeted(_)
@@ -6490,12 +7383,13 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
 
 /// Whether `entries`, or a group among them, hold a pair of recordings --
 /// one for pixels and one for documents, which a page that keeps a
-/// recording for pixels files -- so that a picture of the page played for
-/// one target does not stand for the other: [`Page::picture`]'s holds the
-/// colours placed for pixels.
+/// recording for pixels files, or a [`Split`] -- so that a picture of the
+/// page played for one target does not stand for the other:
+/// [`Page::picture`]'s holds the colours placed for pixels, and a split's
+/// pixels.
 pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
     entries.iter().any(|entry| match entry {
-        Layer::Targeted(_) => true,
+        Layer::Targeted(_) | Layer::Split(_) => true,
         Layer::Deferred(deferred) => deferred.is_pair(),
         Layer::ReplayedText(text) => text.is_pair(),
         Layer::Gradient(op) => op.is_pair(),
@@ -9646,7 +10540,10 @@ mod shadow_run_tests {
 
     use super::CAST_RUNS;
     use crate::{
-        EngineKind, context::exact_blur, pixels::PixelDepth, prelude::*,
+        EngineKind,
+        context::{REPLAYS_TRANSLUCENT_TEXT, exact_blur},
+        pixels::PixelDepth,
+        prelude::*,
     };
 
     /// The family Oswald is registered under for these runs, so that it
@@ -9945,6 +10842,55 @@ mod shadow_run_tests {
             }
         }
         assert!(apart.is_empty(), "pixels off the exact shadow: {apart:#?}");
+    }
+
+    #[test]
+    fn a_translucent_run_casting_a_shadow_apart_is_drawn_as_casting_none() {
+        // A run casting a `shadowColor` shadow under a `drop-shadow()` of
+        // its own has the shadow filed apart and is run through its filter's
+        // chain as a run casting none -- see `Context2D::render_to_canvas`
+        // -- so it is drawn from its coverage as that run is: cast off the
+        // page, the shadow leaves the two pages alike.
+        use super::FLAT_RUNS;
+        FontLibrary::new()
+            .use_paths(
+                Some(OSWALD),
+                ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
+            )
+            .expect("registers");
+        let drawn = |shadow: bool| {
+            let mut canvas = Canvas::with_options(
+                PAGE.0 as f32,
+                PAGE.1 as f32,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(SIXTY));
+            ctx.set_fill_style_css(TRANSLUCENT.fill).expect("a colour");
+            ctx.set_filter_css(TRANSLUCENT.filter).expect("a filter");
+            if shadow {
+                ctx.set_shadow_color_css("black").expect("a colour");
+                // A page's height and more below the run: off the page.
+                ctx.set_shadow_offset(0.0, (2 * PAGE.1) as f32);
+            }
+            let before = FLAT_RUNS.get();
+            ctx.fill_text("Hamburgefonstiv", AT.0, AT.1, None);
+            let pixels = canvas
+                .to_image_data(None, &ImageDataExport::default())
+                .expect("pixels")
+                .pixels()
+                .to_vec();
+            (pixels, FLAT_RUNS.get() - before)
+        };
+        let (alone, flat) = drawn(false);
+        assert!(flat > 0, "the control: the run casting none is not flat");
+        let (casting, flat) = drawn(true);
+        assert!(casting == alone, "the run casting a shadow parts");
+        assert!(flat > 0, "the run casting a shadow is not drawn flat");
     }
 
     #[test]
@@ -10375,6 +11321,19 @@ mod shadow_run_tests {
         pages(&[page], filter, false).remove(0).pixels
     }
 
+    /// Has this thread record a translucent run as Skia blits it -- see
+    /// `REPLAYS_TRANSLUCENT_TEXT` -- for a test that needs two runs alike
+    /// in their input and not in their cast. Blitted, an alpha of a byte of
+    /// 1 lands only the pixels a run covers whole -- `(a * (c + 1)) >> 8` --
+    /// where drawn from its coverage it lands every pixel covered by half,
+    /// and no two runs searched here then land alike. The cast is filed by
+    /// the same key either way, and a run the flat route leaves -- dithered,
+    /// naming a line colour, on a page that does not place its colour on
+    /// its bytes -- is drawn as blitted.
+    fn as_skia_blits() {
+        REPLAYS_TRANSLUCENT_TEXT.set(false);
+    }
+
     #[test]
     fn a_shadow_cast_from_a_kept_run_is_taken_without_drawing_its_cast() {
         // A run is kept from its second draw -- see `Typesetter::laid_out`
@@ -10432,6 +11391,7 @@ mod shadow_run_tests {
         // 30.3 lies 242.4 eighths of a pixel in, short of 243, an odd eighth
         // its placement turns at: 30.33 lies in its class, 30.4 past it in
         // the next -- see `run_mask::PLACEMENT_STEPS`.
+        as_skia_blits();
         let filter = TRANSLUCENT.filter;
         let at = |x: f32| Page {
             text: "I",
@@ -10644,6 +11604,7 @@ mod shadow_run_tests {
         // an alpha of a byte of 1 lands, as they were and its edges moved.
         // Only where the run lies tells the two casts apart.
         use crate::context::run_mask::{CAST_EXACTLY, PLACEMENT_STEPS};
+        as_skia_blits();
         let at = |x: f32, fill| Page {
             text: "I",
             font: SIXTY,
@@ -10691,6 +11652,7 @@ mod shadow_run_tests {
         // "I" in Oswald at another weight: another run, its stem's edges
         // elsewhere, its whole pixels -- all an alpha of a byte of 1 lands
         // -- the same. Only the run in the cast's key tells them apart.
+        as_skia_blits();
         fn at<'a>(font: &'a str, fill: &'a str) -> Page<'a> {
             Page {
                 text: "I",
@@ -10723,6 +11685,7 @@ mod shadow_run_tests {
         // but whose masks Skia blends by their luminance otherwise -- see
         // `CoverageRun` -- so that their copies cover otherwise. Only the
         // paint in the cast's key tells them apart.
+        as_skia_blits();
         let fills: Vec<(String, String)> = (128..=255)
             .step_by(4)
             .map(|level| {
@@ -10757,6 +11720,7 @@ mod shadow_run_tests {
         // same cast. Their shadows, rounded once from the coverage times
         // the alpha, are a level apart where the coverage is near half:
         // only the alpha in the cast's key tells them apart.
+        as_skia_blits();
         let filter = "drop-shadow(3px 2px 1px black)";
         let at = |fill| Page {
             text: "iiiiiiii",

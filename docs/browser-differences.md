@@ -88,8 +88,13 @@ the exact product. Each channel is drawn in the colour nearest the one named
 of those that store it on either engine -- see
 `ExactColour::nearest_text_paint` -- which keeps the named colour's contrast
 for all but 637 of the 65,025 pairs above, 456 of them at an alpha under 32
-levels. Those store the exact product inside the glyph, and their edges take
-the contrast of the bucket next to the named colour's.
+levels. Those are drawn over a colour shader of the named colour, through a
+colour filter that paints the exact product's bytes and answers the named
+colour where Skia asks for the colour it sets the contrast from, so they
+store the exact product inside the glyph and keep the named colour's edges.
+On an eight-bit canvas on the CPU a translucent run in one flat colour takes
+its coverage from the named colour itself -- see the entry on translucent text
+below.
 
 On Linux a variable face's advances move in whole font units between its
 masters, where on macOS they follow the interpolation as Chrome on macOS
@@ -211,6 +216,45 @@ upright; that is inferred, and Chrome on Linux was not measured. macOS and
 Windows draw text with CoreText and DirectWrite rather than FreeType, and are
 unchanged; macOS draws 85 degrees sheared through its glyph masks. The
 `UPSTREAM` note at `past_freetype_shear` carries the re-check.
+
+**Translucent text on an eight-bit CPU canvas lands the exact product of its
+alpha and the glyph's coverage, where Chrome's CPU canvas lands a level under
+it on about one covered pixel in ten.** Skia's raster blit of a glyph mask
+multiplies the premultiplied colour, alpha byte `a` included, by the
+coverage `c` as `(a × (c + 1)) >> 8` -- Skia M156's
+`blit_mask_d32_a8_general` in `src/opts/SkBlitMask_opts.h`, through
+`SkAlphaMulQ(pmc, SkAlpha255To256(c))` -- not `round(a × c / 255)`. On 60px
+Helvetica "Hamburgefonstiv", 8,427 pixels covered, Chrome 156's software
+canvas (`willReadFrequently`) lands the shifted
+product on every pixel and stands off the exact one on 698 at
+`rgba(20, 60, 200, 0.3)`, 571 at `rgba(200, 80, 30, 0.6)` and 814 at
+`rgba(128, 128, 128, 0.55)`; its accelerated canvas lands the exact product,
+as this library's GPU canvas does. Here a CPU canvas draws such a run opaque,
+reads its coverage, and lands each pixel on the premultiplied bytes a fill of
+the colour stores times the coverage, rounded once (`layer::FlatRun`) -- what
+the GPU canvas draws the run's paint as. Two differences remain. Where an
+anti-aliased clip's edge crosses the run, Skia applies the clip's coverage to
+the coloured run as it composites it, a second rounding: within a level on
+those pixels. And the coverage is the named colour's: Skia sets a glyph
+mask's contrast from the paint's colour, and the colour placed for the
+page's bytes can fall in another bucket -- grey 128 at 0.3, which left
+2,815 of 8,484 pixels of a 44px Oswald run off the product Skia's own blit
+makes of the named grey's coverage -- and a GPU canvas draws such a run
+through the colour filter above, which keeps the named colour's bucket. A run
+under a `drop-shadow()`, or casting a `shadowColor` shadow, is drawn the same
+way above its shadow, and one under `blur()` is blurred from its coverage
+times its alpha. A canvas holding such a run, drawn into another with
+`drawImage`, lands the bytes its own page holds under every blend: the image
+of a canvas is its own pixels, as `getImageData` reads them. A run under
+a blend that covers beyond the draw, such as `copy`, is drawn from its
+coverage into the layer the blend composites, which starts transparent. A run
+holding colour glyphs this library draws from a `COLR` table lands its plain
+glyphs the same way, each colour glyph composited in its place among them.
+A run in a gradient or a pattern, dithered, holding colour glyphs the
+platform draws, such as emoji through CoreText, naming a line colour of its
+own, or under a filter the library leaves to Skia, such as `brightness()`
+alone, is blitted as Skia blits it, and so is every run on a float canvas,
+where nothing is rounded to a byte.
 
 **Text set at 17.3px is laid out at 17.3px; Chrome 156 lays it out at
 17.29px.** Measured on macOS in Oswald, `measureText("Hamburgefonstiv")` at
@@ -349,6 +393,18 @@ Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
   scale._ The Chrome mapping this ports, and why one unconditional cubic is
   wrong twice over, are documented on `ScalingOperation` and
   `SamplingFilter::sampling_for` in `src/node/filter.rs`.
+- _An image drawn larger with smoothing stores the nearest level of its
+  bilinear interpolation, where Chrome truncates it._ Chrome 159's software
+  canvas, drawing a 16px canvas at 64px over an opaque page, read back the
+  floor of the exact interpolation on all 12,288 colour channels, a level
+  under it on the 1,558 whose fraction is half or more; here those 1,558
+  store the nearest level. Over them Chrome stands 1,180.69 levels from the
+  exact values in sum and this library 377.31, which is why this differs.
+  Off the pixel grid, at 3.7 times, Chrome fits neither: of 3,481 alpha
+  channels 2,334 are the nearest level and 2,431 the floor. A GPU canvas
+  stands further off, up to 1.018 levels on Metal, because its texture unit
+  weights a sample at its own sub-texel precision; `tests/image_smoothing.rs`
+  derives the bound.
 - _Solid colours keep float alpha_ rather than being truncated to `u8` before
   painting, so `globalAlpha = 0.5` yields an alpha byte of 128 where truncation
   gives 127.
@@ -1349,15 +1405,15 @@ either way a triangle cut at x 82 moved 57 pixels inside the clip.
 
 A canvas drawn into another, used as a pattern or drawn as an image, draws its
 cut draws on the CPU as it draws them itself, at densities 1 to 3 -- an image
-at density 1, where its pixels are the canvas's own. The recording Skia
-rasterizes for an image applies the clip as a clip shader, a pattern
-rasterizes the canvas as the canvas composites itself, and `drawCanvas` keeps
-a canvas holding a cut draw as its entries, which each target clips its own
-way. A PDF or SVG export keeps such a canvas drawn in with `drawCanvas` as
-vectors clipped by the path, as before: Skia's SVG device cannot write a clip
-shader and writes an empty clip in its place, which hides the draw. The raster
-a PDF embeds for an image or a pattern of the canvas, and an SVG for an image,
-is exact at the cut. On the GPU engine an image of such a canvas is rasterized
+at density 1, where its pixels are the canvas's own. A pattern rasterizes the
+canvas as the canvas composites itself, and `drawCanvas` keeps a canvas
+holding a cut draw as its entries, which each target clips its own way. A PDF
+or SVG export keeps such a canvas drawn in with `drawCanvas`, or drawn as an
+image, as vectors clipped by the path, as before: Skia's SVG device cannot
+write a clip shader and writes an empty clip in its place, which hides the
+draw. The raster a PDF embeds for a pattern of the canvas, or for an image of
+one too costly to replay -- see `DOCUMENT_REPLAY_BUDGET` -- is exact at the
+cut. On the GPU engine an image of such a canvas is rasterized
 with the clip shader too: under the circle above, with a stroke beside the
 triangle, 50 pixels change, 288 differ from the GPU's own draw of the page
 where 244 did, and their mean distance from the CPU's exact draw falls from
@@ -1769,9 +1825,17 @@ the CPU canvas's bytes under a scale, a rotation, a `globalAlpha`, `multiply`,
 `copy` and a shadow, the shadow cast from the CPU's draw and standing within a
 level of the CPU canvas's: Metal composites any shadow at half precision, a
 level off near a tie, and an x86 CPU canvas composites one up to a level off
-the exact composite the GPU makes on Vulkan.
-The image of a canvas is backed by its page's picture, and Ganesh replaying
-that picture draws the hard stops as its own gradient. What stays apart:
+the exact composite the GPU makes on Vulkan. A GPU canvas drawn with
+`drawCanvas` into another under a transform other than a whole pixel's
+translation, where the effect's image would be resampled, has the draw made on
+the CPU at the destination's pixels instead, in the layer the source is drawn
+through, which plays on a surface of its own: a sweep over a fill lands on the
+CPU canvas's bytes inside its edges scaled by 2 or 0.5, moved part of a pixel
+or rotated, through `source-over`, `multiply` and `color-dodge`, where
+Ganesh's own gradient parted 5,301 pixels by up to 35 levels under `multiply`
+at a scale of 2 and 5,766 by up to 66 under `color-dodge`.
+A canvas drawn as an image is its own pixels, which a GPU canvas composites
+on the CPU where its page holds such a draw (#703). What stays apart:
 those ties; along a path's edge, a byte Metal's half-precision composite
 rounds the other way, within 0.15 of a tie, and a byte llvmpipe's or NVIDIA's
 eight-bit composite rounds in two terms, within a level of the exact
@@ -1783,25 +1847,13 @@ reading the destination, #736's case; text's anti-aliased edge, which is
 Ganesh's coverage as for a flat colour; a gradient the CPU draws in floats --
 a translucent two-point conical one, one interpolated in a space other than
 the page's, one under a filter, a shadow or a blend the CPU's eight-bit pipeline has no stage
-for -- inside a layer a group opens, where the pixels cannot be read back and
-the CPU's raster is composited instead, a level apart wherever its two
-roundings differ from the CPU's one (9,792 of 16,384 pixels on a translucent
-radial over a fill, measured by compositing at the page), unless the layer
-also holds a run of text drawn over a read back, whose entries then play on a
-surface of their own, where the gradient is drawn as on the page
-(`layer::played_on_a_root`); a GPU canvas drawn with `drawCanvas` into
-another under a transform other than a whole pixel's translation, where the
-image would be
-resampled and the draw is made on the CPU at the destination's pixels instead,
-inside the layer the source is drawn through and composited through the draw's
-blend -- exact inside an opaque `source-over` sweep scaled by 2 or 0.5, moved
-part of a pixel or rotated; within a level through a blend the CPU makes in
-eight bits (`multiply` on 365 of 16,384 pixels at a scale of 2, where Ganesh's
-own gradient parted 5,301 by up to 35); and through `color-dodge`, which the
-CPU makes in floats from a gradient it never rounds, the composite's rounding
-of it multiplied by the dodge's division (7,091 pixels up to 29 levels at a
-scale of 2, where Ganesh's own gradient parted 5,766 by up to 66); and what a
-GPU canvas does with any colour -- `multiply` a level apart on 97 of 4,096
+for -- inside a layer whose own paint carries a filter or which a backdrop
+seeds, where the pixels cannot be read back and the CPU's raster is
+composited instead, a level apart wherever its two roundings differ from the
+CPU's one (9,792 of 16,384 pixels on a translucent radial over a fill,
+measured with the layer played inside itself); any other layer holding such a gradient plays its entries on a
+surface of its own, where the gradient is drawn as on the page
+(`layer::played_on_a_root`); and what a GPU canvas does with any colour -- `multiply` a level apart on 97 of 4,096
 pixels of the sweep, as for an image of the same pixels. Chrome's GPU canvas
 was not measured: headless Chrome drew it on SwiftShader.
 
@@ -2012,6 +2064,54 @@ stand more than 32 levels off the canvas in CoreGraphics and 409 in poppler.
 The glyphs stay vector. Writing the form so that every reader agrees -- the
 layer's device given the page's transform and its form a matching matrix --
 is a change to Skia's PDF backend, tracked as #664. PDFium is not measured.
+
+**A page never cleared, into which canvases keep being drawn as images, holds
+one image of its own pixels for what it drew before, and an export at a
+density other than 1 draws that part from those pixels, scaled.** A canvas
+drawn into another with `drawImage` is its own pixels, which the
+page holds until it is erased, one image a draw. Once those images come to more
+than `RECORDED_IMAGE_PAGES` (4) times the bytes of the page's own pixels at
+density 1, with no `saveLayer` open, the page keeps its pixels as one image and
+lets the rest go (`PageRecorder::flatten`): a 400 by 300 canvas drawn at half
+alpha into one never cleared, 600 frames, grows 27 to 33 MB where 7.1.0 grew
+88.4 MB. `getImageData`, and a PNG or JPEG at density 1, are byte for byte what
+they were, on the CPU and on Metal (`a_flattened_page_draws_as_it_did`). At
+another density what the page drew before the flatten is that image scaled,
+where it was drawn at that density. A browser has no density to export at, so
+there is nothing to compare.
+
+A page filled again and again with patterns of a changing canvas flattens the
+same way. Each such pattern holds the canvas's page as it stood, the raster a
+CPU page draws it from, and for a canvas holding a drawn canvas that canvas's
+own pixels; the page counts the images once each by identity, and each
+pattern's raster as a page of the pattern's canvas at density 1, whatever
+density it was made at and only once it is made on the CPU, toward the same
+budget (`TileSource::budget_bytes`). A 400 by 300 CPU canvas filled at half
+alpha with a new pattern of a 400 by 300 CPU canvas each frame, collected after
+each frame, grows 9 MB over 300 frames where it grew 144 MB, and 15 MB where
+the source holds a drawn canvas, where it grew 284 MB. A pattern lets go of its
+raster once no page has drawn it for a generation of the page's content, and
+makes it again, the same bytes, if it is drawn again
+(`TileSource::release_unheld`). Run as one synchronous loop, the plain source
+grows 18 MB over 300 frames where it grew 143 MB. A source holding a drawn
+canvas still grows about a page a frame until the loop yields, 150 MB where it
+grew 287 MB: each pattern object keeps that source's own pixels until Node
+finalizes it, which waits for the event loop.
+
+A PDF or an SVG of such a page writes what it drew as vectors and text through
+every flatten, from the entries a document plays of each draw
+(`a_flattened_page_is_written_from_every_draw`), with one exception. A canvas
+whose entries cost more than `DOCUMENT_REPLAY_BUDGET` (64) replays is written
+into a document as its image, and the page counts that image. At a flatten
+where the page's image and the images its document holds would come to more
+than `RECORDED_IMAGE_PAGES` (4) pages at density 1, the document of everything
+drawn before that flatten becomes the page's image too, as pixels; what is
+drawn after it is vectors and text until the next such flatten. A page into
+which no canvas past that budget was drawn holds no such image, and keeps its
+whole document as vectors and text however many times it flattens.
+`a_page_drawn_into_past_the_replay_budget_levels_off` holds a page drawn into
+that way every frame to the budget, in the images it holds and in those its
+SVG writes. Without the bound it held one image a frame.
 
 **A canvas's pattern is written as PDF tiling where its tiles land on whole
 device pixels, and poppler draws seams between the tiles.** A draw dyed by a

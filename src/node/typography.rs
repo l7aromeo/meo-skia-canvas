@@ -16,8 +16,8 @@ use crate::{
     font::{
         FontFamily, ObliqueAngle,
         colr::{
-            ColourRun, Placed, blends_by_coefficients, colr_face, draw_placed,
-            flush_batch,
+            ColourRun, ColrGlyph, Placed, blends_by_coefficients, colr_face,
+            draw_placed, flush_batch,
         },
         designed_style, leans_as_asked,
         platform_colour::draws_own_colours,
@@ -37,7 +37,7 @@ use crate::{
 use neon::prelude::*;
 use skia_safe::{
     BlendMode as SkBlendMode, Canvas, Color4f, Font, FontHinting, FontMetrics,
-    FourByteTag, GlyphId, IRect, Matrix, Paint, PaintJoin, PaintStyle,
+    FourByteTag, GlyphId, IRect, M44, Matrix, Paint, PaintJoin, PaintStyle,
     Path as SkPath, PathBuilder as SkPathBuilder, PictureRecorder, Point, Rect,
     RoundOut, TextBlob, TextBlobBuilder, Typeface,
     font::Edging,
@@ -874,6 +874,7 @@ impl RunPaint {
                     shear,
                     at,
                     &paint,
+                    Some(blob),
                 ),
             }
         }
@@ -1672,9 +1673,14 @@ thread_local! {
     /// `source-over`, either, which the page must not tell apart.
     pub(crate) static GLYPH_DRAWS_FOR: Cell<Option<GlyphDraws>> =
         const { Cell::new(None) };
-    /// How many glyphs [`draw_glyphs_apart`] has drawn on this thread.
+    /// How many glyphs [`draw_glyphs_apart`] has drawn apart onto a canvas on
+    /// this thread.
     pub(crate) static GLYPHS_DRAWN_ALONE: Cell<usize> =
         const { Cell::new(0) };
+    /// How many glyphs [`draw_glyphs_apart`] has held on this thread in more
+    /// than one group, or a glyph at a time, for [`held_groups`] -- drawn
+    /// onto planes of their own rather than apart onto a canvas.
+    pub(crate) static GLYPHS_HELD_APART: Cell<usize> = const { Cell::new(0) };
     /// How far, in the units a run is laid out in, [`RunPaint::reach`]
     /// draws its answer in on this thread: a mutant, a reach that cuts ink,
     /// for the checks on it to refuse.
@@ -2306,7 +2312,16 @@ pub(crate) fn draw_outlines(
         add_outlines(&mut builder, font, glyphs, positions, shear, origin);
     let mut outlined = paint.clone();
     outlined.set_anti_alias(font.edging() != Edging::Alias);
-    canvas.draw_path(&builder.detach(), &outlined);
+    let outlines = builder.detach();
+    if holding() {
+        let reach = stroke_reach(&outlined);
+        let bounds = outlines.bounds().with_outset((reach, reach));
+        hold(canvas, bounds, false, move |canvas| {
+            canvas.draw_path(&outlines, &outlined);
+        });
+    } else {
+        canvas.draw_path(&outlines, &outlined);
+    }
     if bare.is_empty() {
         return;
     }
@@ -2314,7 +2329,11 @@ pub(crate) fn draw_outlines(
         .iter()
         .map(|&index| (glyphs[index], positions[index]))
         .unzip();
-    if let Some(blob) = sheared_blob(font, &glyphs, &positions, *shear) {
+    if holding() {
+        draw_glyphs_apart(
+            canvas, font, &glyphs, &positions, shear, origin, paint, None,
+        );
+    } else if let Some(blob) = sheared_blob(font, &glyphs, &positions, *shear) {
         canvas.draw_text_blob(&blob, origin, paint);
     }
 }
@@ -2337,9 +2356,195 @@ pub(crate) fn draw_glyphs(
     }
     if drawn_as_outlines(canvas, font, shear) {
         draw_outlines(canvas, font, glyphs, positions, shear, origin, paint);
+    } else if holding() {
+        draw_glyphs_apart(
+            canvas, font, glyphs, positions, shear, origin, paint, None,
+        );
     } else if let Some(blob) = sheared_blob(font, glyphs, positions, *shear) {
         canvas.draw_text_blob(&blob, origin, paint);
     }
+}
+
+/// One draw of part of a run, held by [`held_groups`] rather than made:
+/// a group of its glyphs no two of which ink a pixel in common, the
+/// outlines of the glyphs drawn from them, or colour glyphs this library
+/// draws, in the paint [`ColourGlyphsIn`] names.
+pub(crate) struct HeldGroup {
+    /// The transform the draw was asked under, relative to the one the
+    /// canvas [`held_groups`] was given carried.
+    matrix: M44,
+    /// What the draw can ink, in that canvas's device pixels.
+    bounds: Rect,
+    /// Whether the draw is of colour glyphs, drawn in their own paint.
+    coloured: bool,
+    draw: Box<dyn Fn(&Canvas)>,
+}
+
+impl HeldGroup {
+    /// Makes the draw onto `canvas`, under the transform it was asked
+    /// under relative to the one `canvas` carries.
+    pub(crate) fn draw(&self, canvas: &Canvas) {
+        canvas.save();
+        canvas.concat_44(&self.matrix);
+        (self.draw)(canvas);
+        canvas.restore();
+    }
+
+    /// What the draw can ink, in the device pixels of the canvas
+    /// [`held_groups`] was given: its glyphs' or outlines' bounds, unhinted,
+    /// widened by a stroke's reach.
+    pub(crate) fn bounds(&self) -> Rect {
+        self.bounds
+    }
+
+    /// Whether the draw is of colour glyphs this library draws, in the
+    /// paint [`ColourGlyphsIn`] named while [`held_groups`] held them: drawn
+    /// as they stand, each glyph through a layer of its own -- see
+    /// `ColourRun::draw` -- rather than from its coverage.
+    pub(crate) fn coloured(&self) -> bool {
+        self.coloured
+    }
+}
+
+/// What [`held_groups`] holds on a thread: the inverse of the transform of
+/// the canvas it was given, and the draws held.
+struct Held {
+    from: M44,
+    draws: Vec<HeldGroup>,
+}
+
+thread_local! {
+    /// The draws [`held_groups`] is holding on this thread, `None` where it
+    /// holds none.
+    static HELD_GROUPS: RefCell<Option<Held>> = const { RefCell::new(None) };
+}
+
+/// The draws `draw` asks of `canvas` for the runs it draws, held in order
+/// rather than made, each glyph run in groups no two glyphs of which ink a
+/// pixel of `canvas` in common -- see [`glyph_groups`] -- and a run whose
+/// glyphs share no pixel as the one blob it is drawn from. The colour
+/// glyphs this library draws are held in their place among them, the ones
+/// between two plain glyphs as one draw -- see [`HeldGroup::coloured`] --
+/// so that no group of plain glyphs is drawn across one. Nothing else may
+/// draw: a decoration's lines would be drawn onto `canvas` as they stand.
+///
+/// A raster composites a blob's glyphs one after another, so where two
+/// overlap the second is composited over the first. Drawing a held group at
+/// a time, each onto its own plane and composited in turn, keeps that order
+/// where the run is drawn from its coverage -- see `layer::FlatRun`.
+/// Empty where `canvas`'s transform cannot be inverted.
+pub(crate) fn held_groups(
+    canvas: &Canvas,
+    draw: impl FnOnce(),
+) -> Vec<HeldGroup> {
+    let Some(from) = canvas.local_to_device().invert() else {
+        return Vec::new();
+    };
+    let outer = HELD_GROUPS.replace(Some(Held {
+        from,
+        draws: Vec::new(),
+    }));
+    draw();
+    HELD_GROUPS
+        .replace(outer)
+        .map(|held| held.draws)
+        .unwrap_or_default()
+}
+
+/// Whether [`held_groups`] is holding this thread's draws.
+fn holding() -> bool {
+    HELD_GROUPS.with_borrow(Option::is_some)
+}
+
+/// Holds `draw`, asked of `canvas`, inking no more than `bounds` in its
+/// units, of colour glyphs where `coloured`, where [`held_groups`] is
+/// holding this thread's draws; drops it otherwise.
+fn hold(
+    canvas: &Canvas,
+    bounds: Rect,
+    coloured: bool,
+    draw: impl Fn(&Canvas) + 'static,
+) {
+    HELD_GROUPS.with_borrow_mut(|held| {
+        if let Some(held) = held {
+            let at = canvas.local_to_device();
+            held.draws.push(HeldGroup {
+                matrix: M44::concat(&held.from, &at),
+                bounds: at.to_m33().map_rect(bounds).0,
+                coloured,
+                draw: Box::new(draw),
+            });
+        }
+    });
+}
+
+thread_local! {
+    /// The paint the colour glyphs this library draws are drawn in on this
+    /// thread, `None` where they take the paint their run is drawn in --
+    /// see [`ColourGlyphsIn`].
+    static COLOUR_GLYPHS_IN: RefCell<Option<Paint>> = const {
+        RefCell::new(None)
+    };
+}
+
+/// While held, the colour glyphs this library draws on this thread are
+/// drawn in the paint it names, whatever paint their run is drawn in, and
+/// their foreground is that paint's colour -- see `ColourRun::of`.
+///
+/// A translucent run in one flat colour is drawn from its glyphs' coverage
+/// in the colour it was named in, opaque, or recorded through a colour
+/// shader -- see `layer::FlatRun` -- and neither paint is what a colour
+/// glyph composites through: drawn in the opaque one, a glyph at 0.6 lands
+/// opaque, and in the shader's, its layer takes none of the run's alpha.
+pub(crate) struct ColourGlyphsIn(Option<Paint>);
+
+impl ColourGlyphsIn {
+    pub(crate) fn hold(paint: Paint) -> Self {
+        Self(COLOUR_GLYPHS_IN.replace(Some(paint)))
+    }
+}
+
+impl Drop for ColourGlyphsIn {
+    fn drop(&mut self) {
+        COLOUR_GLYPHS_IN.set(self.0.take());
+    }
+}
+
+/// Holds a draw of `blob` at `origin` in `paint`, asked of `canvas` -- see
+/// [`hold`].
+fn hold_blob(canvas: &Canvas, blob: TextBlob, origin: Point, paint: &Paint) {
+    let reach = stroke_reach(paint);
+    let bounds = blob
+        .bounds()
+        .with_offset(origin)
+        .with_outset((reach, reach));
+    let paint = paint.clone();
+    hold(canvas, bounds, false, move |canvas| {
+        canvas.draw_text_blob(&blob, origin, &paint);
+    });
+}
+
+/// Draws `glyphs`, colour glyphs of `run` each with its origin, onto
+/// `canvas` in `paint`, as `ColourRun::draw_all` draws them, or holds the
+/// draw where [`held_groups`] is holding this thread's draws -- see
+/// [`hold`].
+fn draw_colours(
+    canvas: &Canvas,
+    run: &ColourRun,
+    glyphs: &[(Rc<ColrGlyph>, Point)],
+    paint: &Paint,
+) {
+    if glyphs.is_empty() {
+        return;
+    }
+    if !holding() {
+        run.draw_all(canvas, glyphs, paint);
+        return;
+    }
+    let (run, glyphs, paint) = (run.clone(), glyphs.to_vec(), paint.clone());
+    hold(canvas, run.inks(&glyphs), true, move |canvas| {
+        run.draw_all(canvas, &glyphs, &paint);
+    });
 }
 
 /// How the glyphs of a run are drawn onto a canvas -- see [`glyph_draws`].
@@ -2397,6 +2602,16 @@ pub(crate) enum GlyphDraws {
 /// such a case: the CPU blurs each glyph's mask and composites it in turn,
 /// as a group drawn apart does.
 pub(crate) fn glyph_draws(paint: &Paint, canvas: &Canvas) -> GlyphDraws {
+    // Held for drawing from their coverage, a run's glyphs that share a
+    // pixel are always apart -- see [`held_groups`] -- whatever a test asks,
+    // short of a glyph at a time, which holds them apart too.
+    if holding() {
+        #[cfg(test)]
+        if GLYPH_DRAWS_FOR.get() == Some(GlyphDraws::Each) {
+            return GlyphDraws::Each;
+        }
+        return GlyphDraws::Grouped;
+    }
     #[cfg(test)]
     if let Some(draws) = GLYPH_DRAWS_FOR.get() {
         return draws;
@@ -2449,6 +2664,12 @@ impl Drop for WholeRuns {
 /// `shear`, in `paint`, as [`sheared_blob`]'s glyphs, apart as
 /// [`glyph_draws`] says for `canvas` -- grouped or a glyph at a time -- in
 /// the order the run holds them.
+///
+/// `whole`, the run's blob where the caller holds one, is what is held for
+/// a run whose glyphs make one group while [`held_groups`] holds the draws:
+/// on a raster a kept run's blobs are kept, and building the group's blob
+/// again would undo that -- see `LaidOut::paint`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_glyphs_apart(
     canvas: &Canvas,
     font: &Font,
@@ -2457,6 +2678,7 @@ pub(crate) fn draw_glyphs_apart(
     shear: &Shear,
     origin: Point,
     paint: &Paint,
+    whole: Option<&TextBlob>,
 ) {
     let groups = match glyph_draws(paint, canvas) {
         GlyphDraws::Grouped => glyph_groups(&pixels_inked(
@@ -2466,8 +2688,18 @@ pub(crate) fn draw_glyphs_apart(
             (0..glyphs.len()).map(|at| at..at + 1).collect()
         }
     };
+    let holding = holding();
+    if holding && let (Some(whole), [_]) = (whole, groups.as_slice()) {
+        hold_blob(canvas, whole.clone(), origin, paint);
+        return;
+    }
     #[cfg(test)]
-    GLYPHS_DRAWN_ALONE.set(GLYPHS_DRAWN_ALONE.get() + glyphs.len());
+    match holding {
+        true => GLYPHS_HELD_APART.set(GLYPHS_HELD_APART.get() + glyphs.len()),
+        false => {
+            GLYPHS_DRAWN_ALONE.set(GLYPHS_DRAWN_ALONE.get() + glyphs.len());
+        }
+    }
     for group in groups {
         let blob = sheared_blob(
             font,
@@ -2475,8 +2707,14 @@ pub(crate) fn draw_glyphs_apart(
             &positions[group],
             *shear,
         );
-        if let Some(blob) = blob {
-            canvas.draw_text_blob(&blob, origin, paint);
+        let Some(blob) = blob else {
+            continue;
+        };
+        match holding {
+            true => hold_blob(canvas, blob, origin, paint),
+            false => {
+                canvas.draw_text_blob(&blob, origin, paint);
+            }
         }
     }
 }
@@ -2833,7 +3071,10 @@ pub(crate) fn draw_colour_run(
         // Drawn as nothing, colour glyphs and all.
         Shear::Flat => return ColourRun::of(font, paint).is_some(),
     };
-    let Some(run) = ColourRun::of(&sheared, paint) else {
+    // The paint the colour glyphs are drawn in -- see [`ColourGlyphsIn`].
+    let named = COLOUR_GLYPHS_IN.with_borrow(Clone::clone);
+    let coloured = named.as_ref().unwrap_or(paint);
+    let Some(run) = ColourRun::of(&sheared, coloured) else {
         return false;
     };
     let draws = glyph_draws(paint, canvas);
@@ -2848,6 +3089,7 @@ pub(crate) fn draw_colour_run(
                 &Shear::None,
                 origin,
                 paint,
+                None,
             );
         } else if from < to
             && let Some(blob) = sheared_blob(
@@ -2870,14 +3112,14 @@ pub(crate) fn draw_colour_run(
             continue;
         };
         if from < index {
-            run.draw_all(canvas, &colours, paint);
+            draw_colours(canvas, &run, &colours, coloured);
             colours.clear();
             plain(from, index);
         }
         colours.push((colour, origin + at));
         from = index + 1;
     }
-    run.draw_all(canvas, &colours, paint);
+    draw_colours(canvas, &run, &colours, coloured);
     plain(from, glyphs.len());
     true
 }

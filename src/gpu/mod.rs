@@ -92,6 +92,18 @@ use crate::gpu::vulkan::engine::VulkanEngine as Engine;
 ))]
 pub use crate::gpu::vulkan::renderer::VulkanRenderer as Renderer;
 
+// `gui` draws each window through `Renderer`, which only a GPU backend
+// defines. A build with `window` and neither backend stops here, naming the
+// fix, rather than at nothing but `gui`'s unresolved import of it.
+#[cfg(all(
+    feature = "window",
+    not(any(feature = "metal", feature = "vulkan"))
+))]
+compile_error!(
+    "the `window` feature needs a GPU backend beside it: `metal` on macOS, \
+     `vulkan` on Linux and Windows"
+);
+
 #[cfg(not(any(feature = "vulkan", feature = "metal")))]
 struct Engine {}
 #[cfg(not(any(feature = "vulkan", feature = "metal")))]

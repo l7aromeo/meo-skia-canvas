@@ -501,9 +501,11 @@ pub(crate) fn run_cast(
 /// product is rounded to a byte before the blur and again after; cast from
 /// the run drawn opaque, whose alpha is its coverage, and taken at the
 /// alpha in floats, it is rounded once. The run the shadow lies under is
-/// still the one drawn translucent, as Skia draws it: the shadow is not
-/// linear in the alpha, since the run is composited over it, so the alpha
-/// cannot be taken as one gain on the whole, as `blur()` takes it.
+/// still the one drawn translucent, as the page draws it -- from its
+/// coverage on an eight-bit page on the CPU, see `layer::FlatRun`: the
+/// shadow is not linear in the alpha, since the run is composited over it,
+/// so the alpha cannot be taken as one gain on the whole, as `blur()` takes
+/// it.
 pub(crate) struct Cast<'a> {
     pub(crate) canvas: &'a SkCanvas,
     pub(crate) draw: &'a dyn Fn(&SkCanvas),

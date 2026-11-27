@@ -4274,123 +4274,92 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
     Ok(())
 }
 
-/// A clipped nested draw costs the region rather than the whole page.
+/// A canvas drawn again into another, unchanged, costs a draw of its image
+/// rather than a read of its page.
 ///
-/// Rasterizing the visible region drew the source's deferred image into a
-/// region-sized surface, and Skia answers that by materializing the whole
-/// page and copying the sliver out -- so every op in the source ran however
-/// little of it showed. Replaying the picture into that surface lets Skia
-/// cull against its bounds instead. The crate reaches this by its own door,
-/// `capture`/`place_capture`, which handed over pixels without the picture
-/// beside them and so could not replay anything.
+/// A canvas carrying nesting is handed over as its own pixels, made once
+/// for each state of its page and served again while it is unchanged --
+/// see `PageRecorder::image`. A draw that follows a change to the source
+/// pays for reading the whole page out in the image's colour type and
+/// copying it into a new image, however little of it the draw shows: a
+/// clip on the destination does not reach the source's read. A draw of
+/// the source unchanged pays for neither.
 ///
-/// So the claim is a comparison with the page itself: drawing a 180x24
-/// region of a 5000-op source costs a small fraction of drawing that source
-/// whole, which it cannot if it rasterizes every op. Each trial times the two
-/// back to back, alternating which goes first, and the assertion takes the
-/// median of the trials' ratios. Load stretches both members of a pair alike
-/// and a stretched trial falls outside the median; a ratio of the fastest
-/// passes of two separate legs, which this replaced, reads high whenever
-/// contention lands on the short one -- it failed once on CI at 5.1 against a
-/// bound of 5.0 with nothing wrong.
+/// The claim is a comparison of the two: each trial changes the source by
+/// one pixel, times a draw of it, then times a draw of it again unchanged,
+/// and the assertion takes the median of the trials' ratios. Load
+/// stretches both members of a pair alike and a stretched trial falls
+/// outside the median.
 ///
-/// The bound is a tenth. That allowance is the clipped draw's own cost: a
-/// fresh page, recording, the 4x4 readback, and replay culling each op
-/// against the region, which is per op but no pixels. Measured in a debug
-/// build with the machine at a load average near 94, eight runs: the region
-/// 0.03ms, the page 12 to 14ms, a median ratio of 0.0025 to 0.0028. With the
-/// region rasterized from the whole page instead, three runs gave medians of
-/// 0.95 to 0.98: the clipped draw then costs what the page does.
+/// Measured in a debug build on Apple Silicon, three runs of seven
+/// trials: the median trial's cached draw 0.06 to 0.07ms against 0.44 to
+/// 0.48ms for the one that reads the page, ratios 0.14 to 0.15. With the image
+/// made afresh for every draw the median ratio is 0.98. The bound sits
+/// between the two, about three times either median.
 #[test]
-fn a_clipped_nested_draw_does_not_cost_the_whole_page() {
+fn a_canvas_drawn_again_costs_its_image_not_its_page() {
     use std::time::Instant;
 
-    /// Ops on the source page: enough that rasterizing them dominates the
-    /// page's fixed costs, so a whole-page draw is measurably the page.
-    const OPS: usize = 5000;
-    /// A clipped draw may cost this fraction of the whole page -- see above.
-    const ALLOWANCE: f64 = 0.1;
+    /// A cached draw may cost this fraction of one that reads the page --
+    /// see above.
+    const ALLOWANCE: f64 = 0.5;
     /// Paired trials whose median ratio is asserted; odd, so the median is
     /// one of them.
     const TRIALS: usize = 7;
 
-    let mut inner = Canvas::new(1400.0, 1400.0);
+    // A small canvas nested in the source, which is what makes the source
+    // hand itself over as its pixels.
+    let mut inner = Canvas::new(8.0, 8.0);
     inner.set_gpu(false);
-    {
-        let ctx = inner.context();
-        ctx.set_fill_style_css("#742").expect("a css colour");
-        ctx.fill_rect(0.0, 0.0, 1400.0, 1400.0);
-        for i in 0..OPS {
-            let shade = (i % 12) as f32 / 12.0;
-            ctx.set_fill_style(RgbaLinear::opaque(shade, 0.4, 1.0 - shade));
-            ctx.fill_rect(
-                ((i * 31) % 1400) as f32,
-                ((i * 17) % 1400) as f32,
-                260.0,
-                140.0,
-            );
-        }
-    }
+    inner.context().fill_rect(0.0, 0.0, 8.0, 8.0);
     let mut source = Canvas::new(1400.0, 1400.0);
     source.set_gpu(false);
-    source.context().draw_canvas(&mut inner, 0.0, 0.0);
+    {
+        let ctx = source.context();
+        ctx.set_fill_style_css("#742").expect("a css colour");
+        ctx.fill_rect(0.0, 0.0, 1400.0, 1400.0);
+        ctx.draw_canvas(&mut inner, 0.0, 0.0);
+    }
 
-    let mut draw = |clipped: bool| {
+    // Milliseconds to draw `source` into a fresh page and read it back.
+    let timed = |source: &mut Canvas| {
+        let started = Instant::now();
         let mut dest = Canvas::new(1400.0, 1400.0);
         dest.set_gpu(false);
-        {
-            let ctx = dest.context();
-            ctx.save();
-            if clipped {
-                ctx.begin_path();
-                ctx.rect(0.0, 0.0, 180.0, 24.0);
-                ctx.clip(FillRule::NonZero);
-            }
-            ctx.draw_canvas(&mut source, 0.0, 0.0);
-            ctx.restore();
-        }
+        dest.context().draw_canvas(source, 0.0, 0.0);
         let data = dest
             .context()
             .get_image_data(0.0, 0.0, 4.0, 4.0)
             .expect("the page rasterizes");
         assert_eq!(data.pixels()[3], 255, "the draw actually drew");
+        started.elapsed().as_secs_f64() * 1e3
     };
-    // Milliseconds per draw, over `rounds` draws.
-    let mut timed = |clipped: bool, rounds: usize| {
-        let started = Instant::now();
-        for _ in 0..rounds {
-            draw(clipped);
-        }
-        started.elapsed().as_secs_f64() * 1e3 / rounds as f64
+    let change = |source: &mut Canvas, trial: usize| {
+        let ctx = source.context();
+        ctx.set_fill_style_css("#123").expect("a css colour");
+        ctx.fill_rect(trial as f32, 1390.0, 1.0, 1.0);
     };
 
-    // Warm both paths, so neither first page's setup is in a number.
-    timed(true, 1);
-    timed(false, 1);
+    // Warm the path, so the first page's setup is in no number.
+    timed(&mut source);
 
     let mut ratios: Vec<(f64, f64, f64)> = (0..TRIALS)
         .map(|trial| {
-            let (region, page) = match trial % 2 {
-                0 => {
-                    let region = timed(true, 20);
-                    (region, timed(false, 3))
-                }
-                _ => {
-                    let page = timed(false, 3);
-                    (timed(true, 20), page)
-                }
-            };
-            (region / page, region, page)
+            change(&mut source, trial);
+            let composited = timed(&mut source);
+            let cached = timed(&mut source);
+            (cached / composited, cached, composited)
         })
         .collect();
     ratios.sort_by(|a, b| a.0.total_cmp(&b.0));
-    eprintln!("region/page per trial, sorted: {ratios:.4?}");
-    let (median, region, page) = ratios[TRIALS / 2];
+    eprintln!("cached/composited per trial, sorted: {ratios:.4?}");
+    let (median, cached, composited) = ratios[TRIALS / 2];
     assert!(
         median < ALLOWANCE,
-        "a clipped draw must cost a fraction of the page: the median trial \
-         drew the region in {region:.2}ms and the page in {page:.2}ms, a \
-         ratio of {median:.3} against {ALLOWANCE}"
+        "a canvas drawn again unchanged must cost a fraction of its \
+         composite: the median trial drew it cached in {cached:.2}ms and \
+         composited in {composited:.2}ms, a ratio of {median:.3} against \
+         {ALLOWANCE}"
     );
 }
 

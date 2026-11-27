@@ -3812,25 +3812,28 @@ export interface CanvasDrawImage {
     dh: number,
   ): void;
   /**
-   * Draw another canvas, replaying its contents as vectors.
+   * Draw another canvas, replaying its contents into this one.
    *
-   * Unlike {@link CanvasRenderingContext2D.drawImage}, which rasterizes the
-   * source first, this keeps text as text and paths as paths -- so an SVG or
-   * PDF export of the result stays selectable and scalable.
+   * {@link CanvasRenderingContext2D.drawImage} draws a canvas as an image of
+   * its own pixels, which is what this canvas then holds. Here the canvas's
+   * draws are replayed instead, unless it holds a drawn canvas or an image
+   * of an SVG itself: that one is drawn as `drawImage` draws it, so that a
+   * page copied back and forth is not replayed once more each round. An SVG
+   * or PDF export keeps text as text and paths as paths either way, except
+   * that a draw whose replay would mean replaying more canvases than a
+   * document allows for one draw is written as its pixels. A page never
+   * cleared that comes to hold more of those images than four pages of its
+   * own pixels writes what it drew until then as those pixels too, and what
+   * it draws after as before.
    *
-   * The replay is clipped to the destination rectangle, so anything that
-   * spreads -- an `imageFilter` blur, a shadow -- stops at its edge instead of
-   * bleeding past it the way it does through `drawImage`. Give the destination
-   * room if you want the spread. This is inherited behaviour rather than a
-   * rule the Canvas standard sets: `drawCanvas` has no standard counterpart,
-   * and `drawImage` does let a filter spread.
+   * A `filter` or a shadow set on this context spreads past the destination
+   * rectangle as it does through `drawImage`.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   drawCanvas(image: Canvas, dx: number, dy: number): void;
   /**
-   * As above, scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`), and
-   * clipped to it.
+   * As above, scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`).
    *
    * 🧪 Not in the HTML Canvas standard.
    */

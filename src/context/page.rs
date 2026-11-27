@@ -13,7 +13,7 @@ use skia_safe::{
     PixelGeometry, Pixmap, Point, Rect, RoundOut, Size, Surface, SurfaceProps,
     SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
-    image::{BitDepth, CachingHint},
+    image::CachingHint,
     jpeg_encoder, pdf, png_encoder,
     svg::{self, canvas::Flags},
     webp_encoder,
@@ -49,11 +49,12 @@ use crate::{
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
             DrawnIn, Entries, GradientDraw, GradientPiece, GradientPixels,
-            Group, Layer, LayerRec, OnGpu, PatternDraw, RecordedCount,
-            ReplayedText, Target, TileScope, holds_a_cut, in_document_space,
-            play_entries, tiles_exactly,
+            Group, HeldImage, Layer, LayerRec, OnGpu, PatternDraw,
+            RecordedCount, ReplayedText, Split, Target, TileScope, TileSource,
+            holds_a_cut, in_document_space, play_entries, tiles_exactly,
         },
         resident::{Place, SharedSurface},
+        tile_cuts::{InteriorSides, TileCuts, TileReach},
     },
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
@@ -370,6 +371,31 @@ impl Drop for PageId {
     }
 }
 
+/// Where a [`Split`] begins in the list its page files into -- see
+/// [`PageRecorder::begin_split`].
+pub(crate) struct SplitMark {
+    /// The page's erasures when the split began: a draw that erases the
+    /// page erases what lay before the mark, and leaves its entries first.
+    clears: u64,
+    /// How many layers were open, the innermost the list's.
+    depth: usize,
+    /// How many entries the list held.
+    at: usize,
+    /// What the innermost open layer's contents asked of a vector backend
+    /// before the split, which the split's pixels do not ask in its place.
+    features: Option<VectorFeatures>,
+    /// What the page said of how a GPU canvas plays it once the pixels were
+    /// filed -- [`PageRecorder::plays_apart_on_gpu`] and
+    /// [`PageRecorder::holds_reading_runs`] -- which the document's draws,
+    /// never played on one, do not change. Set by
+    /// [`PageRecorder::take_split`].
+    on_gpu: (bool, bool),
+    /// The page's erasures when the pixels were taken: where the document's
+    /// draws erase the page, the pixels' entries were counted in what was
+    /// erased, and are counted again in what replaces it.
+    taken_at: u64,
+}
+
 /// The draws made on one page, recorded rather than rasterised.
 ///
 /// Kept until the page is erased -- by `reset()`, an opaque fill covering the
@@ -411,6 +437,14 @@ pub struct PageRecorder {
     /// vector backend. Empty for the ordinary ones. See
     /// [`PageRecorder::append_isolated`]. Shared as `layers` is.
     features: Arc<Vec<VectorFeatures>>,
+    /// Where the page's draws would come out otherwise in a tile than in the
+    /// page -- see [`TileCuts`]. Replaced with `layers`.
+    tile_cuts: TileCuts,
+    /// What the draw being recorded is, for the tiles, as the context
+    /// declared it -- see [`Self::declare_tile_reach`]. `None` where nothing
+    /// declared one, which [`Self::note_tile_cut`] takes as a cut over the
+    /// draw's clip, or over the whole page.
+    tile_reach: Option<TileReach>,
     bounds: Rect,
     matrix: Matrix,
     clip: Option<Path>,
@@ -460,7 +494,8 @@ pub struct PageRecorder {
     /// after one kept run 10.8% of the main thread on the GPU, where that
     /// page's one run needs no bound at all. A run opened before the page
     /// held one is not bounded, which ends a batch sooner and draws the
-    /// same pixels.
+    /// same pixels. A run in a split's document, which no GPU canvas plays,
+    /// does not set it -- see [`Self::take_split`].
     holds_reading_runs: bool,
     /// Whether the canvas the page belongs to plays it on the GPU, as its
     /// engine stands while it records -- see [`Self::set_plays_on_gpu`].
@@ -478,6 +513,14 @@ pub struct PageRecorder {
     /// The frame the last entry filed, a [`GradientDraw`], was opened in
     /// while it can still be joined, as `blur_run` is for a [`BlurOp`].
     gradient_run: Option<u64>,
+    /// Whether the last split filed joins, and can still be joined, as
+    /// `gradient_run` says of a [`GradientDraw`]: until the page is taken --
+    /// see [`Self::filed_page`] -- by a read, an export or a cache keyed by
+    /// its length, and until a split that does not join is filed. Not ended
+    /// by [`Self::flush`], which each split's own [`Self::seal`] calls. A
+    /// split joins only the last entry of the list, which an entry filed
+    /// since, an erase among them, is not.
+    split_run: bool,
     /// The image-filtered draws the last `GradientDraw` filed as an isolated
     /// layer holds, counted as [`Self::filled_with_filtered`] counts those
     /// of an isolated layer in `current` -- see [`Self::append_gradient`].
@@ -507,17 +550,66 @@ pub struct PageRecorder {
     /// rasterization went 0.06, 0.27, 0.94, 1.78, 3.54 seconds -- which is
     /// why the size of the recording cannot be the trigger.
     ///
-    /// Any value above zero means this page already carries someone else's
-    /// picture, and `node::image::Source::of` rasterizes it rather than let a
-    /// second level of nesting form. The count is kept rather than a flag
-    /// because it says how much would be replayed, which is what the
-    /// measurement in that function is about.
+    /// Any value above zero means this page holds a draw of another canvas,
+    /// and a draw of this page into another takes its pixels rather than
+    /// its page, so that no second level of nesting forms -- see the
+    /// binding's `drawCanvas` and `context2d::capture`. A canvas drawn in
+    /// and written for a document as its image counts one, past
+    /// `DOCUMENT_REPLAY_BUDGET`: the page holds a draw of it still. The
+    /// count is kept rather than a flag because it says how much a document
+    /// would replay, which that budget bounds.
+    ///
+    /// It counts what the page holds now, so an erasure resets it with the
+    /// entries: a canvas cleared and drawn into again each frame costs one
+    /// frame's draws, not every frame's.
     replay_cost: usize,
     /// Whether an entry filed on this page, or in a layer open on it, draws
     /// other bytes on a GPU canvas replaying a recording of it than on a
     /// CPU canvas -- see [`Layer::plays_apart_on_gpu`]. Set as each entry is
-    /// filed, so that asking costs nothing however many the page holds.
+    /// filed, so that asking costs nothing however many the page holds, and
+    /// put back as it was after a split's document is filed, which no GPU
+    /// canvas plays -- see [`Self::take_split`].
     plays_apart_on_gpu: bool,
+    /// The image of the page made last, served again while the page is as
+    /// it was -- see [`Self::image`].
+    own_image: Option<OwnImage>,
+    /// What a document plays of the page as it was last asked, by the
+    /// page's identity and depth -- see [`Self::document_entries`].
+    projection: Option<Projection>,
+    /// How many times the page has been erased -- see [`Self::set_bounds`]
+    /// -- so that a split can tell its draw erased what lay beneath it --
+    /// see [`SplitMark`].
+    clears: u64,
+    /// Set while a split's document is drawn -- see [`Self::take_split`].
+    documenting: bool,
+    /// The images the page's entries hold that their pictures do not count
+    /// -- see [`Layer::held_images`]: a split's, and those of the page a
+    /// pattern draws from -- each once, by its identity, with the bytes of
+    /// its pixels: added to as each entry is filed, and emptied with the
+    /// page's content, which is the only place an entry leaves the page.
+    held: HashMap<u32, usize>,
+    /// The bytes `held` holds, summed.
+    held_bytes: usize,
+    /// The rasters the patterns the page's entries draw from hold -- see
+    /// [`TileSource::count_raster_into`] -- each pattern's once, however
+    /// many entries it dyes: added to as an entry drawing from a pattern is
+    /// filed and as the pattern makes or replaces its raster, and begun
+    /// again with the page's content. What is told to the engine.
+    rasters: RecordedCount,
+    /// What those rasters take toward the page's budget, each pattern's
+    /// once -- see [`TileSource::budget_bytes`] -- added to as `rasters` is
+    /// and begun again with it: what the page flattens past -- see
+    /// [`Self::held_entry_bytes`].
+    raster_budget: RecordedCount,
+    /// The patterns this generation's entries draw from, each once, held
+    /// weakly -- added to as `rasters` is -- and those the generation
+    /// before drew from. Emptying the page lets go of the rasters of the
+    /// earlier generation's patterns that this one did not draw again and
+    /// that no other page holds -- see [`TileSource::release_unheld`] -- a
+    /// generation late, so that a pattern drawn after every erase keeps its
+    /// raster rather than rasterizing its page again each frame.
+    patterns: Vec<Weak<TileSource>>,
+    patterns_before: Vec<Weak<TileSource>>,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
     /// open `current` records the innermost one's contents, and what each
@@ -608,23 +700,6 @@ impl OpenLayer {
     }
 }
 
-/// The depth a deferred picture image can carry for a canvas of `color_type`.
-///
-/// [`BitDepth`] names only U8 and F16, so a canvas at `RGBAF32` is carried at
-/// F16 -- narrower than the surface it draws on, and the widest the
-/// deferred-image API offers. F16 holds values outside `[0, 1]`, which is
-/// what an extended-range canvas is for, and its exponent puts eight levels
-/// between two eight-bit steps near 1.0 and two thousand near 0.002, where a
-/// canvas built for low-alpha accumulation needs them.
-fn source_bit_depth(color_type: ColorType) -> BitDepth {
-    match color_type {
-        ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32 => {
-            BitDepth::F16
-        }
-        _ => BitDepth::U8,
-    }
-}
-
 /// Which of a page's recordings a draw is being recorded into, and so which
 /// paint it records with -- see [`Recorders`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -701,6 +776,9 @@ thread_local! {
     /// clear -- see [`PageRecorder::set_bounds`].
     pub(crate) static FINISHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many reads on this thread a page's tiles served -- see
+    /// [`RecordingSurface::read_tiled`].
+    pub(crate) static TILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -719,6 +797,14 @@ thread_local! {
     /// dropped them -- the reference [`PageRecorder::release_recorders`] and
     /// the begin that follows it are held to.
     pub(crate) static RELEASES_RECORDERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a page lets go of what it holds for pixels past its budget on
+    /// this thread -- see [`PageRecorder::flatten`]: off, it keeps every
+    /// entry, the reference a flattened page is held to.
+    pub(crate) static FLATTENS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 #[cfg(test)]
@@ -1186,11 +1272,202 @@ impl PageRecorder {
         );
     }
 
-    /// Adds what `entry` holds to the page's count, and has what it records
-    /// when first played add to it then -- see [`Layer::count_into`].
-    fn count(&self, entry: &Layer) {
+    /// The bytes of the images this page's entries hold that their pictures
+    /// do not count -- see [`Split::image`] -- each counted once however
+    /// many entries hold it, with the image of the page made last -- see
+    /// [`Self::image`] -- which the page itself holds, and the rasters of
+    /// the patterns its entries draw from, each pattern's once.
+    ///
+    /// An image held by this page and by another -- a canvas's image drawn
+    /// in, while that canvas still holds it as the image of its page -- is
+    /// counted by both, so the engine is told too much while both hold it
+    /// and never too little. The page's own image is counted once where its
+    /// entries hold it too, as a flattened page's do -- see
+    /// [`Self::flatten`]. A build with debug assertions holds the count to a
+    /// walk of the page's entries at every call.
+    pub fn held_image_bytes(&self) -> usize {
+        #[cfg(debug_assertions)]
+        self.hold_images_to_walk();
+        #[cfg(debug_assertions)]
+        self.hold_rasters_to_walk();
+        let own = self
+            .own_image
+            .as_ref()
+            .and_then(|own| HeldImage::of(&own.image))
+            .filter(|own| !self.held.contains_key(&own.id))
+            .map_or(0, |own| own.bytes);
+        self.held_bytes + self.rasters.bytes() + own
+    }
+
+    /// The bytes of the images the page's entries hold that their pictures
+    /// do not count, and of the rasters of the patterns they draw from at
+    /// density 1, without the image of the page itself -- what a page
+    /// flattens past: see [`Self::flatten`], which lets go of those held
+    /// for pixels and of those its document holds where keeping them would
+    /// leave it over its budget. A raster counts at density 1 whatever the
+    /// density it was made at, as the budget is in pages at density 1, and
+    /// only once it is made on the CPU -- see [`TileSource::budget_bytes`].
+    pub(crate) fn held_entry_bytes(&self) -> usize {
+        self.held_bytes + self.raster_budget.bytes()
+    }
+
+    /// The bytes the rasters of the patterns the page's entries draw from
+    /// take as they were last made, each pattern's once -- what
+    /// [`Self::held_image_bytes`] tells the engine of them.
+    #[cfg(test)]
+    pub(crate) fn pattern_raster_bytes(&self) -> usize {
+        self.rasters.bytes()
+    }
+
+    /// Lets go of every entry the page holds for pixels, keeping what they
+    /// drew as `base`, the page's own pixels -- see [`Self::image`] -- filed
+    /// as one [`Split`] whose document is what a document plays of the page
+    /// as it stood: see [`Self::document_entries`].
+    ///
+    /// A page into which canvases are drawn as images, round after round and
+    /// never cleared, otherwise holds an image for each, a page of pixels a
+    /// draw. Flattened, it holds one for pixels however many rounds it has
+    /// drawn, and a document still writes every round from its own entries,
+    /// which it never sees the base of.
+    ///
+    /// Except where those entries hold images themselves -- canvases drawn
+    /// in past `DOCUMENT_REPLAY_BUDGET`, which a document writes as their
+    /// images, see [`Entries::held`] -- and keeping them would leave the
+    /// page holding more than `budget` bytes of images with the base. Then
+    /// the document is the base as well: a PDF or an SVG writes what the
+    /// page drew before the flatten as its pixels, and what it draws after
+    /// as vectors and text. A page into which no canvas past that budget
+    /// was drawn holds no such image, and its document is kept whole
+    /// through every flatten.
+    ///
+    /// `base` is drawn untransformed and unclipped onto the emptied page, so
+    /// its pixels at density 1 are what they were. At another density the base
+    /// is scaled, where the entries it replaced were drawn at that density.
+    /// The transform and clip the page holds are kept for the next draw.
+    pub(crate) fn flatten(&mut self, base: &SkImage, budget: usize) {
+        #[cfg(test)]
+        if !FLATTENS.get() {
+            return;
+        }
+        let Projection { entries, held, .. } = self.projection();
+        let (document, document_held) = (entries.clone(), held.clone());
+        let held = HeldImage::of(base);
+        let keeps = kept_bytes(held, &document_held, &document) <= budget;
+        // Past the budget, the document draws the base, and holds it.
+        let document_held = match keeps {
+            true => document_held,
+            false => held.iter().copied().collect(),
+        };
+        // The document is what it was, and costs what it did to replay.
+        let (matrix, clip, cost) =
+            (self.matrix, self.clip.clone(), self.replay_cost);
+        self.set_bounds(self.bounds);
+        self.replay_cost = cost;
+        let mut mark = self.begin_split();
+        let put = base.clone();
+        // Unframed, so under no transform or clip, onto the page just
+        // emptied.
+        let drawn = move |canvas: &SkCanvas, _: Recording| {
+            canvas.draw_image(&put, (0, 0), None);
+        };
+        self.append_unframed(VectorFeatures::PLAIN, drawn.clone());
+        let pixels = self.take_split(&mut mark);
+        match keeps {
+            true => document
+                .iter()
+                .for_each(|(entry, asks)| self.file_entry(entry.clone(), asks)),
+            false => self.append_unframed(VectorFeatures::PLAIN, drawn),
+        }
+        self.end_split(mark, pixels, held, document_held, false);
+        self.set_state(matrix, &clip);
+        // The base is the image of the page as it now stands.
+        let page = self.page();
+        if let Some(own) = &mut self.own_image
+            && own.image.unique_id() == base.unique_id()
+        {
+            own.key.page = page.id;
+            own.key.depth = page.layers.len();
+        }
+    }
+
+    /// Panics where the rasters the page counts, or what they take toward
+    /// its budget, are not those of the patterns a walk of its entries
+    /// finds, each once. A raster an export
+    /// makes on another thread moves the count as it is put in place, so a
+    /// walk and the count read apart may straddle it: they are read again,
+    /// up to [`COUNT_CATCH_UP_TRIES`] times, until they agree.
+    #[cfg(debug_assertions)]
+    fn hold_rasters_to_walk(&self) {
+        let sources =
+            tile_sources(self.layers.iter().chain(
+                self.open.iter().flat_map(|layer| layer.entries.iter()),
+            ));
+        let walked = || {
+            sources.iter().fold((0, 0), |(rasters, budget), source| {
+                (
+                    rasters + source.raster_bytes(),
+                    budget + source.budget_bytes(),
+                )
+            })
+        };
+        let counted = || (self.rasters.bytes(), self.raster_budget.bytes());
+        let agrees = (0..COUNT_CATCH_UP_TRIES).any(|_| {
+            let agrees = walked() == counted();
+            if !agrees {
+                std::thread::yield_now();
+            }
+            agrees
+        });
+        assert!(
+            agrees,
+            "the page counts {:?} bytes of pattern rasters and of the budget \
+             they take, where its entries' patterns hold {:?}",
+            counted(),
+            walked()
+        );
+    }
+
+    /// Panics where the images the page counts as held are not those a
+    /// walk of its entries finds.
+    #[cfg(debug_assertions)]
+    fn hold_images_to_walk(&self) {
+        let mut walked = HashMap::new();
+        self.layers
+            .iter()
+            .chain(self.open.iter().flat_map(|layer| layer.entries.iter()))
+            .for_each(|entry| {
+                entry.held_images(&mut |held| {
+                    walked.insert(held.id, held.bytes);
+                });
+            });
+        assert_eq!(
+            walked, self.held,
+            "the images the page counts as held are not those its entries \
+             hold"
+        );
+    }
+
+    /// Adds what `entry` holds to the page's counts, and has what it records
+    /// when first played add to them then -- see [`Layer::count_into`]: its
+    /// pictures, the images it holds that they do not count, each once --
+    /// see [`Layer::held_images`] -- and the rasters of the patterns it
+    /// draws from, each pattern's once -- see [`Layer::tile_sources`].
+    fn count(&mut self, entry: &Layer) {
         entry.count_into(&self.recorded);
         self.recorded.add(entry.recorded_bytes());
+        let (counted, bytes) = (&mut self.held, &mut self.held_bytes);
+        entry.held_images(&mut |held| {
+            if counted.insert(held.id, held.bytes).is_none() {
+                *bytes += held.bytes;
+            }
+        });
+        let (rasters, budget, patterns) =
+            (&self.rasters, &self.raster_budget, &mut self.patterns);
+        entry.tile_sources(&mut |source| {
+            if source.count_raster_into(rasters, budget) {
+                patterns.push(Arc::downgrade(source));
+            }
+        });
     }
 
     /// Shares what the page's canvas reports to the JavaScript engine with
@@ -1228,6 +1505,8 @@ impl PageRecorder {
             dual,
             layers: Arc::default(),
             features: Arc::default(),
+            tile_cuts: TileCuts::default(),
+            tile_reach: None,
             changed: false,
             isolated: None,
             filtered: 0,
@@ -1240,6 +1519,7 @@ impl PageRecorder {
             plays_on_gpu: false,
             cut_run: None,
             gradient_run: None,
+            split_run: false,
             gradient_filtered: 0,
             run: None,
             spare: None,
@@ -1252,6 +1532,16 @@ impl PageRecorder {
             place: Place::new(),
             replay_cost: 0,
             plays_apart_on_gpu: false,
+            own_image: None,
+            projection: None,
+            clears: 0,
+            documenting: false,
+            held: HashMap::new(),
+            held_bytes: 0,
+            rasters: RecordedCount::default(),
+            raster_budget: RecordedCount::default(),
+            patterns: Vec::new(),
+            patterns_before: Vec::new(),
             open: Vec::new(),
             recorded: RecordedCount::default(),
         }
@@ -1277,10 +1567,36 @@ impl PageRecorder {
         self.append_as(true, f);
     }
 
+    /// Declares what the draws recorded from here on are, for the tiles --
+    /// see [`TileCuts`] -- until it is declared again: the context declares
+    /// one before each draw it records and clears it after.
+    pub fn declare_tile_reach(&mut self, reach: Option<TileReach>) {
+        self.tile_reach = reach;
+    }
+
+    /// Notes the draw being recorded in the page's [`TileCuts`]: as
+    /// declared, or, where nothing was, as a cut over its clip's device
+    /// bounds, or over the whole page where it has none. Nothing for a
+    /// split's document, which no tile plays -- see [`Self::take_split`].
+    fn note_tile_cut(&mut self) {
+        if self.documenting {
+            return;
+        }
+        let reach = self.tile_reach.unwrap_or_else(|| {
+            TileReach::Cut(
+                self.clip
+                    .as_ref()
+                    .map_or(self.bounds, |clip| *clip.bounds()),
+            )
+        });
+        self.tile_cuts.note(reach);
+    }
+
     fn append_as<F>(&mut self, alike: bool, f: F)
     where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         // An ordinary draw cannot join an isolated layer: that layer is
         // marked for rasterization, and everything in it is rasterized with
         // it. Close it first so this draw stays a vector.
@@ -1332,6 +1648,7 @@ impl PageRecorder {
     where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         if self.isolated.is_some_and(|open| open != features) {
             self.flush();
         }
@@ -1378,11 +1695,14 @@ impl PageRecorder {
 
     /// Erases the page's content, in place.
     ///
-    /// All three callers clear at the size the page already has --
-    /// `reset()`, an opaque fill that covers the canvas, and a `clearRect`
-    /// that does -- and a resize goes through [`Self::update_bounds`]
-    /// instead. The page keeps everything but what it recorded: its
-    /// recordings are dropped unfinished, and the next draw begins new ones.
+    /// Every caller clears at the size the page already has -- `reset()`,
+    /// an opaque fill that covers the canvas, a `clearRect` that does, and
+    /// [`Self::flatten`] -- and a resize goes through
+    /// [`Self::update_bounds`] instead. The page keeps everything but what
+    /// it recorded: its recordings are dropped unfinished, and the next draw
+    /// begins new ones. A pattern the generation before this one drew from,
+    /// and this one did not, lets go of its raster here where no other page
+    /// holds it -- see [`Self::patterns`](PageRecorder#structfield.patterns).
     /// Finishing a recording optimizes it and bounds every draw in it, for a
     /// picture nothing would keep: finishing one holding 200 rects cost 11.7
     /// microseconds more than dropping it, and one holding 2,000 cost 115
@@ -1407,6 +1727,7 @@ impl PageRecorder {
             // has nothing left to file.
             self.id = Self::mint_id();
         }
+        self.clears += 1;
 
         // Dropped rather than finished, as the page's own recordings are:
         // what a run holds is erased with the rest.
@@ -1424,10 +1745,29 @@ impl PageRecorder {
         // what it was given.
         self.layers = Arc::default();
         self.features = Arc::default();
+        self.tile_cuts = TileCuts::default();
         self.holds_reading_runs = false;
         // A count of its own, which what the old content records when an
         // export first plays it adds to rather than to this one's.
         self.recorded = RecordedCount::default();
+        self.held.clear();
+        self.held_bytes = 0;
+        self.rasters = RecordedCount::default();
+        self.raster_budget = RecordedCount::default();
+        // The counts the earlier generation's patterns held are gone, so
+        // those this one did not draw again and no other page holds let
+        // go of their rasters.
+        let drawn = std::mem::take(&mut self.patterns);
+        let before = std::mem::replace(&mut self.patterns_before, drawn);
+        before
+            .iter()
+            .filter(|source| {
+                !self.patterns_before.iter().any(|now| now.ptr_eq(source))
+            })
+            .filter_map(Weak::upgrade)
+            .for_each(|source| source.release_unheld());
+        // What a replay walks is what the page holds, which is now nothing.
+        self.replay_cost = 0;
         self.changed = false;
         self.isolated = None;
         self.filtered = 0;
@@ -1782,6 +2122,21 @@ impl PageRecorder {
         let Some(layer) = self.open.pop() else {
             return;
         };
+        // Composited through its clip, where a path's edge is what a tile
+        // cuts, and from a backdrop read off the device beneath it, which a
+        // tile holds only within itself.
+        let backdrop =
+            layer.rec.backdrop.is_some() || layer.rec.pixels_backdrop.is_some();
+        let cut = match (&layer.clip, backdrop) {
+            (_, true) => Some(self.bounds),
+            (Some(clip), false) if clip.is_rect().is_none() => {
+                Some(*clip.bounds())
+            }
+            _ => None,
+        };
+        if let Some(cut) = cut {
+            self.tile_cuts.note(TileReach::Cut(cut));
+        }
         self.surface
             .borrow_mut()
             .forget_layers_past(self.open.len());
@@ -1831,6 +2186,7 @@ impl PageRecorder {
         features: VectorFeatures,
         shift: Point,
     ) {
+        self.note_tile_cut();
         self.close_run();
         self.file_current();
         let shift = Matrix::translate(shift);
@@ -1858,6 +2214,7 @@ impl PageRecorder {
         group: Group,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         self.file_current();
         let group = Group {
             clip: self.clip.as_ref().map(Path::serialize),
@@ -1865,6 +2222,192 @@ impl PageRecorder {
         };
         self.file_group(group, features);
         self.restore();
+    }
+
+    /// Begins one draw filed apart for each kind of target -- see
+    /// [`Split`]: files everything recorded so far, and marks where the
+    /// draw's entries will begin. What is drawn until [`Self::take_split`]
+    /// is the draw's pixels; what is drawn after it until
+    /// [`Self::end_split`] is its document's.
+    pub(crate) fn begin_split(&mut self) -> SplitMark {
+        self.seal();
+        SplitMark {
+            clears: self.clears,
+            depth: self.open.len(),
+            at: self.filed_len(),
+            features: self.open.last().map(|layer| layer.features),
+            on_gpu: (false, false),
+            taken_at: self.clears,
+        }
+    }
+
+    /// Takes what was filed since `mark`, the draw's pixels, from the page.
+    /// What is drawn until [`Self::end_split`] is for a document alone, and
+    /// notes no cut in the page's tiles, which only pixels are read from --
+    /// see [`TileCuts`].
+    pub(crate) fn take_split(&mut self, mark: &mut SplitMark) -> Entries {
+        self.seal();
+        mark.on_gpu = (self.plays_apart_on_gpu, self.holds_reading_runs);
+        mark.taken_at = self.clears;
+        self.documenting = true;
+        self.drain_since(mark)
+    }
+
+    /// Takes what was filed since `mark`, the draw's document, and files it
+    /// with `pixels` as one [`Layer::Split`] holding `image`, asking of a
+    /// vector backend what the document's entries ask. `held` is what the
+    /// document holds besides -- see [`Entries::held`].
+    ///
+    /// Where `joins`, and the last entry filed is a split that joins too,
+    /// with nothing filed, read or erased since, the draw's entries join
+    /// that split's -- see [`Split::join`] -- rather than standing in one of
+    /// their own: a page drawing a sheet of thousands of tiles in a row
+    /// files one entry for them, where a split each held thousands, each
+    /// ending the run a draw after it could join. Taking the page ends the
+    /// run -- see [`Self::filed_page`] -- so that no split a page taken
+    /// holds, or a cache keyed by the page's length has drawn, grows.
+    pub(crate) fn end_split(
+        &mut self,
+        mark: SplitMark,
+        pixels: Entries,
+        image: Option<HeldImage>,
+        held: Arc<[HeldImage]>,
+        joins: bool,
+    ) {
+        self.seal();
+        self.documenting = false;
+        (self.plays_apart_on_gpu, self.holds_reading_runs) = mark.on_gpu;
+        let document = Entries {
+            held,
+            ..self.drain_since(&mark)
+        };
+        // The pixels' entries asked an open layer for their features as they
+        // were filed; the layer asks for what the split's document does.
+        if self.marked_list(&mark)
+            && let (Some(layer), Some(features)) =
+                (self.open.last_mut(), mark.features)
+        {
+            layer.features = features;
+        }
+        if pixels.layers.is_empty() && document.layers.is_empty() {
+            return;
+        }
+        if mark.taken_at != self.clears {
+            pixels.layers.iter().for_each(|entry| self.count(entry));
+        }
+        let features = document.all_features();
+        let split = Split {
+            pixels,
+            document,
+            image,
+        };
+        // Each entry was counted as it was filed; the images are counted
+        // here, each once however many entries hold it.
+        let (counted, bytes) = (&mut self.held, &mut self.held_bytes);
+        split.held_images(&mut |held| {
+            if counted.insert(held.id, held.bytes).is_none() {
+                *bytes += held.bytes;
+            }
+        });
+        let joined = joins && self.split_run;
+        self.split_run = joins;
+        let split = match joined {
+            true => match self.join_split(split, features) {
+                Ok(()) => return,
+                Err(split) => split,
+            },
+            false => split,
+        };
+        self.file_counted(Layer::Split(Arc::new(split)), features);
+    }
+
+    /// Joins `split`, asking `features` of a vector backend, to the split
+    /// filed last in the list the page files into -- see
+    /// [`Self::end_split`] -- where that is one no page taken still holds.
+    /// `Err` gives `split` back where it files apart.
+    fn join_split(
+        &mut self,
+        split: Split,
+        features: VectorFeatures,
+    ) -> Result<(), Split> {
+        let gpu = split.plays_apart_on_gpu();
+        let (entries, entry_features) = match self.open.last_mut() {
+            Some(layer) => (&mut layer.entries, &mut layer.entry_features),
+            None => (
+                Arc::make_mut(&mut self.layers),
+                Arc::make_mut(&mut self.features),
+            ),
+        };
+        let Some(Layer::Split(last)) = entries.last_mut() else {
+            return Err(split);
+        };
+        let Some(last) = Arc::get_mut(last) else {
+            return Err(split);
+        };
+        last.join(split)?;
+        if let Some(last) = entry_features.last_mut() {
+            *last = last.with(features);
+        }
+        if let Some(layer) = self.open.last_mut() {
+            layer.features = layer.features.with(features);
+        }
+        self.plays_apart_on_gpu = self.plays_apart_on_gpu || gpu;
+        Ok(())
+    }
+
+    /// Files what the page holds unfiled -- its recording, the frame's run
+    /// -- and ends every run an entry filed next could join, so that what is
+    /// drawn next is filed in entries of its own.
+    ///
+    /// On the page [`Self::flush`] ends the blur and gradient runs as it
+    /// files; inside a layer the recording is filed without ending them, so
+    /// they are ended here. A cut draw joins only a piece of the frame's run
+    /// it was drawn in, and the run is closed here, so the next is another;
+    /// an isolated layer is only ever open on the page, which the flush
+    /// closes.
+    fn seal(&mut self) {
+        self.settle();
+        self.close_run();
+        self.file_current();
+        self.blur_run = None;
+        self.gradient_run = None;
+    }
+
+    /// How many entries the list the page files into holds: the innermost
+    /// open layer's, or the page's own.
+    fn filed_len(&self) -> usize {
+        match self.open.last() {
+            Some(layer) => layer.entries.len(),
+            None => self.layers.len(),
+        }
+    }
+
+    /// Whether the page files into the list `mark` was taken of: nothing
+    /// erased it since, and the layer it was taken in is still the
+    /// innermost.
+    fn marked_list(&self, mark: &SplitMark) -> bool {
+        mark.clears == self.clears && mark.depth == self.open.len()
+    }
+
+    /// Takes the entries filed since `mark` out of the list the page files
+    /// into: all of them where the page was erased since, which erased what
+    /// lay before the mark with it.
+    fn drain_since(&mut self, mark: &SplitMark) -> Entries {
+        let at = match self.marked_list(mark) {
+            true => mark.at,
+            false => 0,
+        };
+        let (layers, features) = match self.open.last_mut() {
+            Some(layer) => (
+                layer.entries.split_off(at),
+                layer.entry_features.split_off(at),
+            ),
+            None => (
+                Arc::make_mut(&mut self.layers).split_off(at),
+                Arc::make_mut(&mut self.features).split_off(at),
+            ),
+        };
+        Entries::new(layers, features)
     }
 
     /// Files `group` after what [`Self::file_current`] has filed.
@@ -2116,6 +2659,8 @@ impl PageRecorder {
         if surface
             .read_tiled(&page, opts, engine, dst_info, crop, dst_buffer)?
         {
+            #[cfg(test)]
+            TILE_READS.set(TILE_READS.get() + 1);
             return Ok(());
         }
 
@@ -2279,6 +2824,7 @@ impl PageRecorder {
     ) where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         // Inside a layer a run of draws asking for the same features is one
         // of its entries, as on the page, and one asking for others is
         // filed apart: what the frame's run holds, drawn before this and
@@ -2416,6 +2962,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         if self.isolated.is_some() {
             self.flush();
         }
@@ -2489,6 +3036,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         self.append_under_clip(
             |clip| match clip {
                 None => Layer::Pattern(tile),
@@ -2519,6 +3067,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         self.holds_reading_runs |= text.reads_the_page();
         self.append_under_clip(
             |clip| match clip {
@@ -2571,6 +3120,7 @@ impl PageRecorder {
         clip: Option<&Path>,
         features: VectorFeatures,
     ) {
+        self.note_tile_cut();
         let isolated = features.any() && self.open.is_empty();
         if self.isolated.is_some() {
             self.flush();
@@ -2760,6 +3310,7 @@ impl PageRecorder {
     ) where
         F: Fn(&SkCanvas, Recording),
     {
+        self.note_tile_cut();
         if self.isolated.is_some() {
             self.flush();
         }
@@ -2879,6 +3430,14 @@ impl PageRecorder {
         self.plays_apart_on_gpu
     }
 
+    /// Whether the page has filed a kept run read in the shader -- see
+    /// [`Self::holds_reading_runs`](PageRecorder#structfield.
+    /// holds_reading_runs).
+    #[cfg(test)]
+    pub(crate) fn holds_reading_runs(&self) -> bool {
+        self.holds_reading_runs
+    }
+
     /// Charges this page for replaying a picture that costs `cost` of its own.
     ///
     /// Called instead of counting the draw as one, because a nested picture is
@@ -2919,6 +3478,7 @@ impl PageRecorder {
         Page {
             layers: Arc::new(layers),
             features: Arc::new(features),
+            tile_cuts: self.tile_cuts.clone(),
             bounds: self.bounds,
             id: id.0,
             starts_from: Some(FiledPrefix {
@@ -2967,6 +3527,7 @@ impl PageRecorder {
     /// it, are filed first where no layer is open; while one is, everything
     /// before the outermost was filed when it opened.
     fn filed_page(&mut self) -> Page {
+        self.split_run = false;
         if self.open.is_empty() {
             self.settle();
             self.split_run();
@@ -2976,6 +3537,7 @@ impl PageRecorder {
         Page {
             layers: Arc::clone(&self.layers),
             features: Arc::clone(&self.features),
+            tile_cuts: self.tile_cuts.clone(),
             bounds: self.bounds,
             id: self.id.0,
             starts_from: None,
@@ -3002,83 +3564,157 @@ impl PageRecorder {
         self.page()
     }
 
+    /// This page's entries as a document plays them, for another canvas to
+    /// draw as its document's half of a draw of this one -- see
+    /// [`Entries::projected`] -- made once for each state of the page, as
+    /// its image is.
+    pub(crate) fn document_entries(&mut self) -> Entries {
+        self.projection().entries.clone()
+    }
+
+    /// The images [`Self::document_entries`] hold that their pictures do
+    /// not count, each once -- see [`Entries::held`].
+    pub(crate) fn document_held(&mut self) -> Arc<[HeldImage]> {
+        self.projection().held.clone()
+    }
+
+    /// What a document plays of the page as it stands, made where the page
+    /// has changed since it was last asked.
+    fn projection(&mut self) -> &Projection {
+        let page = self.page();
+        let key = (page.id, page.layers.len());
+        if self.projection.as_ref().is_none_or(|made| made.key != key) {
+            let entries = Entries {
+                apart: self.dual(),
+                ..Entries::shared(page.layers, page.features)
+            };
+            let entries = entries.projected().unwrap_or(entries);
+            let mut held = HashMap::new();
+            entries.held_images(&mut |image| {
+                held.insert(image.id, image);
+            });
+            self.projection = Some(Projection {
+                key,
+                held: held.into_values().collect(),
+                entries,
+            });
+        }
+        // SAFETY: set to `Some` above where it was not already.
+        self.projection.as_ref().unwrap()
+    }
+
+    /// This page as an image for another canvas to draw: its own pixels, as
+    /// a read of the whole page composites them -- see [`Self::pixels_as`].
+    ///
+    /// What the Canvas standard draws for a canvas source is its bitmap, so
+    /// the image holds the bytes `getImageData` reads, whatever the page was
+    /// drawn with: a run this library composites itself -- see
+    /// [`ReplayedText`] -- lands in it as it lands on the page. An image of
+    /// the page's picture replayed by Skia did not: Skia drew such a run from
+    /// its recording, up to two levels off the page's bytes.
+    ///
+    /// The pixels are paid for here, once for each state of the page: an
+    /// image asked for again before anything is drawn is the one made last
+    /// -- see [`OwnImage`] -- so a source drawn many times holds one bitmap.
+    /// The read composites on the engine the canvas plays on, and leaves the
+    /// page keeping its surface or tiles as any read does.
+    ///
+    /// `color_type` is the canvas's. An eight-bit image is made in the
+    /// eight-bit type that is not [`ColorType::N32`] -- see
+    /// [`own_image_type`] -- and a float one in the canvas's own. `text`
+    /// is the canvas's text contrast and gamma, which the read rasterizes
+    /// glyphs under.
     pub fn image(
         &mut self,
         color_type: ColorType,
         space: &ColorSpace,
         text: (f32, f32),
     ) -> Option<SkImage> {
-        self.image_flattened(false, color_type, space, text)
-    }
-
-    /// This page as an image, optionally rasterized on the spot.
-    ///
-    /// The ordinary answer is deferred: an image backed by the page's
-    /// picture, which costs nothing to make and is replayed wherever it is
-    /// drawn. That is what makes a canvas cheap to use as a source, and it is
-    /// also what compounds -- a deferred image drawn into a second canvas
-    /// carries this page's whole picture with it, so copying a page into a
-    /// fresh canvas and drawing it back doubles the work of the eventual
-    /// rasterization each round while the recording grows by a constant.
-    ///
-    /// `flatten` pays for the pixels now instead. One replay, and what comes
-    /// back is a bitmap that costs the same wherever it is drawn however many
-    /// times it is copied again. `node::image::Source::of` asks for it on
-    /// any page that already carries a nested picture of its own.
-    ///
-    /// The image carries the canvas's own depth and color space. It is what
-    /// the picture is replayed into when it is finally drawn, so its format
-    /// bounds what the source can hand the destination: an eight-bit sRGB
-    /// image clips a `display-p3` canvas to the smaller gamut and puts an
-    /// `RGBAF32` canvas on the 1/255 grid, whatever either canvas is made
-    /// with. `ExportOptions::compositing_color_type` bounds the same two
-    /// properties for the surface a page draws into.
-    ///
-    /// The picture replays under `text`, the canvas's text contrast and gamma
-    /// -- see [`text_surface_props`] -- so its glyphs land with the edges the
-    /// canvas's own pixels have. Skia's defaults are not the page's on Linux,
-    /// nor on any canvas made with a contrast or gamma of its own.
-    pub fn image_flattened(
-        &mut self,
-        flatten: bool,
-        color_type: ColorType,
-        space: &ColorSpace,
-        text: (f32, f32),
-    ) -> Option<SkImage> {
-        let size = self.bounds.size().to_floor();
-        let deferred = self.page().picture(None).and_then(|pict| {
-            started::deferred_from_picture(
-                pict,
-                size,
-                None,
-                None,
-                source_bit_depth(color_type),
-                Some(space.clone()),
-                text_surface_props(text.0, text.1),
-            )
-        })?;
-        match flatten {
-            // `Allow`, so a source drawn more than once pays for its pixels
-            // once. The fallback hands back the deferred image, which draws
-            // the same pixels and goes on carrying its picture -- slow rather
-            // than wrong, and unreachable: `make_raster_image` on a picture
-            // image allocates its own raster canvas and replays into it,
-            // whatever the size. Asserted so that stops being folklore.
-            true => Some(
-                deferred
-                    .clone()
-                    .make_raster_image(None, CachingHint::Allow)
-                    .unwrap_or_else(|| {
-                        debug_assert!(
-                            false,
-                            "a picture-backed page must rasterize"
-                        );
-                        deferred
-                    }),
-            ),
-            false => Some(deferred),
+        let page = self.page();
+        let key = OwnImageKey {
+            page: page.id,
+            depth: page.layers.len(),
+            color_type,
+            space: space_key(space),
+            text,
+            gpu: self.plays_on_gpu,
+        };
+        if let Some(held) = &self.own_image
+            && held.key == key
+        {
+            return Some(held.image.clone());
         }
+        let size = self.bounds.size().to_floor();
+        let crop = IRect::from_size(size);
+        let held = own_image_type(color_type);
+        let opts = ExportOptions {
+            color_type: held,
+            color_space: space.clone(),
+            alpha_type: AlphaType::Premul,
+            surface_color_space: space.clone(),
+            surface_color_type: color_type,
+            density: 1.0,
+            text_contrast: text.0,
+            text_gamma: text.1,
+            ..ExportOptions::default()
+        };
+        let engine = match self.plays_on_gpu {
+            true => RenderingEngine::GPU,
+            false => RenderingEngine::CPU,
+        };
+        let pixels =
+            self.pixels_as(crop, opts, engine, AlphaType::Premul).ok()?;
+        let info =
+            ImageInfo::new(size, held, AlphaType::Premul, Some(space.clone()));
+        let row_bytes = info.min_row_bytes();
+        let image = started::raster_from_data(
+            &info,
+            Data::new_copy(&pixels),
+            row_bytes,
+        )?;
+        self.own_image = Some(OwnImage {
+            key,
+            image: image.clone(),
+        });
+        Some(image)
     }
+}
+
+/// What a document plays of a page, made once for each state of the page --
+/// see [`PageRecorder::document_entries`].
+#[derive(Debug)]
+struct Projection {
+    /// The page's identity and depth when it was made.
+    key: (usize, usize),
+    /// The page's entries, each split standing in as its document.
+    entries: Entries,
+    /// The images `entries` hold that their pictures do not count, each
+    /// once.
+    held: Arc<[HeldImage]>,
+}
+
+/// What [`PageRecorder::image`] made last, and the state of the page it was
+/// made from.
+pub(crate) struct OwnImage {
+    key: OwnImageKey,
+    image: SkImage,
+}
+
+/// The state of a page an image of it was made from: the page's identity
+/// and how many entries it held -- what tells a page surface it is current
+/// -- and how the image was asked for.
+///
+/// A page taken while a layer is open has an identity of its own each time
+/// -- see [`PageRecorder::page`] -- so an image of one is never served
+/// again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OwnImageKey {
+    page: usize,
+    depth: usize,
+    color_type: ColorType,
+    space: ColorSpaceKey,
+    text: (f32, f32),
+    gpu: bool,
 }
 
 //
@@ -3261,6 +3897,48 @@ impl Tile {
             Err(why) => Checked::Refused(why),
         }
     }
+}
+
+/// The bytes a page flattened onto `base` holds where it keeps
+/// `document`, what a document played of it, with the images
+/// `document_held` names: each image once by its identity, and the raster
+/// of each pattern the entries draw from once, as it counts toward the
+/// budget -- see [`TileSource::budget_bytes`] -- what
+/// [`PageRecorder::held_entry_bytes`] counts once they are filed, so that a
+/// page kept under its budget is not flattened again at the next draw.
+fn kept_bytes(
+    base: Option<HeldImage>,
+    document_held: &[HeldImage],
+    document: &Entries,
+) -> usize {
+    let mut images = HashMap::new();
+    let mut hold = |held: HeldImage| {
+        images.insert(held.id, held.bytes);
+    };
+    base.into_iter()
+        .chain(document_held.iter().copied())
+        .for_each(&mut hold);
+    document.held_images(&mut hold);
+    images.values().sum::<usize>()
+        + tile_sources(document.layers.iter())
+            .iter()
+            .map(|source| source.budget_bytes())
+            .sum::<usize>()
+}
+
+/// The patterns `entries` draw from, each once -- see [`Layer::tile_sources`].
+fn tile_sources<'a>(
+    entries: impl Iterator<Item = &'a Layer>,
+) -> Vec<Arc<TileSource>> {
+    let mut sources: Vec<Arc<TileSource>> = Vec::new();
+    entries.for_each(|entry| {
+        entry.tile_sources(&mut |source| {
+            if !sources.iter().any(|seen| Arc::ptr_eq(seen, source)) {
+                sources.push(Arc::clone(source));
+            }
+        })
+    });
+    sources
 }
 
 /// `at` of `surface` read into `pixels` through a CPU copy of the whole
@@ -3956,6 +4634,10 @@ pub struct RecordingSurface {
     /// for each that a read has been taken inside -- see
     /// [`Self::read_rastered`]. Made like `surface` and dropped with it.
     layers: Vec<LayerRaster>,
+    /// Tiles composited from nothing since the page was last composited --
+    /// see [`Self::read_tiled`], which hands reads roaming over more tiles
+    /// than the page holds to the page.
+    tiles_composited: usize,
 }
 
 /// Clips `canvas` as the layers in `open` clip what is drawn inside the
@@ -4005,6 +4687,7 @@ impl Default for RecordingSurface {
             color_space: ColorSpace::new_srgb(),
             density: 0.0,
             layers: Vec::new(),
+            tiles_composited: 0,
         }
     }
 }
@@ -4133,6 +4816,7 @@ impl RecordingSurface {
                     return false;
                 };
                 let samples = engine.sample_count(&surface.image_info(), opts);
+                self.tiles_composited += 1;
                 self.tiles.insert(
                     *origin,
                     Tile {
@@ -4263,9 +4947,11 @@ impl RecordingSurface {
     ///
     /// False when the page surface already holds a current composite -- it
     /// answers the read for nothing -- when the rectangle is wider than the
-    /// grid is worth, when a tile could not be allocated, or when a tile
-    /// refused the read. Every one of those falls back to the page rather
-    /// than failing.
+    /// grid is worth, when reads have roamed over as many tiles as the page
+    /// holds, when a tile it touches would make one of the page's draws
+    /// otherwise than the page does -- see [`TileCuts`] -- when a tile could
+    /// not be allocated, or when a tile refused the read. Every one of those
+    /// falls back to the page rather than failing.
     pub fn read_tiled(
         &mut self,
         page: &Page,
@@ -4298,6 +4984,56 @@ impl RecordingSurface {
         let page_size = page.scaled_dimensions(opts.density);
         let wanted = Self::tiles_covering(crop, page_size);
         if wanted.is_empty() || wanted.len() > TILES_PER_READ as usize {
+            return Ok(false);
+        }
+
+        // Reads roaming over the page: once the tiles composited since the
+        // page last was number as many as the page holds, they have cost what
+        // compositing it does -- sixteen 256 tiles of a page take what the
+        // page takes, see [`TILE`] -- and the page, which then answers every
+        // read for a copy, serves them. At most twice what choosing either
+        // in hindsight would have cost. Not where the page is past what the
+        // pages a thread keeps may hold, where the tiles keep reading in a
+        // megabyte: a GPU page of 8000 by 8000 took 137 microseconds a read
+        // composited, against 3.9 from a tile.
+        let page_tiles =
+            Self::tiles_covering(IRect::from_size(page_size), page_size).len();
+        let page_bytes = ImageInfo::new(
+            page_size,
+            opts.compositing_color_type(),
+            AlphaType::Premul,
+            None,
+        )
+        .compute_min_byte_size();
+        if self.tiles_composited >= page_tiles && page_bytes <= PAGE_CACHE_BYTES
+        {
+            return Ok(false);
+        }
+
+        // A tile makes some draws otherwise than the page: a path across one
+        // of its sides, or on the GPU touching it at all, and a shader or an
+        // image sampled anywhere in it -- see [`TileCuts`]. The page serves
+        // a read of such a tile.
+        let gpu = !matches!(engine, RenderingEngine::CPU);
+        let density = opts.density;
+        let scaled = density != 1.0;
+        let cut = wanted.iter().any(|origin| {
+            let rect = Self::tile_rect(*origin, page_size);
+            let interior = InteriorSides {
+                left: rect.left > 0,
+                top: rect.top > 0,
+                right: rect.right < page_size.width,
+                bottom: rect.bottom < page_size.height,
+            };
+            let in_page = Rect::new(
+                rect.left as f32 / density,
+                rect.top as f32 / density,
+                rect.right as f32 / density,
+                rect.bottom as f32 / density,
+            );
+            page.tile_cuts.keep_off(in_page, interior, gpu, scaled)
+        });
+        if cut {
             return Ok(false);
         }
 
@@ -4512,6 +5248,7 @@ impl RecordingSurface {
         opts: &ExportOptions,
         engine: &RenderingEngine,
     ) {
+        self.tiles_composited = 0;
         // check for anything that would invalidate the previous contents
         let reconfigure = self.is_config_stale(opts);
         // Made again only because there is none: what the budget dropped --
@@ -5078,6 +5815,9 @@ pub struct Page {
     pub layers: Arc<Vec<Layer>>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
     pub(crate) features: Arc<Vec<VectorFeatures>>,
+    /// Where these draws would come out otherwise in a tile than in the
+    /// page -- see [`RecordingSurface::read_tiled`].
+    pub(crate) tile_cuts: TileCuts,
 }
 
 /// The filed page a page taken inside a `saveLayer` holds the open layers
@@ -5127,6 +5867,7 @@ impl Default for Page {
             bounds: skia_safe::Rect::new_empty(),
             layers: Arc::default(),
             features: Arc::default(),
+            tile_cuts: TileCuts::default(),
         }
     }
 }
@@ -5476,8 +6217,9 @@ impl Page {
     /// can write as it is; each group composited at an opacity alone entry
     /// by entry -- opened at an opacity of 1, and written as a group of its
     /// own at any other where `splices` is the SVG document's -- see
-    /// [`Group::opacity`]; and each run of what it refuses as one image,
-    /// under the transform `canvas` carries.
+    /// [`Group::opacity`]; each split's document entry by entry -- see
+    /// [`Split`]; and each run of what it refuses as one image, under the
+    /// transform `canvas` carries.
     ///
     /// Nothing in `layers` blends in a way the backend refuses:
     /// [`Self::draw_as_document`] embeds every entry up to the last that
@@ -5505,11 +6247,14 @@ impl Page {
         // A group composited at an opacity alone is opened where that is 1,
         // and written as a group of its own at any other where the document
         // is an SVG one -- see [`Self::splice_group`].
+        // A split's document entries are taken one by one, as the page's
+        // are.
         let opens = |index: usize| match &layers[index] {
             Layer::Group(group) => match group.opacity() {
                 Some(alpha) => alpha == 1.0 || splicing,
                 None => false,
             },
+            Layer::Split(_) => true,
             _ => false,
         };
         // Consecutive refused layers go in as one image rather than one
@@ -5536,6 +6281,18 @@ impl Page {
                     canvas,
                     Target::Document,
                 );
+                continue;
+            }
+            if let Layer::Split(split) = &layers[index] {
+                self.play_as_document(
+                    canvas,
+                    &split.document.layers,
+                    &split.document.features,
+                    backend,
+                    embedding,
+                    splices.as_deref_mut(),
+                )?;
+                index += 1;
                 continue;
             }
             if let Layer::Group(group) = &layers[index]
@@ -11716,6 +12473,7 @@ mod tests {
                     Layer::Deferred(_) => "deferred",
                     Layer::ReplayedText(_) => "colour text",
                     Layer::Gradient(_) => "gradient",
+                    Layer::Split(_) => "split",
                 })
                 .collect();
             kinds.join(" ")

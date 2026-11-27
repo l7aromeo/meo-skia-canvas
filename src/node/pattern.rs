@@ -1,13 +1,16 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{FilterMode, Matrix, Rect, Shader, Size, TileMode};
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use crate::{
     context::{
-        BoxedContext2D, Context2D, layer::TileSource, page::ExportOptions,
+        BoxedContext2D, Context2D,
+        layer::{HeldImage, TileSource},
+        page::ExportOptions,
     },
     node::{
+        external::External,
         filter::{SamplingFilter, ScalingOperation},
         image::{BoxedImage, Content},
     },
@@ -15,7 +18,12 @@ use crate::{
 };
 
 pub type BoxedCanvasPattern = JsBox<RefCell<CanvasPattern>>;
-impl Finalize for CanvasPattern {}
+impl Finalize for CanvasPattern {
+    /// Releases what this pattern told the engine it holds.
+    fn finalize<'a, C: Context<'a>>(self, cx: &mut C) {
+        self.stamp.borrow_mut().external.release(cx);
+    }
+}
 
 pub struct Stamp {
     content: Content,
@@ -27,6 +35,9 @@ pub struct Stamp {
     /// for an image's pattern. `content` holds the page as a document
     /// writes it.
     source: Option<Arc<TileSource>>,
+    /// What the pattern has told the JavaScript engine it holds -- see
+    /// [`CanvasPattern::report`].
+    external: External,
 }
 
 #[derive(Clone)]
@@ -53,6 +64,7 @@ impl CanvasPattern {
                 repeat,
                 matrix,
                 source: None,
+                external: External::default(),
             })),
         }
     }
@@ -70,14 +82,11 @@ impl CanvasPattern {
     /// rasterization each round -- 47, 122, 378, 1409 milliseconds at eight,
     /// twelve, fourteen and sixteen rounds. One that has only been drawn on
     /// does not pay, which is what keeps an ordinary pattern cheap and
-    /// leaves it vector. The same rule `node::image::Source::of` follows.
+    /// leaves it vector. The same rule the binding's `drawCanvas` follows.
     pub fn of_page(ctx: &Context2D, repeat: (TileMode, TileMode)) -> Self {
         let dims = ctx.bounds.size();
         let content = match ctx.replay_cost() > 0 {
-            true => ctx
-                .source_image(true)
-                .map(Content::Bitmap)
-                .unwrap_or_default(),
+            true => ctx.source_image().map(Content::Bitmap).unwrap_or_default(),
             false => ctx
                 .picture()
                 .map(|picture| Content::Vector {
@@ -98,10 +107,14 @@ impl CanvasPattern {
             text_gamma,
             ..ExportOptions::default()
         };
+        let image = match &content {
+            Content::Bitmap(image) => HeldImage::of(image),
+            _ => None,
+        };
         let pattern =
             Self::from_parts(content, dims, repeat, Matrix::new_identity());
         pattern.stamp.borrow_mut().source =
-            Some(Arc::new(TileSource::new(ctx.page(), options)));
+            Some(Arc::new(TileSource::new(ctx.page(), options, image)));
         pattern
     }
 
@@ -118,6 +131,41 @@ impl CanvasPattern {
             stamp.matrix,
             stamp.repeat,
         ))
+    }
+
+    /// The bytes of the pixels this pattern holds that no picture counts,
+    /// each image once: its tile's, where the tile is an image whose pixels
+    /// are in main memory, and those the page of a canvas's pattern holds
+    /// -- see [`TileSource::held_images`]. An image another object holds
+    /// too -- the canvas's own image of its page, an `Image` the pattern was
+    /// made from -- is counted by both, so the engine is told too much while
+    /// both hold it and never too little. The raster a draw dyed by the
+    /// pattern makes is counted by the page that files the draw.
+    fn held_bytes(&self) -> usize {
+        let stamp = self.stamp.borrow();
+        let mut held = HashMap::new();
+        let mut hold = |image: HeldImage| {
+            held.insert(image.id, image.bytes);
+        };
+        if let Content::Bitmap(image) = &stamp.content
+            && let Some(image) = HeldImage::of(image)
+        {
+            hold(image);
+        }
+        if let Some(source) = &stamp.source {
+            source.held_images(&mut hold);
+        }
+        held.values().sum()
+    }
+
+    /// Tells the JavaScript engine what this pattern holds -- see
+    /// [`Self::held_bytes`] -- which does not change once it is made, and
+    /// which its finalizer releases. Unreported, a loop making a pattern of
+    /// a nesting canvas each frame held a page of pixels for every pattern
+    /// it had not collected yet, the engine seeing a small object each.
+    fn report<'a, C: Context<'a>>(&self, cx: &mut C) {
+        let bytes = self.held_bytes();
+        self.stamp.borrow_mut().external.hold(cx, bytes);
     }
 
     /// Replaces the tile's local transform.
@@ -200,6 +248,7 @@ pub fn from_image(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
 
     let canvas_pattern =
         CanvasPattern::from_parts(content, dims, repeat, matrix);
+    canvas_pattern.report(&mut cx);
     Ok(cx.boxed(RefCell::new(canvas_pattern)))
 }
 
@@ -214,6 +263,7 @@ pub fn from_image_data(
 
     let canvas_pattern =
         CanvasPattern::from_parts(content, dims, repeat, matrix);
+    canvas_pattern.report(&mut cx);
     Ok(cx.boxed(RefCell::new(canvas_pattern)))
 }
 
@@ -222,6 +272,7 @@ pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
     let repeat = repetition_arg(&mut cx, 2)?;
 
     let canvas_pattern = CanvasPattern::of_page(&src.borrow(), repeat);
+    canvas_pattern.report(&mut cx);
     Ok(cx.boxed(RefCell::new(canvas_pattern)))
 }
 

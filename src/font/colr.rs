@@ -454,6 +454,7 @@ fn inlined(glyph: &ColrGlyph, paint: &Paint) -> bool {
 /// A run of glyphs in a face with a `COLR` table, drawn a glyph at a time:
 /// its colour glyphs from their paint graphs, and the rest left to the
 /// caller to draw as the platform would.
+#[derive(Clone)]
 pub(crate) struct ColourRun {
     face: Rc<ColrFace>,
     /// Design units, as recorded with y down, to the run's space.
@@ -532,6 +533,24 @@ impl ColourRun {
         Some(recorded.bounds.map_or_else(Rect::new_empty, |bounds| {
             self.to_run.map_rect(bounds).0
         }))
+    }
+
+    /// What `glyphs`, each with its origin, can ink drawn by
+    /// [`Self::draw_all`], in the run's space: each glyph's bounds at its
+    /// origin, as [`Self::ink`] gives them. Drawn, a glyph is placed by
+    /// [`snapped`], which can move it by up to a device pixel; that is
+    /// within the device margin a reach is given (`layer::HINTED_INK_DRIFT`).
+    pub(crate) fn inks(&self, glyphs: &[(Rc<ColrGlyph>, Point)]) -> Rect {
+        glyphs
+            .iter()
+            .filter_map(|(glyph, at)| {
+                let bounds = glyph.bounds?;
+                Some(self.to_run.map_rect(bounds).0.with_offset(*at))
+            })
+            .fold(Rect::new_empty(), |mut all, glyph| {
+                all.join(glyph);
+                all
+            })
     }
 
     /// Draws `glyph`, as [`Self::glyph`] gives it, with its origin at `at`

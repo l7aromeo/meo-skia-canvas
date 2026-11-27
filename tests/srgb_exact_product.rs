@@ -296,6 +296,22 @@ fn text_with_no_exact_colour_in_its_bucket_stores_the_product_inside() {
     }
 }
 
+/// Text in such a colour keeps its own contrast bucket's edges as well. Grey
+/// 128 at an alpha of 76.5 levels is 38.4, which rounds to 38, and the
+/// colours that store 38 at the alpha's byte, 77, are 125 to 127, in the
+/// bucket below; its "O" still takes the coverage grey 144 does, whose
+/// product 43 a colour of their own bucket stores.
+#[test]
+fn text_with_no_exact_colour_in_its_bucket_keeps_its_edges() {
+    for gpu in common::engines() {
+        assert_eq!(
+            edges(128.0, 76.5, gpu),
+            edges(144.0, 76.5, gpu),
+            "gpu {gpu}"
+        );
+    }
+}
+
 /// The side of the page [`a_whole_page_fill_on_the_gpu_rounds_a_tie_up`]
 /// fills, large enough that Ganesh takes a fill covering it as a clear.
 const CLEARED_SIDE: f32 = 300.0;

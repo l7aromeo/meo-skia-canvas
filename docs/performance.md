@@ -43,9 +43,10 @@ transfer function on every layer and a float one does not. Opaque fills go the o
 `RGBAF32` falls off a cliff rather than scaling with its byte count. `RGBAF16` stays close to its
 memory cost throughout, which makes it the one to reach for unless you need 32-bit precision.
 
-**A canvas drawn into a canvas, behind a clip.** Only a source that has itself drawn a canvas is
-rasterized at all; the cost of that is the clip's rather than the source's, so a hundredfold
-heavier source does not cost a hundredfold more:
+**A canvas drawn into a canvas, behind a clip.** A source is drawn as its own pixels, composited
+once for each state of its page and served again while it is unchanged, so drawing it again costs
+the clip's work rather than the source's, and a hundredfold heavier source does not cost a
+hundredfold more:
 
 | ops in the source | cpu            | gpu            |
 | ----------------- | -------------- | -------------- |
@@ -61,8 +62,7 @@ the two for the same reason: each round ends in a read, and waiting for the devi
 the drawing and swamps the difference between the sources.
 
 The crate is where the sub-linearity is legible, because nothing there is at the floor: 16.5
-microseconds against 41.1 for the same two sources, 2.50× for a hundredfold more work. Sub-linear
-rather than flat — replaying the source still walks its picture to cull it.
+microseconds against 41.1 for the same two sources, 2.50× for a hundredfold more work.
 
 **Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
 the four formats that carry a clock send only the rectangle each frame changed, so a still

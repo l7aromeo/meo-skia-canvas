@@ -723,9 +723,17 @@ lint: ensure-deps
 # a different backend gets that combination, and `gpu` has to resolve `Engine`
 # and `Renderer` to one of them rather than bind each name twice. Those are
 # what the `clippy` matrix in rust-ci.yml is for.
-[doc("Run clippy and ESLint without fixing. Three clippy passes: no features, this host's, its GPU backend alone.")]
+#
+# After the first pass, `check-window-backend.mjs` checks the one feature set
+# that has to fail: `window` with no backend, which stops at the error naming
+# the backend to add. It links the first pass's Skia, since `window` asks
+# skia-safe for nothing, so it costs one more check of the crate. Its
+# self-test runs first, for the reason `check-upstream-notes` runs one.
+[doc("Run clippy and ESLint without fixing. Three clippy passes: no features, this host's, its GPU backend alone; and `window` alone must fail with its named error.")]
 lint-check: ensure-deps lint-js
     {{ skia_cargo }} clippy --all-targets --no-default-features -- -D warnings
+    node scripts/check-window-backend.mjs --self-test
+    node scripts/check-window-backend.mjs -- {{ skia_cargo }}
     {{ skia_cargo }} clippy --all-targets --features "{{ host_features }}" -- -D warnings
     {{ skia_cargo }} clippy --all-targets --no-default-features --features "{{ host_backend }}" -- -D warnings
 

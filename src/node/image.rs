@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use crate::{
     color::skia_color_to_rgba_linear,
-    context::{BoxedContext2D, Context2D, SourcePicture, layer::Target},
+    context::{BoxedContext2D, CanvasDocument, layer::Target},
     export::VectorFeatures,
     image::{Svg, decode_frame, frame_delays},
     node::external::External,
@@ -173,30 +173,15 @@ pub struct Source {
     pub content: Content,
     /// Whether the source had no size of its own to be laid out by.
     pub autosized: bool,
-    /// What replaying this source costs the page that draws it, or zero for
-    /// one that carries its own pixels. See `PageRecorder::replay_cost`.
-    ///
-    /// At least one for any canvas, because drawing a canvas is a nested
-    /// replay however little that canvas has on it. Kept apart from
-    /// [`Self::nested`] because the two answer different questions and once
-    /// shared a number: a fresh page costs its destination one replay and
-    /// carries nothing that needs flattening.
-    pub replay_cost: usize,
-    /// Whether this source carries someone else's picture, and so has to be
-    /// rasterized rather than nested again.
-    pub nested: bool,
-    /// The source's own picture and the text contrast and gamma it replays
-    /// under, where it has one, so a nested draw replays the visible region
-    /// instead of materializing the whole page to copy a sliver out of it.
-    /// `None` for every source that is not a canvas, and for a canvas with
-    /// nothing nested in it, which travels as a picture already. See
-    /// `Context2D::draw_nested_image`.
-    pub picture: Option<SourcePicture>,
     /// Whether the source is a canvas whose page holds what a GPU canvas
-    /// replaying it draws in other bytes than a CPU canvas, which the
-    /// destination then draws through a route of its own -- see
+    /// draws in other bytes than a CPU canvas, which the destination then
+    /// composites through a route of its own -- see
     /// `Context2D::draw_source_image`. `false` for every other source.
     pub plays_apart_on_gpu: bool,
+    /// What a document plays of the source where it is a canvas, which is
+    /// drawn as one draw for each kind of target -- see
+    /// `Context2D::draw_canvas_image`. `None` for every other source.
+    pub(crate) document: Option<CanvasDocument>,
 }
 
 impl Clone for Content {
@@ -236,42 +221,26 @@ impl Source {
             return Some(Self {
                 content: image.content.clone(),
                 autosized: image.autosized,
-                replay_cost: 0,
-                nested: false,
-                picture: None,
                 plays_apart_on_gpu: false,
+                document: None,
             });
         }
         if let Ok(context) = value.downcast::<BoxedContext2D, _>(cx) {
-            // A canvas answers with an image backed by its picture rather than
-            // with pixels, which is what makes one cheap to draw and what
-            // compounds when the drawing is another canvas: the picture
-            // travels with it, so a page copied out and drawn back doubles the
-            // eventual rasterization each round while the recording grows by a
-            // constant.
-            //
-            // Nesting is allowed; nesting a nest is not. A page that has only
-            // been drawn on stays deferred, which keeps an ordinary source
-            // cheap and leaves a vector backend able to see through it. One
-            // that has itself drawn a canvas is rasterized -- but at the draw
-            // rather than here, because only the destination knows how much of
-            // this source it can show, and rasterizing a whole page to put a
-            // sliver of it on screen is most of what that costs. See
-            // `Context2D::draw_nested_image`.
+            // A canvas answers with its own pixels, the bitmap a browser
+            // draws for one -- see `PageRecorder::image` -- which the
+            // destination holds as it holds any image's, and with what a
+            // document plays of it, which a PDF or an SVG writes the draw
+            // from -- see `Context2D::draw_canvas_image`.
             let ctx = context.borrow();
-            let cost = ctx.replay_cost();
             return Some(Self {
                 content: ctx
-                    .source_image(false)
+                    .source_image()
                     .map(Content::Bitmap)
                     .unwrap_or_default(),
                 autosized: false,
-                replay_cost: cost.max(1),
-                nested: cost > 0,
-                // Only the nested arm replays it, and only that arm asks.
-                picture: (cost > 0).then(|| ctx.source_picture()).flatten(),
                 // Asked after the image, whose page files what was drawn.
                 plays_apart_on_gpu: ctx.plays_apart_on_gpu(),
+                document: Some(ctx.document()),
             });
         }
         None
@@ -279,19 +248,6 @@ impl Source {
 }
 
 impl Content {
-    pub fn from_context(ctx: &mut Context2D, use_vector: bool) -> Self {
-        match use_vector {
-            true => ctx.picture().map(|picture| Content::Vector {
-                picture,
-                size: ctx.bounds.size(),
-                features: ctx.page().vector_features(),
-                document: None,
-            }),
-            false => ctx.image().map(Content::Bitmap),
-        }
-        .unwrap_or_default()
-    }
-
     pub fn from_image_data(image_data: ImageData) -> Self {
         let info = image_data.image_info();
         started::raster_from_data(

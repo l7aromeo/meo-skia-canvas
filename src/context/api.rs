@@ -1261,28 +1261,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
         return;
     };
 
-    // A source that carries a picture rather than pixels is replayed wherever
-    // this page is, so the page is charged what the source costs rather than
-    // for one draw. Zero for an ordinary image, and for a canvas that has
-    // already been flattened.
-    if source.replay_cost > 0 {
-        ctx.charge_replay(source.replay_cost);
-    }
-
     match &source.content {
-        // A source carrying someone else's picture is rasterized before it is
-        // drawn, and only as far as this draw can show -- see
-        // `Context2D::draw_nested_image`.
-        Content::Bitmap(image) if source.nested => {
-            let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_nested_image(
-                image,
-                source.picture.as_ref(),
-                &src,
-                &dst,
-                source.plays_apart_on_gpu,
-            );
-        }
         Content::Bitmap(image) => {
             // A crop reaching outside the image is clipped to it, and the
             // destination clipped in the same proportion, which is what the
@@ -1293,7 +1272,13 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
             // kind of source, not one bitmap case moves. The picture below is
             // the one that needs it.
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_source_image(image, &src, &dst, source.plays_apart_on_gpu);
+            let apart = source.plays_apart_on_gpu;
+            match &source.document {
+                Some(document) => {
+                    ctx.draw_canvas_image(image, document, &src, &dst, apart)
+                }
+                None => ctx.draw_source_image(image, &src, &dst, apart),
+            }
         }
         Content::Vector {
             picture,
@@ -1381,10 +1366,8 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 Err(_) => Content::default(),
             },
             autosized: false,
-            replay_cost: 0,
-            nested: false,
-            picture: None,
             plays_apart_on_gpu: false,
+            document: None,
         },
     };
 
@@ -1422,9 +1405,11 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // recording grows by a constant. Twelve rounds took 3.5 seconds where
     // eleven took 1.8 and ten took 0.9.
     //
-    // Past the cap the source is rasterized instead, which costs one replay
-    // now and leaves the destination holding a bitmap that replays once
-    // however often it is copied again. Only nesting is counted, so a page
+    // A source with any nesting is drawn as `drawImage` draws a canvas
+    // instead: its own pixels on the page -- see `PageRecorder::image` --
+    // which leaves the destination holding a bitmap that replays once
+    // however often it is copied again, and what it drew in a document --
+    // see `Context2D::draw_canvas_image`. Only nesting is counted, so a page
     // with a hundred thousand ordinary draws on it never reaches this.
     let cost = context.borrow().replay_cost();
     if cost == 0 {
@@ -1448,20 +1433,24 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         return Ok(cx.undefined());
     }
 
-    let content = Content::from_context(&mut context.borrow_mut(), false);
-    let (src, dst) = _layout_rects(&mut cx, content.size(), &nums)?;
-    let (src, dst) = content.snap_rects_to_bounds(src, dst);
-    match &content {
-        Content::Bitmap(image) => {
-            let apart = context.borrow().plays_apart_on_gpu();
-            this.borrow_mut()
-                .draw_source_image(image, &src, &dst, apart);
-            Ok(cx.undefined())
-        }
-        _ => cx.throw_error(
+    let (image, apart, document) = {
+        let context = context.borrow();
+        // The other two asked after the image, whose page files what was
+        // drawn -- as `Source::of` asks them.
+        let image = context.source_image();
+        (image, context.plays_apart_on_gpu(), context.document())
+    };
+    let Some(image) = image else {
+        return cx.throw_error(
             "Canvas's PictureRecorder failed to generate an image",
-        ),
-    }
+        );
+    };
+    let size: Size = image.dimensions().into();
+    let (src, dst) = _layout_rects(&mut cx, size, &nums)?;
+    let (src, dst) = Content::snap_rects_to_size(size, src, dst);
+    this.borrow_mut()
+        .draw_canvas_image(&image, &document, &src, &dst, apart);
+    Ok(cx.undefined())
 }
 
 pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsArrayBuffer> {
