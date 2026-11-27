@@ -17,7 +17,8 @@
 //! `t >= stop`, as the `gradient` stage counts, and each channel is rounded
 //! where the CPU rounds it: on the eight-bit pipeline (`lowp`) as
 //! `trunc(x * 255 + 0.5)`, premultiplied with `div255_accurate` and scaled
-//! by the paint's alpha with `div255`; on the float pipeline (`highp`) at
+//! by the paint's alpha as `EXACT_SCALE` says the CPU scales it; on the
+//! float pipeline (`highp`) at
 //! the store, which takes a half level to the even one on aarch64 and
 //! x86-64. The effect returns whole levels,
 //! which the half-precision fragment output carries to an eight-bit target
@@ -2424,10 +2425,16 @@ fn floats(data: &mut [u8], at: usize, values: &[f32]) {
     }
 }
 
-/// Whether the CPU's `div255` rounds to the nearest level, as NEON
-/// computes it, or is `(v + 255) >> 8`, as every other backend of
-/// `SkRasterPipeline_opts.h` computes it.
-const EXACT_SCALE: bool = cfg!(target_arch = "aarch64");
+/// Whether the CPU's eight-bit pipeline scales a colour by the paint's
+/// alpha to the nearest level, or as `(v + 255) >> 8`. It scales in
+/// `scale_1_float`, through `div255`, which NEON computes to the nearest
+/// level and every other backend of `SkRasterPipeline_opts.h` as
+/// `(v + 255) >> 8` -- unless Skia carries
+/// `containers/skia-lowp-paint-alpha.patch` (`cfg(meo_lowp_paint_alpha)`),
+/// whose `scale_1_float_accurate` divides through `div255_accurate` on
+/// every backend.
+const EXACT_SCALE: bool =
+    cfg!(any(target_arch = "aarch64", meo_lowp_paint_alpha));
 
 /// Whether the CPU's `highp` store rounds a half level to the even one, as
 /// NEON's `vcvtnq` and x86's `cvtps` do, or up, as `round` in
