@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use skia_safe::{
     AlphaType, Bitmap, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorSpace, ColorType, Data, Document, IRect, ISize, Image as SkImage,
-    ImageInfo, M44, Matrix, Paint, Path, Picture, PictureRecorder,
+    ImageInfo, M44, Matrix, Paint, Path, PathOp, Picture, PictureRecorder,
     PixelGeometry, Pixmap, Point, Rect, RoundOut, Size, Surface, SurfaceProps,
     SurfacePropsFlags, XYZD50Hash, annotate,
     canvas::SrcRectConstraint,
@@ -48,10 +48,11 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            DrawnIn, Entries, GradientDraw, GradientPiece, GradientPixels,
-            Group, HeldImage, Layer, LayerRec, OnGpu, PatternDraw,
-            RecordedCount, ReplayedText, Split, Target, TileScope, TileSource,
-            holds_a_cut, in_document_space, play_entries, tiles_exactly,
+            DrawnIn, Entries, Erase, GradientDraw, GradientPiece,
+            GradientPixels, Group, HeldImage, Layer, LayerRec, OnGpu,
+            PatternDraw, PutPixels, RecordedCount, ReplayedText, Split, Target,
+            TileScope, TileSource, holds_a_cut, in_document_space,
+            play_entries, tiles_exactly,
         },
         resident::{Place, SharedSurface},
         tile_cuts::{InteriorSides, TileCuts, TileReach},
@@ -521,6 +522,10 @@ pub struct PageRecorder {
     /// split joins only the last entry of the list, which an entry filed
     /// since, an erase among them, is not.
     split_run: bool,
+    /// The eraser being drawn -- see [`Self::begin_erase`] -- as the entry
+    /// it records is to be filed: what it erases and what an SVG writes in
+    /// its place.
+    erasing: Option<(Data, Option<PutPixels>)>,
     /// The image-filtered draws the last `GradientDraw` filed as an isolated
     /// layer holds, counted as [`Self::filled_with_filtered`] counts those
     /// of an isolated layer in `current` -- see [`Self::append_gradient`].
@@ -1324,21 +1329,23 @@ impl PageRecorder {
     /// as one [`Split`] whose document is what a document plays of the page
     /// as it stood: see [`Self::document_entries`].
     ///
-    /// A page into which canvases are drawn as images, round after round and
-    /// never cleared, otherwise holds an image for each, a page of pixels a
-    /// draw. Flattened, it holds one for pixels however many rounds it has
-    /// drawn, and a document still writes every round from its own entries,
-    /// which it never sees the base of.
+    /// A page into which canvases are drawn as images, or `ImageData` put,
+    /// round after round and never cleared, otherwise holds an image for
+    /// each, a page of pixels a draw or a put's own. Flattened, it holds one
+    /// for pixels however many rounds it has drawn, and a document still
+    /// writes every round from its own entries, which it never sees the base
+    /// of.
     ///
     /// Except where those entries hold images themselves -- canvases drawn
     /// in past `DOCUMENT_REPLAY_BUDGET`, which a document writes as their
-    /// images, see [`Entries::held`] -- and keeping them would leave the
-    /// page holding more than `budget` bytes of images with the base. Then
-    /// the document is the base as well: a PDF or an SVG writes what the
-    /// page drew before the flatten as its pixels, and what it draws after
-    /// as vectors and text. A page into which no canvas past that budget
-    /// was drawn holds no such image, and its document is kept whole
-    /// through every flatten.
+    /// images, see [`Entries::held`], and puts, which it writes as their
+    /// pixels, see [`Erase`] -- and keeping them would leave the page
+    /// holding more than `budget` bytes of images with the base. Then the
+    /// document is the base as well: a PDF or an SVG writes what the page
+    /// drew before the flatten as its pixels, and what it draws after as
+    /// vectors and text. A page into which no canvas past that budget was
+    /// drawn and nothing was put holds no such image, and its document is
+    /// kept whole through every flatten.
     ///
     /// `base` is drawn untransformed and unclipped onto the emptied page, so
     /// its pixels at density 1 are what they were. At another density the base
@@ -1520,6 +1527,7 @@ impl PageRecorder {
             cut_run: None,
             gradient_run: None,
             split_run: false,
+            erasing: None,
             gradient_filtered: 0,
             run: None,
             spare: None,
@@ -1948,8 +1956,48 @@ impl PageRecorder {
     /// asking `features` of a vector backend for it, or among the contents
     /// of the innermost open `saveLayer`, which asks for them in turn.
     fn file_entry(&mut self, entry: Layer, features: VectorFeatures) {
+        let entry = self.erased(entry, features);
         self.count(&entry);
         self.file_counted(entry, features);
+    }
+
+    /// `entry`, filed asking `features`, as the [`Erase`] it is where it is
+    /// the entry of the eraser being drawn -- see [`Self::begin_erase`].
+    fn erased(&mut self, entry: Layer, features: VectorFeatures) -> Layer {
+        if !features.holds(VectorFeatures::ERASE) {
+            return entry;
+        }
+        match self.erasing.take() {
+            Some((region, written)) => Layer::Erase(Arc::new(Erase {
+                entry,
+                region,
+                written,
+            })),
+            None => entry,
+        }
+    }
+
+    /// Begins an eraser -- a `putImageData`, or a `clearRect` short of the
+    /// whole page -- which erases `region`, a path in the page's space, and
+    /// which an SVG writes as `written` in its place: everything recorded
+    /// so far is filed first, so that what the eraser records next is an
+    /// entry of its own, and [`Self::end_erase`] files that entry as an
+    /// [`Erase`]. The eraser asks [`VectorFeatures::ERASE`] of a vector
+    /// backend, which is how its entry is told from any other.
+    pub(crate) fn begin_erase(
+        &mut self,
+        region: &Path,
+        written: Option<PutPixels>,
+    ) {
+        self.seal();
+        self.erasing = Some((region.serialize(), written));
+    }
+
+    /// Ends the eraser [`Self::begin_erase`] began, filing what it recorded
+    /// as one [`Erase`], before anything drawn after it can join it.
+    pub(crate) fn end_erase(&mut self) {
+        self.seal();
+        self.erasing = None;
     }
 
     /// Files `entry` as [`Self::file_entry`] does, its bytes counted already:
@@ -2419,7 +2467,9 @@ impl PageRecorder {
     /// `saveLayer` is open -- see [`Self::flush`] -- and otherwise among the
     /// contents of the innermost one.
     fn file_current(&mut self) {
-        let Some(layer) = self.open.last_mut() else {
+        let Some(features) =
+            self.open.last().map(|layer| layer.current_features)
+        else {
             self.flush();
             return;
         };
@@ -2433,12 +2483,17 @@ impl PageRecorder {
             recorders.begin_with(bounds, true);
             entry
         }) {
+            let entry = self.erased(entry, features);
             entry.count_into(&self.recorded);
             self.recorded.add(entry.recorded_bytes());
-            layer.entries.push(entry);
-            layer.entry_features.push(layer.current_features);
+            if let Some(layer) = self.open.last_mut() {
+                layer.entries.push(entry);
+                layer.entry_features.push(features);
+            }
         }
-        layer.current_features = VectorFeatures::PLAIN;
+        if let Some(layer) = self.open.last_mut() {
+            layer.current_features = VectorFeatures::PLAIN;
+        }
         self.framed = false;
         self.changed = false;
         self.filtered = 0;
@@ -2774,10 +2829,11 @@ impl PageRecorder {
             entry
         });
         if let Some(entry) = filed {
+            let features = self.isolated.unwrap_or(VectorFeatures::PLAIN);
+            let entry = self.erased(entry, features);
             self.count(&entry);
             Arc::make_mut(&mut self.layers).push(entry);
-            Arc::make_mut(&mut self.features)
-                .push(self.isolated.unwrap_or(VectorFeatures::PLAIN));
+            Arc::make_mut(&mut self.features).push(features);
         }
         self.isolated = None;
 
@@ -6188,18 +6244,41 @@ impl Page {
         // and what is drawn after it stays vector -- a page that composites
         // early and draws normally afterwards still exports as mostly vectors.
         // Only a refused blend counts: one the backend writes composites
-        // against what the document already holds beneath it.
+        // against what the document already holds beneath it. An eraser
+        // counts as the blend it is -- `BlendMode::Clear` -- but in an SVG,
+        // which writes what lies beneath one clipped away from what it
+        // erases instead -- see `Self::play_around_eraser`.
+        let svg = splices.is_some();
+        let backdrop = match svg {
+            true => VectorFeatures::BLEND_MODE,
+            false => VectorFeatures::BLEND_MODE.with(VectorFeatures::ERASE),
+        };
         let blends = |index: usize| {
             self.features.get(index).is_some_and(|features| {
-                features.refused_by(backend)
-                    && features.refused_by(VectorFeatures::BLEND_MODE)
+                features.refused_by(backend) && features.refused_by(backdrop)
             })
         };
         let backdrop_end = (0..self.layers.len()).rfind(|i| blends(*i));
 
         let mut index = 0;
         if let Some(last) = backdrop_end {
-            self.embed_raster(canvas, &self.layers[..=last], embedding)?;
+            // Clipped away from what is erased after it, as anything drawn
+            // before an eraser is.
+            let kept = match svg {
+                true => kept_from_erasers(canvas, &self.layers[last + 1..]),
+                false => Some(None),
+            };
+            let Some(kept) = kept else {
+                return self.embed_raster(canvas, &self.layers, embedding);
+            };
+            canvas.save();
+            if let Some(kept) = &kept {
+                canvas.clip_path(kept, ClipOp::Intersect, true);
+            }
+            let embedded =
+                self.embed_raster(canvas, &self.layers[..=last], embedding);
+            canvas.restore();
+            embedded?;
             index = last + 1;
         }
         self.play_as_document(
@@ -6234,6 +6313,18 @@ impl Page {
         embedding: Embedding<'_>,
         mut splices: Option<&mut Splices<'_>>,
     ) -> Result<(), String> {
+        let splicing = splices.is_some();
+        // An SVG writes a list holding an eraser in pieces -- see
+        // `Self::play_around_eraser`.
+        if splicing
+            && let Some(first) = layers
+                .iter()
+                .position(|layer| matches!(layer, Layer::Erase(_)))
+        {
+            return self.play_around_eraser(
+                canvas, layers, features, first, backend, embedding, splices,
+            );
+        }
         // A canvas's pattern painted from its tile is refused where, played
         // here, its tiles would not land on whole device pixels -- see
         // `tiles_exactly`.
@@ -6243,14 +6334,15 @@ impl Page {
                     .holds(VectorFeatures::CANVAS_PATTERN_ALIGNED)
                     && !tiles_exactly(&layers[index], canvas))
         };
-        let splicing = splices.is_some();
         // A group composited at an opacity alone is opened where that is 1,
         // and written as a group of its own at any other where the document
-        // is an SVG one -- see [`Self::splice_group`].
+        // is an SVG one -- see [`Self::splice_group`]. An SVG opens one
+        // holding an eraser, to write the eraser as it does on the page.
         // A split's document entries are taken one by one, as the page's
         // are.
+        let opacity = |group: &Group| group.opacity_clipping_erasers(splicing);
         let opens = |index: usize| match &layers[index] {
-            Layer::Group(group) => match group.opacity() {
+            Layer::Group(group) => match opacity(group) {
                 Some(alpha) => alpha == 1.0 || splicing,
                 None => false,
             },
@@ -6298,7 +6390,7 @@ impl Page {
             if let Layer::Group(group) = &layers[index]
                 && opens(index)
             {
-                match (group.opacity(), splices.as_deref_mut()) {
+                match (opacity(group), splices.as_deref_mut()) {
                     (Some(alpha), Some(splices)) if alpha != 1.0 => self
                         .splice_group(
                             canvas, group, alpha, backend, embedding, splices,
@@ -6329,6 +6421,73 @@ impl Page {
             self.embed_raster(canvas, &layers[start..index], embedding)?;
         }
         Ok(())
+    }
+
+    /// Writes `layers`, whose entry at `first` is the first eraser among
+    /// them -- see [`Erase`] -- into an SVG, as [`Self::play_as_document`]
+    /// writes the rest: what lies before the eraser clipped away from every
+    /// region erased after it, then what the eraser writes in its place
+    /// with everything after it, which is clipped in turn away from what
+    /// the erasers after it erase. So nothing drawn before an eraser shows
+    /// where it erases, as on the canvas, and everything outside stays
+    /// vector. The clear itself, which Skia's SVG device writes as nothing,
+    /// is not written at all.
+    ///
+    /// Where the region left cannot be made, the whole list is embedded as
+    /// pixels, which the page composites itself.
+    #[allow(clippy::too_many_arguments)]
+    fn play_around_eraser(
+        &self,
+        canvas: &SkCanvas,
+        layers: &[Layer],
+        features: &[VectorFeatures],
+        first: usize,
+        backend: VectorFeatures,
+        embedding: Embedding<'_>,
+        mut splices: Option<&mut Splices<'_>>,
+    ) -> Result<(), String> {
+        let Some(Some(kept)) = kept_from_erasers(canvas, &layers[first..])
+        else {
+            return self.embed_raster(canvas, layers, embedding);
+        };
+        canvas.save();
+        canvas.clip_path(&kept, ClipOp::Intersect, true);
+        let before = self.play_as_document(
+            canvas,
+            &layers[..first],
+            &features[..first],
+            backend,
+            embedding,
+            splices.as_deref_mut(),
+        );
+        canvas.restore();
+        before?;
+        let written = match &layers[first] {
+            Layer::Erase(erase) => erase.written.as_ref().and_then(|put| {
+                let mut recorder = PictureRecorder::new();
+                put.draw(recorder.begin_recording(put.dst, false));
+                recorder.finish_recording_as_picture(None)
+            }),
+            _ => None,
+        };
+        let (rest, rest_features): (Vec<Layer>, Vec<VectorFeatures>) = written
+            .map(|picture| (Layer::Picture(picture), VectorFeatures::PLAIN))
+            .into_iter()
+            .chain(
+                layers[first + 1..]
+                    .iter()
+                    .cloned()
+                    .zip(features[first + 1..].iter().copied()),
+            )
+            .unzip();
+        self.play_as_document(
+            canvas,
+            &rest,
+            &rest_features,
+            backend,
+            embedding,
+            splices,
+        )
     }
 
     /// Writes `group`, which composites what it holds at `alpha` and nothing
@@ -8244,10 +8403,41 @@ pub(crate) fn text_surface_props(contrast: f32, gamma: f32) -> SurfaceProps {
     )
 }
 
+/// What `canvas` shows that the erasers among `layers` leave -- see
+/// [`Erase`]: the bounds of its clip, in its own space, less the union of
+/// the regions they erase. `Some(None)` where none of them erases, and
+/// `None` where the region cannot be made.
+fn kept_from_erasers(
+    canvas: &SkCanvas,
+    layers: &[Layer],
+) -> Option<Option<Path>> {
+    let mut regions = layers.iter().filter_map(|layer| match layer {
+        Layer::Erase(erase) => Some(Path::deserialize(&erase.region)),
+        _ => None,
+    });
+    let Some(first) = regions.next() else {
+        return Some(None);
+    };
+    let erased = regions.try_fold(first?, |erased, region| {
+        erased.op(&region?, PathOp::Union)
+    })?;
+    // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+    // Re-check: cargo test skia_svg_writes_a_difference_clip_as_intersection
+    // Skia's SVG device writes a clip of any op as an intersection, so a
+    // `ClipOp::Difference` of the erased region would keep the region and
+    // cut everything else. The region left is made here and clipped to as
+    // an intersection, which the device writes as a path under
+    // `clip-rule` `evenodd`.
+    let visible =
+        Path::rect(canvas.local_clip_bounds().unwrap_or_default(), None);
+    Some(Some(visible.op(&erased, PathOp::Difference)?))
+}
+
 /// What a PDF refuses of a page composited in `space` and exported at
 /// `density`: the blends it cannot write -- see
 /// [`blend_features`](crate::export::blend_features); on a page composited
-/// anywhere but sRGB, every blend, since a PDF blends in its page group's
+/// anywhere but sRGB, every blend, an eraser's among them -- see
+/// [`VectorFeatures::ERASE`] -- since a PDF blends in its page group's
 /// sRGB rather than in the canvas's own space; and at a density other than
 /// 1, a blend written through a soft mask inside a group, which
 /// CoreGraphics renders otherwise under the page's scale.
@@ -8262,7 +8452,10 @@ fn pdf_cannot(space: &ColorSpace, density: f32) -> VectorFeatures {
     // 2.5, and render it with sips against the canvas at that density.
     let blends = match space.is_srgb() {
         true => VectorFeatures::PDF_CANNOT,
-        false => VectorFeatures::PDF_CANNOT.with(VectorFeatures::BLEND_MODE),
+        // An eraser blends under `BlendMode::Clear` as any other blend does.
+        false => VectorFeatures::PDF_CANNOT
+            .with(VectorFeatures::BLEND_MODE)
+            .with(VectorFeatures::ERASE),
     };
     match density == 1.0 {
         true => blends,
@@ -12469,6 +12662,7 @@ mod tests {
                     Layer::Targeted(_) => "pair",
                     Layer::Cut(_) => "cut",
                     Layer::Clipped(_) => "clipped",
+                    Layer::Erase(_) => "erase",
                     Layer::Pattern(_) => "tile",
                     Layer::Deferred(_) => "deferred",
                     Layer::ReplayedText(_) => "colour text",

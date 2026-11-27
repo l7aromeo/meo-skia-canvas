@@ -38,7 +38,8 @@ use skia_safe::{
     IPoint, IRect, ISize, Image, ImageFilter, ImageInfo, MaskFilter, Matrix,
     MipmapMode, Paint, PaintCap, PaintJoin, PaintStyle, Path, PathDirection,
     Picture, PictureRecorder, Point, Rect, RoundOut, RuntimeEffect,
-    SamplingOptions, Shader, Surface, TileMode, Vector, canvas::SaveLayerRec,
+    SamplingOptions, Shader, Surface, TileMode, Vector,
+    canvas::{SaveLayerRec, SrcRectConstraint},
     color_filters, image_filters, shaders,
 };
 
@@ -114,6 +115,9 @@ pub enum Layer {
     /// A run of text holding colour glyphs, drawn again where it is played
     /// back on pixels -- see [`ReplayedText`].
     ReplayedText(Arc<ReplayedText>),
+    /// A `putImageData`, or a `clearRect` short of the whole page, with the
+    /// region it erases -- see [`Erase`]. Shared, as a blur is.
+    Erase(Arc<Erase>),
     /// A run of draws dyed by gradients, or of canvases drawn as images that
     /// hold such draws, drawn on a GPU canvas in the bytes the CPU draws them
     /// in -- see [`GradientDraw`].
@@ -131,6 +135,7 @@ impl Layer {
             Layer::Picture(picture) => picture.playback(canvas),
             Layer::Blur(op) => op.playback(canvas, target),
             Layer::Group(group) => group.playback(canvas, target),
+            Layer::Erase(erase) => erase.entry.playback(canvas, target),
             Layer::Targeted(pictures) => match target {
                 Target::Pixels => pictures.0.playback(canvas),
                 Target::Document => pictures.1.playback(canvas),
@@ -176,6 +181,7 @@ impl Layer {
                 .iter()
                 .any(|(entry, _)| entry.plays_apart_on_gpu()),
             Layer::Clipped(piece) => piece.entry().plays_apart_on_gpu(),
+            Layer::Erase(erase) => erase.entry.plays_apart_on_gpu(),
             Layer::Split(split) => split.plays_apart_on_gpu(),
             Layer::Picture(_)
             | Layer::Blur(_)
@@ -204,6 +210,7 @@ impl Layer {
             Layer::Targeted(pictures) => Some(pictures.0.cull_rect()),
             Layer::Cut(op) => Some(op.reach()),
             Layer::Clipped(piece) => piece.reach(),
+            Layer::Erase(erase) => erase.entry.reach(),
             Layer::Pattern(tile) => Some(tile.reach()),
             // The pixels' recording, as for a pair, recorded to answer.
             Layer::Deferred(deferred) => Some(
@@ -279,6 +286,7 @@ impl Layer {
                 op.draws.iter().map(GradientPiece::recorded_bytes).sum()
             }
             Layer::Clipped(piece) => piece.entry.recorded_bytes(),
+            Layer::Erase(erase) => erase.entry.recorded_bytes(),
             Layer::Pattern(tile) => tile.plain.approximate_bytes_used(),
             Layer::Split(split) => split
                 .pixels
@@ -317,6 +325,7 @@ impl Layer {
                 .iter()
                 .for_each(|layer| layer.count_into(count)),
             Layer::Clipped(piece) => piece.entry.count_into(count),
+            Layer::Erase(erase) => erase.entry.count_into(count),
             Layer::Split(split) => split
                 .pixels
                 .layers
@@ -348,13 +357,25 @@ impl Layer {
 
 impl Layer {
     /// Calls `each` with every image this entry holds that its pictures do
-    /// not count -- see [`Split::image`] and [`Entries::held`] -- once for
+    /// not count -- see [`Split::image`], [`Entries::held`] and a put's
+    /// pixels, [`PutPixels::image`] -- once for
     /// each time it holds it: the walk the count a page keeps as it files
     /// is held to, and what a document of a canvas is found to hold.
     pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
         match self {
             Layer::Group(group) => group.contents.held_images(each),
             Layer::Clipped(piece) => piece.entry.held_images(each),
+            // A put's pixels, which its entry's picture draws and does not
+            // count: a copy of the `ImageData`, held for as long as the entry.
+            Layer::Erase(erase) => {
+                erase.entry.held_images(each);
+                erase
+                    .written
+                    .as_ref()
+                    .and_then(|written| HeldImage::of(&written.image))
+                    .into_iter()
+                    .for_each(each);
+            }
             Layer::Split(split) => split.held_images(each),
             Layer::Pattern(draw) => draw.source.held_images(each),
             Layer::Picture(_)
@@ -377,6 +398,7 @@ impl Layer {
                 .iter()
                 .for_each(|layer| layer.tile_sources(each)),
             Layer::Clipped(piece) => piece.entry.tile_sources(each),
+            Layer::Erase(erase) => erase.entry.tile_sources(each),
             Layer::Split(split) => split
                 .pixels
                 .layers
@@ -4639,6 +4661,59 @@ impl Split {
     }
 }
 
+/// An eraser -- a `putImageData`, or a `clearRect` that does not clear the
+/// whole page -- filed with the region it erases, so that a document can
+/// write what it does without writing its `BlendMode::Clear`.
+///
+/// Played on every target as `entry`, the eraser as it was recorded: its
+/// clear and, for a put, the put's pixels. A PDF writes that clear as it
+/// writes a blend. Skia's SVG device writes no blend, so the clear would
+/// erase nothing and the page beneath a put would show through it: an SVG
+/// writes `written` instead, and clips what was drawn before the eraser in
+/// the same list to lie outside `region` -- see `Page::play_as_document`
+/// in `context::page`.
+#[derive(Clone, Debug)]
+pub struct Erase {
+    /// The eraser as recorded, played as it is on every target but an SVG.
+    pub(crate) entry: Layer,
+    /// What the eraser erases, in the space of the list it is filed in: a
+    /// put's destination, which a put writes untransformed and unclipped,
+    /// or a `clearRect`'s rectangle where the transform put it, within the
+    /// clip. Serialized, as [`Clipped`] holds its clip, since a [`Path`]
+    /// is not `Sync`.
+    pub(crate) region: Data,
+    /// What an SVG writes in the eraser's place: a put's pixels drawn over
+    /// nothing, `None` for a `clearRect`, which leaves nothing.
+    pub(crate) written: Option<PutPixels>,
+}
+
+/// A put's pixels, as an SVG writes them in the put's place -- see
+/// [`Erase`]: the region `src` of `image` drawn untransformed onto `dst`.
+/// Kept as the image a put draws rather than recorded, so that only an SVG
+/// export pays for writing it.
+#[derive(Clone, Debug)]
+pub(crate) struct PutPixels {
+    /// The put's pixels: the image the eraser's entry draws, which the page
+    /// counts as held -- see [`Layer::held_images`].
+    pub(crate) image: Image,
+    /// The region of `image` the put writes.
+    pub(crate) src: Rect,
+    /// Where the put writes it, in the page's space.
+    pub(crate) dst: Rect,
+}
+
+impl PutPixels {
+    /// The put's pixels drawn onto its destination over nothing.
+    pub(crate) fn draw(&self, canvas: &SkCanvas) {
+        canvas.draw_image_rect(
+            &self.image,
+            Some((&self.src, SrcRectConstraint::Strict)),
+            self.dst,
+            &Paint::default(),
+        );
+    }
+}
+
 /// An image a page's recording holds, by Skia's identity for it and the
 /// bytes of its pixels, so that one image drawn many times counts once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4798,13 +4873,30 @@ impl Group {
     /// 215 levels from the canvas's pixels where a PDF wrote the blend. A
     /// blend the backend refuses is embedded with what lies beneath it
     /// before the group is reached -- see `Page::draw_as_document` -- and
-    /// one it writes is written inside the group's layer.
+    /// one it writes is written inside the group's layer. An eraser blends
+    /// under `BlendMode::Clear` as any other blend does -- see
+    /// [`VectorFeatures::ERASE`].
     pub(crate) fn opacity(&self) -> Option<f32> {
+        self.opacity_clipping_erasers(false)
+    }
+
+    /// [`Self::opacity`], where `clipped` for a document that writes an
+    /// eraser as what lies beneath it clipped away from what it erases --
+    /// see [`Erase`] -- which punches nothing, so that a group holding an
+    /// eraser and no other blend can be opened.
+    pub(crate) fn opacity_clipping_erasers(
+        &self,
+        clipped: bool,
+    ) -> Option<f32> {
+        let blend = match clipped {
+            true => VectorFeatures::BLEND_MODE,
+            false => VectorFeatures::BLEND_MODE.with(VectorFeatures::ERASE),
+        };
         let blends = self
             .contents
             .features
             .iter()
-            .any(|features| features.holds(VectorFeatures::BLEND_MODE));
+            .any(|features| features.refused_by(blend));
         match &self.composite {
             Composite::Layer(rec) if !blends => rec.opacity(),
             Composite::Layer(_) | Composite::Chain { .. } => None,
@@ -7367,6 +7459,7 @@ pub(crate) fn holds_a_cut(entries: &[Layer]) -> bool {
         Layer::Cut(_) => true,
         Layer::Group(group) => holds_a_cut(&group.contents.layers),
         Layer::Clipped(piece) => matches!(piece.entry, Layer::Cut(_)),
+        Layer::Erase(erase) => holds_a_cut(std::slice::from_ref(&erase.entry)),
         Layer::Split(split) => {
             holds_a_cut(&split.pixels.layers)
                 || holds_a_cut(&split.document.layers)
@@ -7395,6 +7488,7 @@ pub(crate) fn holds_a_pair(entries: &[Layer]) -> bool {
         Layer::Gradient(op) => op.is_pair(),
         Layer::Cut(op) => op.documents.is_some(),
         Layer::Group(group) => holds_a_pair(&group.contents.layers),
+        Layer::Erase(erase) => holds_a_pair(std::slice::from_ref(&erase.entry)),
         Layer::Clipped(piece) => match &piece.entry {
             Layer::Targeted(_) => true,
             Layer::Deferred(deferred) => deferred.is_pair(),
