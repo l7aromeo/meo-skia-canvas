@@ -43,6 +43,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::unload::keep_loaded;
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -135,6 +136,7 @@ fn each_chunk<S>(
     init: impl Fn() -> S + Send + Sync,
     op: impl Fn(&mut S, &mut [f32]) + Send + Sync,
 ) {
+    keep_loaded();
     match parallel(work, PARALLEL_FROM) {
         true => data.par_chunks_mut(len).for_each_init(init, op),
         false => {
@@ -432,6 +434,7 @@ pub(crate) fn blur_bytes_into(
     out: &mut [u8],
     stride: usize,
 ) {
+    keep_loaded();
     if width == 0 || height == 0 {
         return;
     }
@@ -810,6 +813,7 @@ fn down_into<L: Lane, T: Copy + Send, const C: usize>(
     stride: usize,
     put: impl Fn(L) -> T + Sync,
 ) {
+    keep_loaded();
     let line_len = width * C;
     let k: Vec<L> = half_kernel(sigma, height - 1)
         .iter()
@@ -1067,6 +1071,7 @@ const BLOCK: usize = 16;
 /// into `dst`. Each worker owns a block of destination rows, so it writes
 /// one contiguous run, and reads the source a block at a time.
 fn transpose(src: &[f32], dst: &mut [f32], width: usize, height: usize) {
+    keep_loaded();
     if width == 0 || height == 0 {
         return;
     }

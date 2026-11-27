@@ -41,7 +41,8 @@
 //! within that of a stop, can round the other way.
 //!
 //! A gradient interpolated in a space other than the page's -- linear sRGB,
-//! sRGB, Display P3, A98 RGB or ProPhoto RGB -- is taken to the page as the
+//! sRGB, Display P3, A98 RGB, or the working space a Rec. 2020 or ProPhoto
+//! RGB gradient is mixed in -- is taken to the page as the
 //! CPU's `SkColorSpaceXformSteps` takes it: its transfer function undone, the
 //! gamut matrix, the page's transfer function applied, each curve through
 //! Skia's own `approx_powf` rebuilt in arithmetic -- see `Toward`. One in
@@ -53,8 +54,8 @@
 //! that pipeline rounds nothing before the store.
 //!
 //! [`GradientSpec::exact`] answers `None` where the effect cannot reproduce
-//! the CPU: an interpolation space it does not convert from (a working
-//! space wrapped around the shader, a PQ or HLG curve); a
+//! the CPU: an interpolation space it does not convert from (a PQ or HLG
+//! curve); a
 //! gradient on the float pipeline -- a
 //! two-point conical, or one converted to the page -- whose stops are
 //! translucent or that is drawn at an alpha (that pipeline rounds once,
@@ -63,7 +64,10 @@
 
 #[cfg(test)]
 use std::cell::Cell;
-use std::{cell::RefCell, sync::Arc};
+use std::{
+    cell::RefCell,
+    sync::{Arc, LazyLock},
+};
 
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorSpacePrimaries, ColorSpaceTransferFn,
@@ -1268,15 +1272,16 @@ const HALF_TURN: f32 = 180.0;
 ///
 /// Lab's and LCH's is XYZ D50 made linear, Oklab's and OkLCH's linear sRGB,
 /// and HSL's and HWB's sRGB, the spaces the stops are converted into and
-/// out of -- see [`Css`]. ProPhoto RGB's gamut is derived from its
-/// primaries, as Skia derives it -- see [`primaries_to_xyzd50`]. `None`
-/// where a working space is wrapped around the shader.
+/// out of -- see [`Css`]. Where a working space is wrapped around the
+/// shader, the gradient interpolates in its destination, which the working
+/// space then is, and is converted from it to the page -- see
+/// [`GradientColorSpace::in_working_space`].
 fn intermediate_space(
     spec: &GradientSpec,
     page: &ColorSpace,
 ) -> Option<ColorSpace> {
-    if spec.space.working_space().is_some() {
-        return None;
+    if let Some(working) = spec.space.working_space() {
+        return working.to_skia_color_space();
     }
     match spec.interpolation.color_space {
         InterpolationSpace::Destination => Some(page.clone()),
@@ -1288,10 +1293,6 @@ fn intermediate_space(
         InterpolationSpace::A98RGB => skia_space(
             &transfer_floats(&named_transfer_fn::A98_RGB),
             &from_fixed(&ADOBE_RGB_GAMUT),
-        ),
-        InterpolationSpace::ProphotoRGB => skia_space(
-            &transfer_floats(&named_transfer_fn::PRO_PHOTO_RGB),
-            &primaries_to_xyzd50(&named_primaries::PRO_PHOTO_RGB)?,
         ),
         InterpolationSpace::Lab | InterpolationSpace::LCH => {
             skia_space(&LINEAR_TF, &from_fixed(&XYZ_GAMUT))
@@ -1331,6 +1332,45 @@ fn skia_space(tf: &[f32; 7], gamut: &Matrix3) -> Option<ColorSpace> {
     bytes.extend(gamut.iter().flatten().flat_map(|v| v.to_ne_bytes()));
     Some(ColorSpace::deserialize(Data::new_copy(&bytes)))
 }
+
+/// CSS Color 4's `prophoto-rgb` (section 10.7): ProPhoto RGB's primaries,
+/// with the gamut Skia derives for them -- see [`primaries_to_xyzd50`] --
+/// and [`CSS_PROPHOTO_TF`]. Built once.
+pub(crate) fn css_prophoto_rgb() -> Option<ColorSpace> {
+    static SPACE: LazyLock<Option<ColorSpace>> = LazyLock::new(|| {
+        skia_space(
+            &CSS_PROPHOTO_TF,
+            &primaries_to_xyzd50(&named_primaries::PRO_PHOTO_RGB)?,
+        )
+    });
+    SPACE.clone()
+}
+
+/// CSS Color 4's `prophoto-rgb` transfer function, `lin_ProPhoto` in its
+/// sample code, in skcms's parametric form `g, a, b, c, d, e, f` --
+/// `c * x + f` below `d`, `(a * x + b)^g + e` from it: a 1.8 power, and
+/// `x / 16` below 16/512. The two branches meet at 16/512, where both give
+/// 1/512, so skcms taking the power there where CSS takes the line changes
+/// nothing.
+const CSS_PROPHOTO_TF: [f32; 7] = [
+    PROPHOTO_GAMMA,
+    1.0,
+    0.0,
+    1.0 / PROPHOTO_LINEAR_DIVISOR,
+    PROPHOTO_LINEAR_BELOW,
+    0.0,
+    0.0,
+];
+
+/// `prophoto-rgb`'s exponent in CSS Color 4 section 10.7, ROMM RGB's.
+const PROPHOTO_GAMMA: f32 = 1.8;
+
+/// What `lin_ProPhoto` divides a value below [`PROPHOTO_LINEAR_BELOW`] by.
+const PROPHOTO_LINEAR_DIVISOR: f32 = 16.0;
+
+/// `Et2` in CSS Color 4's `lin_ProPhoto`: 16/512, below which the curve is a
+/// line.
+const PROPHOTO_LINEAR_BELOW: f32 = 16.0 / 512.0;
 
 /// `tf` as `g, a, b, c, d, e, f`.
 fn transfer_floats(tf: &ColorSpaceTransferFn) -> [f32; 7] {
@@ -1444,7 +1484,8 @@ fn adapt_to_d50(wx: f32, wy: f32) -> Matrix3 {
 /// the matrix from linear RGB on `p`'s primaries to XYZ D50, in skcms's f32
 /// order of operations, which Skia builds with `-ffp-contract=off` outside
 /// Windows. Skia derives ProPhoto RGB's gamut this way when a gradient is
-/// interpolated in it, rather than from a table.
+/// interpolated in it, rather than from a table, and [`css_prophoto_rgb`]
+/// is built with it so that its gamut is Skia's.
 fn primaries_to_xyzd50(p: &ColorSpacePrimaries) -> Option<Matrix3> {
     let in_unit = |v: f32| (0.0..=1.0).contains(&v);
     if ![p.rx, p.ry, p.gx, p.gy, p.bx, p.by, p.wx, p.wy]

@@ -1135,8 +1135,9 @@ fn the_effect_stores_the_cpus_bytes_but_on_ties() {
 
 /// The spaces Skia interpolates in apart from the page and converts from
 /// afterwards on the float pipeline -- linear sRGB, Display P3, sRGB, A98
-/// RGB, Oklab, Lab, LCH, OkLCH, HSL, HWB and ProPhoto RGB -- on an sRGB and
-/// a Display P3 page: over the corpus's gradients, made opaque and drawn at
+/// RGB, Oklab, Lab, LCH, OkLCH, HSL, HWB, and ProPhoto RGB and Rec. 2020 in
+/// the working spaces that give them CSS's curves -- on an sRGB and a
+/// Display P3 page: over the corpus's gradients, made opaque and drawn at
 /// full alpha, the effect stores the CPU's bytes but on ties, the
 /// conversion's noise counted in -- see [`CONVERSION_ULPS`] and
 /// [`CSS_ULPS`]. Every fourth case is drawn near black, every third greys a
@@ -1144,25 +1145,24 @@ fn the_effect_stores_the_cpus_bytes_but_on_ties() {
 /// turns. Skia's own GPU gradient is judged beside it.
 #[test]
 fn the_effect_in_other_spaces_stores_the_cpus_bytes_but_on_ties() {
+    // Each with the interpolation space Skia is handed for it, so a space
+    // mixed in a working space -- Rec. 2020 and ProPhoto RGB, in the
+    // destination -- is judged as it is drawn.
     let spaces = [
-        (
-            InterpolationSpace::SRGBLinear,
-            GradientColorSpace::SrgbLinear,
-        ),
-        (InterpolationSpace::DisplayP3, GradientColorSpace::DisplayP3),
-        (InterpolationSpace::SRGB, GradientColorSpace::Srgb),
-        (InterpolationSpace::A98RGB, GradientColorSpace::A98Rgb),
-        (InterpolationSpace::OKLab, GradientColorSpace::Oklab),
-        (InterpolationSpace::Lab, GradientColorSpace::Lab),
-        (InterpolationSpace::LCH, GradientColorSpace::Lch),
-        (InterpolationSpace::OKLCH, GradientColorSpace::Oklch),
-        (InterpolationSpace::HSL, GradientColorSpace::Hsl),
-        (InterpolationSpace::HWB, GradientColorSpace::Hwb),
-        (
-            InterpolationSpace::ProphotoRGB,
-            GradientColorSpace::ProphotoRgb,
-        ),
-    ];
+        GradientColorSpace::SrgbLinear,
+        GradientColorSpace::DisplayP3,
+        GradientColorSpace::Srgb,
+        GradientColorSpace::A98Rgb,
+        GradientColorSpace::Oklab,
+        GradientColorSpace::Lab,
+        GradientColorSpace::Lch,
+        GradientColorSpace::Oklch,
+        GradientColorSpace::Hsl,
+        GradientColorSpace::Hwb,
+        GradientColorSpace::ProphotoRgb,
+        GradientColorSpace::Rec2020,
+    ]
+    .map(|ours| (ours.to_skia(), ours));
     let methods = [
         HueMethod::Shorter,
         HueMethod::Longer,
@@ -2264,19 +2264,18 @@ fn consecutive_gradient_draws_share_an_entry() {
     assert_eq!(runs, vec![3, 1]);
 }
 
-/// A run of gradient draws the effect refuses -- opaque, mixed in Rec. 2020,
-/// which a working space wrapped around the shader makes -- is made on the
-/// CPU over one read back of the GPU's pixels, not one for each draw, and
-/// stores what a CPU canvas stores.
+/// A run of gradient draws the effect refuses -- opaque, mixed in Skia's own
+/// Rec. 2020, a space no `GradientColorSpace` names and the effect does not
+/// model -- is made on the CPU over one read back of the GPU's pixels, not
+/// one for each draw, and stores what a CPU canvas stores.
 #[test]
 fn a_run_the_effect_refuses_reads_the_gpu_back_once() {
     let mut spec = kept_case();
-    spec.space = GradientColorSpace::Rec2020;
-    spec.interpolation.color_space = InterpolationSpace::Destination;
+    spec.interpolation.color_space = InterpolationSpace::Rec2020;
     let page = ColorSpace::new_srgb();
     assert!(
         spec.exact(&page, 1.0).is_none(),
-        "the effect refuses Rec. 2020"
+        "the effect refuses Skia's Rec. 2020"
     );
     assert!(spec.colors.iter().all(|c| c.a == 1.0), "opaque stops");
     let shader = CanvasShader {
@@ -2320,8 +2319,7 @@ fn a_gpu_canvas_asks_for_each_draws_effect_once() {
     };
     let spec = kept_case();
     let mut refused = spec.clone();
-    refused.space = GradientColorSpace::Rec2020;
-    refused.interpolation.color_space = InterpolationSpace::Destination;
+    refused.interpolation.color_space = InterpolationSpace::Rec2020;
     assert!(refused.exact(&ColorSpace::new_srgb(), 1.0).is_none());
     let (taken, refused) = (shader_of(spec), shader_of(refused));
     let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);

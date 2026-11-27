@@ -6,6 +6,7 @@ use crate::{
     },
     context::page::{ExportOptions, pages_arg},
     gpu,
+    unload::keep_loaded,
     utils::*,
 };
 use neon::prelude::*;
@@ -296,6 +297,7 @@ pub fn get_engine_status(mut cx: FunctionContext) -> JsResult<JsString> {
 }
 
 pub fn toBuffer(mut cx: FunctionContext) -> JsResult<JsPromise> {
+    keep_loaded();
     let this = cx.argument::<BoxedCanvas>(0)?;
     let defaults = this.borrow().export_options();
     let options = export_options_arg(&mut cx, 2, &defaults)?;
@@ -374,6 +376,7 @@ fn folio_width(padding: f32) -> Result<Option<usize>, String> {
 }
 
 pub fn save(mut cx: FunctionContext) -> JsResult<JsPromise> {
+    keep_loaded();
     let this = cx.argument::<BoxedCanvas>(0)?;
     let name_pattern = string_arg(&mut cx, 2, "filePath")?;
     let sequence = !cx.argument::<JsValue>(3)?.is_a::<JsUndefined, _>(&mut cx);

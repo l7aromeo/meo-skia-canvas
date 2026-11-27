@@ -82,13 +82,16 @@ use std::{
     time::Duration,
 };
 
-use crate::context::{
-    blur_mask::release_cached_masks, chain_cache::release_cached_chains,
-    kept::release_kept_results, page::release_cached_pages,
-    run_mask::release_cached_runs,
-};
 #[cfg(feature = "node-addon")]
 use crate::node::idle::release_thread_caches;
+use crate::{
+    context::{
+        blur_mask::release_cached_masks, chain_cache::release_cached_chains,
+        kept::release_kept_results, page::release_cached_pages,
+        run_mask::release_cached_runs,
+    },
+    unload::keep_loaded,
+};
 
 /// Bumped once per rasterization and once per use of a thread's fonts. Only
 /// ever compared against itself.
@@ -196,6 +199,7 @@ pub fn trim() -> bool {
 /// Reclaims once the activity count has held still for a few ticks, and not
 /// again until it moves.
 fn spawn() {
+    keep_loaded();
     thread::spawn(|| {
         let mut quiet = Quiet::default();
         loop {
