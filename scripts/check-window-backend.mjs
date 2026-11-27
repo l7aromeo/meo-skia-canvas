@@ -31,8 +31,19 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** The file whose `compile_error!` a `window` build without a backend hits. */
 const SOURCE = join("src", "gpu", "mod.rs");
 
-/** The feature arguments of the build that must fail. */
-const ARGS = ["check", "--no-default-features", "--features", "window"];
+/**
+ * The build that must fail. `--color never` because the output is read as
+ * text: CI sets `CARGO_TERM_COLOR=always`, and every line then opens with an
+ * escape sequence rather than `error`.
+ */
+const ARGS = [
+  "check",
+  "--color",
+  "never",
+  "--no-default-features",
+  "--features",
+  "window",
+];
 
 /**
  * The messages of every `compile_error!("...")` in `source`, as rustc prints
