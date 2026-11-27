@@ -7,15 +7,16 @@
 //! sRGB F32 page, and up to 1.8e-4 on a linear, P3 or Rec2020 one. A fill
 //! lands exactly on every float page -- see `paint_colour_exact.rs` and
 //! `float_page_colour.rs` -- so it is the reference here.
+//!
+//! Both engines draw each case. A float page asking for the GPU is drawn on
+//! the raster backend where the GPU cannot composite in float -- see
+//! `float_page_colour.rs`.
 
 use std::cell::RefCell;
 
-use meo_skia_canvas::prelude::*;
+mod common;
 
-/// Both engines. A float page asking for the GPU is drawn on the raster
-/// backend where the GPU cannot composite in float -- see
-/// `float_page_colour.rs`.
-const ENGINES: [bool; 2] = [false, true];
+use meo_skia_canvas::prelude::*;
 
 /// Every space a float page can be in and land a fill exactly.
 const SPACES: [PixelColorSpace; 4] = [
@@ -129,9 +130,11 @@ fn misses_over(
 ) -> Vec<String> {
     let mut missed = Vec::new();
     for (&space, depth, gpu) in spaces.iter().flat_map(|space| {
-        depths
-            .iter()
-            .flat_map(move |&depth| ENGINES.map(|gpu| (space, depth, gpu)))
+        depths.iter().flat_map(move |&depth| {
+            common::engines()
+                .into_iter()
+                .map(move |gpu| (space, depth, gpu))
+        })
     }) {
         for colour in over(space) {
             let mut want = page(space, depth, gpu);

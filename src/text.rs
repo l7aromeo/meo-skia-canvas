@@ -48,7 +48,8 @@ use crate::{
     memory::note_font_use,
     node::{
         font_library::{
-            FontLibrary as SharedFontRegistry, font_generation, forgetful,
+            FontLibrary as SharedFontRegistry, StyleGroups, font_generation,
+            forgetful,
         },
         oblique::{
             Built, GlyphPaints, ParagraphRecipe, Passes, PlainPaints, Resolve,
@@ -1336,7 +1337,7 @@ impl TextEngine {
     /// fallbacks for unmatched family names.
     pub fn new(font_manager: &FontLibrary) -> Self {
         let registry = font_manager.registry();
-        let (generation, provider) = registry.provider();
+        let (generation, provider, groups) = registry.provider();
         Self {
             collection: Mutex::new((
                 engine_collection(Some(provider)),
@@ -1344,7 +1345,10 @@ impl TextEngine {
             )),
             registry: Some(registry),
             positions: Rc::default(),
-            faces: Rc::default(),
+            faces: Rc::new(Mutex::new(FaceRecord {
+                groups,
+                ..FaceRecord::default()
+            })),
         }
     }
 
@@ -1374,17 +1378,17 @@ impl TextEngine {
         if let Some(registry) = &self.registry
             && registry.generation() != held.1
         {
-            let (generation, provider) = registry.provider();
+            let (generation, provider, groups) = registry.provider();
             *held = (engine_collection(Some(provider)), generation);
             *self
                 .positions
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) =
                 InstancedPositions::default();
-            self.faces
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .generation = None;
+            let mut faces =
+                self.faces.lock().unwrap_or_else(PoisonError::into_inner);
+            faces.generation = None;
+            faces.groups = groups;
         }
         held.0.clone()
     }
@@ -1476,7 +1480,17 @@ impl TextEngine {
         base_style: &TextStyle,
     ) -> ParagraphBuilder {
         let mut collection = self.collection();
+        let groups = self
+            .faces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .groups
+            .clone();
         let strut = strut_families(base_style, &mut collection.clone());
+        // A strut's face is matched in its own style, which is normal.
+        let strut = groups
+            .styled(&strut, FontStyle::normal(), None)
+            .unwrap_or(strut);
         // A base style has nothing to inherit, so `Inherit` is `Normal` here.
         let base_variations = base_style.font_variations.resolve(&[]);
         let mut instance = instance_for(
@@ -1492,11 +1506,15 @@ impl TextEngine {
             add_slnt(&mut instance.coordinates, angle.degrees());
         }
         let mut base_sk_style = SkTextStyle::new();
-        fill_text_style(&mut base_sk_style, base_style, &instance);
+        fill_text_style(&mut base_sk_style, base_style, &instance, &groups);
         let base_oblique =
             base_style.slant.oblique_degrees().and_then(|degrees| {
                 match_oblique(&mut base_sk_style, &mut collection, degrees)
             });
+        // An oblique laid out upright was named for the oblique.
+        if base_oblique.is_some() {
+            groups.restyle(&mut base_sk_style, None);
+        }
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
@@ -1602,11 +1620,21 @@ impl ParagraphBuilder {
         if let TextSlant::Oblique(angle) = style.slant {
             add_slnt(&mut instance.coordinates, angle.degrees());
         }
+        let groups = self
+            .faces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .groups
+            .clone();
         let mut sk_style = SkTextStyle::new();
-        fill_text_style(&mut sk_style, style, &instance);
+        fill_text_style(&mut sk_style, style, &instance, &groups);
         let oblique = style.slant.oblique_degrees().and_then(|degrees| {
             match_oblique(&mut sk_style, &mut self.collection, degrees)
         });
+        // An oblique laid out upright was named for the oblique.
+        if oblique.is_some() {
+            groups.restyle(&mut sk_style, None);
+        }
         if PaintKey::of(style)
             != PaintKey::new(self.base_fill, self.base_stroke)
         {
@@ -2280,6 +2308,10 @@ pub(crate) struct FaceRecord {
     /// has built its collection again since -- see
     /// [`TextEngine::collection`]. A face's axes stay, being fixed.
     generation: Option<u64>,
+    /// What the engine's collection holds of families of more than one
+    /// width and slant, replaced with the collection -- see
+    /// [`StyleGroups`] and [`StyleGroups::restyle`].
+    groups: Rc<StyleGroups>,
 }
 
 /// How many family lists and styles an engine remembers the matches of.
@@ -2347,6 +2379,7 @@ impl FaceMatches {
         collection: &mut FontCollection,
         names: &Rc<[String]>,
         style: FontStyle,
+        groups: &StyleGroups,
     ) -> Rc<[Typeface]> {
         let key = FaceMatchKey {
             names: names.clone(),
@@ -2360,7 +2393,15 @@ impl FaceMatches {
         }
         #[cfg(test)]
         SEARCHES.set(SEARCHES.get() + 1);
-        let families: Vec<&str> = names.iter().map(String::as_str).collect();
+        // Named as the text style that lays them out will name them -- see
+        // `StyleGroups::restyle`.
+        let styled = groups.styled(names, style, None);
+        let families: Vec<&str> = styled
+            .as_deref()
+            .unwrap_or(names)
+            .iter()
+            .map(String::as_str)
+            .collect();
         let faces: Rc<[Typeface]> =
             collection.find_typefaces(&families, style).into();
         if remember {
@@ -2462,9 +2503,10 @@ fn work_out(
     let FaceRecord {
         matches,
         axes: known,
+        groups,
         ..
     } = record;
-    let faces = matches.of(collection, &names, query.font_style);
+    let faces = matches.of(collection, &names, query.font_style, groups);
     let Some(axes) = faces.iter().find_map(|face| known.of(face)) else {
         return Instance {
             names: Some(names),
@@ -2605,7 +2647,8 @@ fn background(style: &TextStyle) -> Option<RgbaLinear> {
 }
 
 /// Sets `sk_style`, a new Skia text style, to `style`, with its variable
-/// faces instanced as `instance` says.
+/// faces instanced as `instance` says and its families named as `groups`
+/// says -- see [`StyleGroups::restyle`].
 ///
 /// Filled where the caller made it rather than made here and handed back:
 /// a Skia `TextStyle` is 432 bytes, and handing one back by value cost a
@@ -2614,6 +2657,7 @@ fn fill_text_style(
     sk_style: &mut SkTextStyle,
     style: &TextStyle,
     instance: &Instance,
+    groups: &StyleGroups,
 ) {
     let mut paint = SkPaint::default();
     let cs = linear_srgb_color_space();
@@ -2689,6 +2733,7 @@ fn fill_text_style(
         );
     }
     sk_style.set_font_style(font_style);
+    groups.restyle(sk_style, None);
     if !instance.coordinates.is_empty() {
         sk_style.set_font_arguments(
             &FontArguments::new().set_variation_design_position(

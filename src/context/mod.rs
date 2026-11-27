@@ -66,7 +66,7 @@ use crate::{
         pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
         texture::{BoxedCanvasTexture, CanvasTexture},
-        typography::{WholeRuns, with_style_axes},
+        typography::{KEYS_OWN_COLOUR_BLOBS, WholeRuns, with_style_axes},
     },
     pixels::PixelColorSpace,
     started,
@@ -477,12 +477,14 @@ impl Default for State {
 /// font shorthand's parent is set in.
 pub(crate) fn initial_root_face() -> Option<Typeface> {
     FontLibrary::with_shared(|library| {
+        let names = [generic_name(ROOT_FONT_FAMILY)];
+        let style = FontStyle::normal();
+        let names = library
+            .styled_names(&names, style)
+            .unwrap_or_else(|| names.to_vec());
         let mut collection = library.face_collection();
         collection
-            .find_typefaces(
-                &[generic_name(ROOT_FONT_FAMILY)],
-                FontStyle::normal(),
-            )
+            .find_typefaces(&names, style)
             .into_iter()
             .next()
             .or_else(|| collection.default_fallback())
@@ -3156,8 +3158,9 @@ impl Context2D {
     ///
     /// A blurred shadow is its own group, whose chain blurs the shadow drawn
     /// sharp on pixels by the exact Gaussian -- see `context::chain` -- so
-    /// that a run of text casts the blur of the whole run. What it blurs is
-    /// confined to its cast's `bounds`, which the blur spreads past. A
+    /// that a run of text casts the blur of the whole run. Its cast's
+    /// `bounds` bound the layer the chain blurs in, which the blur spreads
+    /// past, and do not crop what it blurs. A
     /// document draws the shadow as Skia's mask filter draws it, glyph by
     /// glyph, which a PDF holds as an image mask and an SVG, which has no
     /// mask filter to write, embeds as pixels. An unblurred shadow is drawn
@@ -3329,16 +3332,22 @@ impl Context2D {
         let drawn = record(ShadowPart::Sharp(index), pixels)
             .zip(record(ShadowPart::Masked(index), document))?;
         Some(Group {
+            // The cast's bounds are what its sharp shadow can ink, which
+            // bounds the chain's layer -- see `layer::Group::chain_reach_under`
+            // -- and not a crop: confined to them as `within`, the pixels
+            // its glyphs ink past their fractional edges were cut by
+            // coverage, as a mask's ink fills each pixel its outline
+            // touches, and the blur lost what they spread.
             composite: Composite::Chain {
                 steps: Arc::from([Step::Blur(cast.sigma)]),
                 rec: LayerRec::default(),
-                reach: None,
+                reach: Some(self.state.matrix.map_rect(cast.bounds).0),
                 coverage: None,
             },
             matrix: Matrix::new_identity(),
             clip: None,
             entries_clipped: false,
-            within: Some(self.state.matrix.map_rect(cast.bounds).0),
+            within: None,
             contents_matrix: Matrix::new_identity(),
             // What a document plays of it is the shadow Skia's mask filter
             // draws.
@@ -5058,21 +5067,34 @@ impl Context2D {
                 self.vector_features(&paint, Some(style)).with(colour);
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
+            // Whether the run holds a glyph the platform draws in its own
+            // colours -- see `typography::draws_own_colours`.
+            let own_colours = match &kept {
+                Some(kept) => kept.draws_own_colours(),
+                None => typesetter.draws_own_colours(),
+            };
             // The run kept whole, where it holds colour glyphs, to draw them
             // where the page is played back -- see `layer::ReplayedText`.
-            // Every colour glyph composites through a layer of its own.
-            let colour = colour.refused_by(VectorFeatures::LAYER).then(|| {
-                let (run, offset, condensation) =
-                    typesetter.replayed(kept.as_deref());
-                Replay::Text {
-                    run,
-                    at: origin,
-                    offset,
-                    condensation,
-                    global_alpha,
-                    faint,
-                }
-            });
+            // Every colour glyph this library draws composites through a
+            // layer of its own. On a build that keys them, one the platform
+            // draws is drawn there from blobs that Ganesh keys by the matrix
+            // they are drawn under -- see `typography::KEYS_OWN_COLOUR_BLOBS`
+            // -- which a recording holding one set of them for every matrix
+            // cannot be.
+            let colour = (colour.refused_by(VectorFeatures::LAYER)
+                || own_colours && KEYS_OWN_COLOUR_BLOBS)
+                .then(|| {
+                    let (run, offset, condensation) =
+                        typesetter.replayed(kept.as_deref());
+                    Replay::Text {
+                        run,
+                        at: origin,
+                        offset,
+                        condensation,
+                        global_alpha,
+                        faint,
+                    }
+                });
             // The run kept whole, where it is drawn in a blend that reads the
             // page in the shader, to draw its glyphs where the page is played
             // back as that canvas draws them -- see
@@ -5158,10 +5180,7 @@ impl Context2D {
                 reached.set(reach);
                 Some((drawn, reach))
             };
-            let own_colours = || match &kept {
-                Some(kept) => kept.draws_own_colours(),
-                None => typesetter.draws_own_colours(),
-            };
+            let own_colours = || own_colours;
             self.render_to_canvas(
                 &paint,
                 dyed,

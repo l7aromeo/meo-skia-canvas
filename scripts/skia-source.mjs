@@ -287,7 +287,7 @@ const TEXT_DISTANCE_FIELDS_OFF = join(
 );
 
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-// Re-check: cargo test colour_bitmap_glyphs_after_a_larger_draw_draw_as_a_fresh_draw against crates.io's Skia on macOS, where Apple Color Emoji is; it holds that build to emoji drawn from the earlier scale's masks, and fails there once a transformed mask is reused only at the matrix it was made for
+// Re-check: cargo test colour_bitmaps_after_a_larger_draw_draw_afresh against crates.io's Skia on a GPU machine; it holds that build to a paragraph's colour bitmaps drawn from an earlier scale's masks, and fails there once a transformed mask is reused only at the matrix it was made for
 //
 // A glyph with no outline -- a colour bitmap such as an emoji -- at 254
 // device pixels or more is drawn from a transformed mask, a bitmap made for
@@ -299,7 +299,10 @@ const TEXT_DISTANCE_FIELDS_OFF = join(
 // scale, rotation and skew they were made for, compared exactly; translation
 // alone still reuses, and a blob only rebuilds when that matrix changes. Not
 // covered: a sub-run read back from a buffer, as a slug is, has no matrix to
-// compare and keeps the old rule. This crate makes no slugs.
+// compare and keeps the old rule. This crate makes no slugs. Without the
+// patch, `KEYS_OWN_COLOUR_BLOBS` in src/node/typography.rs draws such runs
+// from blobs Ganesh keys by their matrix, on every route but the Paragraph
+// API, whose blobs SkParagraph builds; that route is why the patch stays.
 const TRANSFORMED_MASK_REUSE = join(
   "containers",
   "skia-transformed-mask-reuse.patch",
@@ -318,8 +321,26 @@ const TRANSFORMED_MASK_REUSE = join(
 // without (#642). The patch divides with `/`, correctly rounded at every
 // level. Skia builds with `-ffp-contract=off`, and an explicit `mad` is a
 // fused multiply-add at both the AVX2 and the AVX-512 level, so every other
-// operation in these stages is the same correctly rounded one at each level
-// too, and the bytes are the same.
+// operation in these stages is the same correctly rounded one at those two
+// levels too, and the bytes are the same between them. The SSE level computes
+// an explicit `mad` in two roundings (`fuses_mad` in tests/blend_division.rs),
+// so a machine without AVX2 is not held to those bytes; how far it lands from
+// them has not been measured.
+//
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
+// Re-check: cargo test a_runtime_blender_cannot_fuse_a_multiply_add
+//
+// No route in the crate's own code gives the patched stages' bytes. A runtime
+// blender dividing with `/` cannot fuse a `mad` as the stages do, since SkSL
+// declares `fma` in its GPU module (src/sksl/sksl_gpu.sksl) and not for a
+// runtime effect. Measured on arm64 against tests/blend_division.rs's
+// reference, which fuses where the stages do: over an image, 35 of its 36
+// mode-and-input cases drew no pixel off it, and one drew a pixel a level
+// off (saturation over the mixed pixels from seed 642). Under an
+// anti-aliased edge, over a backdrop whose alpha varies, 31 to 128 of 16384
+// pixels a level off the patched stages, in every mode. A blender would draw
+// the same bytes at every SIMD level, SSE's included, which the patch does
+// not; taking it would change the patched build's pixels.
 const EXACT_BLEND_DIVISION = join(
   "containers",
   "skia-exact-blend-division.patch",

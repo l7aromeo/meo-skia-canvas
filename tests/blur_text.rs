@@ -15,6 +15,8 @@ mod exact;
 use exact::{gaussian, misses, sampled};
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const OSWALD: &str = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
 const FAMILY: &str = "BlurTextOswald";
 const TEXT: &str = "Hamburgefonstiv";
@@ -67,7 +69,7 @@ fn blurred_text_keeps_its_ink_and_blurs_as_a_whole() {
     FontLibrary::new()
         .use_paths(Some(FAMILY), [OSWALD])
         .expect("registers");
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (em, sigma) in CASES {
             let margin = (MARGIN_SIGMAS * sigma).ceil();
             let mut probe = Canvas::new(1.0, 1.0);
@@ -81,7 +83,7 @@ fn blurred_text_keeps_its_ink_and_blurs_as_a_whole() {
             let drawn = |filter: &str| -> Option<Vec<f64>> {
                 let mut canvas = Canvas::new(width, height);
                 canvas.set_gpu(gpu);
-                if gpu && canvas.engine_kind() != EngineKind::Gpu {
+                if gpu && !common::on_gpu(&canvas) {
                     return None;
                 }
                 let ctx = canvas.context();
@@ -136,7 +138,7 @@ fn text_alpha(
     );
     let mut canvas = Canvas::new(width, height);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -165,7 +167,7 @@ fn blurred_text_is_the_exact_gaussian_of_the_sharp_text() {
     FontLibrary::new()
         .use_paths(Some(FAMILY), [OSWALD])
         .expect("registers");
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (em, sigma) in EXACT_CASES {
             let margin = (MARGIN_SIGMAS * sigma).ceil();
             let Some((sharp, width)) = text_alpha(gpu, em, margin, "none")

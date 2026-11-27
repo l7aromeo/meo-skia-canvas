@@ -17,6 +17,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 /// The page the ellipses were recorded on, in pixels.
 const WIDTH: f32 = 640.0;
 const HEIGHT: f32 = 500.0;
@@ -100,20 +102,8 @@ fn parted(a: &[u8], b: &[u8], shift: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Whether Metal has a device to offer, asked of Metal itself rather than of
-/// the engine under test.
-#[cfg(feature = "metal")]
-fn has_metal_device() -> bool {
-    objc2_metal::MTLCreateSystemDefaultDevice().is_some()
-}
-
-#[cfg(not(feature = "metal"))]
-fn has_metal_device() -> bool {
-    false
-}
-
-/// Skips where there is no GPU, and fails where Metal has a device but the
-/// engine did not start on it.
+/// Skips where there is no GPU, and fails where one is required or Metal has
+/// a device but the engine did not start on it -- see `common::has_gpu`.
 ///
 /// Ignored, saying why, where the Skia compiled lacks the atlas placement --
 /// `cfg(meo_atlas_placement)`, from `build.rs`.
@@ -126,13 +116,7 @@ fn has_metal_device() -> bool {
 )]
 fn a_blurred_mask_in_the_same_flush_leaves_another_alone() -> Result<(), Error>
 {
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    if probe.engine_kind() != EngineKind::Gpu {
-        assert!(
-            !has_metal_device(),
-            "Metal has a device, but the GPU engine did not start on it"
-        );
+    if !common::has_gpu() {
         return Ok(());
     }
 

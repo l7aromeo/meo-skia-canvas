@@ -6,7 +6,7 @@ use skia_safe::{
     AlphaType, Codec, Color4f, ColorSpace, ColorType, Data, Font, FontHinting,
     FontMgr, FontStyle, FourByteTag, Image as SkImage, ImageInfo,
     Size as SkSize, Typeface, codec,
-    font_style::Slant,
+    font_style::{Slant, Weight, Width},
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
@@ -17,8 +17,8 @@ use crate::{
     error::Error,
     font::caseless,
     font_library::{
-        FontLibrary as SharedFonts, ObliqueFamily, is_oblique_alias,
-        oblique_alias, unmatched_name,
+        FontLibrary as SharedFonts, ObliqueFamily, StyleGroups, is_group_alias,
+        is_oblique_alias, oblique_alias, unmatched_name,
     },
     geometry::Size,
     node::utils::{css_to_color4f, is_named_color},
@@ -781,12 +781,9 @@ impl Svg {
             // The families first: the manager is built to answer them, so it
             // cannot be built before they are known. See `families_named`.
             let wanted = families_named(xml, &generics, &claimed);
+            let (font_mgr, groups) = lib.svg_fonts(&wanted);
             Self::parse_dom(
-                xml,
-                lib.font_mgr(&wanted),
-                &generics,
-                &claimed,
-                &obliques,
+                xml, font_mgr, &generics, &claimed, &obliques, &groups,
             )
         })
     }
@@ -805,9 +802,10 @@ impl Svg {
         generics: &[(String, String)],
         claimed: &[(String, String)],
         obliques: &[ObliqueFamily],
+        groups: &StyleGroups,
     ) -> Result<svg::Dom, Error> {
         let rewritten =
-            rewrite_text(xml, generics, claimed, obliques, &font_mgr);
+            rewrite_text(xml, generics, claimed, obliques, groups, &font_mgr);
         let bytes = rewritten.as_deref().unwrap_or(xml);
         svg::Dom::from_bytes(bytes, font_mgr).map_err(|_| Error::DecodeImage {
             reason: "could not parse SVG XML".to_string(),
@@ -1127,6 +1125,9 @@ struct Cascade {
     /// The `font-style` in effect, as the slant Skia asks its font manager
     /// for.
     slant: Slant,
+    /// The `font-weight` in effect, as the weight Skia asks its font manager
+    /// for -- see [`svg_font_weight`].
+    weight: Weight,
     /// The `font-family` Skia reads in effect once the rewrite is applied.
     written_family: Option<String>,
 }
@@ -1167,6 +1168,47 @@ fn font_style_slant(value: &str) -> Option<Slant> {
 /// The `font-style` keyword for an oblique, which an angle may follow.
 const OBLIQUE: &str = "oblique";
 
+/// The family Skia's SVG text is set in where a document states none: the
+/// initial `font-family`, `fFontFamily.init("Sans")` in
+/// `SkSVGAttribute.cpp`. Fixed by Skia, not chosen here.
+const SVG_INITIAL_FAMILY: &str = "Sans";
+
+/// The `font-weight` values Skia's SVG parser reads, in the order it tries
+/// them, with the weight `SkSVGText.cpp` asks its font manager for at each:
+/// `None` for `inherit`.
+const SVG_FONT_WEIGHTS: [(&str, Option<Weight>); 14] = [
+    ("normal", Some(Weight::NORMAL)),
+    ("bold", Some(Weight::BOLD)),
+    ("bolder", Some(Weight::EXTRA_BOLD)),
+    ("lighter", Some(Weight::LIGHT)),
+    ("100", Some(Weight::THIN)),
+    ("200", Some(Weight::EXTRA_LIGHT)),
+    ("300", Some(Weight::LIGHT)),
+    ("400", Some(Weight::NORMAL)),
+    ("500", Some(Weight::MEDIUM)),
+    ("600", Some(Weight::SEMI_BOLD)),
+    ("700", Some(Weight::BOLD)),
+    ("800", Some(Weight::EXTRA_BOLD)),
+    ("900", Some(Weight::BLACK)),
+    ("inherit", None),
+];
+
+/// The weight a `font-weight` value asks Skia's SVG text for, or `None` for
+/// `inherit` and any value Skia's parser refuses, both of which leave the
+/// inherited weight in place.
+///
+/// As `SkSVGAttributeParser::parse(SkSVGFontWeight*)` reads it: the first of
+/// [`SVG_FONT_WEIGHTS`] the value starts with, case for case, and then
+/// nothing after it. So `bolder`, which starts with `bold`, is refused, as
+/// is a value with space around it in an attribute; a `style` declaration
+/// is trimmed before it is read, by Skia and by [`style_declaration`].
+fn svg_font_weight(value: &str) -> Option<Weight> {
+    let (keyword, weight) = SVG_FONT_WEIGHTS
+        .iter()
+        .find(|(keyword, _)| value.starts_with(keyword))?;
+    (value.len() == keyword.len()).then_some(*weight).flatten()
+}
+
 /// The `font-family` an element whose family is `stated` and whose slant is
 /// `slant` is written with: its family's [`oblique_alias`] where `obliques`
 /// sends that slant there, and otherwise what [`family_substitution`] makes
@@ -1197,8 +1239,11 @@ fn written_family(
     });
     match sent {
         Some(family) if !stated.contains(',') => oblique_alias(&family.name),
-        // A family's oblique faces, which a document cannot name.
-        _ if is_oblique_alias(name) => unmatched_name(name),
+        // A family's oblique faces or one group of its faces, which a
+        // document cannot name.
+        _ if is_oblique_alias(name) || is_group_alias(name) => {
+            unmatched_name(name)
+        }
         _ => family_substitution(stated, generics, claimed)
             .map(str::to_string)
             .unwrap_or_else(|| stated.trim().to_string()),
@@ -1867,7 +1912,14 @@ fn text_position_lengths_in_px(
     claimed: &[(String, String)],
     font_mgr: &FontMgr,
 ) -> Option<Vec<u8>> {
-    rewrite_text(xml, generics, claimed, &[], font_mgr)
+    rewrite_text(
+        xml,
+        generics,
+        claimed,
+        &[],
+        &StyleGroups::default(),
+        font_mgr,
+    )
 }
 
 fn rewrite_text(
@@ -1875,6 +1927,7 @@ fn rewrite_text(
     generics: &[(String, String)],
     claimed: &[(String, String)],
     obliques: &[ObliqueFamily],
+    groups: &StyleGroups,
     font_mgr: &FontMgr,
 ) -> Option<Vec<u8>> {
     // Not UTF-8, so this cannot reason about the bytes. The Neon binding
@@ -1896,6 +1949,7 @@ fn rewrite_text(
         family: None,
         stated_family: None,
         slant: Slant::Upright,
+        weight: Weight::NORMAL,
         written_family: None,
     }];
     let mut depth_of_root = None;
@@ -1940,6 +1994,7 @@ fn rewrite_text(
         let mut family_attribute: Option<String> = None;
         let mut own_slant = inherited.slant;
         let mut states_href = false;
+        let mut own_weight = inherited.weight;
 
         for attribute in element.attributes() {
             let attribute = attribute.ok()?;
@@ -1966,6 +2021,9 @@ fn rewrite_text(
                 "font-style" => {
                     own_slant = font_style_slant(raw).unwrap_or(own_slant);
                 }
+                "font-weight" => {
+                    own_weight = svg_font_weight(raw).unwrap_or(own_weight);
+                }
                 _ => {}
             }
         }
@@ -1974,6 +2032,12 @@ fn rewrite_text(
                 .and_then(font_style_slant)
         {
             own_slant = slant;
+        }
+        if let Some(weight) =
+            style_declaration(style_value.as_deref(), "font-weight")
+                .and_then(svg_font_weight)
+        {
+            own_weight = weight;
         }
         let styled_family =
             style_declaration(style_value.as_deref(), "font-family")
@@ -1985,6 +2049,18 @@ fn rewrite_text(
         let written = stated_family.as_deref().map(|stated| {
             written_family(stated, own_slant, generics, claimed, obliques)
         });
+        // And to the group of its faces the style is narrowed to by slant
+        // before weight, where Skia's matcher would let the weight outrank
+        // the slant -- see `StyleGroups`. Skia's SVG text is set in
+        // `SkSVGText.cpp`'s style: the weight and slant stated, at the
+        // normal width.
+        let svg_style = FontStyle::new(own_weight, Width::NORMAL, own_slant);
+        let written = groups
+            .written_for(
+                written.as_deref().unwrap_or(SVG_INITIAL_FAMILY),
+                svg_style,
+            )
+            .or(written);
 
         // A `font-family` in the `style` attribute wins over the attribute
         // form, as CSS says and as Skia does, so it decides both what a
@@ -2130,6 +2206,7 @@ fn rewrite_text(
                 family: own_family,
                 stated_family,
                 slant: own_slant,
+                weight: own_weight,
                 written_family: written,
             });
         }
@@ -4293,9 +4370,16 @@ mod tests {
             let xml = format!(
                 r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" font-size="16">{body}</svg>"##
             );
-            rewrite_text(xml.as_bytes(), &[], &[], &obliques, &FontMgr::new())
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                .unwrap_or(xml)
+            rewrite_text(
+                xml.as_bytes(),
+                &[],
+                &[],
+                &obliques,
+                &StyleGroups::default(),
+                &FontMgr::new(),
+            )
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or(xml)
         };
         let alias = oblique_alias("Tied");
 

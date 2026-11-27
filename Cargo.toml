@@ -85,16 +85,25 @@ freetype = []
 metal = [
     "skia-safe/ganesh",
     "skia-safe/metal",
-    "dep:raw-window-handle",
-    "dep:raw-window-metal",
     "dep:objc2",
     "dep:objc2-core-foundation",
     "dep:objc2-foundation",
     "dep:objc2-metal",
-    "dep:objc2-quartz-core",
 ]
 vulkan = ["skia-safe/ganesh", "skia-safe/vulkan", "winit/rwh_05", "dep:ash", "dep:vulkano"]
-window = ["dep:winit", "dep:spin_sleep"]
+# `raw-window-metal` and `objc2-quartz-core` make and drive the Metal
+# renderer's layer for the window, so they are needed only with `metal` as
+# well, which a feature cannot ask for. They hang on `window`, which builds
+# only beside a GPU backend, and only on Apple targets, whose backend is
+# Metal. A build there with `vulkan` and `window` and no `metal` turns them on
+# and names neither, and Cargo warns of both; vulkano compiles both there
+# anyway, through `raw-window-metal`.
+window = [
+    "dep:winit",
+    "dep:spin_sleep",
+    "dep:raw-window-metal",
+    "dep:objc2-quartz-core",
+]
 
 # `Image::from_url` and `ImageData::from_url`, over `http` and `https`. Opt-in:
 # it brings an HTTP client and TLS, which a caller drawing from bytes does not
@@ -295,12 +304,7 @@ objc2 = { version = "0.6", optional = true }
 objc2-core-foundation = { version = "0.3", optional = true }
 objc2-foundation = { version = "0.3", optional = true }
 objc2-metal = { version = "0.3", optional = true }
-objc2-quartz-core = { version = "0.3", features = [
-    "CAMetalLayer",
-], optional = true }
 parking_lot = "0.12"
-raw-window-handle = { version = "0.6", optional = true }
-raw-window-metal = { version = "1", optional = true }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -365,6 +369,12 @@ libc = "0.2"
 # -- see `font::quarantine`.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-quartz-core = { version = "0.3", features = [
+    "CAMetalLayer",
+], optional = true }
+raw-window-metal = { version = "1", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 allsorts = { version = "0.17", features = [

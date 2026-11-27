@@ -356,6 +356,8 @@ jobs:
         with:
           key: ${{ steps.skia.outputs.key }}-test-freetype-fetch
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # No GPU feature, so every GPU leg under tests/ skips here and says so
+      # on stderr; the `binding` job draws them on lavapipe.
       - run: |
           cargo test \
             --no-default-features \
@@ -471,10 +473,10 @@ jobs:
       - name: Check the declarations against the built addon
         run: just check-dts-surface
 
-      # `MEO_SKIA_CANVAS_REQUIRE_GPU` names the device tests/gpu_path_coverage.rs
-      # and tests/gpu_crowded_flush.rs have to draw on, lavapipe's `llvmpipe`,
-      # so a green run says they drew there rather than skipped for want of a
-      # GPU.
+      # `MEO_SKIA_CANVAS_REQUIRE_GPU` names the device every GPU leg under
+      # tests/ has to draw on, lavapipe's `llvmpipe` -- see `common::on_gpu`
+      # in tests/common/mod.rs -- so a green run says they drew there rather
+      # than skipped for want of a GPU.
       # poppler's `pdftoppm`, which `tests/pdf_blend.rs` renders the PDF's
       # blends with; the test fails on CI where it is missing, rather than
       # skip and stop guarding them. The runner's own distribution package.

@@ -244,14 +244,22 @@ the `skia-defines.txt` it saved beside them. Measured on an M4 Pro, the build
 script took 8 seconds this way, and `just build` 40 seconds from an empty
 target.
 
-**Which entry.** One per tree, target, SDK, profile and skia-bindings feature
-set, the features being what `cargo tree` resolves for a call's flags. The
+**Which entry.** One per tree, target, SDK, compiler, profile and
+skia-bindings feature set, the features being what `cargo tree` resolves for
+a call's flags. The compiler is named by the first line `--version` prints
+for the C and the C++ compiler skia-bindings would run -- `CLANGCC`, else
+`CC`, else `clang`, and the same for C++ -- so an Xcode or Command Line
+Tools update that changes clang keys new entries whether or not it changes
+the SDK; a compiler variable holding a command with arguments, such as
+`ccache clang`, is never cached, since the line does not say what the
+arguments do. The
 SDK is named by the version its `SDKSettings.json` records, as
 `MacOSX27.2.sdk`, so every path to one SDK -- `MacOSX.sdk`, the symlinks
 beside it, the Command Line Tools' copy -- finds one entry; an SDK that
 records no version is never cached. Xcode's and the Command Line Tools'
-copies of one version share an entry: measured on 27.2, they compile Skia's
-CoreText and Metal sources to the same bytes. The
+copies of one version share an entry where their clangs print one version
+line, as both do on 27.2: measured there, they compile Skia's CoreText and
+Metal sources to the same bytes. The
 tree is `treeName`, so a change of patches misses the cache rather than
 linking a stale entry, and a superseded tree's entries are removed with the
 tree. Every cargo call in the justfile that builds skia-bindings goes through
@@ -259,16 +267,32 @@ tree. Every cargo call in the justfile that builds skia-bindings goes through
 since one recipe can build several feature sets. It says on stderr whether it
 linked an entry or is compiling Skia, and why. `bun run build` reaches it
 through `lib/prebuild.mjs`. A plain `cargo` call, or one with no entry for its
-features, compiles Skia as before.
+features, compiles Skia as before. Through the script, a build that compiles
+stores what it compiled, so that the next build of that key links it: it asks
+cargo for its JSON messages, which name the out-dir skia-bindings' build script
+ran in and the features it was compiled with, and passes the rest of cargo's
+output through. A store that is refused says why on stderr and leaves the build
+passing or failing as cargo had it. Such a build's stdout is a pipe through the
+script, so a test harness there prints no colour. A build is stored only when
+its build script ran after the call started: one cargo found fresh may have
+been compiled by an earlier clang, and its log does not say which, so it is
+left unstored until skia-bindings next compiles. A second build of a key
+already held is compared by what its archives hold -- each member's
+contents, in order, without its date or the symbol index `ranlib` rebuilds,
+neither of which ever agrees between two builds -- and by its definitions
+file: where those agree it is `already held`, and otherwise it is refused,
+naming the first library and member that differ.
 
 **What the entry compiled.** An entry also keeps `notices.json`: the Skia
 tree and the projects its build compiled, from ninja's dependency record,
 which the third-party notices of a build that links it are written from. A
-build whose ninja has no `deps` tool -- the musl image's `/usr/bin/ninja` is
-samurai -- has its build directory described by `gn desc` instead, and every
-build whose ninja keeps a record is described that way too and refused where
-the two differ, so that the route the musl builds take is checked on every
-other build. An
+build whose ninja has no `deps` tool -- samurai, which Alpine installs as
+`/usr/bin/ninja` -- has its build directory described by `gn desc` instead,
+and every build whose ninja keeps a record is described that way too and
+refused where the two differ, so that the route such a build and a derived
+record take is checked on every other build. The musl image names Alpine's
+real ninja in `SKIA_NINJA_COMMAND` and refuses to build unless it has the
+`deps` tool, so every release leg builds Skia with ninja. An
 entry stored before entries kept one has it derived when a lookup finds it,
 by `gn desc` over the arguments its seed log printed, and is linked as
 before -- the same set as ninja's, measured on three entries whose seed
@@ -278,7 +302,8 @@ record. Run with no `SKIA_SOURCE_DIR` where
 `skia-source.mjs env` would name a tree, the script refuses and names the
 command that sets it, rather than let skia-bindings build against rust-skia's
 unpatched Skia; `SKIA_CACHE_UNPATCHED=1` asks for that build on purpose. `just skia-cache-fill <cargo flags>` builds
-a feature set from source and stores it. An entry is about 70 MB.
+a feature set from source and stores it ahead of a build that needs it. An
+entry is about 70 MB.
 
 **Not rust-skia's prebuilt binaries.** skia-bindings also downloads archives,
 `file://` URLs included, but only with `SKIA_SOURCE_DIR` unset, keyed by
@@ -289,9 +314,11 @@ the archive is missing.
 **What still vouches for the patches.** An entry is stored only from a build
 `scripts/check-patched-skia.mjs` passes, from the worktree's own tree, and it
 keeps that build's log. A build that linked an entry passes the same check
-when every library it linked is, byte for byte, one an entry of the
-worktree's tree holds, and that entry's log passes: patched where it was
-compiled, the same bytes where it was linked. A library changed after it was
+when every library it linked -- each its log names in a `rustc-link-lib`
+line, not each archive its out-dir holds, which can keep an earlier build's
+-- is, byte for byte, one an entry of the worktree's tree holds, and that
+entry's log passes: patched where it was compiled, the same bytes where it
+was linked. A library changed after it was
 stored, or an entry from another tree, fails. The check holds a build with no
 Ganesh -- the clippy pass with no features -- to the patched files it
 compiles, which are the SVG slant and the face match.

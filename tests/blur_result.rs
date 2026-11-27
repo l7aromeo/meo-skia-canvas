@@ -15,6 +15,8 @@ mod exact;
 use exact::{misses, sampled};
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const SIZE: (f32, f32) = (160.0, 100.0);
 
 /// A triangle across most of the canvas.
@@ -55,7 +57,7 @@ fn triangle_in(
         },
     )
     .expect("a canvas");
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -114,7 +116,7 @@ fn float_alpha(canvas: &mut Canvas) -> Vec<f64> {
 
 #[test]
 fn a_blurred_path_is_the_exact_gaussian_of_what_it_draws() {
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         // Under the FFT's crossover, over it, and far over it.
         for sigma in [2.0f32, 8.0, 30.0] {
             let (Some(mut drawn), Some(mut blurred)) = (
@@ -151,7 +153,7 @@ fn faded_triangle(
 ) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -215,7 +217,7 @@ fn a_blurred_path_at_an_alpha_is_rounded_once() {
     // is itself a tie, 76.5 of a byte, which a fill rounds up to 77.
     let on_its_byte =
         |alpha: f64| (alpha * f64::from(u8::MAX) + 0.5).floor() / 255.0;
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in [2.0f32, 8.0] {
             for (colour, global, scale) in [
                 ("black", 0.5f32, on_its_byte(0.5)),
@@ -282,7 +284,7 @@ const NARROW: [(f32, f32); 3] = [(10.0, 85.0), (45.0, 10.25), (80.5, 90.0)];
 fn a_clip_confines_the_blur_and_not_what_it_blurs() {
     // What lies outside the clip is blurred into it, as a filter is applied
     // to the draw and the clip to what the filter makes.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in [2.0f32, 8.0, 30.0] {
             let (Some(mut drawn), Some(mut blurred)) = (
                 triangle(gpu, NARROW, "none", None),
@@ -427,7 +429,7 @@ fn a_drop_shadow_is_the_exact_gaussian_of_what_casts_it() {
 fn a_drop_shadowed_image_at_an_alpha_is_rounded_once() {
     // The alpha applies after the filter, to the image and its shadow
     // together, as it does to a blurred image.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let (Some(mut drawn), Some(mut shadowed)) = (
             drawn_image(gpu, "none", 1.0),
             drawn_image(gpu, "drop-shadow(3px 2px 2px black)", 0.5),
@@ -509,7 +511,7 @@ fn a_blurred_path_on_float_pixels_is_the_exact_gaussian_unrounded() {
         // is drawn on the CPU; it runs where a backend composites
         // float.
         let srgb = PixelColorSpace::Srgb;
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for sigma in [2.0f32, 8.0, 30.0] {
                 let filter = format!("blur({sigma}px)");
                 let (Some(mut drawn), Some(mut blurred)) = (
@@ -614,7 +616,7 @@ fn drawn_canvas(gpu: bool, filter: &str, sized: bool) -> Option<Canvas> {
     source.context().fill_rect(0.0, 0.0, 40.0, 40.0);
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -631,7 +633,7 @@ fn a_blurred_canvas_drawn_in_spreads_past_where_it_is_drawn() {
     // The destination rectangle bounds what is drawn, not its blur: Chrome
     // 156 reads alpha 72 five pixels outside a red square blurred by 8px and
     // 28 ten pixels out, where this read 0 at both.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sized in [false, true] {
             for sigma in [2.0f32, 8.0] {
                 let (Some(mut drawn), Some(mut blurred)) = (
@@ -667,7 +669,7 @@ fn a_blurred_canvas_drawn_in_spreads_past_where_it_is_drawn() {
 fn a_canvas_drawn_in_casts_its_drop_shadow_past_where_it_is_drawn() {
     // The destination rectangle confines what is drawn and not the shadow,
     // which lands thirty pixels to the right of the square, outside it.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(mut canvas) =
             drawn_canvas(gpu, "drop-shadow(30px 0px 0px blue)", false)
         else {
@@ -689,7 +691,7 @@ fn a_drop_shadow_past_a_canvas_drawn_in_survives_the_layer_around_it() {
     // and a plain layer around it is confined to what its contents reach:
     // the shadow lies outside the destination, so a group reporting the
     // destination as its reach would have the parent layer cut it off.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let mut source = Canvas::new(40.0, 40.0);
         source.set_gpu(gpu);
         source
@@ -699,7 +701,7 @@ fn a_drop_shadow_past_a_canvas_drawn_in_survives_the_layer_around_it() {
         source.context().fill_rect(0.0, 0.0, 40.0, 40.0);
         let mut canvas = Canvas::new(SIZE.0, SIZE.1);
         canvas.set_gpu(gpu);
-        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        if gpu && !common::on_gpu(&canvas) {
             continue;
         }
         let ctx = canvas.context();
@@ -749,7 +751,7 @@ fn a_flood_through_a_canvas_drawn_in_covers_the_page_as_chrome_does() {
         None,
     )
     .expect("a flood");
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for in_layer in [false, true] {
             let mut source = Canvas::new(40.0, 40.0);
             source.set_gpu(gpu);
@@ -760,7 +762,7 @@ fn a_flood_through_a_canvas_drawn_in_covers_the_page_as_chrome_does() {
             source.context().fill_rect(0.0, 0.0, 40.0, 40.0);
             let mut canvas = Canvas::new(SIZE.0, SIZE.1);
             canvas.set_gpu(gpu);
-            if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            if gpu && !common::on_gpu(&canvas) {
                 continue;
             }
             let ctx = canvas.context();
@@ -815,7 +817,7 @@ fn varied_image() -> Image {
 fn drawn_image(gpu: bool, filter: &str, global_alpha: f32) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -830,7 +832,7 @@ fn a_blurred_image_is_the_exact_gaussian_of_what_it_draws() {
     // The filter applies to what is drawn, and the global alpha after it,
     // as the Canvas drawing model orders them: the reference is the image
     // drawn opaque, blurred, then scaled by the alpha.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in [2.0f32, 8.0] {
             for global in [1.0f32, 0.5] {
                 let (Some(mut drawn), Some(mut blurred)) = (
@@ -868,7 +870,7 @@ fn a_blurred_image_is_the_exact_gaussian_of_what_it_draws() {
 fn oval(gpu: bool, filter: &str, rounded: bool) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -894,7 +896,7 @@ fn a_blurred_oval_is_the_exact_gaussian_of_what_it_draws() {
     // `ellipse` draws is a path to Skia, and took the image blur at every
     // sigma. Both are blurred on their result now.
     for rounded in [true, false] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for sigma in [2.0f32, 8.0, 12.0, 30.0] {
                 let filter = format!("blur({sigma}px)");
                 let (Some(mut drawn), Some(mut blurred)) =
@@ -926,7 +928,7 @@ fn a_blurred_oval_is_the_exact_gaussian_of_what_it_draws() {
 fn rounded(gpu: bool, filter: &str, x: f32) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -951,7 +953,7 @@ fn a_blurred_rounded_rectangle_is_the_exact_gaussian_of_what_it_draws() {
     // Skia's coverage blur of a rounded rectangle approximates the
     // Gaussian, so a rounded rectangle is blurred on its result at every
     // sigma, as a triangle is.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for (sigma, at) in [2.0f32, 8.0]
             .into_iter()
             .flat_map(|sigma| ROUNDED_AT.map(|x| (sigma, x)))
@@ -993,7 +995,7 @@ fn far(
 ) -> Option<Vec<u8>> {
     let mut canvas = Canvas::new(size.0, size.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -1309,7 +1311,7 @@ fn a_blurred_rounded_rectangle_on_the_gpu_is_the_exact_gaussian_wherever_it_lies
 fn stroked(gpu: bool, filter: &str) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -1325,7 +1327,7 @@ fn a_blurred_stroked_rectangle_is_the_exact_gaussian_of_what_it_draws() {
     // A rectangle the closed-form blur does not take, a stroked one, is
     // blurred on its result: Skia's coverage blur, which took it up to a
     // sigma of 40, approximates the Gaussian.
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in [2.0f32, 8.0] {
             let filter = format!("blur({sigma}px)");
             let (Some(mut drawn), Some(mut blurred)) =
@@ -1359,7 +1361,7 @@ fn dyed_triangle(
 ) -> Option<Canvas> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -1397,7 +1399,7 @@ fn a_blurred_pattern_fill_is_the_exact_gaussian_of_what_it_draws() {
     // chain's, as a run of text's is, and not Skia's, which was 5.78 levels
     // off on the CPU and 1.19 on the GPU.
     let mut wrong = vec![];
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         for sigma in [2.0f32, 4.0, 8.0] {
             let (Some(mut drawn), Some(mut blurred)) = (
                 dyed_triangle(gpu, striped, "none"),
@@ -1482,7 +1484,7 @@ fn a_blurred_image_pattern_or_gradient_fill_is_the_exact_gaussian() {
         ("image pattern", striped_pixels as fn(&mut Context2D), false),
         ("gradient", graded, true),
     ] {
-        for gpu in [false, true] {
+        for gpu in common::engines() {
             for sigma in [2.0f32, 8.0] {
                 let (Some(mut drawn), Some(mut blurred)) = (
                     dyed_triangle(gpu && !made_on_the_cpu, dye, "none"),
@@ -1538,7 +1540,7 @@ fn a_gradient_casts_the_shadow_a_cpu_canvas_casts() {
     let shadowed = |gpu: bool, shadow: bool| {
         let mut canvas = Canvas::new(SIZE.0, SIZE.1);
         canvas.set_gpu(gpu);
-        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        if gpu && !common::on_gpu(&canvas) {
             return None;
         }
         let ctx = canvas.context();
@@ -1605,7 +1607,7 @@ fn tinted(
 ) -> Option<[u8; 4]> {
     let mut canvas = Canvas::new(SIZE.0, SIZE.1);
     canvas.set_gpu(gpu);
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -1684,7 +1686,7 @@ fn colour_functions_in_a_row_tint_as_one() {
     let blurred = format!("blur(5px) {TINT}");
     let one = tinted(false, TINT, graded_black).expect("a CPU canvas");
     let mut wrong = Vec::new();
-    for gpu in [false, true] {
+    for gpu in common::engines() {
         let Some(graded) = tinted(gpu, TINT, graded_black) else {
             continue;
         };

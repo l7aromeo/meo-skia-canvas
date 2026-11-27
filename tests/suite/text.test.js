@@ -2513,6 +2513,97 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
       ),
       "plain text draws the upright face",
     );
+    // At 900 Skia's own scores put the italic 900 face first for plain text.
+    assert.ok(
+      pixels("900 200px WeightItalicMixed").equals(
+        pixels("900 200px WeightUprightAlone"),
+      ),
+      "plain text at 900 draws the upright face",
+    );
+  });
+
+  test("a family's upright face is drawn for plain text whatever its weight", () => {
+    // An upright 900 face and an italic 400 one: plain text at 400 takes the
+    // upright face, which Skia's own scores put behind the italic face
+    // nearer in weight.
+    FontLibrary.use("HeavyUprightAlone", [
+      `${R}/Recursive-upright900-subset.ttf`,
+    ]);
+    FontLibrary.use("LightItalicAlone", [
+      `${R}/Recursive-italic400-subset.ttf`,
+    ]);
+    FontLibrary.use("HeavyUprightMixed", [
+      `${R}/Recursive-upright900-subset.ttf`,
+      `${R}/Recursive-italic400-subset.ttf`,
+    ]);
+    assert.ok(
+      !pixels("200px HeavyUprightAlone").equals(
+        pixels("200px LightItalicAlone"),
+      ),
+      "the two faces draw differently",
+    );
+    assert.ok(
+      pixels("200px HeavyUprightMixed").equals(
+        pixels("200px HeavyUprightAlone"),
+      ),
+      "plain text draws the upright face",
+    );
+    assert.ok(
+      pixels("italic 200px HeavyUprightMixed").equals(
+        pixels("italic 200px LightItalicAlone"),
+      ),
+      "italic draws the italic face",
+    );
+  });
+
+  test("a paragraph takes a family's face by slant before weight", () => {
+    // The Paragraph API's styles, set and pushed, match as canvas text does.
+    FontLibrary.use("ParagraphUprightAlone", [
+      `${R}/Recursive-upright-subset.ttf`,
+    ]);
+    FontLibrary.use("ParagraphItalicAlone", [
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    FontLibrary.use("ParagraphMixed", [
+      `${R}/Recursive-upright-subset.ttf`,
+      `${R}/Recursive-italic900-subset.ttf`,
+    ]);
+    const drawn = (family, fontStyle, pushed) => {
+      const ctx = new Canvas(300, 300).getContext("2d"),
+        style = { fontFamilies: [family], fontSize: 200, color: "black" },
+        builder = pushed
+          ? new ParagraphBuilder({ textStyle: style })
+          : new ParagraphBuilder({ textStyle: { ...style, fontStyle } });
+      if (pushed) builder.pushStyle({ ...style, fontStyle });
+      builder.addText("IH");
+      const paragraph = builder.build();
+      paragraph.layout(300);
+      ctx.drawParagraph(paragraph, 40, 20);
+      return Buffer.from(ctx.getImageData(0, 0, 300, 300).data);
+    };
+    const italic = { slant: 1 },
+      heavy = { weight: 900 };
+    for (const pushed of [false, true]) {
+      const how = pushed ? "pushed" : "set";
+      assert.ok(
+        !drawn("ParagraphItalicAlone", italic, pushed).equals(
+          drawn("ParagraphUprightAlone", italic, pushed),
+        ),
+        `${how}: the italic face draws unlike the upright one skewed`,
+      );
+      assert.ok(
+        drawn("ParagraphMixed", italic, pushed).equals(
+          drawn("ParagraphItalicAlone", italic, pushed),
+        ),
+        `${how}: italic draws the italic face`,
+      );
+      assert.ok(
+        drawn("ParagraphMixed", heavy, pushed).equals(
+          drawn("ParagraphUprightAlone", heavy, pushed),
+        ),
+        `${how}: plain text at 900 draws the upright face`,
+      );
+    }
   });
 
   test("a face flagged oblique is reported slanted", () => {

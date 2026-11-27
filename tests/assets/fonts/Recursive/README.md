@@ -1,6 +1,6 @@
 # Recursive fixtures
 
-Seven files from Recursive, `Recursive[CASL,CRSV,MONO,slnt,wght].ttf` from
+Nine files from Recursive, `Recursive[CASL,CRSV,MONO,slnt,wght].ttf` from
 github.com/google/fonts, under the SIL Open Font License in `OFL.txt`. Each
 holds only the glyphs the oblique tests draw, and each was made with
 `hb-subset` at `CASL=0,MONO=0,CRSV=0,wght=400`:
@@ -37,5 +37,18 @@ this tree has.
   italic 900, and it leans 12deg of its own, so it tells apart from an upright
   face skewed; it stands in for a family's italic face far in weight from its
   upright one.
+
+- `Recursive-italic400-subset.ttf`: `Recursive-italic900-subset.ttf` at
+  `usWeightClass` 400, with `head` `macStyle` italic alone, and its table
+  checksums and `checkSumAdjustment` recomputed. Every platform reports it
+  italic 400.
+
+- `Recursive-upright900-subset.ttf`: `Recursive-upright-subset.ttf` at
+  `usWeightClass` 900, `OS/2` `fsSelection` bit 5, `BOLD`, set and bit 6,
+  `REGULAR`, cleared, and `head` `macStyle` bold, with its table checksums
+  and `checkSumAdjustment` recomputed. Every platform reports it upright 900.
+  With the italic 400 face it is a family whose upright face is far in
+  weight from a normal-weight request, which Skia's matcher answers with the
+  italic face.
 
 A modified version may keep the name: `OFL.txt` reserves no font name.

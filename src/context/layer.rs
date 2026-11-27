@@ -1892,6 +1892,12 @@ impl Replay {
 /// another or a pattern plays the run at, rather than resampled from the
 /// scale it was recorded at.
 ///
+/// On a build that keys their blobs -- see
+/// `typography::KEYS_OWN_COLOUR_BLOBS` -- a run holding glyphs the platform
+/// draws in its own colours is kept here too, and drawn where it is played
+/// from blobs Ganesh keys by the matrix they are drawn under, so that a GPU
+/// page read at one scale after another draws from the masks made for it.
+///
 /// The run is drawn with the shadow it casts and through the blend that
 /// covers beyond it, as `Context2D::render_to_canvas` records them, so that
 /// every colour glyph of it reaches pixels as an image. A draw that cannot

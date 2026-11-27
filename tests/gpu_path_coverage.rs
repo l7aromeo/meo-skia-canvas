@@ -12,10 +12,12 @@
 //! taken away and the pixel came back, so the page is kept whole rather than
 //! reduced.
 
-use std::{env, fs};
+use std::fs;
 
 use meo_skia_canvas::prelude::*;
 use serde_json::Value;
+
+mod common;
 
 /// The page's draws, in order: a verb, the path or the ellipse it fills or
 /// strokes, a CSS colour, an alpha, a stroke's width and cap, a mask blur's
@@ -112,28 +114,8 @@ fn alpha(
     Ok(pixels.chunks(4).map(|px| px[3]).collect())
 }
 
-/// Whether Metal has a device to offer, asked of Metal itself rather than of
-/// the engine under test.
-#[cfg(feature = "metal")]
-fn has_metal_device() -> bool {
-    objc2_metal::MTLCreateSystemDefaultDevice().is_some()
-}
-
-#[cfg(not(feature = "metal"))]
-fn has_metal_device() -> bool {
-    false
-}
-
-/// Text the GPU's device name has to contain where it is set, as on CI's
-/// Linux runner, which names lavapipe's `llvmpipe`: a run that has to show it
-/// drew on that device, rather than one that skipped for want of a GPU.
-const REQUIRE_GPU: &str = "MEO_SKIA_CANVAS_REQUIRE_GPU";
-
-/// Skips where there is no GPU, and fails where Metal has a device but the
-/// engine did not start on it: `set_gpu(true)` falls back silently to the
-/// raster path, so a skip keyed on `engine_kind` alone would pass on a Mac
-/// whose GPU engine broke. Fails as well where [`REQUIRE_GPU`] names a device
-/// the engine is not on.
+/// Skips where there is no GPU, and fails where one is required -- see
+/// `common::on_gpu`.
 ///
 /// Ignored, saying why, where the Skia compiled lacks the atlas placement --
 /// `cfg(meo_atlas_placement)`, from `build.rs`.
@@ -149,28 +131,7 @@ fn a_path_over_a_blurred_one_keeps_its_coverage() -> Result<(), Error> {
     let draws: Vec<Value> =
         serde_json::from_str(&fs::read_to_string(DRAWS).expect(DRAWS))
             .expect("the draws parse");
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    if let Ok(required) = env::var(REQUIRE_GPU) {
-        let backend = BackendInfo::query();
-        assert!(
-            probe.engine_kind() == EngineKind::Gpu
-                && backend
-                    .device
-                    .as_deref()
-                    .is_some_and(|device| device.contains(&required)),
-            "{REQUIRE_GPU} asks for a GPU named {required:?}; the engine is \
-             {:?} on {:?}, error {:?}",
-            probe.engine_kind(),
-            backend.device,
-            backend.error,
-        );
-    }
-    if probe.engine_kind() != EngineKind::Gpu {
-        assert!(
-            !has_metal_device(),
-            "Metal has a device, but the GPU engine did not start on it"
-        );
+    if !common::has_gpu() {
         return Ok(());
     }
 
