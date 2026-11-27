@@ -1894,10 +1894,13 @@ Over 600 generated gradients drawn as a rectangle, a rectangle off whole
 pixels, a triangle and a polygon, the GPU canvas parted from the CPU on 582
 pixels, every one within float noise of a half level or a stop. A path's
 anti-aliased edge is the CPU's too: the effect is masked by the CPU's coverage
-of the path, made for the draws that follow one another in one image at the
-same places as the effect's, so that a gradient fill's shadow and blur, which
-a chain makes from the CPU's edge, are those of the edge the canvas draws
-(#766). That coverage is cut where the page ends, as the CPU canvas's is, so
+of the path, drawn at the page's own pixels and copied for the draws that
+follow one another into one image at the same places as the effect's, so that
+a gradient fill's shadow and blur, which a chain makes from the CPU's edge,
+are those of the edge the canvas draws (#766). Drawn into that image moved by
+whole pixels, a disc's edge stood up to 8 levels from the CPU canvas's by
+where the image placed it, since Skia covers a curved edge by where it lies
+(#813). That coverage is cut where the page ends, as the CPU canvas's is, so
 a gradient path the page's edge cuts moves inside the page as it does on the
 CPU engine -- see the entry on a fill the page's edge cuts. Through
 Ganesh's coverage, a hard stop's edge stood up to 125 levels from the CPU

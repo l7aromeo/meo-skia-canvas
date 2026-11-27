@@ -716,10 +716,10 @@ fn edge_misses(
         .collect()
 }
 
-/// `edge_misses` for each blend, asserted empty, and the coverage itself
-/// held to the CPU's byte for byte: on a transparent page an opaque
-/// gradient's alpha is its coverage, which no blend rounds.
-fn assert_cpus_edge(
+/// The coverage of `draw`'s paths held to the CPU's byte for byte: on a
+/// transparent page an opaque gradient's alpha is its coverage, which no
+/// blend rounds.
+fn assert_cpus_coverage(
     size: (f32, f32),
     name: &str,
     draw: &dyn Fn(&mut Context2D),
@@ -745,6 +745,18 @@ fn assert_cpus_edge(
         apart.len(),
         apart.first(),
     );
+}
+
+/// [`assert_cpus_coverage`], and `edge_misses` for each blend asserted
+/// empty. The paths are to lie apart, so that each composites over the
+/// backdrop alone and rounds once.
+fn assert_cpus_edge(
+    size: (f32, f32),
+    name: &str,
+    draw: &dyn Fn(&mut Context2D),
+    shader: &dyn Fn() -> Shader,
+) {
+    assert_cpus_coverage(size, name, draw, shader);
     for blend in [BlendMode::SourceOver, BlendMode::Multiply] {
         let misses = edge_misses(size, draw, shader, blend);
         assert!(
@@ -776,7 +788,7 @@ fn a_gradient_paths_edge_is_the_cpus() {
             ctx.fill(FillRule::NonZero);
         }),
         // Cut where the page ends, as the CPU canvas cuts it -- see
-        // `layer::draw_coverage`.
+        // `layer::DeviceCoverage`.
         ("a triangle past every edge", &|ctx| {
             ctx.begin_path();
             ctx.move_to(-40.5, 190.0);
@@ -875,4 +887,47 @@ fn a_gradient_path_past_the_atlas_takes_the_cpus_edge() {
     assert_cpus_edge(size, "a ramp", &triangle, &smooth);
     assert_cpus_edge(size, "past the edge, a hard stop", &past, &hard);
     assert_cpus_edge(size, "past the edge, a ramp", &past, &smooth);
+}
+
+/// A gradient path's edge on a GPU canvas is the CPU canvas's wherever the
+/// run's atlas places it (#813): alone, in a grid of its own kind, and
+/// beside a larger path, which moves its slot.
+#[test]
+fn a_gradient_paths_edge_is_the_cpus_wherever_its_slot_lies() {
+    if !common::has_gpu() {
+        return;
+    }
+    let disc = |ctx: &mut Context2D, x: f32, y: f32, r: f32| {
+        ctx.begin_path();
+        ctx.arc(x, y, r, 0.0, std::f32::consts::TAU, false)
+            .expect("a positive radius");
+        ctx.fill(FillRule::NonZero);
+    };
+    let scenes: [Named; 4] = [
+        ("one disc", &|ctx| disc(ctx, 16.4, 16.7, 10.3)),
+        ("sixteen discs", &|ctx| {
+            for i in 0..16u8 {
+                let (x, y) = (f32::from(i % 4) * 32.0, f32::from(i / 4) * 32.0);
+                disc(ctx, 16.4 + x, 16.7 + y, 10.3);
+            }
+        }),
+        ("a disc alone", &|ctx| disc(ctx, 106.2, 106.5, 12.3)),
+        ("a disc after a larger one", &|ctx| {
+            disc(ctx, 60.7, 55.1, 25.4);
+            disc(ctx, 106.2, 106.5, 12.3);
+        }),
+    ];
+    let size = (128.0, 128.0);
+    let smooth = || ramp(size.0);
+    for (scene, draw) in scenes {
+        assert_cpus_edge(size, &format!("{scene}, a ramp"), draw, &smooth);
+    }
+    // Their areas overlap, so that the second is drawn where the first's
+    // coverage was. Over a backdrop the second composites over the first,
+    // which is not what `edge_misses` holds, so only the coverage is.
+    let across = |ctx: &mut Context2D| {
+        disc(ctx, 40.3, 44.6, 20.1);
+        disc(ctx, 58.7, 52.2, 18.4);
+    };
+    assert_cpus_coverage(size, "two discs across each other", &across, &smooth);
 }

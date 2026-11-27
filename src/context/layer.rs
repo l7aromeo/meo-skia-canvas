@@ -3510,7 +3510,7 @@ struct Slot {
     image: Image,
     at: IPoint,
     /// The CPU's coverage of each path in the atlas, at the same slots as
-    /// `image` -- see [`draw_coverage`]. `None` where it could not be made,
+    /// `image` -- see [`DeviceCoverage`]. `None` where it could not be made,
     /// and the path then makes its own -- see [`coverage_image`].
     mask: Option<Image>,
 }
@@ -3565,6 +3565,9 @@ fn atlas(
     let limit = max_texture_size(canvas);
     let width_limit = ATLAS_WIDTH_PX.min(limit);
     let (mut x, mut y, mut row, mut width) = (0, 0, 0, 0);
+    // The page's pixels from its origin to the farthest corner of a path
+    // the atlas holds, which their coverage is drawn over.
+    let mut extent = ISize::new(0, 0);
     let mut page = None;
     for (index, (draw, effect)) in draws.iter().zip(&effects).enumerate() {
         let (Some(draw), Some(_)) = (draw, effect) else {
@@ -3586,6 +3589,14 @@ fn atlas(
         if y + h > limit {
             continue;
         }
+        let reaching = ISize::new(
+            extent.width.max(draw.area.right),
+            extent.height.max(draw.area.bottom),
+        );
+        if !DeviceCoverage::fits(reaching) {
+            continue;
+        }
+        extent = reaching;
         slots[index] = Some(IPoint::new(x, y));
         page.get_or_insert_with(|| draw.page.clone());
         (x, row, width) = (x + w, row.max(h), width.max(x + w));
@@ -3632,17 +3643,16 @@ fn atlas(
     let mask = made.as_ref().and_then(|_| {
         let mut surface =
             started::raster(&coverage_info((width, height)), None, None)?;
-        let target = surface.canvas();
-        target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        let mut device = DeviceCoverage::new(extent)?;
         for (draw, at) in draws.iter().zip(&slots) {
             let (Some(draw), Some(at)) = (draw, at) else {
                 continue;
             };
-            let origin = IPoint::new(
-                draw.area.left - SLOT_MARGIN_PX,
-                draw.area.top - SLOT_MARGIN_PX,
-            );
-            draw_coverage(target, draw, *at, origin);
+            // The slot's pixel `at` is the page's pixel a margin outside
+            // the path's area.
+            let to = IPoint::new(at.x + SLOT_MARGIN_PX, at.y + SLOT_MARGIN_PX);
+            device.copy(draw, &mut surface, to)?;
         }
         Some(surface.image_snapshot())
     });
@@ -3687,7 +3697,7 @@ fn max_texture_size(_canvas: &SkCanvas) -> i32 {
 /// A rectangle on whole pixels is the effect itself. Any other path is an
 /// aliased rectangle over the pixels it inks, its effect -- the atlas's
 /// image of it, or the effect itself for one the atlas does not hold --
-/// masked by the CPU's coverage of the path -- see [`draw_coverage`] -- so
+/// masked by the CPU's coverage of the path -- see [`DeviceCoverage`] -- so
 /// that its edge is the CPU canvas's, as its shadow and its blur already
 /// are, made on the CPU -- see `Context2D::chain_input`. Drawn through the
 /// path, it took Ganesh's anti-aliasing instead, up to 125 levels from the
@@ -3841,43 +3851,86 @@ fn nearest() -> SamplingOptions {
 /// How the effect's image and the coverage are tiled: transparent outside.
 const DECAL: (TileMode, TileMode) = (TileMode::Decal, TileMode::Decal);
 
-/// Draws the CPU's coverage of `draw`'s path onto `target`, an alpha
-/// surface whose pixel `at` is the page's device pixel `origin`: the path
-/// under the draw's own paint -- its style, its stroke and its
-/// anti-aliasing -- in opaque white, which leaves at each pixel the
-/// coverage the CPU canvas's scan conversion hands its blend.
-///
-/// Clipped to the draw's `area`, which ends where the page does, so that a
-/// path crossing the page's edge is cut where the CPU canvas cuts it and
-/// nowhere else. Skia's analytic anti-aliasing cuts a path's edges at its
-/// clip's bounds and snaps the new ends to a quarter pixel, which moves
-/// the coverage along the whole edge: cut at the reach, a pixel past the
-/// page, a triangle crossing the page's right edge stood up to 52 levels
-/// from the CPU canvas, and unclipped in the atlas a path spilled into the
-/// slot beside it.
-fn draw_coverage(
-    target: &SkCanvas,
-    draw: &GradientPath,
-    at: IPoint,
-    origin: IPoint,
-) {
-    let mut paint = draw.paint.clone();
-    paint
-        .set_shader(None)
-        .set_color(Color::WHITE)
-        .set_blend_mode(BlendMode::SrcOver);
-    let shift = (at.x - origin.x, at.y - origin.y);
-    target.save();
-    target.clip_irect(draw.area.with_offset(shift), ClipOp::Intersect);
-    target.set_matrix(
-        &Matrix::concat(
-            &Matrix::translate((shift.0 as f32, shift.1 as f32)),
-            &draw.matrix,
-        )
-        .into(),
-    );
-    target.draw_path(&draw.path.lock(), &paint);
-    target.restore();
+/// The most bytes the surface of a [`DeviceCoverage`] takes, at one a
+/// pixel: an 8192 pixel square page's worth. Chosen rather than derived, so
+/// that a page up to that size draws its paths' edges through the effect,
+/// and a larger one holds no more than that while it plays. A path past it
+/// is drawn on the CPU, whose route is exact too -- see [`played_on_gpu`].
+const DEVICE_COVERAGE_BYTES: usize = 8192 * 8192;
+
+/// An alpha surface whose pixel (x, y) is the page's device pixel (x, y),
+/// which the CPU's coverage of a path is drawn onto under the draw's own
+/// matrix before its area is copied to where the GPU reads it, so that it
+/// is the CPU canvas's coverage to the byte.
+struct DeviceCoverage(Surface);
+
+impl DeviceCoverage {
+    /// Whether a surface reaching `extent` from the page's origin keeps to
+    /// [`DEVICE_COVERAGE_BYTES`].
+    fn fits(extent: ISize) -> bool {
+        let side = |n: i32| usize::try_from(n).ok();
+        side(extent.width)
+            .zip(side(extent.height))
+            .and_then(|(w, h)| w.checked_mul(h))
+            .is_some_and(|bytes| bytes <= DEVICE_COVERAGE_BYTES)
+    }
+
+    /// A surface reaching `extent` from the page's origin, where it
+    /// [`fits`](Self::fits) and is not empty.
+    fn new(extent: ISize) -> Option<Self> {
+        if extent.is_empty() || !Self::fits(extent) {
+            return None;
+        }
+        started::raster(&coverage_info(extent), None, None).map(Self)
+    }
+
+    /// Draws `draw`'s path in opaque white under its own paint -- its style,
+    /// its stroke and its anti-aliasing -- which leaves at each pixel the
+    /// coverage the CPU canvas's scan conversion hands its blend, and copies
+    /// the path's area to `target`'s pixel `to`. `None` where the area does
+    /// not lie on the surface.
+    ///
+    /// Clipped to the draw's `area`, so that the clear and the draw reach
+    /// only the pixels copied: cleared whole, the surface would cost every
+    /// path its whole extent. Where a path crosses the page's edge, its area
+    /// ends there and so does the surface, so it is cut where the CPU canvas
+    /// cuts it and nowhere else. Skia's analytic anti-aliasing cuts a path's
+    /// edges at its clip's bounds and snaps the new ends to a quarter pixel,
+    /// which moves the coverage along the whole edge: cut a pixel past the
+    /// page, a triangle crossing the page's right edge stood up to 52 levels
+    /// from the CPU canvas.
+    fn copy(
+        &mut self,
+        draw: &GradientPath,
+        target: &mut Surface,
+        to: IPoint,
+    ) -> Option<()> {
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+        // Re-check: cargo test skia_covers_a_curve_by_where_it_lies
+        //
+        // Skia's analytic anti-aliasing covers a curved edge by where on the
+        // device it lies, so the path is drawn at the page's own pixels and
+        // only the result is moved. Drawn into its slot under the draw's
+        // matrix moved by whole pixels, a disc stored 86 on a pixel where the
+        // CPU canvas stores 85 moved by (-4, -4), and 200 where it stores
+        // 208 moved by (110, 0) (#813). Were curves covered alike wherever
+        // they lie, the path could be drawn into its slot directly.
+        let mut paint = draw.paint.clone();
+        paint
+            .set_shader(None)
+            .set_color(Color::WHITE)
+            .set_blend_mode(BlendMode::SrcOver);
+        let canvas = self.0.canvas();
+        canvas.save();
+        canvas.clip_irect(draw.area, ClipOp::Intersect);
+        canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        canvas.set_matrix(&draw.matrix.into());
+        canvas.draw_path(&draw.path.lock(), &paint);
+        canvas.restore();
+        let drawn = self.0.peek_pixels()?.extract_subset(draw.area)?;
+        target.write_pixels_from_pixmap(&drawn, to);
+        Some(())
+    }
 }
 
 /// The CPU's coverage of `draw`'s path over `reach`, the page's device
@@ -3886,14 +3939,12 @@ fn draw_coverage(
 fn coverage_image(draw: &GradientPath, reach: IRect) -> Option<Image> {
     let mut surface =
         started::raster(&coverage_info(reach.size()), None, None)?;
-    let target = surface.canvas();
-    target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-    draw_coverage(
-        target,
+    surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+    DeviceCoverage::new(ISize::new(draw.area.right, draw.area.bottom))?.copy(
         draw,
-        IPoint::new(0, 0),
-        IPoint::new(reach.left, reach.top),
-    );
+        &mut surface,
+        IPoint::new(draw.area.left - reach.left, draw.area.top - reach.top),
+    )?;
     Some(surface.image_snapshot())
 }
 
@@ -8794,6 +8845,21 @@ mod tests {
         alpha
     }
 
+    #[test]
+    fn a_device_coverage_keeps_to_its_bytes() {
+        use super::{DEVICE_COVERAGE_BYTES, DeviceCoverage};
+        use skia_safe::ISize;
+        let side = (DEVICE_COVERAGE_BYTES as f64).sqrt() as i32;
+        assert_eq!((side as usize).pow(2), DEVICE_COVERAGE_BYTES);
+        assert!(DeviceCoverage::fits(ISize::new(side, side)));
+        assert!(!DeviceCoverage::fits(ISize::new(side + 1, side)));
+        assert!(!DeviceCoverage::fits(ISize::new(side, side + 1)));
+        assert!(!DeviceCoverage::fits(ISize::new(-1, side)));
+        assert!(!DeviceCoverage::fits(ISize::new(i32::MAX, i32::MAX)));
+        assert!(DeviceCoverage::new(ISize::new(0, side)).is_none());
+        assert!(DeviceCoverage::new(ISize::new(3, 2)).is_some());
+    }
+
     /// Skia's anti-aliasing covers a curved edge by where on the device it
     /// lies, not only by its shape: the same oval, moved down by a whole
     /// number of pixels -- every point exactly, on the 1/64 grid -- is
@@ -8804,7 +8870,9 @@ mod tests {
     /// layer in `Group::chain_content`, the bound `text_reach_tests` hold
     /// two placements to, and the entry in `docs/browser-differences.md`
     /// can go -- and the surface of its own `Group::played_at_source` plays
-    /// a canvas drawn in on, unless a cut still moves a path's coverage.
+    /// a canvas drawn in on, unless a cut still moves a path's coverage, and
+    /// the surface at the page's own pixels [`DeviceCoverage`] draws a
+    /// gradient path's coverage on.
     #[test]
     fn skia_covers_a_curve_by_where_it_lies() {
         let here = oval_at(0);
