@@ -33,12 +33,9 @@
 //!
 //! An image is such an effect too, read through [`image_bytes`]: a
 //! translucent image drawn `source-over` at whole pixels -- see
-//! `layer::OnGpu::Image` -- and the pixels of a plain layer, which a GPU
-//! canvas plays on a surface of its own and composites through
-//! [`composite_once`] rather than through the layer's restore -- see
-//! `layer::Group::played_exactly`. The draw's alpha is the coverage, as
-//! the CPU scales a source by its paint's alpha in the same `div255`
-//! (#837).
+//! `layer::OnGpu::Image` -- composited through [`composite_once`]. The
+//! draw's alpha is the coverage, as the CPU scales a source by its paint's
+//! alpha in the same `div255` (#837).
 //!
 //! [`float_over`] is the same composite for a source the CPU draws on its
 //! float pipeline, rounded once, which a layer takes from a raster of

@@ -7633,16 +7633,16 @@ mod overlapping_glyph_tests {
     /// composites unchanged. The canvas drawn in is a group whose own layer
     /// takes a second root inside the first, where its gradient is drawn
     /// over the transparent black of the source's own pixels. Those pixels
-    /// are then composited onto the page in the CPU's arithmetic, so the GPU
-    /// page stores the CPU page's bytes, the exact composite (#837). The
-    /// shadow stands within a level of the CPU's on the page itself, since
-    /// Metal composites any shadow at half precision, as
-    /// `docs/browser-differences.md` says, and the layer adds nothing to
-    /// that. Played inside the layer with no root, the shadowed gradient and
-    /// the text land apart from the page. The canvas drawn in with no root
-    /// is composited through Ganesh's own blend, and stands from the exact
-    /// composite only within 0.18 of a tie: its gradient lands alike inside
-    /// the layer, which starts transparent as the source's own pixels do.
+    /// are then composited onto the page: the CPU page stores the exact
+    /// composite, and Metal blends them at half precision, a level from it
+    /// only within 0.18 of a tie, as it blends any canvas drawn in (#837).
+    /// The shadow stands within a level of the CPU's on the page itself, for
+    /// the same reason, as `docs/browser-differences.md` says, and the layer
+    /// adds nothing to that. Played inside the layer with no root, the
+    /// shadowed gradient and the text land apart from the page. The canvas
+    /// drawn in lands as it does on its roots, since its group's layer
+    /// starts transparent, as the source's own pixels do: the roots it
+    /// takes cost a surface and a copy each and change none of its bytes.
     #[test]
     fn a_layer_holding_a_gradient_drawn_over_a_read_back_lands_as_the_page() {
         use crate::{
@@ -7782,27 +7782,25 @@ mod overlapping_glyph_tests {
                 let (cpu, _) = page(false, true, draw);
                 let off = zip(&cpu, &exact).filter(|(b, (e, _))| *b != e);
                 assert_eq!(off.count(), 0, "the CPU off the exact composite");
-                assert!(
-                    layered == cpu,
-                    "the GPU {} levels from the CPU",
-                    most_apart(&layered, &cpu)
+                let far = zip(&layered, &exact)
+                    .filter(|(b, (e, tie))| {
+                        b.abs_diff(*e) > 1 || (*b != e && *tie > 0.18)
+                    })
+                    .count();
+                assert_eq!(
+                    far, 0,
+                    "the GPU off the exact composite past a tie"
                 );
             }
             OWN_ROOTS.set(false);
             let (inside, _) = page(true, true, draw);
             OWN_ROOTS.set(true);
             match draw {
-                Draw::DrawnIn => {
-                    let far = zip(&inside, &exact)
-                        .filter(|(b, (e, tie))| {
-                            b.abs_diff(*e) > 1 || (*b != e && *tie > 0.18)
-                        })
-                        .count();
-                    assert_eq!(
-                        far, 0,
-                        "without a root, off the exact composite past a tie"
-                    );
-                }
+                Draw::DrawnIn => assert!(
+                    inside == direct,
+                    "{draw:?}: {} levels from the page without a root",
+                    most_apart(&inside, &direct)
+                ),
                 Draw::Shadowed | Draw::Text => assert!(
                     inside != direct,
                     "{draw:?}: inside the layer lands apart"
@@ -13911,8 +13909,8 @@ mod pattern_memory_tests {
 mod exact_composite_tests {
     //! Gradient paths on a GPU canvas composited `source-over` in the CPU's
     //! arithmetic, held for one snapshot of what they cover -- see
-    //! `context::exact_composite` (#783) -- and translucent images and plain
-    //! layers composited in it as well (#837).
+    //! `context::exact_composite` (#783) -- and translucent images
+    //! composited in it as well (#837).
     use super::*;
     use std::f32::consts::TAU;
 
@@ -14179,9 +14177,9 @@ mod exact_composite_tests {
         }
     }
 
-    /// The source the #837 scenes draw: a 400 by 160 CPU canvas holding a
-    /// translucent radial gradient interpolated in Oklab, whose pixels
-    /// stand at many alphas, near ties among them.
+    /// The canvas whose pixels the #837 scenes draw as an image: 400 by 160,
+    /// on the CPU, holding a translucent radial gradient interpolated in
+    /// Oklab, whose pixels stand at many alphas, near ties among them.
     fn translucent_source() -> Canvas {
         let stops = [
             stop(0.0, (200, 40, 90), 0.6),
@@ -14211,20 +14209,15 @@ mod exact_composite_tests {
     /// How a #837 scene draws its source.
     #[derive(Clone, Copy, Debug)]
     struct Drawn {
-        /// Drawn in with `drawCanvas` rather than as an image of its pixels.
-        canvas: bool,
-        /// Inside a `saveLayer`.
-        layer: bool,
         /// The `globalAlpha`.
         alpha: f32,
         /// The whole-pixel offset it is drawn at.
         at: f32,
-        /// Under [`CLIP`], set before the layer.
+        /// Under [`CLIP`].
         clipped: bool,
     }
 
-    /// The clip a clipped #837 scene draws under, on whole pixels: a layer
-    /// opened under it covers only it, so its surface starts at its corner.
+    /// The clip a clipped #837 scene draws under, on whole pixels.
     const CLIP: (f32, f32, f32, f32) = (150.0, 30.0, 90.0, 70.0);
 
     /// The bytes of a page on the GPU or the CPU filled with [`UNDER`] and
@@ -14243,19 +14236,8 @@ mod exact_composite_tests {
             ctx.rect(x, y, w, h);
             ctx.clip(FillRule::NonZero);
         }
-        if drawn.layer {
-            ctx.save_layer();
-        }
         ctx.set_global_alpha(drawn.alpha);
-        match drawn.canvas {
-            true => {
-                ctx.draw_canvas(&mut translucent_source(), drawn.at, drawn.at)
-            }
-            false => ctx.draw_image(image, drawn.at, drawn.at),
-        }
-        if drawn.layer {
-            ctx.restore();
-        }
+        ctx.draw_image(image, drawn.at, drawn.at);
         page.context()
             .get_image_data(0.0, 0.0, SOURCE_W, SOURCE_H)
             .expect("pixels")
@@ -14322,14 +14304,12 @@ mod exact_composite_tests {
             .collect()
     }
 
-    /// A translucent image drawn `source-over` at a whole pixel, and a
-    /// canvas holding one drawn in, store on a GPU page the bytes the CPU
-    /// page stores -- alone and inside a `saveLayer`, at a `globalAlpha` of
-    /// 1 and of 0.5, at 0,0, at 3,3 and at 3,3 under a clip whose corner a
-    /// layer's surface starts at -- and those are the CPU's eight-bit
-    /// composite, which the test models. Through Ganesh's own blend, Metal
-    /// parted from it by a level in 4,920 channels for the image and 1,224
-    /// for the canvas (#837).
+    /// A translucent image drawn `source-over` at a whole pixel stores on a
+    /// GPU page the bytes the CPU page stores -- at a `globalAlpha` of 1 and
+    /// of 0.5, at 0,0, at 3,3 and at 3,3 under a clip -- and those are the
+    /// CPU's eight-bit composite, which the test models. Through Ganesh's
+    /// own blend, Metal parted from it by a level in 4,920 channels at 1 and
+    /// 9,384 at 0.5, unclipped (#837).
     #[test]
     fn a_translucent_image_composites_as_the_cpu_does_on_the_gpu() {
         if !RenderingEngine::GPU.selectable() {
@@ -14338,32 +14318,19 @@ mod exact_composite_tests {
         }
         let (source, image) = source_pixels();
         let mut apart = vec![];
-        for canvas in [false, true] {
-            for layer in [false, true] {
-                for alpha in [1.0, 0.5] {
-                    for (at, clipped) in
-                        [(0.0, false), (3.0, false), (3.0, true)]
-                    {
-                        let drawn = Drawn {
-                            canvas,
-                            layer,
-                            alpha,
-                            at,
-                            clipped,
-                        };
-                        let cpu = drawn_over(false, drawn, &image);
-                        let gpu = drawn_over(true, drawn, &image);
-                        let model =
-                            composited(&source, alpha, at as usize, clipped);
-                        let count = |a: &[u8], b: &[u8]| {
-                            a.iter().zip(b).filter(|(a, b)| a != b).count()
-                        };
-                        let (cpu_off, gpu_off) =
-                            (count(&cpu, &model), count(&gpu, &cpu));
-                        if cpu_off + gpu_off > 0 {
-                            apart.push((drawn, cpu_off, gpu_off));
-                        }
-                    }
+        for alpha in [1.0, 0.5] {
+            for (at, clipped) in [(0.0, false), (3.0, false), (3.0, true)] {
+                let drawn = Drawn { alpha, at, clipped };
+                let cpu = drawn_over(false, drawn, &image);
+                let gpu = drawn_over(true, drawn, &image);
+                let model = composited(&source, alpha, at as usize, clipped);
+                let count = |a: &[u8], b: &[u8]| {
+                    a.iter().zip(b).filter(|(a, b)| a != b).count()
+                };
+                let (cpu_off, gpu_off) =
+                    (count(&cpu, &model), count(&gpu, &cpu));
+                if cpu_off + gpu_off > 0 {
+                    apart.push((drawn, cpu_off, gpu_off));
                 }
             }
         }

@@ -1895,10 +1895,20 @@ describe("Context2D", () => {
         const bytes = src.getImageData(0, 0, 80, 60, {
           alphaType: "premultiplied",
         });
+        const [cx, cy, r] = [80, 50, 25.3];
         const circle = (x) => {
           x.beginPath();
-          x.arc(80, 50, 25.3, 0, 2 * Math.PI);
+          x.arc(cx, cy, r, 0, 2 * Math.PI);
           x.clip();
+        };
+        // A GPU canvas composites the canvas drawn in through Ganesh's own
+        // blend and an image of its bytes in the CPU's arithmetic (#837):
+        // they agree wherever the clip covers a pixel whole, and may part by
+        // a level only where the circle's anti-aliased edge covers one in
+        // part.
+        const onTheEdge = (i) => {
+          const [x, y] = [((i >> 2) % 200) + 0.5, Math.floor(i / 800) + 0.5];
+          return Math.abs(Math.hypot(x - cx, y - cy) - r) < 1;
         };
         const cases = {
           "at a whole pixel": [() => {}, [40, 20]],
@@ -1919,7 +1929,14 @@ describe("Context2D", () => {
           };
           const drawn = land("drawCanvas", source),
             image = land("drawImage", bytes);
-          const apart = drawn.filter((v, i) => v !== image[i]).length;
+          const allowed = (v, i) =>
+            gpu &&
+            clip === circle &&
+            Math.abs(v - image[i]) <= 1 &&
+            onTheEdge(i);
+          const apart = drawn.filter(
+            (v, i) => v !== image[i] && !allowed(v, i),
+          ).length;
           assert.equal(apart, 0, `${name}, gpu ${gpu}: bytes apart`);
         }
       }

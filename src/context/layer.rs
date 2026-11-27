@@ -612,26 +612,20 @@ thread_local! {
     pub(crate) static BACKDROP_ROUTE: Cell<bool> = const { Cell::new(true) };
     /// Whether [`played_on_a_root`] plays a layer's entries on a surface of
     /// their own on this thread: off, every layer's entries play inside it,
-    /// where their runs are drawn by the GPU, and [`Group::played_exactly`]
-    /// leaves to that a layer whose entries read the page.
+    /// where their runs are drawn by the GPU.
     pub(crate) static OWN_ROOTS: Cell<bool> = const { Cell::new(true) };
     /// Whether [`Group::played_unlayered`] draws a plain group on this
     /// thread: off, every group composites through its layer, the reference
     /// the clips standing in for it are held to.
     pub(crate) static UNLAYERED: Cell<bool> = const { Cell::new(true) };
-    /// Whether [`Group::played_exactly`] composites a plain layer on a GPU
-    /// canvas in the CPU's arithmetic on this thread: off, it composites
-    /// through its restore, in Ganesh's own blend (#837).
-    pub(crate) static EXACT_LAYERS: Cell<bool> = const { Cell::new(true) };
     /// Whether [`drawn_as_bytes`] composites a translucent image on a GPU
     /// canvas in the CPU's arithmetic on this thread: off, Ganesh draws it
     /// as recorded, in its own blend (#837).
     pub(crate) static EXACT_IMAGES: Cell<bool> = const { Cell::new(true) };
     /// How many images [`drawn_as_bytes`] has composited on this thread.
     pub(crate) static IMAGES_AS_BYTES: Cell<usize> = const { Cell::new(0) };
-    /// How many layers' entries that read the page have been played on a
-    /// surface of their own on this thread, by [`played_on_a_root`] or
-    /// [`Group::composited_exactly`].
+    /// How many layers' entries [`played_on_a_root`] has played on a
+    /// surface of their own on this thread.
     pub(crate) static ROOTS_PLAYED: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -5484,164 +5478,6 @@ impl Group {
         drawn
     }
 
-    /// Composites the layer `source-over` onto a GPU canvas in the CPU's
-    /// arithmetic -- see [`exact_composite`] -- rather than through the
-    /// layer's restore, which Metal blends at half precision, a level off
-    /// within 0.18 of a tie (#837). Whether it did; where it did not,
-    /// nothing was drawn.
-    ///
-    /// The entries are played on a surface of their own over the clip's
-    /// bounds, as [`played_on_a_root`] plays them, and the surface's bytes
-    /// are then composited at the layer's alpha, a byte, as the CPU canvas
-    /// composites a layer: over one snapshot of what lies beneath on the
-    /// canvas's own surface, through a blender inside a layer.
-    ///
-    /// Only for a layer the CPU composites in that arithmetic: an eight-bit
-    /// page, a paint with no more than an alpha and `source-over`, and no
-    /// backdrop and no bounds of its own. The composite is drawn under the
-    /// canvas's clip, whose partial pixels along an edge off whole pixels
-    /// Ganesh still blends in its own stage.
-    ///
-    /// What it costs past the layer's own: a surface the size of the clip's
-    /// bounds from the layers [`chain::pool`] keeps, and a copy of what it
-    /// covers beneath.
-    fn played_exactly(
-        &self,
-        canvas: &SkCanvas,
-        rec: &LayerRec,
-        base: &Matrix,
-        within: Option<Rect>,
-    ) -> bool {
-        let paint = rec.pixels_paint.as_ref().or(rec.paint.as_ref());
-        let plain = paint.is_none_or(|paint| {
-            paint.as_blend_mode() == Some(BlendMode::SrcOver)
-                && paint.image_filter().is_none()
-                && paint.shader().is_none()
-                && paint.mask_filter().is_none()
-                && paint.color_filter().is_none()
-        });
-        if !plain
-            || rec.backdrop.is_some()
-            || rec.pixels_backdrop.is_some()
-            || rec.bounds.is_some()
-            || rec.one_image
-            || !blur_mask::on_gpu(canvas)
-            || !eight_bits(canvas)
-        {
-            return false;
-        }
-        #[cfg(test)]
-        if !EXACT_LAYERS.get()
-            || (!OWN_ROOTS.get()
-                && reads_the_page(
-                    &self.contents.layers,
-                    &Matrix::concat(base, &self.contents_matrix),
-                ))
-        {
-            return false;
-        }
-        let to_device = Matrix::concat(base, &self.matrix);
-        if to_device.has_perspective() {
-            return false;
-        }
-        canvas.save();
-        canvas.set_matrix(&to_device.into());
-        let crop = self.crop(canvas, Target::Pixels, &to_device);
-        if crop.is_none() {
-            self.confine(canvas, Target::Pixels, &to_device);
-        }
-        let drawn = self.composited_exactly(
-            canvas,
-            base,
-            crop.as_ref(),
-            within,
-            paint.map_or(1.0, Paint::alpha_f),
-        );
-        canvas.restore();
-        drawn
-    }
-
-    /// [`Self::played_exactly`] once the destination is applied: `crop`
-    /// where it cuts the entries, `within` the device rectangle the layer
-    /// is confined to, and `alpha` the layer's.
-    fn composited_exactly(
-        &self,
-        canvas: &SkCanvas,
-        base: &Matrix,
-        crop: Option<&Coverage>,
-        within: Option<Rect>,
-        alpha: f32,
-    ) -> bool {
-        let Some(clip) = canvas.device_clip_bounds() else {
-            return true;
-        };
-        let bounds = match within {
-            Some(within) => {
-                match IRect::intersect(&clip, &within.round_out()) {
-                    Some(bounds) => bounds,
-                    None => return true,
-                }
-            }
-            None => clip,
-        };
-        let Some((mut surface, key)) =
-            chain::layer_surface(canvas, Depth::Bytes, bounds)
-        else {
-            return false;
-        };
-        let origin = Point::new(bounds.left as f32, bounds.top as f32);
-        let entries = Matrix::concat(base, &self.contents_matrix);
-        {
-            let root = surface.canvas();
-            root.set_matrix(
-                &Matrix::concat(&Matrix::translate(-origin), &entries).into(),
-            );
-            let _root = OwnRoot::enter();
-            // A chain on the surface keeps its layers as it would on the
-            // canvas.
-            let _scope = pool::samples(canvas)
-                .map(|samples| LayerScope::open(root, samples));
-            play_entries(
-                &self.contents.layers,
-                &self.contents.features,
-                root,
-                Target::Pixels,
-            );
-            #[cfg(test)]
-            if OWN_ROOTS.get()
-                && reads_the_page(&self.contents.layers, &entries)
-            {
-                ROOTS_PLAYED.set(ROOTS_PLAYED.get() + 1);
-            }
-            if let Some(crop) = crop {
-                root.reset_matrix();
-                root.translate(-origin);
-                crop.multiply(root);
-            }
-        }
-        let played = surface.image_snapshot();
-        let effect =
-            exact_composite::image_bytes(&played, &Matrix::translate(origin));
-        let drawn = match effect {
-            Some(effect) => {
-                exact_composite::composite_once(
-                    canvas,
-                    bounds,
-                    effect,
-                    exact_composite::alpha_coverage(alpha),
-                    !InLayer::open(),
-                );
-                true
-            }
-            None => false,
-        };
-        drop(played);
-        if let Some(key) = key {
-            pool::keep(key, surface);
-        }
-        drawn
-    }
-
     /// Draws a canvas or a vector image drawn in onto `canvas` from a surface
     /// of its own, on a raster on the CPU, where `outer` maps the group's own
     /// coordinates to `canvas`'s pixels. Whether it did; where it did not,
@@ -6074,8 +5910,6 @@ impl Group {
             }
             (Composite::Layer(rec), Target::Pixels)
                 if self.played_unlayered(canvas, rec, &base) => {}
-            (Composite::Layer(rec), Target::Pixels)
-                if self.played_exactly(canvas, rec, &base, within) => {}
             (Composite::Layer(rec) | Composite::Chain { rec, .. }, target) => {
                 let to_device = Matrix::concat(&base, &self.matrix);
                 canvas.set_matrix(&to_device.into());

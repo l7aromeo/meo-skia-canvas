@@ -967,8 +967,9 @@ mod on_the_gpu {
     {
         // A glyph's image composites through the `globalAlpha` as its layer
         // did, which is Chrome's CPU canvas byte for byte. Metal blends it at
-        // half precision, as it blends any image under an alpha: a level from
-        // the CPU at most, and off the exact composite only near a tie.
+        // half precision, as it blends a canvas drawn in under an alpha: a
+        // level from the CPU at most, and off the exact composite only near
+        // a tie.
         // llvmpipe blends it at eight bits: two levels from the CPU at most,
         // and a level from the exact composite anywhere.
         // The exact composite is known where a glyph's bytes do not depend
