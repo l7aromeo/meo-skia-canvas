@@ -1671,6 +1671,72 @@ describe("Context2D", () => {
       assert.doesNotThrow(() => ctx.drawCanvas(image, 0, 0));
     });
 
+    test("drawCanvas() composites the source as its own pixels", () => {
+      // The source's putImageData replaces its pixels, transparent ones
+      // included; drawn in, those pixels leave the destination showing.
+      let srcCanvas = new Canvas(4, 4),
+        srcCtx = srcCanvas.getContext("2d");
+      srcCtx.fillStyle = "red";
+      srcCtx.fillRect(0, 0, 4, 4);
+      srcCtx.putImageData(srcCtx.createImageData(4, 2), 0, 2);
+
+      ctx.fillStyle = "blue";
+      ctx.fillRect(0, 0, 4, 4);
+      ctx.drawCanvas(srcCanvas, 0, 0);
+      assert.deepEqual(pixel(1, 1), [255, 0, 0, 255], "the red put");
+      assert.deepEqual(pixel(1, 3), [0, 0, 255, 255], "the page beneath");
+    });
+
+    test("drawCanvas() lands the canvas's own pixels at a whole pixel", () => {
+      // However a clip, a crop or the page's edge cuts it: its curves are
+      // covered as on the canvas itself, and composited exactly. The
+      // reference is the source's premultiplied bytes drawn as an image,
+      // which is RGBA -- on x86 not the page's own order, so Skia composites
+      // it through its raster pipeline, exactly, where an image in the
+      // page's order takes the sprite row, a level off in places.
+      for (const gpu of [false, true]) {
+        const source = new Canvas(80, 60),
+          src = source.getContext("2d");
+        source.gpu = gpu;
+        src.fillStyle = "rgba(0,0,0,0.8)";
+        src.beginPath();
+        src.ellipse(40, 30, 35, 22.5, 0.4, 0, 2 * Math.PI);
+        src.fill();
+        src.fillStyle = "rgba(200,80,30,0.6)";
+        src.fillRect(4, 4, 30, 30);
+        const bytes = src.getImageData(0, 0, 80, 60, {
+          alphaType: "premultiplied",
+        });
+        const circle = (x) => {
+          x.beginPath();
+          x.arc(80, 50, 25.3, 0, 2 * Math.PI);
+          x.clip();
+        };
+        const cases = {
+          "at a whole pixel": [() => {}, [40, 20]],
+          "cut by a circle": [circle, [40, 20]],
+          "cut by the page's edge": [() => {}, [-13, -7]],
+          cropped: [() => {}, [10, 8, 50, 40, 50, 28, 50, 40]],
+        };
+        for (const [name, [clip, coords]] of Object.entries(cases)) {
+          const land = (verb, what) => {
+            const page = new Canvas(200, 140),
+              x = page.getContext("2d");
+            page.gpu = gpu;
+            x.fillStyle = "rgb(40,120,200)";
+            x.fillRect(0, 0, 200, 140);
+            clip(x);
+            x[verb](what, ...coords);
+            return Array.from(x.getImageData(0, 0, 200, 140).data);
+          };
+          const drawn = land("drawCanvas", source),
+            image = land("drawImage", bytes);
+          const apart = drawn.filter((v, i) => v !== image[i]).length;
+          assert.equal(apart, 0, `${name}, gpu ${gpu}: bytes apart`);
+        }
+      }
+    });
+
     test("reset()", async () => {
       ctx.fillStyle = "green";
       ctx.scale(2, 2);

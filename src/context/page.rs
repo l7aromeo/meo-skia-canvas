@@ -48,10 +48,10 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Entries, GradientDraw, GradientPiece, GradientPixels, Group, Layer,
-            LayerRec, OnGpu, PatternDraw, RecordedCount, ReplayedText, Target,
-            TileScope, holds_a_cut, in_document_space, play_entries,
-            tiles_exactly,
+            DrawnIn, Entries, GradientDraw, GradientPiece, GradientPixels,
+            Group, Layer, LayerRec, OnGpu, PatternDraw, RecordedCount,
+            ReplayedText, Target, TileScope, holds_a_cut, in_document_space,
+            play_entries, tiles_exactly,
         },
         resident::{Place, SharedSurface},
     },
@@ -123,6 +123,38 @@ pub(crate) fn release_cached_pages() {
         entry.bytes = 0;
         entry.depth = 0;
     });
+}
+
+/// The colour type pixels of the library's own are drawn back onto a page
+/// in, as an image -- what a canvas drawn in plays on, see `in_own_type` in
+/// the layer module: their own, but for eight-bit pixels, which are drawn in
+/// the eight-bit type that is not [`ColorType::N32`].
+///
+/// Drawn source-over at a whole-pixel offset onto an `N32` page, an `N32`
+/// image takes Skia's sprite blitter, whose row rounds `d * (256 - sa) >> 8`
+/// on x86 -- 18,760 of the 65,536 pairs of destination and source alpha a
+/// level off the exact composite -- and is off on every CPU under an alpha.
+/// Any other pairing takes the raster pipeline, which lands the exact
+/// composite at full alpha everywhere. The test is the image's own colour
+/// type, which Skia does not fold away as it can a paint that changes
+/// nothing.
+///
+/// It is the type of the image and not of a surface drawn into: entries
+/// drawn on a surface in this type are rasterized by the raster pipeline,
+/// not the blitters that drew a page's own pixels, and land other bytes. So
+/// the pixels are made as a page's are and read out in this type.
+// UPSTREAM: skia-safe 0.156.0 -- #828 -- worked around
+// Re-check: cargo test a_canvas_drawn_in_at_a_whole_pixel_lands_its_own_pixels
+pub(crate) fn own_image_type(color_type: ColorType) -> ColorType {
+    match color_type {
+        ColorType::RGBA8888 | ColorType::BGRA8888 => {
+            match ColorType::N32 == ColorType::RGBA8888 {
+                true => ColorType::BGRA8888,
+                false => ColorType::RGBA8888,
+            }
+        }
+        other => other,
+    }
 }
 
 //
@@ -1290,20 +1322,39 @@ impl PageRecorder {
     /// which is where a run's is -- see [`Run`] -- so the run is closed and
     /// `f` recorded into the page's own recording, as every draw was before
     /// runs. The next draw frames that recording again.
-    pub fn append_unframed<F>(&mut self, f: F)
+    ///
+    /// A draw asking `features` of a vector backend is recorded as
+    /// [`Self::append_isolated`] records one, in an entry asking for them
+    /// apart from what was drawn before it, and the next ordinary draw closes
+    /// that entry: a put erases what lies beneath it under
+    /// `BlendMode::Clear`, which a document has to see to write it.
+    pub fn append_unframed<F>(&mut self, features: VectorFeatures, f: F)
     where
         F: Fn(&SkCanvas, Recording),
     {
-        if self.isolated.is_some() {
+        if self.isolated.is_some_and(|open| open != features) {
             self.flush();
         }
         self.close_run();
+        let marked = features.any();
+        if marked && self.isolated.is_none() {
+            self.file_current();
+        }
         self.fork_current();
         self.current().each(|canvas, recording| {
             canvas.restore_to_count(1);
             f(canvas, recording);
         });
         self.changed = true;
+        if marked {
+            match self.open.last_mut() {
+                Some(layer) => {
+                    layer.features = layer.features.with(features);
+                    layer.current_features = features;
+                }
+                None => self.isolated = Some(features),
+            }
+        }
         self.reframe();
     }
 
@@ -1741,6 +1792,7 @@ impl PageRecorder {
                 matrix: layer.matrix,
                 clip: layer.clip.as_ref().map(Path::serialize),
                 entries_clipped: true,
+                source: None,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
                 contents: Entries::new(layer.entries, layer.entry_features),
@@ -1758,19 +1810,22 @@ impl PageRecorder {
     }
 
     /// Files `contents` as a [`Group`] composited by `composite`, under the
-    /// transform and clip the recorder holds and inside `within` under that
-    /// transform, its entries played under `contents_matrix`; asking
-    /// `features` of a vector backend for the group as a whole, beside what
-    /// each of its entries asks. Filed where the recording
-    /// stands: on the page, or among the contents of the innermost open
-    /// layer.
+    /// transform and clip the recorder holds, its entries played under
+    /// `contents_matrix`; asking `features` of a vector backend for the group
+    /// as a whole, beside what each of its entries asks. Filed where the
+    /// recording stands: on the page, or among the contents of the innermost
+    /// open layer.
+    ///
+    /// `drawn_in` is where a canvas or a vector image drawn in lands, for a
+    /// group that is one: inside its destination under the recorder's
+    /// transform, landing the pixels it holds -- see [`DrawnIn`].
     ///
     /// `shift` moves the group in device space, both transforms with it, as
     /// a shadow is offset from what casts it.
     pub(crate) fn append_group(
         &mut self,
         composite: Composite,
-        within: Option<Rect>,
+        drawn_in: Option<DrawnIn>,
         contents_matrix: Matrix,
         contents: Entries,
         features: VectorFeatures,
@@ -1785,7 +1840,8 @@ impl PageRecorder {
             clip: self.clip.as_ref().map(Path::serialize),
             // Recorded by the caller under no clip of this page's.
             entries_clipped: false,
-            within,
+            source: drawn_in.map(|drawn_in| drawn_in.source),
+            within: drawn_in.map(|drawn_in| drawn_in.within),
             contents_matrix: Matrix::concat(&shift, &contents_matrix),
             contents,
         };
@@ -1883,6 +1939,7 @@ impl PageRecorder {
                     matrix: layer.matrix,
                     clip: layer.clip.as_ref().map(Path::serialize),
                     entries_clipped: true,
+                    source: None,
                     within: None,
                     contents_matrix: Matrix::new_identity(),
                     contents: Entries::new(contents, features),
@@ -9814,6 +9871,7 @@ mod tests {
             matrix: *matrix,
             clip: clip.map(Path::serialize),
             entries_clipped: false,
+            source: None,
             within: None,
             contents_matrix: Matrix::new_identity(),
             contents: Entries::plain(vec![Layer::Picture(contents.clone())]),
@@ -10054,6 +10112,7 @@ mod tests {
                 matrix: Matrix::new_identity(),
                 clip: None,
                 entries_clipped: false,
+                source: None,
                 within: None,
                 contents_matrix: Matrix::new_identity(),
                 contents: Entries::plain(vec![Layer::Picture(contents)]),
@@ -10570,6 +10629,7 @@ mod tests {
             matrix: Matrix::new_identity(),
             clip: None,
             entries_clipped: false,
+            source: None,
             within: None,
             contents_matrix: Matrix::new_identity(),
             contents: Entries::plain(vec![Layer::Picture(
@@ -10688,6 +10748,7 @@ mod tests {
                 matrix: Matrix::new_identity(),
                 clip: None,
                 entries_clipped: false,
+                source: None,
                 within: None,
                 contents_matrix,
                 contents: Entries::plain(contents),
@@ -11713,6 +11774,40 @@ mod tests {
                 "{reads} layers: copied"
             );
         }
+    }
+
+    /// An unframed draw asking for features is an entry of its own: what was
+    /// drawn before it, and what is drawn after it, ask for nothing.
+    #[test]
+    fn an_unframed_draw_asking_for_features_is_an_entry_apart() {
+        let clear =
+            VectorFeatures::BLEND_MODE.with(VectorFeatures::MASKED_BLEND);
+        let square = |canvas: &SkCanvas, _: Recording| {
+            canvas.draw_rect(Rect::from_wh(1.0, 1.0), &Paint::default());
+        };
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.append(square);
+        recorder.append_unframed(clear, square);
+        recorder.append_unframed(clear, square);
+        recorder.append(square);
+        assert_eq!(
+            *recorder.page().features,
+            [VectorFeatures::PLAIN, clear, VectorFeatures::PLAIN],
+            "on the page"
+        );
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.open_layer(LayerRec::default());
+        recorder.append(square);
+        recorder.append_unframed(clear, square);
+        recorder.append(square);
+        let Some(Layer::Group(group)) = recorder.open_layers_entry() else {
+            panic!("the open layer is a group");
+        };
+        assert_eq!(
+            *group.contents.features,
+            [VectorFeatures::PLAIN, clear, VectorFeatures::PLAIN],
+            "in a layer"
+        );
     }
 
     /// A page keeps what it was given while the recorder draws on, and a
