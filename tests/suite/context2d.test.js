@@ -1795,6 +1795,70 @@ describe("Context2D", () => {
       assert.doesNotThrow(() => ctx.drawCanvas(image, 0, 0));
     });
 
+    // A filter or a shadow on the destination spreads past the rectangle
+    // `drawCanvas` draws into, as it does past `drawImage`'s, which is what
+    // Chrome's `drawImage` does with one. At one to one the two land the
+    // same bytes, for a canvas replayed as its page and for one holding a
+    // drawn canvas, which is drawn as its pixels. The source fills its
+    // whole canvas, so a draw clipped to the destination leaves the pixels
+    // read outside it clear.
+    test("drawCanvas() spreads a filter or a shadow as drawImage() does", () => {
+      const SIDE = 60;
+      const AT = 70;
+      const PAGE = [220, 200];
+      const source = (/** @type {boolean} */ nesting) => {
+        const canvas = new Canvas(SIDE, SIDE);
+        canvas.gpu = false;
+        const c = canvas.getContext("2d");
+        c.fillStyle = "rgb(40,90,160)";
+        c.fillRect(0, 0, SIDE, SIDE);
+        if (nesting) {
+          const tiny = new Canvas(4, 4);
+          tiny.gpu = false;
+          tiny.getContext("2d").fillRect(0, 0, 4, 4);
+          c.drawImage(tiny, 0, 0);
+        }
+        return canvas;
+      };
+      /** @type {[string, (c: CanvasRenderingContext2D) => void, number][]} */
+      const effects = [
+        ["a blur", (c) => (c.filter = "blur(6px)"), AT - 3],
+        [
+          "a shadow",
+          (c) => {
+            c.shadowColor = "rgba(200,0,0,0.8)";
+            c.shadowBlur = 8;
+            c.shadowOffsetX = 30;
+          },
+          AT + SIDE + 10,
+        ],
+      ];
+      for (const [effect, set, outside] of effects) {
+        for (const nesting of [false, true]) {
+          const drawn = (/** @type {"drawCanvas" | "drawImage"} */ verb) => {
+            const page = new Canvas(...PAGE);
+            page.gpu = false;
+            const c = page.getContext("2d");
+            set(c);
+            c[verb](source(nesting), AT, AT);
+            return c.getImageData(0, 0, ...PAGE).data;
+          };
+          const what = `${effect}, ${nesting ? "nesting" : "plain"} source`;
+          const replayed = drawn("drawCanvas");
+          const row = (AT + SIDE / 2) * PAGE[0];
+          assert.ok(
+            replayed[(row + outside) * 4 + 3] > 0,
+            `${what}: reaches x ${outside}, outside the destination`,
+          );
+          assert.deepEqual(
+            replayed,
+            drawn("drawImage"),
+            `${what}: as drawImage`,
+          );
+        }
+      }
+    });
+
     test("reset()", async () => {
       ctx.fillStyle = "green";
       ctx.scale(2, 2);

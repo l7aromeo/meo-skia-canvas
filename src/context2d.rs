@@ -12226,3 +12226,116 @@ mod flatten_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod draw_canvas_spread_tests {
+    use super::*;
+
+    /// The source's side, which it fills, so that a draw clipped to the
+    /// destination leaves every pixel outside it clear.
+    const SIDE: u32 = 60;
+
+    /// Where the source is drawn, on both axes.
+    const AT: f32 = 70.0;
+
+    /// The page drawn into.
+    const PAGE: (f32, f32) = (220.0, 200.0);
+
+    /// Sets a blur or a shadow on the context drawn into.
+    type Effect = fn(&mut Context2D);
+
+    /// A CPU canvas filled with one colour, or that and a small canvas
+    /// drawn into it, which makes it nest: `draw_canvas` then draws it as
+    /// its pixels rather than as its page -- see `capture`.
+    fn source(nesting: bool) -> Canvas {
+        let mut canvas = Canvas::new(SIDE as f32, SIDE as f32);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, SIDE as f32, SIDE as f32);
+        if nesting {
+            let mut tiny = Canvas::new(4.0, 4.0);
+            tiny.set_gpu(false);
+            tiny.context().fill_rect(0.0, 0.0, 4.0, 4.0);
+            canvas.context().draw_canvas(&mut tiny, 0.0, 0.0);
+        }
+        canvas
+    }
+
+    fn pixels(canvas: &mut Canvas) -> Vec<u8> {
+        canvas
+            .to_image_data(None, &ImageDataExport::default())
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The alpha at (`x`, `y`) of `pixels`, a page's RGBA bytes.
+    fn alpha(pixels: &[u8], x: u32, y: u32) -> u8 {
+        pixels[((y * PAGE.0 as u32 + x) * 4 + 3) as usize]
+    }
+
+    /// A blur or a shadow on the destination spreads past the rectangle
+    /// `draw_canvas` draws into, as it does past `draw_image`'s for an image
+    /// of the same canvas, which is what Chrome's `drawImage` does with one,
+    /// and at one to one the two land the same bytes.
+    #[test]
+    fn a_canvas_drawn_in_spreads_a_blur_or_a_shadow_as_its_image_does() {
+        let effects: [(&str, Effect, u32); 2] = [
+            (
+                "a blur",
+                |ctx| {
+                    ctx.set_filter(&[FilterOp::Blur(6.0)])
+                        .expect("a blur is a filter")
+                },
+                AT as u32 - 3,
+            ),
+            (
+                "a shadow",
+                |ctx| {
+                    ctx.set_shadow_color_css("rgba(200,0,0,0.8)")
+                        .expect("a colour");
+                    ctx.set_shadow_blur(8.0);
+                    ctx.set_shadow_offset(30.0, 0.0);
+                },
+                AT as u32 + SIDE + 10,
+            ),
+        ];
+        for (effect, set, outside) in effects {
+            for nesting in [false, true] {
+                let what = format!(
+                    "{effect}, {} source",
+                    if nesting { "nesting" } else { "plain" }
+                );
+                let mut drawn = source(nesting);
+                let image = Image::from_pixels(
+                    &pixels(&mut drawn),
+                    SIDE,
+                    SIDE,
+                    4 * SIDE as usize,
+                    PixelExportOptions::default(),
+                )
+                .expect("an image");
+                let page = |draw: &dyn Fn(&mut Context2D)| {
+                    let mut page = Canvas::new(PAGE.0, PAGE.1);
+                    page.set_gpu(false);
+                    let ctx = page.context();
+                    set(ctx);
+                    draw(ctx);
+                    pixels(&mut page)
+                };
+                let replayed =
+                    page(&|ctx| ctx.draw_canvas(&mut source(nesting), AT, AT));
+                let row = AT as u32 + SIDE / 2;
+                assert!(
+                    alpha(&replayed, outside, row) > 0,
+                    "{what}: reaches x {outside}, outside the destination"
+                );
+                assert!(
+                    replayed == page(&|ctx| ctx.draw_image(&image, AT, AT)),
+                    "{what}: as an image of the canvas"
+                );
+            }
+        }
+    }
+}

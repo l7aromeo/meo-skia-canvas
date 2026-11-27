@@ -3819,19 +3819,14 @@ export interface CanvasDrawImage {
    * own pixels writes what it drew until then as those pixels too, and what
    * it draws after as before.
    *
-   * The replay is clipped to the destination rectangle, so anything that
-   * spreads -- an `imageFilter` blur, a shadow -- stops at its edge instead of
-   * bleeding past it the way it does through `drawImage`. Give the destination
-   * room if you want the spread. This is inherited behaviour rather than a
-   * rule the Canvas standard sets: `drawCanvas` has no standard counterpart,
-   * and `drawImage` does let a filter spread.
+   * A `filter` or a shadow set on this context spreads past the destination
+   * rectangle as it does through `drawImage`.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   drawCanvas(image: Canvas, dx: number, dy: number): void;
   /**
-   * As above, scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`), and
-   * clipped to it.
+   * As above, scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`).
    *
    * 🧪 Not in the HTML Canvas standard.
    */
