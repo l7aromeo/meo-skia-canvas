@@ -170,18 +170,18 @@ pub(crate) const CONTEXT_BYTES: usize = 4_800;
 pub(crate) const DOCUMENT_REPLAY_BUDGET: usize = 64;
 
 /// How many pages of its own pixels a page's entries may hold in images of
-/// other canvases before the page lets go of them -- see
-/// `PageRecorder::flatten`.
+/// other canvases, and in the rasters of the patterns of them they draw
+/// from, before the page lets go of them -- see `PageRecorder::flatten`.
 ///
 /// Chosen rather than derived: past it a page holds one page of pixels for
 /// what it drew, so a page never cleared that keeps drawing changing
-/// canvases in levels off at a few pages, where it held a page for every
-/// draw. Below it what the page drew itself stays entries, which a read at
-/// another density draws at that density; past it they are the base's
-/// pixels, scaled there. The images a document of the page holds count
-/// too -- canvases drawn in past [`DOCUMENT_REPLAY_BUDGET`] -- and a flatten
-/// that would keep more than this in them with the base writes the
-/// document as the base as well.
+/// canvases in, or filling with patterns of them, levels off at a few
+/// pages, where it held a page for every draw. Below it what the page drew
+/// itself stays entries, which a read at another density draws at that
+/// density; past it they are the base's pixels, scaled there. The images a
+/// document of the page holds count too -- canvases drawn in past
+/// [`DOCUMENT_REPLAY_BUDGET`] -- and a flatten that would keep more than
+/// this in them with the base writes the document as the base as well.
 pub(crate) const RECORDED_IMAGE_PAGES: usize = 4;
 
 /// What a document plays of a canvas drawn into another -- see
@@ -724,8 +724,9 @@ impl Context2D {
     /// multisample buffer with them -- see
     /// `page::RecordingSurface::budgeted_bytes` -- its recording -- see
     /// [`PageRecorder::recorded_bytes`] -- the images the recording holds
-    /// that no other object reports -- see
-    /// [`PageRecorder::held_image_bytes`] -- and itself, [`CONTEXT_BYTES`].
+    /// that no other object reports, and the rasters of the patterns it
+    /// draws from -- see [`PageRecorder::held_image_bytes`] -- and itself,
+    /// [`CONTEXT_BYTES`].
     ///
     /// Called by the binding as the context is made, after a read, which
     /// builds the page surface or its tiles and files what was drawn, and
@@ -1450,17 +1451,20 @@ impl Context2D {
         F: Fn(&SkCanvas, &Paint, Pass),
     {
         let lines = text.as_ref().is_some_and(|text| text.lines);
-        if self.files_through_pattern(paint, features, replay, lines, &f)
-            || self.files_through_chain(
-                paint,
-                exact,
-                features,
-                text.as_ref(),
-                cpu_bytes.is_some(),
-                &f,
-                None,
-            )
-        {
+        if self.files_through_pattern(paint, features, replay, lines, &f) {
+            // What the pattern holds, the page now holds too.
+            self.flatten_past_budget();
+            return;
+        }
+        if self.files_through_chain(
+            paint,
+            exact,
+            features,
+            text.as_ref(),
+            cpu_bytes.is_some(),
+            &f,
+            None,
+        ) {
             return;
         }
         let paint_for = |recording: Recording| match (recording, exact) {
@@ -4900,11 +4904,12 @@ impl Context2D {
     }
 
     /// Flattens the page -- see `PageRecorder::flatten` -- where the images
-    /// its entries hold come to more than [`RECORDED_IMAGE_PAGES`] of its
-    /// own pixels at density 1 and no layer is open: a layer's entries are
+    /// its entries hold, with the rasters of the patterns they draw from,
+    /// come to more than [`RECORDED_IMAGE_PAGES`] of its own pixels at
+    /// density 1 and no layer is open: a layer's entries are
     /// composited when it closes, and the base would have to stand beneath
     /// them.
-    fn flatten_past_budget(&mut self) {
+    fn flatten_past_budget(&self) {
         if self.layers.iter().any(|opened| *opened) {
             return;
         }

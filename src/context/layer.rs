@@ -356,29 +356,59 @@ impl Layer {
             Layer::Group(group) => group.contents.held_images(each),
             Layer::Clipped(piece) => piece.entry.held_images(each),
             Layer::Split(split) => split.held_images(each),
+            Layer::Pattern(draw) => draw.source.held_images(each),
             Layer::Picture(_)
             | Layer::Blur(_)
             | Layer::Targeted(_)
             | Layer::Cut(_)
             | Layer::Gradient(_)
-            | Layer::Pattern(_)
+            | Layer::Deferred(_)
+            | Layer::ReplayedText(_) => {}
+        }
+    }
+
+    /// Calls `each` with the page of every pattern this entry draws from --
+    /// see [`TileSource`] -- once for each time it draws from it.
+    pub(crate) fn tile_sources(&self, each: &mut dyn FnMut(&Arc<TileSource>)) {
+        match self {
+            Layer::Group(group) => group
+                .contents
+                .layers
+                .iter()
+                .for_each(|layer| layer.tile_sources(each)),
+            Layer::Clipped(piece) => piece.entry.tile_sources(each),
+            Layer::Split(split) => split
+                .pixels
+                .layers
+                .iter()
+                .chain(split.document.layers.iter())
+                .for_each(|layer| layer.tile_sources(each)),
+            Layer::Pattern(draw) => each(&draw.source),
+            Layer::Picture(_)
+            | Layer::Blur(_)
+            | Layer::Targeted(_)
+            | Layer::Cut(_)
+            | Layer::Gradient(_)
             | Layer::Deferred(_)
             | Layer::ReplayedText(_) => {}
         }
     }
 }
 
-/// The bytes the pictures of one generation of a page's recording hold --
-/// see [`PageRecorder::recorded_bytes`](super::page::PageRecorder::recorded_bytes)
-/// -- added to as each entry is filed and as each picture recorded when first
-/// played is recorded. Shared with those pictures, which an export can
-/// record on another thread.
+/// The bytes one generation of a page's recording holds of one kind: its
+/// pictures -- see
+/// [`PageRecorder::recorded_bytes`](super::page::PageRecorder::recorded_bytes)
+/// -- or the rasters of the patterns its entries draw from -- see
+/// [`TileSource::count_raster_into`]. Added to as each entry is filed and as
+/// each picture or raster made when first played is made, and moved as a
+/// raster is replaced. Shared with those pictures and patterns, which an
+/// export can play on another thread.
 ///
 /// `Relaxed` throughout: the count is a figure told to the JavaScript
 /// engine, and nothing is published through it -- no thread reads a picture
-/// because it read the count. Every addition to one atomic falls in a single
+/// because it read the count. Every change to one atomic falls in a single
 /// order, so none is lost; a report made while another thread records may
-/// miss that one picture, which the next report counts.
+/// miss that one picture or raster, which the next report counts.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RecordedCount(Arc<AtomicUsize>);
 
@@ -398,7 +428,8 @@ impl RecordedCount {
     }
 }
 
-/// A [`RecordedCount`] held weakly, by a [`LazyPicture`] filed into it.
+/// A [`RecordedCount`] held weakly, by a [`LazyPicture`] or a [`TileSource`]
+/// filed into it.
 #[derive(Debug)]
 struct WeakCount(Weak<AtomicUsize>);
 
@@ -416,6 +447,14 @@ impl WeakCount {
     fn add(&self, bytes: usize) {
         if let Some(count) = self.0.upgrade() {
             count.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Moves the count from `was` bytes to `now`, where it still counts.
+    fn adjust(&self, was: usize, now: usize) {
+        if let Some(count) = self.0.upgrade() {
+            count.fetch_add(now, Ordering::Relaxed);
+            count.fetch_sub(was, Ordering::Relaxed);
         }
     }
 }
@@ -1783,23 +1822,121 @@ const SCALE_SLACK: f32 = 1.0 / 1024.0;
 /// resampled, and on a platform whose native colour type is BGRA8888 a
 /// translucent edge blits a level apart from the page's -- see
 /// `a_picture_shader_tile_blits_as_rgba`.
+///
+/// What it holds is held by every page a draw dyed by it is filed into, and
+/// counted there: the images its page holds and the one it paints a
+/// document with -- see [`Self::held_images`] -- and the raster it makes,
+/// which a page counts once however many of its draws the pattern dyes --
+/// see [`Self::count_raster_into`] and [`Self::budget_bytes`].
 #[derive(Debug)]
 pub struct TileSource {
     page: Page,
     /// What the page is rasterized with: its own colour space, format and
     /// glyph settings. The density is set for each raster.
     options: ExportOptions,
+    /// The images the pattern holds that no picture counts, each once: the
+    /// one it paints a document with besides the page, where it holds one
+    /// -- a nesting canvas's own pixels, see `CanvasPattern::of_page` --
+    /// and those the page holds. Collected as the pattern is made, since the
+    /// page it was taken as never changes, so that filing a draw dyed by it
+    /// does not walk the page again.
+    held: Box<[HeldImage]>,
     /// The raster made last on the CPU, and the density it was made at.
     raster: Mutex<Option<(u32, Image)>>,
+    /// Each page's counts the pattern was filed into, once each, held
+    /// weakly: of rasters, which a raster made or replaced moves by its
+    /// bytes, and of the pages they take toward the page's budget, which
+    /// the first raster made adds to -- see [`Self::count_raster_into`].
+    counted_by: Mutex<Vec<(WeakCount, WeakCount)>>,
 }
 
 impl TileSource {
-    /// `page`, rasterized with `options` at whatever density a draw asks.
-    pub fn new(page: Page, options: ExportOptions) -> Self {
+    /// `page`, rasterized with `options` at whatever density a draw asks,
+    /// beside `image`, which the pattern holds besides the page.
+    pub(crate) fn new(
+        page: Page,
+        options: ExportOptions,
+        image: Option<HeldImage>,
+    ) -> Self {
+        let mut held: Vec<HeldImage> = image.into_iter().collect();
+        page.layers.iter().for_each(|layer| {
+            layer.held_images(&mut |image| {
+                if !held.iter().any(|seen| seen.id == image.id) {
+                    held.push(image);
+                }
+            })
+        });
         Self {
             page,
             options,
+            held: held.into(),
             raster: Mutex::new(None),
+            counted_by: Mutex::default(),
+        }
+    }
+
+    /// Calls `each` with every image the pattern holds that no picture
+    /// counts, each once: the one it paints a document with, and those its
+    /// page holds -- see [`Layer::held_images`] -- which the canvas it was
+    /// made from stops counting once it moves on.
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        self.held.iter().for_each(|image| each(*image));
+    }
+
+    /// The bytes of the raster the pattern makes on the CPU at density 1.
+    fn page_bytes(&self) -> usize {
+        let dims = self.page.scaled_dimensions(1.0);
+        self.options
+            .compositing_info(dims, &self.options.surface_color_space)
+            .compute_min_byte_size()
+    }
+
+    /// What the pattern's raster takes toward the budget of a page holding
+    /// it, which is in pages of its own pixels at density 1 -- see
+    /// `RECORDED_IMAGE_PAGES`: the raster's bytes at density 1 once one is
+    /// made on the CPU, whatever density it was made at, so that a page
+    /// read at density 3 is not let go of for the nine pages a raster made
+    /// there takes; nothing before, and nothing for a pattern drawn only on
+    /// the GPU, whose rasters last one playback -- see [`TileScope`].
+    pub(crate) fn budget_bytes(&self) -> usize {
+        match self.raster.lock().is_some() {
+            true => self.page_bytes(),
+            false => 0,
+        }
+    }
+
+    /// The bytes of the raster the pattern holds, 0 before it makes one.
+    pub(crate) fn raster_bytes(&self) -> usize {
+        self.raster
+            .lock()
+            .as_ref()
+            .and_then(|(_, image)| HeldImage::of(image))
+            .map_or(0, |held| held.bytes)
+    }
+
+    /// Has a page hold the pattern's raster: `rasters` its bytes now and
+    /// the change each raster made after brings, and `budget` what it takes
+    /// toward the page's budget -- see [`Self::budget_bytes`] -- now, or
+    /// once the first is made. Once for each page, however many times it
+    /// is asked with its counts, since a page holds one raster of the
+    /// pattern however many of its draws it dyes.
+    pub(crate) fn count_raster_into(
+        &self,
+        rasters: &RecordedCount,
+        budget: &RecordedCount,
+    ) {
+        // The raster's lock first, as `Self::raster` takes the two, so that
+        // no raster is made between the bytes added and the counts held.
+        let raster = self.raster.lock();
+        let mut counts = self.counted_by.lock();
+        counts.retain(|(held, _)| !held.is_gone());
+        if counts.iter().any(|(held, _)| held.holds(rasters)) {
+            return;
+        }
+        counts.push((rasters.weak(), budget.weak()));
+        if let Some((_, image)) = raster.as_ref() {
+            rasters.add(HeldImage::of(image).map_or(0, |held| held.bytes));
+            budget.add(self.page_bytes());
         }
     }
 
@@ -1844,7 +1981,22 @@ impl TileSource {
         };
         let image =
             self.page.rasterized(&options, RenderingEngine::CPU).ok()?;
+        let bytes = |raster: Option<&Image>| {
+            raster.and_then(HeldImage::of).map_or(0, |held| held.bytes)
+        };
+        let (first, was, now) = (
+            held.is_none(),
+            bytes(held.as_ref().map(|(_, image)| image)),
+            bytes(Some(&image)),
+        );
         *held = Some((density, image.clone()));
+        let page = self.page_bytes();
+        self.counted_by.lock().iter().for_each(|(rasters, budget)| {
+            rasters.adjust(was, now);
+            if first {
+                budget.add(page);
+            }
+        });
         Some(image)
     }
 

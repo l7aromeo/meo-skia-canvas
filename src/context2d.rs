@@ -13198,3 +13198,242 @@ mod decoded_blit_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod pattern_memory_tests {
+    //! A page filled with patterns of a canvas counts what each pattern's
+    //! draw holds -- the raster of the canvas's page it is drawn from, the
+    //! image a nesting canvas's pattern paints a document with, and the
+    //! images the page it was made from holds -- and lets them go for its
+    //! own pixels past its budget, as it does a canvas drawn into it.
+    use super::*;
+    use crate::{
+        canvas::EngineKind, context::RECORDED_IMAGE_PAGES,
+        pattern::PatternRepeat,
+    };
+
+    /// The pages' side.
+    const SIDE: (f32, f32) = (120.0, 80.0);
+    /// The bytes a page of `SIDE` takes at four to a pixel.
+    const PAGE: usize = (SIDE.0 * SIDE.1) as usize * 4;
+    /// Frames drawn, enough for several flattens.
+    const FRAMES: usize = 24;
+    /// The side of the canvas a nesting source draws in.
+    const INNER: f32 = 8.0;
+
+    fn cpu(side: (f32, f32)) -> Canvas {
+        let mut canvas = Canvas::new(side.0, side.1);
+        canvas.set_gpu(false);
+        canvas
+    }
+
+    /// A canvas drawn as its own pixels wherever it is drawn in: it holds
+    /// a canvas drawn in itself -- see `capture`.
+    fn nesting_inner() -> Canvas {
+        let mut tiny = cpu((2.0, 2.0));
+        tiny.context().fill_rect(0.0, 0.0, 2.0, 2.0);
+        let mut inner = cpu((INNER, INNER));
+        inner.context().fill_rect(0.0, 0.0, INNER, INNER);
+        inner.context().draw_canvas(&mut tiny, 0.0, 0.0);
+        inner
+    }
+
+    /// The source changed for frame `n`: filled over, and, where it
+    /// `nests`, a canvas drawn in that it then holds the image of.
+    fn change(source: &mut Canvas, inner: &mut Canvas, n: usize, nests: bool) {
+        let ctx = source.context();
+        ctx.set_fill_style(RgbaLinear::opaque((n % 7) as f32 / 7.0, 0.4, 0.8));
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        if nests {
+            ctx.draw_canvas(inner, 0.0, 0.0);
+        }
+    }
+
+    /// `dest` filled at half alpha with a new pattern of `source`, then a
+    /// pixel of it read, which plays the fill and so rasterizes the tile.
+    fn fill(dest: &mut Canvas, source: &mut Canvas) {
+        let ctx = dest.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(source, PatternRepeat::Repeat);
+        ctx.set_global_alpha(0.5);
+        ctx.set_fill_pattern(&pattern);
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a pixel");
+    }
+
+    /// What the page counts as held beside its pictures, and what it
+    /// flattens past -- see `PageRecorder::held_entry_bytes`.
+    fn held(canvas: &mut Canvas) -> (usize, usize) {
+        let mut bytes = (0, 0);
+        canvas.context().inner.with_recorder(|recorder| {
+            bytes = (recorder.held_image_bytes(), recorder.held_entry_bytes());
+        });
+        bytes
+    }
+
+    /// What the page tells the engine its patterns' rasters take.
+    fn rasters(canvas: &mut Canvas) -> usize {
+        let mut bytes = 0;
+        canvas.context().inner.with_recorder(|recorder| {
+            bytes = recorder.pattern_raster_bytes();
+        });
+        bytes
+    }
+
+    /// A page filled with a new pattern of a changing canvas every frame
+    /// counts each frame's raster, and for a nesting canvas its image too,
+    /// and levels off. Uncounted, a page held a raster a frame and told the
+    /// engine none of it; counted without the flatten, it grew a page a
+    /// frame.
+    #[test]
+    fn a_page_filled_with_a_new_pattern_every_frame_levels_off() {
+        for nests in [false, true] {
+            let mut source = cpu(SIDE);
+            let mut inner = nesting_inner();
+            let mut dest = cpu(SIDE);
+            let (mut flattened, mut last) = (0, 0);
+            for n in 0..FRAMES {
+                change(&mut source, &mut inner, n, nests);
+                fill(&mut dest, &mut source);
+                let (now, entries) = held(&mut dest);
+                // The first frame's pattern: its raster at density 1, and
+                // for a nesting canvas its image and the image its page
+                // holds.
+                if n == 0 {
+                    let inner = (INNER * INNER) as usize * 4;
+                    assert_eq!(
+                        entries,
+                        if nests { 2 * PAGE + inner } else { PAGE },
+                        "nests {nests}: the first frame's pattern"
+                    );
+                }
+                // The budget, the frame's raster made after the flatten
+                // was weighed, and the page's own image.
+                assert!(
+                    now <= (RECORDED_IMAGE_PAGES + 2) * PAGE,
+                    "nests {nests}, frame {n}: {now} bytes held"
+                );
+                if entries < last {
+                    flattened += 1;
+                }
+                last = entries;
+            }
+            assert!(
+                flattened >= 3,
+                "nests {nests}: {flattened} flattens in {FRAMES} frames"
+            );
+        }
+    }
+
+    /// One pattern filled again and again is one raster, counted once.
+    #[test]
+    fn a_pattern_filled_again_is_counted_once() {
+        let mut source = cpu(SIDE);
+        source.context().fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        let mut dest = cpu(SIDE);
+        let ctx = dest.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        ctx.set_fill_pattern(&pattern);
+        (0..10).for_each(|n| {
+            ctx.fill_rect(n as f32, 0.0, 30.0, 30.0);
+        });
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a pixel");
+        assert_eq!(rasters(&mut dest), PAGE, "one raster of one page");
+        assert_eq!(held(&mut dest).1, PAGE, "one page toward the budget");
+    }
+
+    /// A pattern rasterized at one density and then another holds the
+    /// second, and is counted as it now is: four pages at density 2, not
+    /// those and the page it held before. Toward the budget, which is in
+    /// pages at density 1, it is one page at any density.
+    #[test]
+    fn a_pattern_rasterized_again_is_counted_as_it_now_is() {
+        let mut source = cpu(SIDE);
+        source.context().fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        let mut dest = cpu(SIDE);
+        let ctx = dest.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        ctx.set_fill_pattern(&pattern);
+        ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+        ctx.scale(2.0, 2.0);
+        ctx.fill_rect(20.0, 0.0, 30.0, 30.0);
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a pixel");
+        assert_eq!(rasters(&mut dest), 4 * PAGE, "the raster at density 2");
+        assert_eq!(held(&mut dest).1, PAGE, "the raster at density 1");
+    }
+
+    /// A pattern first rasterized at density 3 takes one page toward the
+    /// budget, as one made at density 1 does, and the nine its raster holds
+    /// toward what the engine is told.
+    #[test]
+    fn a_pattern_first_rasterized_at_density_3_takes_one_page() {
+        let mut source = cpu(SIDE);
+        source.context().fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        let mut dest = cpu(SIDE);
+        let ctx = dest.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        ctx.set_fill_pattern(&pattern);
+        ctx.scale(3.0, 3.0);
+        ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("a pixel");
+        assert_eq!(rasters(&mut dest), 9 * PAGE, "the raster at density 3");
+        assert_eq!(held(&mut dest).1, PAGE, "one page toward the budget");
+    }
+
+    /// A pattern of a nesting canvas holds the canvas's image, which a
+    /// document paints it with, and the page it was made from, which holds
+    /// the image of the canvas drawn into it. Both are counted where the
+    /// pattern is filled, once the canvas has moved on and counts neither.
+    /// Nothing has played the fill, so no raster is made or counted.
+    #[test]
+    fn a_pattern_counts_the_images_its_page_holds() {
+        let mut source = cpu(SIDE);
+        let mut inner = nesting_inner();
+        source.context().draw_canvas(&mut inner, 0.0, 0.0);
+        let mut dest = cpu(SIDE);
+        let ctx = dest.context();
+        let pattern =
+            ctx.create_pattern_from_canvas(&mut source, PatternRepeat::Repeat);
+        ctx.set_fill_pattern(&pattern);
+        ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+        // The source erased: it holds neither image now.
+        source.context().fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        let image = (INNER * INNER) as usize * 4;
+        assert_eq!(
+            held(&mut dest).1,
+            PAGE + image,
+            "the source's image and the image its page held"
+        );
+        assert_eq!(rasters(&mut dest), 0, "no raster before a playback");
+    }
+
+    /// A GPU page draws a pattern from a texture that lasts the one
+    /// playback, so it holds no raster and counts none: filled with more
+    /// patterns than its budget holds pages, it is never let go of for
+    /// them. Counted as a CPU page's would be, it flattened at the fifth.
+    #[test]
+    fn a_gpu_page_counts_no_raster_for_its_patterns() {
+        let mut probe = Canvas::new(4.0, 4.0);
+        probe.set_gpu(true);
+        if probe.engine_kind() != EngineKind::Gpu {
+            return;
+        }
+        let mut source = cpu(SIDE);
+        let mut inner = nesting_inner();
+        let mut dest = Canvas::new(SIDE.0, SIDE.1);
+        dest.set_gpu(true);
+        for n in 0..2 * RECORDED_IMAGE_PAGES {
+            change(&mut source, &mut inner, n, false);
+            fill(&mut dest, &mut source);
+            assert_eq!(rasters(&mut dest), 0, "frame {n}: no raster held");
+            assert_eq!(
+                held(&mut dest).1,
+                0,
+                "frame {n}: nothing toward the budget"
+            );
+        }
+    }
+}

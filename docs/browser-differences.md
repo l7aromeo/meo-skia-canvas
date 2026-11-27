@@ -1955,6 +1955,20 @@ another density what the page drew before the flatten is that image scaled,
 where it was drawn at that density. A browser has no density to export at, so
 there is nothing to compare.
 
+A page filled again and again with patterns of a changing canvas flattens the
+same way. Each such pattern holds the canvas's page as it stood, the raster a
+CPU page draws it from, and for a canvas holding a drawn canvas that canvas's
+own pixels; the page counts the images once each by identity, and each
+pattern's raster as a page of the pattern's canvas at density 1, whatever
+density it was made at and only once it is made on the CPU, toward the same
+budget (`TileSource::budget_bytes`). A 400 by 300 CPU canvas filled at half
+alpha with a new pattern of a 400 by 300 CPU canvas each frame, collected after
+each frame, grows 9 MB over 300 frames where it grew 144 MB, and 15 MB where
+the source holds a drawn canvas, where it grew 284 MB. Run as one synchronous
+loop it still grows about a page a frame until the loop yields: each pattern
+object keeps its own raster and pixels until Node finalizes it, which waits for
+the event loop.
+
 A PDF or an SVG of such a page writes what it drew as vectors and text through
 every flatten, from the entries a document plays of each draw
 (`a_flattened_page_is_written_from_every_draw`), with one exception. A canvas

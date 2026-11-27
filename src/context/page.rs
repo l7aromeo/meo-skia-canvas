@@ -50,8 +50,8 @@ use crate::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
             DrawnIn, Entries, GradientDraw, GradientPiece, GradientPixels,
             Group, HeldImage, Layer, LayerRec, OnGpu, PatternDraw,
-            RecordedCount, ReplayedText, Split, Target, TileScope, holds_a_cut,
-            in_document_space, play_entries, tiles_exactly,
+            RecordedCount, ReplayedText, Split, Target, TileScope, TileSource,
+            holds_a_cut, in_document_space, play_entries, tiles_exactly,
         },
         resident::{Place, SharedSurface},
         tile_cuts::{InteriorSides, TileCuts, TileReach},
@@ -583,12 +583,24 @@ pub struct PageRecorder {
     /// Set while a split's document is drawn -- see [`Self::take_split`].
     documenting: bool,
     /// The images the page's entries hold that their pictures do not count
-    /// -- see [`Split::image`] -- each once, by its identity, with the bytes
-    /// of its pixels: added to as a split is filed, and emptied with the
+    /// -- see [`Layer::held_images`]: a split's, and those of the page a
+    /// pattern draws from -- each once, by its identity, with the bytes of
+    /// its pixels: added to as each entry is filed, and emptied with the
     /// page's content, which is the only place an entry leaves the page.
     held: HashMap<u32, usize>,
     /// The bytes `held` holds, summed.
     held_bytes: usize,
+    /// The rasters the patterns the page's entries draw from hold -- see
+    /// [`TileSource::count_raster_into`] -- each pattern's once, however
+    /// many entries it dyes: added to as an entry drawing from a pattern is
+    /// filed and as the pattern makes or replaces its raster, and begun
+    /// again with the page's content. What is told to the engine.
+    rasters: RecordedCount,
+    /// What those rasters take toward the page's budget, each pattern's
+    /// once -- see [`TileSource::budget_bytes`] -- added to as `rasters` is
+    /// and begun again with it: what the page flattens past -- see
+    /// [`Self::held_entry_bytes`].
+    raster_budget: RecordedCount,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
     /// open `current` records the innermost one's contents, and what each
@@ -1254,7 +1266,8 @@ impl PageRecorder {
     /// The bytes of the images this page's entries hold that their pictures
     /// do not count -- see [`Split::image`] -- each counted once however
     /// many entries hold it, with the image of the page made last -- see
-    /// [`Self::image`] -- which the page itself holds.
+    /// [`Self::image`] -- which the page itself holds, and the rasters of
+    /// the patterns its entries draw from, each pattern's once.
     ///
     /// An image held by this page and by another -- a canvas's image drawn
     /// in, while that canvas still holds it as the image of its page -- is
@@ -1266,22 +1279,35 @@ impl PageRecorder {
     pub fn held_image_bytes(&self) -> usize {
         #[cfg(debug_assertions)]
         self.hold_images_to_walk();
+        #[cfg(debug_assertions)]
+        self.hold_rasters_to_walk();
         let own = self
             .own_image
             .as_ref()
             .and_then(|own| HeldImage::of(&own.image))
             .filter(|own| !self.held.contains_key(&own.id))
             .map_or(0, |own| own.bytes);
-        self.held_bytes + own
+        self.held_bytes + self.rasters.bytes() + own
     }
 
     /// The bytes of the images the page's entries hold that their pictures
-    /// do not count, without the image of the page itself -- what a page
+    /// do not count, and of the rasters of the patterns they draw from at
+    /// density 1, without the image of the page itself -- what a page
     /// flattens past: see [`Self::flatten`], which lets go of those held
     /// for pixels and of those its document holds where keeping them would
-    /// leave it over its budget.
+    /// leave it over its budget. A raster counts at density 1 whatever the
+    /// density it was made at, as the budget is in pages at density 1, and
+    /// only once it is made on the CPU -- see [`TileSource::budget_bytes`].
     pub(crate) fn held_entry_bytes(&self) -> usize {
-        self.held_bytes
+        self.held_bytes + self.raster_budget.bytes()
+    }
+
+    /// The bytes the rasters of the patterns the page's entries draw from
+    /// take as they were last made, each pattern's once -- what
+    /// [`Self::held_image_bytes`] tells the engine of them.
+    #[cfg(test)]
+    pub(crate) fn pattern_raster_bytes(&self) -> usize {
+        self.rasters.bytes()
     }
 
     /// Lets go of every entry the page holds for pixels, keeping what they
@@ -1317,12 +1343,7 @@ impl PageRecorder {
         let Projection { entries, held, .. } = self.projection();
         let (document, document_held) = (entries.clone(), held.clone());
         let held = HeldImage::of(base);
-        let keeps = held
-            .iter()
-            .chain(document_held.iter())
-            .map(|image| image.bytes)
-            .sum::<usize>()
-            <= budget;
+        let keeps = kept_bytes(held, &document_held, &document) <= budget;
         // Past the budget, the document draws the base, and holds it.
         let document_held = match keeps {
             true => document_held,
@@ -1360,6 +1381,43 @@ impl PageRecorder {
         }
     }
 
+    /// Panics where the rasters the page counts, or what they take toward
+    /// its budget, are not those of the patterns a walk of its entries
+    /// finds, each once. A raster an export
+    /// makes on another thread moves the count as it is put in place, so a
+    /// walk and the count read apart may straddle it: they are read again,
+    /// up to [`COUNT_CATCH_UP_TRIES`] times, until they agree.
+    #[cfg(debug_assertions)]
+    fn hold_rasters_to_walk(&self) {
+        let sources =
+            tile_sources(self.layers.iter().chain(
+                self.open.iter().flat_map(|layer| layer.entries.iter()),
+            ));
+        let walked = || {
+            sources.iter().fold((0, 0), |(rasters, budget), source| {
+                (
+                    rasters + source.raster_bytes(),
+                    budget + source.budget_bytes(),
+                )
+            })
+        };
+        let counted = || (self.rasters.bytes(), self.raster_budget.bytes());
+        let agrees = (0..COUNT_CATCH_UP_TRIES).any(|_| {
+            let agrees = walked() == counted();
+            if !agrees {
+                std::thread::yield_now();
+            }
+            agrees
+        });
+        assert!(
+            agrees,
+            "the page counts {:?} bytes of pattern rasters and of the budget \
+             they take, where its entries' patterns hold {:?}",
+            counted(),
+            walked()
+        );
+    }
+
     /// Panics where the images the page counts as held are not those a
     /// walk of its entries finds.
     #[cfg(debug_assertions)]
@@ -1380,11 +1438,24 @@ impl PageRecorder {
         );
     }
 
-    /// Adds what `entry` holds to the page's count, and has what it records
-    /// when first played add to it then -- see [`Layer::count_into`].
-    fn count(&self, entry: &Layer) {
+    /// Adds what `entry` holds to the page's counts, and has what it records
+    /// when first played add to them then -- see [`Layer::count_into`]: its
+    /// pictures, the images it holds that they do not count, each once --
+    /// see [`Layer::held_images`] -- and the rasters of the patterns it
+    /// draws from, each pattern's once -- see [`Layer::tile_sources`].
+    fn count(&mut self, entry: &Layer) {
         entry.count_into(&self.recorded);
         self.recorded.add(entry.recorded_bytes());
+        let (counted, bytes) = (&mut self.held, &mut self.held_bytes);
+        entry.held_images(&mut |held| {
+            if counted.insert(held.id, held.bytes).is_none() {
+                *bytes += held.bytes;
+            }
+        });
+        let (rasters, budget) = (&self.rasters, &self.raster_budget);
+        entry.tile_sources(&mut |source| {
+            source.count_raster_into(rasters, budget)
+        });
     }
 
     /// Shares what the page's canvas reports to the JavaScript engine with
@@ -1455,6 +1526,8 @@ impl PageRecorder {
             documenting: false,
             held: HashMap::new(),
             held_bytes: 0,
+            rasters: RecordedCount::default(),
+            raster_budget: RecordedCount::default(),
             open: Vec::new(),
             recorded: RecordedCount::default(),
         }
@@ -1662,6 +1735,8 @@ impl PageRecorder {
         self.recorded = RecordedCount::default();
         self.held.clear();
         self.held_bytes = 0;
+        self.rasters = RecordedCount::default();
+        self.raster_budget = RecordedCount::default();
         // What a replay walks is what the page holds, which is now nothing.
         self.replay_cost = 0;
         self.changed = false;
@@ -3793,6 +3868,48 @@ impl Tile {
             Err(why) => Checked::Refused(why),
         }
     }
+}
+
+/// The bytes a page flattened onto `base` holds where it keeps
+/// `document`, what a document played of it, with the images
+/// `document_held` names: each image once by its identity, and the raster
+/// of each pattern the entries draw from once, as it counts toward the
+/// budget -- see [`TileSource::budget_bytes`] -- what
+/// [`PageRecorder::held_entry_bytes`] counts once they are filed, so that a
+/// page kept under its budget is not flattened again at the next draw.
+fn kept_bytes(
+    base: Option<HeldImage>,
+    document_held: &[HeldImage],
+    document: &Entries,
+) -> usize {
+    let mut images = HashMap::new();
+    let mut hold = |held: HeldImage| {
+        images.insert(held.id, held.bytes);
+    };
+    base.into_iter()
+        .chain(document_held.iter().copied())
+        .for_each(&mut hold);
+    document.held_images(&mut hold);
+    images.values().sum::<usize>()
+        + tile_sources(document.layers.iter())
+            .iter()
+            .map(|source| source.budget_bytes())
+            .sum::<usize>()
+}
+
+/// The patterns `entries` draw from, each once -- see [`Layer::tile_sources`].
+fn tile_sources<'a>(
+    entries: impl Iterator<Item = &'a Layer>,
+) -> Vec<Arc<TileSource>> {
+    let mut sources: Vec<Arc<TileSource>> = Vec::new();
+    entries.for_each(|entry| {
+        entry.tile_sources(&mut |source| {
+            if !sources.iter().any(|seen| Arc::ptr_eq(seen, source)) {
+                sources.push(Arc::clone(source));
+            }
+        })
+    });
+    sources
 }
 
 /// `at` of `surface` read into `pixels` through a CPU copy of the whole

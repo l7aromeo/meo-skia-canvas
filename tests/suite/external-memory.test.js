@@ -355,6 +355,84 @@ describe("Native memory reported to V8", () => {
     },
   );
 
+  // A page never cleared, filled every frame with a pattern of a changing
+  // canvas, holds a raster of the canvas's page for each frame's pattern,
+  // and for a canvas holding a drawn canvas its image too. The page counts
+  // them as it holds them, and lets them go for its own pixels once they
+  // come to more than a few pages, as it does a canvas drawn into it.
+  for (const nesting of [false, true]) {
+    test(
+      `counts a pattern of a ${nesting ? "nesting " : ""}canvas filled every frame, and levels off`,
+      { skip: why ?? false },
+      async () => {
+        const source = cpuCanvas();
+        const sctx = source.getContext("2d");
+        const inner = drawn(1);
+        const before = await settled();
+        const dest = cpuCanvas();
+        const ctx = dest.getContext("2d");
+        ctx.globalAlpha = 0.5;
+        const held = [];
+        for (let frame = 0; frame < FRAMES; frame++) {
+          sctx.fillStyle = `hsl(${frame * 15}, 50%, 50%)`;
+          sctx.fillRect(0, 0, SIDE[0], SIDE[1]);
+          if (nesting) sctx.drawImage(inner, 0, 0);
+          ctx.fillStyle = ctx.createPattern(source, "repeat");
+          ctx.fillRect(0, 0, SIDE[0], SIDE[1]);
+          ctx.getImageData(0, 0, SIDE[0], SIDE[1]);
+          held.push((await settled()) - before);
+        }
+        // Two frames in, below any flatten, two rasters at least are held
+        // beside the destination's page and its context. The source never
+        // reads its own page, so it reports none.
+        const early = held[1] - PAGE_BYTES - CONTEXT_BYTES;
+        assert.ok(
+          early >= 2 * PAGE_BYTES,
+          `two frames' patterns counted ${early} bytes, a page ${PAGE_BYTES}`,
+        );
+        const most = Math.max(...held);
+        assert.ok(
+          most < (FRAMES / 2) * PAGE_BYTES,
+          `${FRAMES} frames held at most ${most} bytes, a page ${PAGE_BYTES}`,
+        );
+        assert.equal(inner.width, SIDE[0]);
+      },
+    );
+  }
+
+  // A pattern of a canvas holds the canvas's page as it stood, and for a
+  // canvas holding a drawn canvas its own pixels as well, which the canvas
+  // stops holding once it draws on. The pattern counts them until it is
+  // collected: the page's held image and its own pixels for a nesting
+  // canvas, nothing past its pictures for a plain one.
+  for (const nesting of [false, true]) {
+    test(
+      `counts the pixels a pattern of a ${nesting ? "nesting " : ""}canvas holds until it is collected`,
+      { skip: why ?? false },
+      async () => {
+        const source = cpuCanvas();
+        const sctx = source.getContext("2d");
+        const inner = drawn(1);
+        sctx.fillRect(0, 0, SIDE[0], SIDE[1]);
+        if (nesting) sctx.drawImage(inner, 0, 0);
+        const ctx = cpuCanvas().getContext("2d");
+        /** @type {unknown} */
+        let pattern = ctx.createPattern(source, "repeat");
+        assert.ok(pattern, "a pattern of the canvas");
+        const held = await settled();
+        pattern = null;
+        const released = held - (await settled());
+        assert.equal(pattern, null);
+        assert.equal(
+          released,
+          nesting ? 2 * PAGE_BYTES : 0,
+          `the pattern released ${released} bytes, a page ${PAGE_BYTES}`,
+        );
+        assert.equal(inner.width, SIDE[0]);
+      },
+    );
+  }
+
   // The budget drops a page's pixels and never its recording, so a canvas
   // whose page was dropped still counts what it recorded until it is
   // finalized.
