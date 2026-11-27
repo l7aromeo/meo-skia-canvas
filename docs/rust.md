@@ -277,7 +277,7 @@ meo-skia-canvas = { version = "0.17", default-features = false, features = ["vul
 ```toml
 # .cargo/config.toml
 [env]
-SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-796d4c1baaa1/skia-binaries-{key}.tar.gz"
+SKIA_BINARIES_URL = "https://github.com/l7aromeo/meo-skia-canvas/releases/download/skia-binaries-0.156.0-5441ff02c28c/skia-binaries-{key}.tar.gz"
 ```
 
 skia-bindings then downloads Skia built from `PATCHES` for that target and feature set instead of compiling crates.io's, and the crate draws what the npm package draws. `skia-binaries.txt`, in the crate, holds the URL for the crate version you have, and the targets the archives cover: npm's seven, from `lib/targets.json`, with either C runtime on Windows and musl, with and without `metal` or `vulkan`, whichever the target builds. A skia-safe feature added on top of the crate's has no archive.
