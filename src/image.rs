@@ -3868,12 +3868,23 @@ mod tests {
     /// covering half a pixel, and both at once. Chrome 158 draws the
     /// document as an `<img>`, from a data URL and from a blob alike, into a
     /// canvas reading 127, 128 and 191 -- the arithmetic of sRGB values.
-    /// Blended in linear light they read 188, 188 and 225.
+    /// Blended in linear light they read 188, 188 and 225. The first is an
+    /// exact tie, 127.5: Chrome lands it 127 because it rounds the paint's
+    /// alpha to a byte, which Skia's SVG module does only with
+    /// `containers/skia-svg-byte-paint-alpha.patch`; without it, as from
+    /// crates.io's Skia, the half floats keep the tie and it reads 128.
     #[test]
     fn an_svg_blends_its_layers_in_srgb_as_chrome_does() {
         /// The red channel Chrome 158 reads from the probe below, pixel by
         /// pixel; every pixel is opaque and holds no green or blue.
         const CHROME_RED: [u8; 4] = [255, 127, 128, 191];
+        /// The same without the byte-paint-alpha patch: the tie lands high.
+        const UNROUNDED_RED: [u8; 4] = [255, 128, 128, 191];
+        let red = if cfg!(meo_svg_byte_paint_alpha) {
+            CHROME_RED
+        } else {
+            UNROUNDED_RED
+        };
         let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="1">
 <rect width="4" height="1" fill="rgb(255,0,0)"/>
 <rect x="1" width="1" height="1" fill="black" fill-opacity="0.5"/>
@@ -3901,10 +3912,8 @@ mod tests {
             ),
             "the surface reads back"
         );
-        let want: Vec<u8> = CHROME_RED
-            .iter()
-            .flat_map(|&red| [red, 0, 0, u8::MAX])
-            .collect();
+        let want: Vec<u8> =
+            red.iter().flat_map(|&red| [red, 0, 0, u8::MAX]).collect();
         assert_eq!(pixels.to_vec(), want);
     }
 

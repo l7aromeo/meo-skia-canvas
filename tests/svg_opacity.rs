@@ -23,12 +23,19 @@
 //!   representation, not a rounding rule.
 //!
 //! Without the patch, as on crates.io's Skia, every row is held to what the
-//! half floats land instead, so the day Skia rounds, this says so.
+//! half floats land instead, so the day Skia rounds, this says so. Built
+//! without `containers/skia-svg-wide-colour.patch` too, Skia holds a colour,
+//! and so an `rgba()` fill's and a flood's alpha, as an eight-bit `SkColor`,
+//! so those rows land on a byte, as Chrome's, whatever the surface keeps.
 
 use meo_skia_canvas::prelude::*;
 
 /// Whether Skia rounds a paint's alpha for rasterize's playback here.
 const ROUNDS: bool = cfg!(meo_svg_byte_paint_alpha);
+
+/// Whether Skia keeps an SVG colour's alpha in float, rather than as the
+/// byte of an `SkColor`.
+const FLOAT_COLOUR: bool = cfg!(meo_svg_wide_colour);
 
 /// Each side of every document and canvas, in pixels.
 const SIDE: u32 = 4;
@@ -200,7 +207,9 @@ fn a_document_rounds_its_opacities_as_chrome_does() {
     let wrong: Vec<String> = ROWS
         .iter()
         .filter_map(|&(way, alpha, chrome, unrounded, apart)| {
+            let colour_byte = matches!(way, Way::ColourAlpha | Way::FloodOpacity);
             let want = match (ROUNDS, apart) {
+                (false, _) if colour_byte && !FLOAT_COLOUR => chrome,
                 (false, _) => unrounded,
                 (true, Some((ours, _))) => ours,
                 (true, None) => chrome,
