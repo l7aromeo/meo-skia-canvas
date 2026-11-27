@@ -14223,6 +14223,18 @@ mod exact_composite_tests {
     /// The bytes of a page on the GPU or the CPU filled with [`UNDER`] and
     /// `drawn` over it.
     fn drawn_over(gpu: bool, drawn: Drawn, image: &Image) -> Vec<u8> {
+        drawn_and_read(gpu, drawn, image, (0.0, 0.0, SOURCE_W, SOURCE_H))
+    }
+
+    /// The bytes `read`, a rectangle of the page's pixels, of a page on the
+    /// GPU or the CPU filled with [`UNDER`] and `drawn` over it, read before
+    /// any other.
+    fn drawn_and_read(
+        gpu: bool,
+        drawn: Drawn,
+        image: &Image,
+        (x, y, w, h): (f32, f32, f32, f32),
+    ) -> Vec<u8> {
         let mut page = Canvas::new(SOURCE_W, SOURCE_H);
         page.set_gpu(gpu);
         let ctx = page.context();
@@ -14239,7 +14251,7 @@ mod exact_composite_tests {
         ctx.set_global_alpha(drawn.alpha);
         ctx.draw_image(image, drawn.at, drawn.at);
         page.context()
-            .get_image_data(0.0, 0.0, SOURCE_W, SOURCE_H)
+            .get_image_data(x, y, w, h)
             .expect("pixels")
             .pixels()
             .to_vec()
@@ -14347,6 +14359,53 @@ mod exact_composite_tests {
         assert!(
             apart.is_empty(),
             "(scene, CPU channels off the model, GPU channels off the CPU): {apart:?}"
+        );
+    }
+
+    /// A read a page's tile serves composites the image on that tile's own
+    /// surface, whose device pixels start at the tile's corner: the image
+    /// is placed by its offset plus that shift. The source's gradient
+    /// crosses the tile edge at 256, and the read past it is served by the
+    /// second tile alone -- which the count of tile reads checks -- on the
+    /// GPU, at the bytes the CPU page holds there and the model's.
+    #[test]
+    fn a_translucent_image_read_through_a_tile_lands_as_the_page() {
+        use crate::context::page::TILE_READS;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        /// The edge of a tile in a page's pixels, `page::TILE`.
+        const TILE: f32 = 256.0;
+        let (source, image) = source_pixels();
+        let read = (TILE, 0.0, SOURCE_W - TILE, SOURCE_H);
+        let width = SOURCE_W as usize;
+        let mut apart = vec![];
+        for alpha in [1.0, 0.5, 0.3] {
+            let drawn = Drawn {
+                alpha,
+                at: 0.0,
+                clipped: false,
+            };
+            let cpu = drawn_and_read(false, drawn, &image, read);
+            let before = TILE_READS.get();
+            let gpu = drawn_and_read(true, drawn, &image, read);
+            assert_eq!(TILE_READS.get() - before, 1, "a tile served the read");
+            let model: Vec<u8> = composited(&source, alpha, 0, false)
+                .chunks(width * 4)
+                .flat_map(|row| row[TILE as usize * 4..].to_vec())
+                .collect();
+            let count = |a: &[u8], b: &[u8]| {
+                a.iter().zip(b).filter(|(a, b)| a != b).count()
+            };
+            let (cpu_off, gpu_off) = (count(&cpu, &model), count(&gpu, &cpu));
+            if cpu_off + gpu_off > 0 {
+                apart.push((alpha, cpu_off, gpu_off));
+            }
+        }
+        assert!(
+            apart.is_empty(),
+            "(alpha, CPU channels off the model, GPU channels off the CPU): {apart:?}"
         );
     }
 
