@@ -7633,16 +7633,16 @@ mod overlapping_glyph_tests {
     /// composites unchanged. The canvas drawn in is a group whose own layer
     /// takes a second root inside the first, where its gradient is drawn
     /// over the transparent black of the source's own pixels. Those pixels
-    /// are then composited onto the page: the CPU page stores the exact
-    /// composite, and Metal blends them at half precision, a level from it
-    /// only within 0.18 of a tie, as it blends any image (#837). The shadow
-    /// stands within a level of the CPU's on the page itself, for the same
-    /// reason, as `docs/browser-differences.md` says, and the layer adds
-    /// nothing to that. Played inside the layer with no root, the shadowed
-    /// gradient and the text land apart from the page. The canvas drawn in
-    /// lands as it does on its roots, since its group's layer starts
-    /// transparent, as the source's own pixels do: the roots it takes cost a
-    /// surface and a copy each and change none of its bytes.
+    /// are then composited onto the page in the CPU's arithmetic, so the GPU
+    /// page stores the CPU page's bytes, the exact composite (#837). The
+    /// shadow stands within a level of the CPU's on the page itself, since
+    /// Metal composites any shadow at half precision, as
+    /// `docs/browser-differences.md` says, and the layer adds nothing to
+    /// that. Played inside the layer with no root, the shadowed gradient and
+    /// the text land apart from the page. The canvas drawn in with no root
+    /// is composited through Ganesh's own blend, and stands from the exact
+    /// composite only within 0.18 of a tie: its gradient lands alike inside
+    /// the layer, which starts transparent as the source's own pixels do.
     #[test]
     fn a_layer_holding_a_gradient_drawn_over_a_read_back_lands_as_the_page() {
         use crate::{
@@ -7782,25 +7782,27 @@ mod overlapping_glyph_tests {
                 let (cpu, _) = page(false, true, draw);
                 let off = zip(&cpu, &exact).filter(|(b, (e, _))| *b != e);
                 assert_eq!(off.count(), 0, "the CPU off the exact composite");
-                let far = zip(&layered, &exact)
-                    .filter(|(b, (e, tie))| {
-                        b.abs_diff(*e) > 1 || (*b != e && *tie > 0.18)
-                    })
-                    .count();
-                assert_eq!(
-                    far, 0,
-                    "the GPU off the exact composite past a tie"
+                assert!(
+                    layered == cpu,
+                    "the GPU {} levels from the CPU",
+                    most_apart(&layered, &cpu)
                 );
             }
             OWN_ROOTS.set(false);
             let (inside, _) = page(true, true, draw);
             OWN_ROOTS.set(true);
             match draw {
-                Draw::DrawnIn => assert!(
-                    inside == direct,
-                    "{draw:?}: {} levels from the page without a root",
-                    most_apart(&inside, &direct)
-                ),
+                Draw::DrawnIn => {
+                    let far = zip(&inside, &exact)
+                        .filter(|(b, (e, tie))| {
+                            b.abs_diff(*e) > 1 || (*b != e && *tie > 0.18)
+                        })
+                        .count();
+                    assert_eq!(
+                        far, 0,
+                        "without a root, off the exact composite past a tie"
+                    );
+                }
                 Draw::Shadowed | Draw::Text => assert!(
                     inside != direct,
                     "{draw:?}: inside the layer lands apart"
@@ -13909,7 +13911,8 @@ mod pattern_memory_tests {
 mod exact_composite_tests {
     //! Gradient paths on a GPU canvas composited `source-over` in the CPU's
     //! arithmetic, held for one snapshot of what they cover -- see
-    //! `context::exact_composite` (#783).
+    //! `context::exact_composite` (#783) -- and translucent images and plain
+    //! layers composited in it as well (#837).
     use super::*;
     use std::f32::consts::TAU;
 
@@ -14174,5 +14177,245 @@ mod exact_composite_tests {
             );
             assert_eq!(snapshots, 1, "{over} over: snapshots");
         }
+    }
+
+    /// The source the #837 scenes draw: a 400 by 160 CPU canvas holding a
+    /// translucent radial gradient interpolated in Oklab, whose pixels
+    /// stand at many alphas, near ties among them.
+    fn translucent_source() -> Canvas {
+        let stops = [
+            stop(0.0, (200, 40, 90), 0.6),
+            stop(1.0, (30, 120, 200), 0.4),
+        ];
+        let gradient = Shader::radial_gradient(
+            Point::new(200.0, 80.0),
+            60.0,
+            &stops,
+            GradientInterpolation::new(GradientColorSpace::Oklab),
+        )
+        .expect("a gradient");
+        let mut canvas = Canvas::new(SOURCE_W, SOURCE_H);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_shader(&gradient);
+        ctx.fill_rect(140.0, 20.0, 120.0, 120.0);
+        canvas
+    }
+
+    const SOURCE_W: f32 = 400.0;
+    const SOURCE_H: f32 = 160.0;
+
+    /// The colour the #837 scenes draw over.
+    const UNDER: [u8; 4] = [220, 180, 60, 255];
+
+    /// How a #837 scene draws its source.
+    #[derive(Clone, Copy, Debug)]
+    struct Drawn {
+        /// Drawn in with `drawCanvas` rather than as an image of its pixels.
+        canvas: bool,
+        /// Inside a `saveLayer`.
+        layer: bool,
+        /// The `globalAlpha`.
+        alpha: f32,
+        /// The whole-pixel offset it is drawn at.
+        at: f32,
+        /// Under [`CLIP`], set before the layer.
+        clipped: bool,
+    }
+
+    /// The clip a clipped #837 scene draws under, on whole pixels: a layer
+    /// opened under it covers only it, so its surface starts at its corner.
+    const CLIP: (f32, f32, f32, f32) = (150.0, 30.0, 90.0, 70.0);
+
+    /// The bytes of a page on the GPU or the CPU filled with [`UNDER`] and
+    /// `drawn` over it.
+    fn drawn_over(gpu: bool, drawn: Drawn, image: &Image) -> Vec<u8> {
+        let mut page = Canvas::new(SOURCE_W, SOURCE_H);
+        page.set_gpu(gpu);
+        let ctx = page.context();
+        let [r, g, b, _] = UNDER;
+        ctx.set_fill_style_css(&format!("rgb({r} {g} {b})"))
+            .expect("a colour");
+        ctx.fill_rect(0.0, 0.0, SOURCE_W, SOURCE_H);
+        if drawn.clipped {
+            let (x, y, w, h) = CLIP;
+            ctx.begin_path();
+            ctx.rect(x, y, w, h);
+            ctx.clip(FillRule::NonZero);
+        }
+        if drawn.layer {
+            ctx.save_layer();
+        }
+        ctx.set_global_alpha(drawn.alpha);
+        match drawn.canvas {
+            true => {
+                ctx.draw_canvas(&mut translucent_source(), drawn.at, drawn.at)
+            }
+            false => ctx.draw_image(image, drawn.at, drawn.at),
+        }
+        if drawn.layer {
+            ctx.restore();
+        }
+        page.context()
+            .get_image_data(0.0, 0.0, SOURCE_W, SOURCE_H)
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The source's pixels, unpremultiplied as `getImageData` reads them,
+    /// and an image made of them.
+    fn source_pixels() -> (Vec<u8>, Image) {
+        let held = translucent_source()
+            .context()
+            .get_image_data(0.0, 0.0, SOURCE_W, SOURCE_H)
+            .expect("pixels");
+        let image = Image::from_pixels(
+            held.pixels(),
+            held.width(),
+            held.height(),
+            held.stride(),
+            PixelExportOptions::default(),
+        )
+        .expect("an image");
+        (held.pixels().to_vec(), image)
+    }
+
+    /// The CPU's eight-bit composite of `source`, unpremultiplied, at
+    /// `alpha` and offset `at`, over [`UNDER`] -- see
+    /// `context::exact_composite`: premultiplied and scaled by the alpha's
+    /// byte with `div255`, then `s + div255_accurate(d * (255 - s.a))`. On
+    /// aarch64 the two divisions are the same, to the nearest level.
+    fn composited(
+        source: &[u8],
+        alpha: f32,
+        at: usize,
+        clipped: bool,
+    ) -> Vec<u8> {
+        let nearest = |v: u32| (v + 128 + ((v + 128) >> 8)) >> 8;
+        let byte = (alpha * 255.0 + 0.5) as u32;
+        let width = SOURCE_W as usize;
+        (0..source.len())
+            .map(|i| {
+                let (x, y) = ((i / 4) % width, (i / 4) / width);
+                let d = u32::from(UNDER[i % 4]);
+                let (cx, cy, cw, ch) = CLIP;
+                let inside = (cx as usize..(cx + cw) as usize).contains(&x)
+                    && (cy as usize..(cy + ch) as usize).contains(&y);
+                let (Some(sx), Some(sy)) =
+                    (x.checked_sub(at), y.checked_sub(at))
+                else {
+                    return d as u8;
+                };
+                if clipped && !inside {
+                    return d as u8;
+                }
+                let px = (sy * width + sx) * 4;
+                let a = u32::from(source[px + 3]);
+                let premul = match i % 4 {
+                    3 => a,
+                    k => nearest(u32::from(source[px + k]) * a),
+                };
+                let (s, sa) = (nearest(premul * byte), nearest(a * byte));
+                (s + nearest(d * (255 - sa))) as u8
+            })
+            .collect()
+    }
+
+    /// A translucent image drawn `source-over` at a whole pixel, and a
+    /// canvas holding one drawn in, store on a GPU page the bytes the CPU
+    /// page stores -- alone and inside a `saveLayer`, at a `globalAlpha` of
+    /// 1 and of 0.5, at 0,0, at 3,3 and at 3,3 under a clip whose corner a
+    /// layer's surface starts at -- and those are the CPU's eight-bit
+    /// composite, which the test models. Through Ganesh's own blend, Metal
+    /// parted from it by a level in 4,920 channels for the image and 1,224
+    /// for the canvas (#837).
+    #[test]
+    fn a_translucent_image_composites_as_the_cpu_does_on_the_gpu() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let (source, image) = source_pixels();
+        let mut apart = vec![];
+        for canvas in [false, true] {
+            for layer in [false, true] {
+                for alpha in [1.0, 0.5] {
+                    for (at, clipped) in
+                        [(0.0, false), (3.0, false), (3.0, true)]
+                    {
+                        let drawn = Drawn {
+                            canvas,
+                            layer,
+                            alpha,
+                            at,
+                            clipped,
+                        };
+                        let cpu = drawn_over(false, drawn, &image);
+                        let gpu = drawn_over(true, drawn, &image);
+                        let model =
+                            composited(&source, alpha, at as usize, clipped);
+                        let count = |a: &[u8], b: &[u8]| {
+                            a.iter().zip(b).filter(|(a, b)| a != b).count()
+                        };
+                        let (cpu_off, gpu_off) =
+                            (count(&cpu, &model), count(&gpu, &cpu));
+                        if cpu_off + gpu_off > 0 {
+                            apart.push((drawn, cpu_off, gpu_off));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            apart.is_empty(),
+            "(scene, CPU channels off the model, GPU channels off the CPU): {apart:?}"
+        );
+    }
+
+    /// An opaque image at full alpha is left to Ganesh's own blend, which
+    /// composites it to its own bytes -- `s + d * 0` -- as the CPU does:
+    /// the GPU page stores the CPU page's bytes without the route. A JPEG
+    /// decodes as `AlphaType::Opaque`, which is what the skip reads; at
+    /// `globalAlpha` 0.99 the same image takes the route, so the skip is
+    /// the image's opacity and not some other condition refusing it.
+    #[test]
+    fn an_opaque_image_skips_the_route_and_lands_the_same() {
+        use crate::context::layer::IMAGES_AS_BYTES;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let bytes = std::fs::read("tests/assets/images/format.jpg")
+            .expect("the JPEG asset");
+        let image = Image::from_encoded(&bytes).expect("a decoded JPEG");
+        let at = 3.0;
+        let page = |gpu: bool, alpha: f32| {
+            let mut page = Canvas::new(SIDE, SIDE);
+            page.set_gpu(gpu);
+            let ctx = page.context();
+            ctx.set_fill_style_css("rgb(200 220 240)")
+                .expect("a colour");
+            ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+            ctx.set_global_alpha(alpha);
+            ctx.draw_image(&image, at, at);
+            page.context()
+                .get_image_data(0.0, 0.0, SIDE, SIDE)
+                .expect("pixels")
+                .pixels()
+                .to_vec()
+        };
+        let before = IMAGES_AS_BYTES.get();
+        let gpu = page(true, 1.0);
+        assert_eq!(IMAGES_AS_BYTES.get(), before, "the route was taken");
+        let cpu = page(false, 1.0);
+        let apart = gpu.iter().zip(&cpu).filter(|(a, b)| a != b).count();
+        assert_eq!(apart, 0, "channels apart from the CPU page");
+        page(true, 0.99);
+        assert_eq!(
+            IMAGES_AS_BYTES.get(),
+            before + 1,
+            "a translucent draw of the same image was refused the route"
+        );
     }
 }

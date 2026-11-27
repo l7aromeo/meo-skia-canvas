@@ -2412,11 +2412,21 @@ impl PageRecorder {
     /// they are ended here. A cut draw joins only a piece of the frame's run
     /// it was drawn in, and the run is closed here, so the next is another;
     /// an isolated layer is only ever open on the page, which the flush
-    /// closes.
+    /// closes. A frame whose clip the run held is framed again before the
+    /// next draw, which opens a run of its own.
     fn seal(&mut self) {
         self.settle();
         self.close_run();
         self.file_current();
+        // A frame recorded bare leaves its clip to the run just closed, and
+        // `file_current` frames again only where something was recorded. A
+        // run split by a draw filed as a piece of it leaves nothing
+        // recorded, so without this the next draw would land in the bare
+        // recording under no clip: the document of a decoded image a clip
+        // cuts, drawn straight after its pixels -- see `begin_split`.
+        if self.framed_bare {
+            self.reframe();
+        }
         self.blur_run = None;
         self.gradient_run = None;
     }
