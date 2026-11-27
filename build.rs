@@ -89,7 +89,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 13] = [
+const SKIA_PATCHES: [SkiaPatch; 14] = [
     // `containers/skia-atlas-placement.patch`: a path drawn into Ganesh's
     // path atlas relative to its own device top-left, rounded to a grid, and
     // only then moved by its whole-pixel location, so its coverage does not
@@ -180,6 +180,15 @@ const SKIA_PATCHES: [SkiaPatch; 13] = [
         cfg: "meo_svg_line_fill",
         file: "modules/svg/src/SkSVGLine.cpp",
         marker: "// A line has no interior, so its fill paints nothing.",
+    },
+    // `containers/skia-svg-byte-paint-alpha.patch`: a switch,
+    // `meo_svg_byte_paint_alpha`, under which the SVG module places each
+    // paint's alpha on a byte, as a browser does, with a group's opacity
+    // folded into its one shape's paint first.
+    SkiaPatch {
+        cfg: "meo_svg_byte_paint_alpha",
+        file: "modules/svg/src/SkSVGRenderContext.cpp",
+        marker: "extern \"C\" void meo_svg_byte_paint_alpha(bool on)",
     },
     // `containers/skia-freetype-advance.patch`: FreeType's unhinted advance
     // is the glyph's units times the face's size, rounded once to 16.16,

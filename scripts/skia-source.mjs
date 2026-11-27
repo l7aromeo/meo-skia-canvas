@@ -248,6 +248,27 @@ const SVG_WIDE_COLOUR = join("containers", "skia-svg-wide-colour.patch");
 const SVG_LINE_FILL = join("containers", "skia-svg-line-fill.patch");
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_document_rounds_its_opacities_as_chrome_does against a build from a tree prepared without this patch; it holds that build to the half-float ties, and fails there once Skia rounds a paint's alpha to a byte
+//
+// Skia's SVG module sets a paint's alpha to the product of its colour's
+// alpha, its `fill-opacity` or `stroke-opacity`, and a leaf's `opacity`
+// (`SkSVGRenderContext::commonPaint`), in float, and lays a group's
+// `opacity` down as a layer. Chrome paints an SVG with an eight-bit alpha:
+// it folds a group over one shape into that shape's paint and rounds the
+// product once, so black at 0.5 over red reads 127 there and 128 from a
+// half-float surface, where `Svg::rasterize` draws (#842). The patch adds a
+// per-thread switch, `meo_svg_byte_paint_alpha`, under which `commonPaint`
+// and `<feFlood>`'s colour round their alpha to a byte, and a `<g>` or
+// `<svg>` whose one child is a shape, or another such group, hands its
+// opacity to that shape's paint instead of laying a layer. Off, the module
+// draws as it did: the switch is on only while this library plays a
+// document into raster pixels, never into a PDF or an SVG.
+const SVG_BYTE_PAINT_ALPHA = join(
+  "containers",
+  "skia-svg-byte-paint-alpha.patch",
+);
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 // Re-check: node scripts/test.mjs tests/suite/text.test.js against a binary built from a tree prepared without this patch; "a family's italic face is drawn for italic whatever its weight" fails
 //
 // `SkFontStyleSet::matchStyleCSS3` (src/core/SkFontMgr.cpp) scores a
@@ -419,6 +440,7 @@ export const PATCHES = {
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
     SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -436,6 +458,7 @@ export const PATCHES = {
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
     SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -456,6 +479,7 @@ export const PATCHES = {
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
     SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,

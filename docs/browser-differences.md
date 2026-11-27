@@ -82,6 +82,17 @@ composite, a CPU image or layer 27.1%, and Chrome's rule 40.0%. On the GPU
 the misses of an image or layer are all within 0.18 of a level of a tie, from
 the half-precision arithmetic: 3.3% of the sweep, against 21.4% for a fill.
 
+**An SVG group over overlapping shapes composites exactly through
+`Svg::rasterize`, where Chrome takes the backdrop's share with the legacy
+blitter's divide.** A group's `opacity` over more than one draw is a layer in
+both. Chrome 159 composites it as above, `d * (255 - A)` over 256: a blue
+shape over a black one at 0.5 over red reads 126, 0, 128, where red and blue
+sum to 254 rather than 255, and 177, 0, 77 at 0.3. `rasterize` draws into
+half floats and lands the exact composite, 128, 0, 128 and 179, 0, 77 --
+127.5 and 76.5 are ties, so either neighbour is as near. The same document
+drawn onto a canvas through `drawImage` takes the canvas's rule and lands
+Chrome's bytes (`tests/svg_opacity.rs`, `tests/suite/svg-opacity.test.js`).
+
 Text sets its glyph masks' contrast from the colour it is drawn in, as Skia
 does (`SkMaskGamma`), and on this canvas that colour is the one that stores
 the exact product. Each channel is drawn in the colour nearest the one named
@@ -1141,7 +1152,7 @@ agree.
 
 **An SVG image's `color`, and so `currentcolor`, and its `lighting-color`
 are drawn in sRGB, so a wide colour in them is clipped on a wide canvas, where
-Chrome keeps it; so is every colour `Svg::rasterize` draws.** Skia's SVG
+Chrome keeps it.** Skia's SVG
 module parses no CSS Color 4 form, so every colour property -- `fill`,
 `stroke`, `stop-color`, `flood-color`, `lighting-color` and `color`, as an
 attribute or in `style` -- is read here by the reader a `fillStyle` uses and
@@ -1160,9 +1171,43 @@ colour conversion to its light and lights in whatever space it draws into;
 the patch keeps it in float, as the next entry says. Chrome was measured only
 for `fill`; CSS Color 4 resolves
 `currentcolor` to the colour `color` computes, so it is expected to keep P3
-green there as it does for `fill`. `Svg::rasterize` draws into an
-eight-bit sRGB surface and clips every colour the document holds
+green there as it does for `fill`. `Svg::rasterize` draws into half floats
+in sRGB, so a paint keeps a wide colour there too: P3's green reads 1, 255, 0
+on a `display-p3` canvas, a level of red from the half float's sRGB below
+zero (`a_wide_paint_reaches_a_wide_canvas`). It blends in sRGB rather than in
+the canvas's space the image is later drawn onto
 ([#816](https://github.com/l7aromeo/meo-skia-canvas/issues/816)).
+
+**An SVG's opacities land each paint's alpha on a byte, as Chrome's do.** A
+browser paints an SVG with an eight-bit alpha: a paint's alpha is the
+product of its colour's alpha, its `fill-opacity` or `stroke-opacity`, and an
+`opacity` folded into that one draw -- a shape's own, and a group's whose one
+child is a shape -- rounded once. Measured in Chrome 159's headless shell,
+black over opaque red: at 0.5, `opacity`, `fill-opacity`, `stroke-opacity`,
+`flood-opacity`, an `rgba()` alpha and a group over one shape each read 127,
+and a group at 0.3 over a shape at `fill-opacity` 0.5 reads 217, 255 less
+0.15 times 255 rounded; rounding the group and the paint apart reads 216.
+Skia's SVG module keeps the product in float and lays a group down as a
+layer, so `Svg::rasterize`'s half floats landed every tie a level high and a
+`drawImage` of an SVG rounded such a group twice.
+`containers/skia-svg-byte-paint-alpha.patch` rounds the product, folds a
+group over one shape into that shape's paint, and is switched on only while a
+document is played into raster pixels (`BytePaintAlpha`), never into a PDF or
+an SVG. A canvas records its `drawImage` of an SVG, so a PDF or an SVG of
+that canvas takes the byte alpha: under half a level from the document's
+own, and what the canvas shows. `tests/svg_opacity.rs` and
+`tests/suite/svg-opacity.test.js` hold 40 cases to Chrome's bytes; the group
+over overlapping shapes is the entry near the top of this file.
+
+**An SVG's `stop-opacity` at a tie lands a level from Chrome, and the
+difference is the representation, not a rounding rule.** Chrome keeps a
+gradient stop's opacity in float, as this library does, so it is not placed
+on a byte. 178.5, black at 0.3 over red, is an exact tie: Chrome's eight-bit
+surface rounds it half to even, 178, and `Svg::rasterize`'s half float stores
+0.7 as 0.70020 and reads 179. At 0.5 `drawImage` lands 127.5 as 127 through
+the canvas's eight-bit pipeline, where Chrome lands 128. Each is as near the
+exact value as the other, and rounding the stop to a byte would move the
+ties that agree.
 
 **An SVG light is lit in float, where Chrome 156 rounds it to a byte in
 linear light.** A lighting primitive in a linearRGB filter, which

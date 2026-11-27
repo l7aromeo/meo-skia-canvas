@@ -10,8 +10,11 @@ use skia_safe::{
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
+mod byte_paint_alpha;
 mod colr_text;
 mod document_features;
+
+pub(crate) use byte_paint_alpha::BytePaintAlpha;
 
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color, skia_color_to_rgba_linear},
@@ -1023,10 +1026,13 @@ impl Svg {
     /// transparent surface of half floats in sRGB and snapshotted, so its
     /// translucent draws composite in sRGB, as a browser composites them,
     /// and an image it embeds keeps colours outside sRGB, such as a Display
-    /// P3 PNG's, for a wide-gamut canvas it is drawn onto. The fit is uniform
-    /// and centred -- `preserveAspectRatio`'s own `xMidYMid meet` -- so a
-    /// 3-by-2 document in a 2-by-1 box inks 150 by 100 of it and is never
-    /// distorted.
+    /// P3 PNG's, for a wide-gamut canvas it is drawn onto. Each paint's alpha
+    /// lands on a byte, as a browser's does, where Skia's SVG module carries
+    /// `containers/skia-svg-byte-paint-alpha.patch`: black at 0.5 over red
+    /// reads 127, where the half floats alone would keep 127.5 and read 128.
+    /// The fit is uniform and centred -- `preserveAspectRatio`'s own
+    /// `xMidYMid meet` -- so a 3-by-2 document in a 2-by-1 box inks 150 by
+    /// 100 of it and is never distorted.
     ///
     /// **This is not `object-fit`.** `contain` is what this gives; `cover`
     /// and `fill` mean scaling the returned [`Image`], which is an operation
@@ -1112,6 +1118,10 @@ impl Svg {
                 }
             }
 
+            // Each paint's alpha on a byte, as a browser paints the document:
+            // the half floats below would otherwise keep a tie such as 0.5 a
+            // level from Chrome's byte. See `BytePaintAlpha`.
+            let _byte_alpha = BytePaintAlpha::hold();
             self.render(
                 canvas,
                 SkSize::new(width as f32, height as f32),
@@ -3047,9 +3057,9 @@ mod tests {
     /// clipped to sRGB where it is not. `color`, and so `currentcolor`, is
     /// clipped on both, Skia holding it as an `SkColor`.
     ///
-    /// Drawn through the document's own DOM onto a `display-p3` raster,
-    /// because [`Svg::rasterize`] draws into eight-bit sRGB and clips
-    /// whatever the document holds.
+    /// Drawn through the document's own DOM onto a `display-p3` raster, so
+    /// the paint lands in the surface's own space rather than in the half
+    /// floats in sRGB [`Svg::rasterize`] draws into.
     #[test]
     fn a_wide_svg_paint_reaches_a_wide_surface() {
         use crate::{node::utils::opt_color_space, started};

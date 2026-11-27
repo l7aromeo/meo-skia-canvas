@@ -4,7 +4,7 @@ use crate::{
     color::skia_color_to_rgba_linear,
     context::{BoxedContext2D, CanvasDocument, layer::Target},
     export::VectorFeatures,
-    image::{Svg, decode_frame, frame_delays},
+    image::{BytePaintAlpha, Svg, decode_frame, frame_delays},
     node::external::External,
     started,
     utils::*,
@@ -402,11 +402,20 @@ pub(crate) fn record_svg(
     let size = Size::new(intrinsic.width, intrinsic.height);
     let bounds = Rect::from_size(size);
     let mut compositor = PictureRecorder::new();
-    let drawn = parsed.render(
-        compositor.begin_recording(bounds, true),
-        bounds.size(),
-        Target::Pixels,
-    );
+    // The pixels' recording paints with each alpha on a byte, as a browser
+    // paints the document -- see `BytePaintAlpha` -- so a tie such as 0.5
+    // lands Chrome's byte on every canvas depth. The byte alpha is in the
+    // picture the canvas records, so a PDF or an SVG of that canvas takes it
+    // too: under half a level from the document's own, and what the canvas
+    // shows. A document's own recording, below, is not held.
+    let drawn = {
+        let _byte_alpha = BytePaintAlpha::hold();
+        parsed.render(
+            compositor.begin_recording(bounds, true),
+            bounds.size(),
+            Target::Pixels,
+        )
+    };
     let pixels = compositor.finish_recording_as_picture(None);
     // A document draws the text a canvas drew as a document plays it -- a
     // colour glyph without its layer where that changes nothing it holds --
