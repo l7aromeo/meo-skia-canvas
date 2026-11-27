@@ -12240,6 +12240,32 @@ mod held_image_tests {
         assert_eq!(held(&mut dest), IMAGE_BYTES, "held once, in and out");
     }
 
+    /// A put holds a copy of the pixels it puts, each put's its own, and a
+    /// put over the whole page lets the puts before it go.
+    #[test]
+    fn a_put_holds_its_pixels_until_a_put_erases_them() {
+        let mut dest = destination();
+        let ctx = dest.context();
+        let half = ctx
+            .create_image_data(SIDE.0 as u32 / 2, SIDE.1 as u32)
+            .expect("image data");
+        ctx.put_image_data(&half, 0.0, 0.0).expect("a put");
+        assert_eq!(held(&mut dest), IMAGE_BYTES / 2, "one put");
+        let ctx = dest.context();
+        ctx.put_image_data(&half, SIDE.0 / 2.0, 0.0).expect("a put");
+        assert_eq!(held(&mut dest), IMAGE_BYTES, "two puts of the same data");
+        let ctx = dest.context();
+        let whole = ctx
+            .create_image_data(SIDE.0 as u32, SIDE.1 as u32)
+            .expect("image data");
+        ctx.put_image_data(&whole, 0.0, 0.0).expect("a put");
+        assert_eq!(
+            held(&mut dest),
+            IMAGE_BYTES,
+            "the whole page put over them"
+        );
+    }
+
     /// A canvas drawn into another holds the image of its page it made,
     /// until its page changes and the next image replaces it.
     #[test]

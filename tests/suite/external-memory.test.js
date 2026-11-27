@@ -138,6 +138,18 @@ const FRAMES = 24;
  */
 const LATE_CANVASES = 10;
 
+/** The region of the page each frame puts, a quarter of `SIDE`. */
+const PUT = [SIDE[0] / 2, SIDE[1] / 2];
+
+/** What one put of `PUT` holds in pixels. */
+const PUT_BYTES = PUT[0] * PUT[1] * PIXEL_BYTES;
+
+/**
+ * The pages of its own pixels a page's entries may hold in images before
+ * it flattens: `RECORDED_IMAGE_PAGES` in src/context/mod.rs.
+ */
+const RECORDED_IMAGE_PAGES = 4;
+
 /** Fills drawn on a page whose recording is to weigh something. */
 const FILLS = 1000;
 
@@ -439,6 +451,44 @@ describe("Native memory reported to V8", () => {
       },
     );
   }
+
+  // A page never cleared, put a fresh `ImageData` over a quarter of it every
+  // frame, holds a copy of each put's pixels in its recording. The page
+  // counts them as it holds them, and lets them go for its own pixels once
+  // they come to more than its budget: at most its own page, the budget's
+  // pages and the put that took it past them, where a page that never lets
+  // go holds a put a frame.
+  test(
+    "counts the pixels of partial puts on a page never cleared, and levels off",
+    { skip: why ?? false },
+    async () => {
+      const before = await settled();
+      const ctx = cpuCanvas().getContext("2d");
+      const held = [];
+      for (let frame = 0; frame < FRAMES; frame++) {
+        const data = ctx.createImageData(PUT[0], PUT[1]);
+        data.data.fill(frame + 1);
+        const at = [frame % 2, (frame >> 1) % 2];
+        ctx.putImageData(data, at[0] * PUT[0], at[1] * PUT[1]);
+        ctx.getImageData(0, 0, SIDE[0], SIDE[1]);
+        held.push((await settled()) - before);
+      }
+      // Two frames in, below any flatten, both puts are counted beside the
+      // page and its context.
+      const early = held[1] - PAGE_BYTES - CONTEXT_BYTES;
+      assert.ok(
+        early >= 2 * PUT_BYTES,
+        `two frames' puts counted ${early} bytes, a put ${PUT_BYTES}`,
+      );
+      const most = Math.max(...held);
+      const bound =
+        (RECORDED_IMAGE_PAGES + 1) * PAGE_BYTES + PUT_BYTES + CONTEXT_BYTES;
+      assert.ok(
+        most <= bound,
+        `${FRAMES} frames held at most ${most} bytes, where ${bound} is allowed`,
+      );
+    },
+  );
 
   // A pattern of a canvas holds the canvas's page as it stood, and for a
   // canvas holding a drawn canvas its own pixels as well, which the canvas
