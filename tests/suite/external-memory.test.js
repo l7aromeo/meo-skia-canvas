@@ -128,6 +128,9 @@ const HELD_BUFFER_BYTES = 4096;
  */
 const DRAWS = 3;
 
+/** Frames a changing canvas is drawn into a page never cleared. */
+const FRAMES = 24;
+
 /** Fills drawn on a page whose recording is to weigh something. */
 const FILLS = 1000;
 
@@ -289,6 +292,37 @@ describe("Native memory reported to V8", () => {
         `${DRAWS} draws of one canvas count its image on each canvas: ` +
           `${held} bytes beside the destination's page, one image ` +
           `${PAGE_BYTES}`,
+      );
+      assert.equal(dest.width, SIDE[0]);
+    },
+  );
+
+  // A page never cleared, into which a changing canvas is drawn every frame,
+  // holds an image of it for each frame until its entries hold more than a
+  // few pages of them, and then lets go of them for one of its own: what is
+  // reported levels off where it grew by a page a frame.
+  test(
+    "levels off for a page a changing canvas is drawn into every frame",
+    { skip: why ?? false },
+    async () => {
+      const source = drawn(1);
+      const sctx = source.getContext("2d");
+      const before = await settled();
+      const dest = cpuCanvas();
+      const ctx = dest.getContext("2d");
+      ctx.globalAlpha = 0.5;
+      let most = 0;
+      for (let frame = 0; frame < FRAMES; frame++) {
+        sctx.fillRect(frame * 7, 0, 7, 40);
+        ctx.drawImage(source, 0, 0);
+        ctx.getImageData(0, 0, SIDE[0], SIDE[1]);
+        most = Math.max(most, (await settled()) - before);
+      }
+      // Kept, every frame's image adds a page; flattened, the count stays
+      // under half that, whatever the page's budget is.
+      assert.ok(
+        most < (FRAMES / 2) * PAGE_BYTES,
+        `${FRAMES} frames held at most ${most} bytes, a page ${PAGE_BYTES}`,
       );
       assert.equal(dest.width, SIDE[0]);
     },

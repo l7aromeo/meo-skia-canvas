@@ -732,6 +732,14 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
+    /// Whether a page lets go of what it holds for pixels past its budget on
+    /// this thread -- see [`PageRecorder::flatten`]: off, it keeps every
+    /// entry, the reference a flattened page is held to.
+    pub(crate) static FLATTENS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Whether [`PageRecorder::recorded_bytes`] holds its count to a walk of
     /// the page on this thread: off only where a test counts the entries
     /// the count itself walks -- see `ENTRIES_WALKED` -- which the
@@ -1203,8 +1211,10 @@ impl PageRecorder {
     /// An image held by this page and by another -- a canvas's image drawn
     /// in, while that canvas still holds it as the image of its page -- is
     /// counted by both, so the engine is told too much while both hold it
-    /// and never too little. A build with debug assertions holds the count
-    /// to a walk of the page's entries at every call.
+    /// and never too little. The page's own image is counted once where its
+    /// entries hold it too, as a flattened page's do -- see
+    /// [`Self::flatten`]. A build with debug assertions holds the count to a
+    /// walk of the page's entries at every call.
     pub fn held_image_bytes(&self) -> usize {
         #[cfg(debug_assertions)]
         self.hold_images_to_walk();
@@ -1212,8 +1222,62 @@ impl PageRecorder {
             .own_image
             .as_ref()
             .and_then(|own| HeldImage::of(&own.image))
+            .filter(|own| !self.held.contains_key(&own.id))
             .map_or(0, |own| own.bytes);
         self.held_bytes + own
+    }
+
+    /// The bytes of the images the page's entries hold that their pictures
+    /// do not count, without the image of the page itself -- what a page
+    /// lets go of when it flattens: see [`Self::flatten`].
+    pub(crate) fn held_entry_bytes(&self) -> usize {
+        self.held_bytes
+    }
+
+    /// Lets go of every entry the page holds for pixels, keeping what they
+    /// drew as `base`, the page's own pixels -- see [`Self::image`] -- filed
+    /// as one [`Split`] whose document is what a document plays of the page
+    /// as it stood: see [`Self::document_entries`].
+    ///
+    /// A page into which canvases are drawn as images, round after round and
+    /// never cleared, otherwise holds an image for each, a page of pixels a
+    /// draw. Flattened, it holds one for pixels however many rounds it has
+    /// drawn, and a document still writes every round from its own entries,
+    /// which it never sees the base of.
+    ///
+    /// `base` is drawn untransformed and unclipped onto the emptied page, so
+    /// its pixels at density 1 are what they were. At another density the base
+    /// is scaled, where the entries it replaced were drawn at that density.
+    /// The transform and clip the page holds are kept for the next draw.
+    pub(crate) fn flatten(&mut self, base: &SkImage) {
+        #[cfg(test)]
+        if !FLATTENS.get() {
+            return;
+        }
+        let document = self.document_entries();
+        let (matrix, clip) = (self.matrix, self.clip.clone());
+        self.set_bounds(self.bounds);
+        let mut mark = self.begin_split();
+        let put = base.clone();
+        // Unframed, so under no transform or clip, onto the page just
+        // emptied.
+        self.append_unframed(move |canvas, _| {
+            canvas.draw_image(&put, (0, 0), None);
+        });
+        let pixels = self.take_split(&mut mark);
+        document
+            .iter()
+            .for_each(|(entry, asks)| self.file_entry(entry.clone(), asks));
+        self.end_split(mark, pixels, HeldImage::of(base));
+        self.set_state(matrix, &clip);
+        // The base is the image of the page as it now stands.
+        let page = self.page();
+        if let Some(own) = &mut self.own_image
+            && own.image.unique_id() == base.unique_id()
+        {
+            own.key.page = page.id;
+            own.key.depth = page.layers.len();
+        }
     }
 
     /// Panics where the images the page counts as held are not those a

@@ -11920,3 +11920,177 @@ mod document_route_tests {
         assert!(!Arc::ptr_eq(&first.layers, &changed.layers), "made again");
     }
 }
+
+#[cfg(test)]
+mod flatten_tests {
+    //! A page never cleared, into which changing canvases are drawn as
+    //! images, lets go of what it holds for pixels past its budget and draws
+    //! as it did -- see `page::PageRecorder::flatten`.
+    use super::*;
+    use crate::{
+        context::{RECORDED_IMAGE_PAGES, page::FLATTENS},
+        export::{EncodeOptions, ImageFormat},
+    };
+
+    /// The pages' side.
+    const SIDE: (f32, f32) = (120.0, 80.0);
+    /// The bytes a page of `SIDE` takes at four to a pixel.
+    const PAGE: usize = (SIDE.0 * SIDE.1) as usize * 4;
+    /// Frames drawn, enough for several flattens.
+    const FRAMES: usize = 24;
+
+    /// A canvas carrying nesting, so that it is drawn as its own pixels.
+    fn source(gpu: bool) -> Canvas {
+        let mut inner = Canvas::new(8.0, 8.0);
+        inner.set_gpu(false);
+        inner.context().fill_rect(0.0, 0.0, 8.0, 8.0);
+        let mut source = Canvas::new(SIDE.0, SIDE.1);
+        source.set_gpu(gpu);
+        source.context().draw_canvas(&mut inner, 0.0, 0.0);
+        source
+    }
+
+    fn held(canvas: &mut Canvas) -> usize {
+        let mut bytes = 0;
+        canvas.context().inner.with_recorder(|recorder| {
+            bytes = recorder.held_image_bytes();
+        });
+        bytes
+    }
+
+    /// One frame: a line of text of the frame's own, and the source changed
+    /// and drawn in at half alpha under the destination's transform, last,
+    /// so that a frame that flattens ends with the page as the flatten left
+    /// it.
+    fn frame(source: &mut Canvas, dest: &mut Canvas, n: usize) {
+        let ctx = source.context();
+        ctx.set_fill_style(RgbaLinear::opaque((n % 7) as f32 / 7.0, 0.4, 0.8));
+        ctx.fill_rect((n * 5 % 120) as f32, 0.0, 5.0, SIDE.1);
+        let ctx = dest.context();
+        ctx.fill_text(
+            &format!("f{n}"),
+            4.0,
+            12.0 + (n % 6) as f32 * 11.0,
+            None,
+        );
+        ctx.draw_canvas(source, 0.0, 0.0);
+    }
+
+    /// A destination with a transform and an alpha set, which a flatten
+    /// keeps for the draws after it.
+    fn destination(gpu: bool) -> Canvas {
+        let mut dest = Canvas::new(SIDE.0, SIDE.1);
+        dest.set_gpu(gpu);
+        let ctx = dest.context();
+        ctx.translate(3.0, 2.0);
+        ctx.set_global_alpha(0.5);
+        assert!(ctx.set_font_css("10px sans-serif"));
+        dest
+    }
+
+    /// The scene drawn for `frames` frames, flattening or not.
+    fn drawn(gpu: bool, frames: usize, flattens: bool) -> Canvas {
+        FLATTENS.set(flattens);
+        let mut source = source(gpu);
+        let mut dest = destination(gpu);
+        (0..frames).for_each(|n| frame(&mut source, &mut dest, n));
+        FLATTENS.set(true);
+        dest
+    }
+
+    fn pixels(canvas: &mut Canvas) -> Vec<u8> {
+        canvas
+            .to_image_data(None, &crate::pixels::ImageDataExport::default())
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// The images held level off: never more than the budget past a frame,
+    /// where without the flatten a page holds one for every frame.
+    #[test]
+    fn a_page_drawn_into_every_frame_levels_off() {
+        let mut source = source(false);
+        let mut dest = destination(false);
+        let mut flattened = 0;
+        let mut last = 0;
+        for n in 0..FRAMES {
+            frame(&mut source, &mut dest, n);
+            let now = held(&mut dest);
+            assert!(
+                now <= RECORDED_IMAGE_PAGES * PAGE,
+                "frame {n}: {now} bytes held, past {RECORDED_IMAGE_PAGES} pages"
+            );
+            if now < last {
+                flattened += 1;
+                assert_eq!(now, PAGE, "frame {n}: the base alone");
+                dest.context().inner.source_image().expect("an image");
+                assert_eq!(
+                    held(&mut dest),
+                    PAGE,
+                    "the base is the page's image"
+                );
+            }
+            last = now;
+        }
+        assert!(flattened >= 3, "{flattened} flattens in {FRAMES} frames");
+    }
+
+    /// A page flattened lands the bytes it would have kept every entry for,
+    /// on the CPU and on the GPU.
+    #[test]
+    fn a_flattened_page_draws_as_it_did() {
+        for gpu in [false, true] {
+            let mut kept = drawn(gpu, FRAMES, false);
+            if gpu && kept.engine_kind() != crate::canvas::EngineKind::Gpu {
+                continue;
+            }
+            let mut flat = drawn(gpu, FRAMES, true);
+            assert!(held(&mut flat) < held(&mut kept), "gpu {gpu}: flattened");
+            assert!(pixels(&mut flat) == pixels(&mut kept), "gpu {gpu}");
+            let png = |canvas: &mut Canvas| {
+                canvas
+                    .to_buffer(ImageFormat::Png, &EncodeOptions::default())
+                    .expect("a PNG")
+            };
+            assert!(png(&mut flat) == png(&mut kept), "gpu {gpu}: the PNG");
+        }
+    }
+
+    /// A page past its budget with a layer open is not flattened, which
+    /// would erase the layer: it draws as one never flattened.
+    #[test]
+    fn a_page_with_a_layer_open_is_not_flattened() {
+        let scene = |flattens: bool| {
+            FLATTENS.set(flattens);
+            let mut source = source(false);
+            let mut dest = destination(false);
+            dest.context().save_layer_with(0.8, None, None);
+            (0..FRAMES).for_each(|n| frame(&mut source, &mut dest, n));
+            dest.context().restore();
+            FLATTENS.set(true);
+            dest
+        };
+        let (mut open, mut kept) = (scene(true), scene(false));
+        assert!(pixels(&mut open) == pixels(&mut kept));
+    }
+
+    /// A document of a flattened page is written from every frame's draws,
+    /// and never from the base.
+    #[test]
+    fn a_flattened_page_is_written_from_every_draw() {
+        let mut flat = drawn(false, FRAMES, true);
+        let svg = flat
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("an SVG");
+        let svg = String::from_utf8_lossy(&svg);
+        assert!(!svg.contains("<image"), "no image");
+        let missing: Vec<usize> = (0..FRAMES)
+            .filter(|n| !svg.contains(&format!("\tf{n}\n")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "frames written without their text: {missing:?}"
+        );
+    }
+}

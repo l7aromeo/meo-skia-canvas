@@ -169,6 +169,18 @@ pub(crate) const CONTEXT_BYTES: usize = 4_800;
 /// this lets through, and 1.3 MB in 278 ms where it was 1,024.
 pub(crate) const DOCUMENT_REPLAY_BUDGET: usize = 64;
 
+/// How many pages of its own pixels a page's entries may hold in images of
+/// other canvases before the page lets go of them -- see
+/// `PageRecorder::flatten`.
+///
+/// Chosen rather than derived: past it a page holds one page of pixels for
+/// what it drew, so a page never cleared that keeps drawing changing
+/// canvases in levels off at a few pages, where it held a page for every
+/// draw. Below it what the page drew itself stays entries, which a read at
+/// another density draws at that density; past it they are the base's
+/// pixels, scaled there.
+pub(crate) const RECORDED_IMAGE_PAGES: usize = 4;
+
 /// What a document plays of a canvas drawn into another -- see
 /// `Context2D::draw_canvas_image`.
 #[derive(Clone, Debug)]
@@ -4684,6 +4696,32 @@ impl Context2D {
                 }
             },
         );
+        self.flatten_past_budget();
+    }
+
+    /// Flattens the page -- see `PageRecorder::flatten` -- where the images
+    /// its entries hold come to more than [`RECORDED_IMAGE_PAGES`] of its
+    /// own pixels at density 1 and no layer is open: a layer's entries are
+    /// composited when it closes, and the base would have to stand beneath
+    /// them.
+    fn flatten_past_budget(&mut self) {
+        if self.layers.iter().any(|opened| *opened) {
+            return;
+        }
+        let page = ImageInfo::new(
+            self.bounds.size().to_floor(),
+            self.canvas_color_type,
+            AlphaType::Premul,
+            None,
+        );
+        let budget =
+            RECORDED_IMAGE_PAGES.saturating_mul(page.compute_min_byte_size());
+        if self.recorder.borrow().held_entry_bytes() <= budget {
+            return;
+        }
+        if let Some(base) = self.source_image() {
+            self.recorder.borrow_mut().flatten(&base);
+        }
     }
 
     /// What a document plays of this canvas, for another canvas to draw
