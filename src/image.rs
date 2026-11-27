@@ -15,6 +15,7 @@ mod document_features;
 
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color, skia_color_to_rgba_linear},
+    context::layer::Target,
     css,
     decode::bmp::space_of,
     error::Error,
@@ -1121,10 +1122,24 @@ impl Svg {
                 }
             }
 
-            self.render(canvas, SkSize::new(width as f32, height as f32));
+            self.render(
+                canvas,
+                SkSize::new(width as f32, height as f32),
+                Target::Pixels,
+            );
         }
 
         Ok(Image::still(surface.image_snapshot()))
+    }
+
+    /// Whether the canvas draws text of the document -- see `colr_text` --
+    /// which a document draws otherwise than pixels do -- see
+    /// [`Self::render`].
+    pub(crate) fn draws_text(&self) -> bool {
+        self.layers
+            .iter()
+            .flatten()
+            .any(|layer| matches!(layer, Layer::Text(_)))
     }
 
     /// Draws the document onto `canvas` with its viewport `container`: the
@@ -1134,13 +1149,15 @@ impl Svg {
     /// The one way both doors draw a document, so that a text the canvas
     /// draws is drawn by each.
     ///
-    /// Says what the drawing asks of a vector backend: what the module's
-    /// asks, judged from the document -- see `document_features` -- and what
-    /// the texts the canvas drew ask -- see `colr_text::TextDraw::draw`.
+    /// Each such text is drawn as the canvas's page plays for `kind` -- see
+    /// `colr_text::TextDraw::draw`. Says what the drawing asks of a vector
+    /// backend: what the module's asks, judged from the document -- see
+    /// `document_features` -- and what those texts ask.
     pub(crate) fn render(
         &mut self,
         canvas: &skia_safe::Canvas,
         container: SkSize,
+        kind: Target,
     ) -> VectorFeatures {
         self.dom.set_container_size(container);
         let Some(layers) = self.layers.as_mut() else {
@@ -1166,9 +1183,8 @@ impl Svg {
                     segment.render(canvas);
                     features
                 }
-                Layer::Text(text) => {
-                    features.with(text.draw(canvas, &root, container, current))
-                }
+                Layer::Text(text) => features
+                    .with(text.draw(canvas, &root, container, current, kind)),
             })
     }
 }
@@ -5551,7 +5567,7 @@ mod tests {
             .expect("valid SVG")
             .rasterize(width, height)
             .expect("rasterizes");
-        let Some((Content::Vector(picture, ..), _)) =
+        let Some((Content::Vector { picture, .. }, _)) =
             record_svg(&Data::new_copy(xml.as_bytes()), None)
         else {
             panic!("the binding records the document");

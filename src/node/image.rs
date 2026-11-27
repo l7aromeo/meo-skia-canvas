@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use crate::{
     color::skia_color_to_rgba_linear,
-    context::{BoxedContext2D, Context2D, SourcePicture},
+    context::{BoxedContext2D, Context2D, SourcePicture, layer::Target},
     export::VectorFeatures,
     image::{Svg, decode_frame, frame_delays},
     node::external::External,
@@ -88,7 +88,14 @@ impl Image {
                 Some(data) if image.is_lazy_generated() => data.size(),
                 _ => image.image_info().compute_min_byte_size(),
             },
-            Content::Vector(picture, ..) => picture.approximate_bytes_used(),
+            Content::Vector {
+                picture, document, ..
+            } => {
+                picture.approximate_bytes_used()
+                    + document
+                        .as_ref()
+                        .map_or(0, Picture::approximate_bytes_used)
+            }
             Content::Loading | Content::Broken => 0,
         };
         let sources = [&self.encoded, &self.svg_source]
@@ -125,10 +132,19 @@ impl Default for Image {
 #[derive(Default)]
 pub enum Content {
     Bitmap(SkImage),
-    /// A recording, its size, and what replaying it asks of a vector backend
-    /// -- see `export::VectorFeatures` -- which a page drawing it carries on
-    /// the draw, since the recording itself does not say.
-    Vector(Picture, Size, VectorFeatures),
+    /// A recording and its size.
+    Vector {
+        picture: Picture,
+        size: Size,
+        /// What a document drawing it asks of a vector backend -- see
+        /// `export::VectorFeatures` -- which a page drawing it carries on
+        /// the draw, since the recording itself does not say.
+        features: VectorFeatures,
+        /// What a document draws in its place, where that differs: an SVG
+        /// whose text a canvas drew, recorded as a document plays that text
+        /// -- see `Svg::render`.
+        document: Option<Picture>,
+    },
     #[default]
     Loading,
     Broken,
@@ -139,7 +155,7 @@ impl std::fmt::Debug for Content {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Content::Bitmap(_) => write!(f, "Bitmap({:?})", self.size()),
-            Content::Vector(_, size, _) => write!(f, "Vector({size:?})"),
+            Content::Vector { size, .. } => write!(f, "Vector({size:?})"),
             Content::Loading => f.write_str("Loading"),
             Content::Broken => f.write_str("Broken"),
         }
@@ -187,9 +203,17 @@ impl Clone for Content {
     fn clone(&self) -> Self {
         match self {
             Content::Bitmap(img) => Content::Bitmap(img.clone()),
-            Content::Vector(pict, size, features) => {
-                Content::Vector(pict.clone(), *size, *features)
-            }
+            Content::Vector {
+                picture,
+                size,
+                features,
+                document,
+            } => Content::Vector {
+                picture: picture.clone(),
+                size: *size,
+                features: *features,
+                document: document.clone(),
+            },
             _ => Content::default(),
         }
     }
@@ -257,9 +281,11 @@ impl Source {
 impl Content {
     pub fn from_context(ctx: &mut Context2D, use_vector: bool) -> Self {
         match use_vector {
-            true => ctx.picture().map(|p| {
-                let features = ctx.page().vector_features();
-                Content::Vector(p, ctx.bounds.size(), features)
+            true => ctx.picture().map(|picture| Content::Vector {
+                picture,
+                size: ctx.bounds.size(),
+                features: ctx.page().vector_features(),
+                document: None,
             }),
             false => ctx.image().map(Content::Bitmap),
         }
@@ -280,7 +306,7 @@ impl Content {
     pub fn size(&self) -> Size {
         match &self {
             Content::Bitmap(img) => img.dimensions().into(),
-            Content::Vector(_, size, _) => *size,
+            Content::Vector { size, .. } => *size,
             _ => Size::new_empty(),
         }
     }
@@ -420,10 +446,37 @@ pub(crate) fn record_svg(
     let size = Size::new(intrinsic.width, intrinsic.height);
     let bounds = Rect::from_size(size);
     let mut compositor = PictureRecorder::new();
-    let features =
-        parsed.render(compositor.begin_recording(bounds, true), bounds.size());
-    Some(match compositor.finish_recording_as_picture(None) {
-        Some(picture) => (Content::Vector(picture, size, features), autosized),
+    let drawn = parsed.render(
+        compositor.begin_recording(bounds, true),
+        bounds.size(),
+        Target::Pixels,
+    );
+    let pixels = compositor.finish_recording_as_picture(None);
+    // A document draws the text a canvas drew as a document plays it -- a
+    // colour glyph without its layer where that changes nothing it holds --
+    // so it is recorded again for one, and the draw is filed with what that
+    // recording asks. Without such text the one recording asks what it asks.
+    let (features, document) = match parsed.draws_text() {
+        true => {
+            let features = parsed.render(
+                compositor.begin_recording(bounds, true),
+                bounds.size(),
+                Target::Document,
+            );
+            (features, compositor.finish_recording_as_picture(None))
+        }
+        false => (drawn, None),
+    };
+    Some(match pixels {
+        Some(picture) => (
+            Content::Vector {
+                picture,
+                size,
+                features,
+                document,
+            },
+            autosized,
+        ),
         None => (Content::Broken, autosized),
     })
 }
@@ -464,7 +517,7 @@ pub fn get_current_color(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = this.borrow();
 
     let could_reach =
-        matches!(this.content, Content::Vector(..) | Content::Loading);
+        matches!(this.content, Content::Vector { .. } | Content::Loading);
     match &this.current_color {
         Some((_, declared)) if could_reach => {
             Ok(cx.string(declared.css()).upcast())

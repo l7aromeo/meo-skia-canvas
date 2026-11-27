@@ -45,6 +45,7 @@ use skia_safe::{
 use crate::{
     canvas::Canvas,
     color::RgbaLinear,
+    context::layer::Target,
     context2d::{Context2D, TextRendering},
     export::VectorFeatures,
     font_library::family_behind_alias,
@@ -1063,19 +1064,23 @@ fn root_matrix(root: &svg::Svg, container: SkSize) -> Matrix {
 impl TextDraw {
     /// Lays the text out and draws it onto `target`, under the matrix the
     /// target holds now and the root's for a container of `container`, with
-    /// `currentcolor` resolving to `current` at the root.
+    /// `currentcolor` resolving to `current` at the root: as the page
+    /// `fill_text` drew it on is played for `kind`, so that a document is
+    /// drawn as one draws the same text drawn by `fill_text`.
     ///
     /// Says what the drawing asks of a vector backend: what `fill_text` asked
     /// of the page it drew on -- the layer a colour glyph is composited
-    /// through -- and the layer `opacity` is drawn through, so that a
-    /// document a backend cannot write it into embeds it as pixels, as it
-    /// does the same text drawn by `fill_text` -- see `export::VectorFeatures`.
+    /// through, where a document draws it through one -- and the layer
+    /// `opacity` is drawn through, so that a document a backend cannot write
+    /// it into embeds it as pixels, as it does the same text drawn by
+    /// `fill_text` -- see `export::VectorFeatures`.
     pub(crate) fn draw(
         &self,
         target: &SkCanvas,
         root: &svg::Svg,
         container: SkSize,
         current: RgbaLinear,
+        kind: Target,
     ) -> VectorFeatures {
         let size = target.base_layer_size();
         if size.width <= 0 || size.height <= 0 {
@@ -1114,10 +1119,15 @@ impl TextDraw {
             ctx.fill_text(&piece.text, origin.x, origin.y, None);
         }
 
-        let Some(picture) = ctx.inner.picture() else {
+        let page = ctx.inner.page();
+        let picture = match kind {
+            Target::Pixels => page.picture(None),
+            Target::Document => page.document_picture(),
+        };
+        let Some(picture) = picture else {
             return VectorFeatures::PLAIN;
         };
-        let mut features = ctx.inner.page().vector_features();
+        let mut features = page.vector_features();
         target.save();
         target.reset_matrix();
         if self.opacity < 1.0 {

@@ -80,8 +80,11 @@ impl CanvasPattern {
                 .unwrap_or_default(),
             false => ctx
                 .picture()
-                .map(|picture| {
-                    Content::Vector(picture, dims, ctx.page().vector_features())
+                .map(|picture| Content::Vector {
+                    picture,
+                    size: dims,
+                    features: ctx.page().vector_features(),
+                    document: None,
                 })
                 .unwrap_or_default(),
         };
@@ -146,7 +149,7 @@ impl CanvasPattern {
                     None,
                 )
                 .map(|shader| shader.with_local_matrix(&stamp.matrix)),
-            Content::Vector(pict, ..) => {
+            Content::Vector { picture: pict, .. } => {
                 let tile_rect = Rect::from_size(stamp.dims);
                 let shader = pict.to_shader(
                     stamp.repeat,

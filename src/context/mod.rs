@@ -47,6 +47,8 @@ pub mod typesetting;
 use crate::node::typography::Painter;
 use exact_gradient::GradientSpec;
 
+#[cfg(test)]
+use crate::font::colr::InlinePlainGlyphs;
 use crate::{
     cache_map::{GOLDEN_RATIO_64, KeptSets},
     context2d::{FontKerning, TextRendering, font_spec_from_css},
@@ -2222,6 +2224,10 @@ impl Context2D {
             };
             recording = LazyPicture::from(Some(recorded));
             if dual {
+                // A document's recording draws a colour glyph without the
+                // layer that changes nothing, as `recorded_for_document`
+                // records it.
+                let _inline = InlinePlainGlyphs::hold();
                 let Some(recorded) = record(Recording::Document) else {
                     return false;
                 };
@@ -5066,12 +5072,17 @@ impl Context2D {
             let kept = typesetter.laid_out();
             // What the colour glyphs this library draws itself ask for, beside
             // what the paint does -- see `typography::colour_features`.
-            let colour = match &kept {
+            // A document records the run while
+            // `colr::InlinePlainGlyphs` is held -- see
+            // `layer::ReplayedText::recorded_for_document` -- so the draw is
+            // filed with what it asks there.
+            let colours = match &kept {
                 Some(kept) => kept.colour_features(&paint),
                 None => typesetter.colour_features(&paint),
             };
-            let features =
-                self.vector_features(&paint, Some(style)).with(colour);
+            let features = self
+                .vector_features(&paint, Some(style))
+                .with(colours.in_document);
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
             // Whether the run holds a glyph the platform draws in its own
@@ -5088,7 +5099,7 @@ impl Context2D {
             // they are drawn under -- see `typography::KEYS_OWN_COLOUR_BLOBS`
             // -- which a recording holding one set of them for every matrix
             // cannot be.
-            let colour = (colour.refused_by(VectorFeatures::LAYER)
+            let colour = (colours.all.refused_by(VectorFeatures::LAYER)
                 || own_colours && KEYS_OWN_COLOUR_BLOBS)
                 .then(|| {
                     let (run, offset, condensation) =
@@ -8480,7 +8491,12 @@ mod tests {
         let picture = inner.picture().expect("the page's picture");
         let size = inner.bounds.size();
         let recorded = CanvasPattern::from_parts(
-            Content::Vector(picture, size, VectorFeatures::PLAIN),
+            Content::Vector {
+                picture,
+                size,
+                features: VectorFeatures::PLAIN,
+                document: None,
+            },
             size,
             repeat,
             identity,

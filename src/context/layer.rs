@@ -59,8 +59,8 @@ use crate::{
     },
     export::{VectorFeatures, blend_features},
     font::colr::{
-        BatchScope, Format, ImageRoute, blends_by_coefficients, composite_onto,
-        grow_sheets,
+        BatchScope, Format, ImageRoute, InlinePlainGlyphs,
+        blends_by_coefficients, composite_onto, grow_sheets,
     },
     gpu::{RenderingEngine, pacing},
     node::{
@@ -2178,24 +2178,34 @@ impl ReplayedText {
     }
 
     /// The run as recorded for a document, recorded now if nothing has
-    /// asked for it yet, its glyphs drawn whole -- see [`WholeRuns`]: in
-    /// the document's own paint on a page that keeps one; otherwise the
-    /// recording for pixels -- see [`Self::recorded`] -- where a blend by
-    /// coefficients draws its glyphs whole there too, and a recording of
-    /// its own where the recording for pixels draws them apart.
+    /// asked for it yet, its glyphs drawn whole -- see [`WholeRuns`] -- and
+    /// each colour glyph that composites as its fills would drawn without
+    /// its layer -- see `colr::InlinePlainGlyphs`: in the document's own
+    /// paint on a page that keeps one; otherwise the recording for pixels
+    /// -- see [`Self::recorded`] -- where a blend by coefficients draws its
+    /// glyphs whole there too and no glyph is drawn without its layer, and
+    /// a recording of its own where the recording for pixels draws them
+    /// apart or through layers the document does without.
     pub(crate) fn recorded_for_document(&self) -> Option<&Picture> {
         let _whole = WholeRuns::hold();
+        // Held only while a recording of the document's own is made, so
+        // that the one for pixels, which this may record first, keeps every
+        // glyph's layer whichever target asks for it first.
+        let inline = || InlinePlainGlyphs::hold();
         let Some(document) = &self.document else {
             if blends_by_coefficients(
                 self.paint.blend_mode_or(BlendMode::SrcOver),
-            ) {
+            ) && !self.inlines_in_document()
+            {
                 return self.recorded();
             }
             return self.whole.get_or_record(|| {
+                let _inline = inline();
                 self.record(&self.paint, self.shadow.as_ref())
             });
         };
         document.picture.get_or_record(|| {
+            let _inline = inline();
             self.record(&document.paint, document.shadow.as_ref())
         })
     }
@@ -2289,9 +2299,22 @@ impl ReplayedText {
         }
     }
 
-    /// Whether this stands for a pair of recordings -- see [`holds_a_pair`].
+    /// Whether this stands for a pair of recordings -- see [`holds_a_pair`]:
+    /// on a page that keeps one for each kind of target, or where a document
+    /// draws a colour glyph without the layer pixels draw it through.
     pub(crate) fn is_pair(&self) -> bool {
-        self.document.is_some()
+        self.document.is_some() || self.inlines_in_document()
+    }
+
+    /// Whether [`Self::recorded_for_document`] draws a colour glyph of the
+    /// run without the layer [`Self::recorded`] draws it through.
+    fn inlines_in_document(&self) -> bool {
+        match &self.replay {
+            Some(Replay::Text { run, .. }) => {
+                run.colour_features(&self.paint).inlines()
+            }
+            Some(Replay::Path(..)) | None => false,
+        }
     }
 }
 
@@ -3794,6 +3817,20 @@ impl Entries {
             features,
             apart: false,
         }
+    }
+
+    /// One draw recorded for each kind of target -- `pixels` and `document`
+    /// -- asking `features` of a vector backend: a [`Layer::Targeted`], which
+    /// each target plays its own of.
+    pub(crate) fn pair(
+        pixels: Picture,
+        document: Picture,
+        features: VectorFeatures,
+    ) -> Self {
+        Self::new(
+            vec![Layer::Targeted(Arc::new((pixels, document)))],
+            vec![features],
+        )
     }
 
     /// `layers` asking nothing of a vector backend.

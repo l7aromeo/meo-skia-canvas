@@ -1074,3 +1074,322 @@ mod on_the_gpu {
         assert_eq!(apart, 0, "{apart} bytes apart");
     }
 }
+
+/// Colour glyphs in a document: an SVG writes each as its fills where
+/// nothing inside it opens a layer or blends and it is drawn opaque and
+/// over, which is what its layer composites to, and embeds it as pixels
+/// otherwise, since Skia's SVG device has no layers.
+mod in_documents {
+    use super::*;
+
+    /// The page the scenes are drawn on, in CSS pixels.
+    const SIDE: (f32, f32) = (220.0, 90.0);
+
+    /// How far a channel of the SVG, rendered back, may stand from the
+    /// canvas: the fills composited one by one over the page, where the
+    /// canvas composites the glyph's layer over it, each rounded to eight
+    /// bits in its own order. Measured at 1.
+    const DOCUMENT_LEVELS: u8 = 1;
+
+    /// What a case sets on the context before its glyphs are drawn.
+    type Paint = dyn Fn(&mut Context2D);
+
+    /// `glyphs` set in `font` on white with their origin at `at`, in the
+    /// paint `paint` sets.
+    fn scene(
+        ctx: &mut Context2D,
+        font: &str,
+        glyphs: &str,
+        at: (f32, f32),
+        paint: &Paint,
+    ) {
+        ctx.set_fill_style_css("white").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        assert!(ctx.set_font_css(font));
+        ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+        paint(ctx);
+        ctx.fill_text(glyphs, at.0, at.1, None);
+    }
+
+    /// A CPU canvas holding [`scene`].
+    fn page(font: &str, glyphs: &str, at: (f32, f32), paint: &Paint) -> Canvas {
+        let mut canvas = Canvas::new(SIDE.0, SIDE.1);
+        canvas.set_gpu(false);
+        scene(canvas.context(), font, glyphs, at, paint);
+        canvas
+    }
+
+    /// The SVG of `canvas` at `density`.
+    fn svg_of(canvas: &mut Canvas, density: u32) -> String {
+        String::from_utf8(
+            canvas
+                .to_buffer(
+                    ImageFormat::Svg,
+                    &EncodeOptions {
+                        density: density as f32,
+                        ..EncodeOptions::default()
+                    },
+                )
+                .expect("an SVG"),
+        )
+        .expect("UTF-8")
+    }
+
+    /// `svg` rendered `density` times its size, on the CPU.
+    fn rendered(svg: &str, density: u32) -> Vec<u8> {
+        let (width, height) =
+            (SIDE.0 as u32 * density, SIDE.1 as u32 * density);
+        let image = Svg::parse(svg)
+            .expect("parses")
+            .rasterize(width, height)
+            .expect("rasterizes");
+        let mut back = Canvas::new(width as f32, height as f32);
+        back.set_gpu(false);
+        back.context().draw_image(&image, 0.0, 0.0);
+        pixels(&mut back)
+    }
+
+    /// The canvas's pixels at `density`.
+    fn drawn(canvas: &mut Canvas, density: u32) -> Vec<u8> {
+        canvas
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    density,
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+    }
+
+    /// Every colour glyph of the COLRv1 test font: the code points the 48px
+    /// reference layout lists, less those it lists without colour paint.
+    fn every_colour_glyph() -> Vec<String> {
+        let file = format!("{REFERENCES}/chrome-test-glyphs-48px.json");
+        let spec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).expect(&file))
+                .expect("JSON");
+        let listed = |key: &str| -> Vec<u32> {
+            spec[key]
+                .as_array()
+                .expect(key)
+                .iter()
+                .map(|hex| {
+                    u32::from_str_radix(hex.as_str().expect("hex"), 16)
+                        .expect("a code point")
+                })
+                .collect()
+        };
+        let plain = listed("withoutColourPaint");
+        listed("codepoints")
+            .into_iter()
+            .filter(|point| !plain.contains(point))
+            .filter_map(char::from_u32)
+            .map(String::from)
+            .collect()
+    }
+
+    /// How many of the test font's colour glyphs a document writes as their
+    /// fills, as counted when the route was written: those of solid fills,
+    /// pads of linear gradients and radial ones from a point inside their
+    /// end circle, with nothing inside them composited or blended.
+    const INLINED_GLYPHS: usize = 27;
+
+    /// Where each density's glyphs are drawn from.
+    const ORIGINS: [(u32, (f32, f32)); 2] =
+        [(1, (10.3, 70.7)), (2, (10.3, 70.7))];
+
+    /// How far the SVG may be moved, in device pixels, to stand on the
+    /// canvas. A document places a colour glyph as the canvas does at its
+    /// own size, on the whole CSS pixel it snaps the origin to -- as a PDF
+    /// does -- where the canvas at a density of 2 snaps it to a half: so
+    /// there it may stand a device pixel off, measured at one down, and
+    /// nowhere at a density of 1.
+    fn moves(density: u32) -> impl Iterator<Item = (i64, i64)> {
+        let reach = i64::from(density > 1);
+        (-reach..=reach)
+            .flat_map(move |dy| (-reach..=reach).map(move |dx| (dx, dy)))
+    }
+
+    /// The largest channel apart between `back` moved by `by` and `canvas`,
+    /// both of the page at `density`, over the page less the edge `by`
+    /// moves past.
+    fn apart_moved(
+        back: &[u8],
+        canvas: &[u8],
+        density: u32,
+        by: (i64, i64),
+    ) -> u8 {
+        let (width, height) = (
+            i64::from(SIDE.0 as u32 * density),
+            i64::from(SIDE.1 as u32 * density),
+        );
+        let at = |x: i64, y: i64| ((y * width + x) * 4) as usize;
+        (1..height - 1)
+            .flat_map(|y| (1..width - 1).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let (a, b) = (at(x + by.0, y + by.1), at(x, y));
+                (0..4).map(move |c| back[a + c].abs_diff(canvas[b + c]))
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Whether `svg`, written from `canvas` at `density`, renders back
+    /// within [`DOCUMENT_LEVELS`] of it, saying how far apart where not.
+    fn renders_as_drawn(
+        svg: &str,
+        canvas: &mut Canvas,
+        density: u32,
+    ) -> Result<(), u8> {
+        let back = rendered(svg, density);
+        let drawn = drawn(canvas, density);
+        let largest = moves(density)
+            .map(|by| apart_moved(&back, &drawn, density, by))
+            .min()
+            .unwrap_or(u8::MAX);
+        (largest <= DOCUMENT_LEVELS).then_some(()).ok_or(largest)
+    }
+
+    #[test]
+    fn an_svg_writes_a_plain_colour_glyph_as_its_fills() {
+        register();
+        let plain = |_: &mut Context2D| {};
+        let mut cases = vec![("48px ColrV0".to_string(), "AB".to_string())];
+        cases.extend(
+            every_colour_glyph()
+                .into_iter()
+                .map(|glyph| ("48px ColrGlyphs".to_string(), glyph)),
+        );
+        let mut inlined = Vec::new();
+        for (font, glyphs) in &cases {
+            for (density, at) in ORIGINS {
+                let mut canvas = page(font, glyphs, at, &plain);
+                // The pixels first, so that the document is not handed the
+                // recording they kept: the JavaScript suite exports first.
+                // Something is drawn, so that agreeing is not agreeing on
+                // an empty page; some of the font's glyphs are grey.
+                let inked = drawn(&mut canvas, density)
+                    .chunks(4)
+                    .any(|pixel| pixel[3] > 0);
+                let svg = svg_of(&mut canvas, density);
+                if svg.contains("<image") {
+                    continue;
+                }
+                let what = format!("{font} {glyphs:?} at {density}");
+                assert!(svg.contains("<path"), "{what}: {svg}");
+                assert!(inked, "{what}");
+                if let Err(largest) =
+                    renders_as_drawn(&svg, &mut canvas, density)
+                {
+                    panic!("{what}: {largest} levels apart");
+                }
+                if density == 1 {
+                    inlined.push(glyphs.clone());
+                }
+            }
+        }
+        // The COLRv0 layers and a linear gradient's pad among them, so that
+        // the sweep cannot pass by writing nothing as fills.
+        assert!(inlined.contains(&"AB".to_string()), "{inlined:?}");
+        assert!(inlined.contains(&"\u{f0500}".to_string()), "{inlined:?}");
+        assert_eq!(inlined.len(), INLINED_GLYPHS + 1, "{inlined:?}");
+    }
+
+    #[test]
+    fn an_svg_embeds_a_colour_glyph_its_layer_changes_as_pixels() {
+        register();
+        let plain = |_: &mut Context2D| {};
+        let translucent = |ctx: &mut Context2D| ctx.set_global_alpha(0.5);
+        let multiplied = |ctx: &mut Context2D| {
+            ctx.set_global_composite_operation(BlendMode::Multiply)
+        };
+        let cases: [(&str, &str, &Paint); 6] = [
+            ("48px ColrV0", "AB", &translucent),
+            ("48px ColrV0", "AB", &multiplied),
+            // A composite, which opens a layer inside the glyph.
+            ("48px ColrGlyphs", colour_text("\u{f0600}"), &plain),
+            // A sweep, which SVG names no paint server for.
+            ("48px ColrGlyphs", colour_text("\u{f0200}"), &plain),
+            // A linear gradient that repeats, which SVG would pad.
+            ("48px ColrGlyphs", colour_text("\u{f0501}"), &plain),
+            // A radial one between two circles, which Skia's SVG device
+            // writes with the circles swapped.
+            ("48px ColrGlyphs", colour_text("\u{f0506}"), &plain),
+        ];
+        for (index, (font, glyphs, paint)) in cases.into_iter().enumerate() {
+            let svg = svg_of(&mut page(font, glyphs, (10.3, 70.7), paint), 1);
+            assert!(svg.contains("<image"), "case {index}: {svg}");
+        }
+    }
+
+    // A page of floats keeps one recording, which a run shares between its
+    // targets where nothing it draws is drawn otherwise for a document; a
+    // colour glyph drawn without its layer is, so the run is recorded again
+    // for the document, and stands for a pair of recordings when its canvas
+    // is drawn into another.
+    #[test]
+    fn a_page_of_floats_writes_its_plain_colour_glyphs_as_fills() {
+        register();
+        let plain = |_: &mut Context2D| {};
+        let floats = || {
+            let mut canvas = Canvas::with_options(
+                SIDE.0,
+                SIDE.1,
+                CanvasOptions {
+                    color_type: PixelDepth::F16,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas of half floats");
+            canvas.set_gpu(false);
+            canvas
+        };
+        for (density, at) in ORIGINS {
+            let mut text = floats();
+            scene(text.context(), "48px ColrV0", "AB", at, &plain);
+            let mut source = floats();
+            scene(source.context(), "48px ColrV0", "AB", at, &plain);
+            let mut drawn_in = floats();
+            drawn_in.context().draw_canvas(&mut source, 0.0, 0.0);
+            for (door, canvas) in
+                [("fill_text", &mut text), ("draw_canvas", &mut drawn_in)]
+            {
+                // The pixels first, so that the document cannot be handed
+                // the recording they keep.
+                drawn(canvas, density);
+                let svg = svg_of(canvas, density);
+                let what = format!("{door} at {density}");
+                assert!(!svg.contains("<image"), "{what}: {svg}");
+                assert!(svg.contains("<path"), "{what}: {svg}");
+                if let Err(largest) = renders_as_drawn(&svg, canvas, density) {
+                    panic!("{what}: {largest} levels apart");
+                }
+            }
+        }
+    }
+
+    // A canvas drawn into another reaches the document as the entries it
+    // holds, so that its text is written as a document plays it rather
+    // than from the recording its pixels keep.
+    #[test]
+    fn a_canvas_drawn_into_another_writes_its_plain_colour_glyphs_as_fills() {
+        register();
+        let plain = |_: &mut Context2D| {};
+        for (density, at) in ORIGINS {
+            let mut source = page("48px ColrV0", "AB", at, &plain);
+            let mut canvas = Canvas::new(SIDE.0, SIDE.1);
+            canvas.set_gpu(false);
+            canvas.context().draw_canvas(&mut source, 0.0, 0.0);
+            let svg = svg_of(&mut canvas, density);
+            let what = format!("at {density}");
+            assert!(!svg.contains("<image"), "{what}: {svg}");
+            assert!(svg.contains("<path"), "{what}: {svg}");
+            if let Err(largest) = renders_as_drawn(&svg, &mut canvas, density) {
+                panic!("{what}: {largest} levels apart");
+            }
+        }
+    }
+}

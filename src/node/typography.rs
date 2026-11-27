@@ -552,14 +552,8 @@ struct DrawnAt {
 impl LaidOut {
     /// What the run's colour glyphs ask of a vector backend when drawn in
     /// `paint` -- see [`colour_features`].
-    pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
-        colour_features(
-            self.drawn
-                .runs
-                .iter()
-                .map(|run| (&run.font, &run.glyphs[..])),
-            paint,
-        )
+    pub(crate) fn colour_features(&self, paint: &Paint) -> ColourFeatures {
+        self.drawn.colour_features(paint)
     }
 
     /// Whether the run holds a glyph the platform draws in its own colours
@@ -788,6 +782,15 @@ impl fmt::Debug for RunPaint {
 }
 
 impl RunPaint {
+    /// What the run's colour glyphs ask of a vector backend when drawn in
+    /// `paint` -- see [`colour_features`].
+    pub(crate) fn colour_features(&self, paint: &Paint) -> ColourFeatures {
+        colour_features(
+            self.runs.iter().map(|run| (&run.font, &run.glyphs[..])),
+            paint,
+        )
+    }
+
     /// Each run as a text blob in its own font, sheared as `shears`
     /// says, to draw at the run's origin, or `None` where it draws nothing.
     ///
@@ -2703,6 +2706,39 @@ fn shares_a_pixel(a: &IRect, b: &IRect) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
+/// What the colour glyphs of a run ask of a vector backend -- see
+/// [`colour_features`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ColourFeatures {
+    /// Drawn as pixels and recordings draw them, each through its layer.
+    pub(crate) all: VectorFeatures,
+    /// Drawn into a document recorded while
+    /// `font::colr::InlinePlainGlyphs` is held, which draws a glyph
+    /// without its layer where that changes nothing a document holds.
+    pub(crate) in_document: VectorFeatures,
+}
+
+impl ColourFeatures {
+    /// Nothing asked of a backend, by a run holding no colour glyph.
+    pub(crate) const PLAIN: Self = Self {
+        all: VectorFeatures::PLAIN,
+        in_document: VectorFeatures::PLAIN,
+    };
+
+    fn with(self, other: Self) -> Self {
+        Self {
+            all: self.all.with(other.all),
+            in_document: self.in_document.with(other.in_document),
+        }
+    }
+
+    /// Whether a document recorded while `font::colr::InlinePlainGlyphs` is
+    /// held draws some glyph without the layer pixels draw it through.
+    pub(crate) fn inlines(self) -> bool {
+        self.all != self.in_document
+    }
+}
+
 /// What the colour glyphs among `runs`, each a font and its glyphs, ask of a
 /// vector backend when drawn in `paint` -- see `font::colr::ColourRun::
 /// features` -- so that a document a backend cannot write them into embeds
@@ -2710,18 +2746,24 @@ fn shares_a_pixel(a: &IRect, b: &IRect) -> bool {
 pub(crate) fn colour_features<'a>(
     runs: impl IntoIterator<Item = (&'a Font, &'a [GlyphId])>,
     paint: &Paint,
-) -> VectorFeatures {
+) -> ColourFeatures {
     runs.into_iter()
         .filter_map(|(font, glyphs)| {
             let run = ColourRun::of(font, paint)?;
             Some(
                 glyphs
                     .iter()
-                    .filter_map(|&glyph| run.features(glyph))
-                    .fold(VectorFeatures::PLAIN, VectorFeatures::with),
+                    .filter_map(|&glyph| {
+                        Some(ColourFeatures {
+                            all: run.features(glyph)?,
+                            in_document: run
+                                .features_in_document(glyph, paint)?,
+                        })
+                    })
+                    .fold(ColourFeatures::PLAIN, ColourFeatures::with),
             )
         })
-        .fold(VectorFeatures::PLAIN, VectorFeatures::with)
+        .fold(ColourFeatures::PLAIN, ColourFeatures::with)
 }
 
 /// What the colour glyphs `paragraph` sets ask of a vector backend -- see
@@ -2734,10 +2776,13 @@ pub(crate) fn paragraph_colour_features(
         return VectorFeatures::PLAIN;
     }
     let runs = glyph_runs(paragraph);
+    // A paragraph's document is recorded as its pixels are, each colour
+    // glyph through its layer.
     colour_features(
         runs.iter().map(|run| (&run.font, &run.glyphs[..])),
         &Paint::default(),
     )
+    .all
 }
 
 /// Whether `paragraph` sets a run in a face whose colour glyphs this library
@@ -3280,13 +3325,13 @@ impl<'a> Typesetter<'a> {
     /// Laying every first draw out again to ask cost 35% more on a page of
     /// three thousand strings each drawn once; a text whose characters its
     /// own faces hold, none of them colour faces, holds no colour glyph.
-    pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
+    pub(crate) fn colour_features(&self, paint: &Paint) -> ColourFeatures {
         if !self.can_hold(|face| colr_face(face).is_some()) {
-            return VectorFeatures::PLAIN;
+            return ColourFeatures::PLAIN;
         }
         let mut layout = self.layout(&Paint::default());
         if !holds_colour_runs(&layout.paragraph) {
-            return VectorFeatures::PLAIN;
+            return ColourFeatures::PLAIN;
         }
         let runs = glyph_runs(&mut layout.paragraph);
         colour_features(

@@ -1370,32 +1370,112 @@ describe("an SVG's text in a colour face", () => {
     agree(got, expected, "mixed");
   });
 
-  // A document is written as the canvas draws: the text reaches an SVG export
-  // as fillText's does rather than dropped with the layer its glyphs are
-  // composited through, which the SVG backend has no way to write.
-  test("reaches an SVG export as fillText's does", async () => {
-    const images = (svg) => (svg.match(/<image\b/g) ?? []).length;
-    for (const [family, entity, text, size] of [
-      ["SvgTextColrV1", "&#xf0100;", "\u{f0100}", 72],
-      ["SvgTextColrV0", "AB", "AB", 48],
+  // A document is written as the canvas draws. A glyph whose layers are
+  // plain fills is written as those fills, from fillText and from an SVG
+  // image alike, and draws back as the canvas does; one whose layer changes
+  // what is under it -- a composite inside the glyph, or the text's opacity
+  // -- is written as pixels from both, rather than dropped with the layer,
+  // which the SVG backend has no way to write.
+  // A page of floats keeps one recording, which a run shares between its
+  // targets unless a document draws it otherwise, as it draws a colour glyph
+  // without its layer.
+  test("reaches an SVG export as fills from a page of floats", async () => {
+    const floats = () => {
+      const canvas = new Canvas(W, H, { colorType: "RGBAF16" });
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      return ctx;
+    };
+    const fromText = floats();
+    fromText.textRendering = "geometricPrecision";
+    fromText.font = "48px SvgTextColrV0";
+    fromText.fillStyle = "rgb(40,90,160)";
+    fromText.fillText("AB", 10, 70);
+    const fromCanvas = floats();
+    fromCanvas.drawCanvas(fromText.canvas, 0, 0);
+    for (const [door, ctx] of [
+      ["fillText", fromText],
+      ["drawCanvas", fromCanvas],
     ]) {
-      const fromImage = new Canvas(W, H);
-      const xml = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><text x="10" y="70" font-family="${family}" font-size="${size}" fill="rgb(40,90,160)">${entity}</text></svg>`;
-      fromImage
-        .getContext("2d")
-        .drawImage(await loadImage(Buffer.from(xml)), 0, 0);
-      const fromText = new Canvas(W, H);
-      const ctx = fromText.getContext("2d");
-      ctx.font = `${size}px ${family}`;
-      ctx.fillStyle = "rgb(40,90,160)";
-      ctx.fillText(text, 10, 70);
-      const [got, expected] = await Promise.all(
-        [fromImage, fromText].map(async (c) =>
-          (await c.toBuffer("svg")).toString(),
+      // The pixels first, so that the document cannot be handed the
+      // recording they keep.
+      const expected = ctx.getImageData(0, 0, W, H, { colorType: "rgba" }).data;
+      const svg = (await ctx.canvas.toBuffer("svg")).toString();
+      assert.doesNotMatch(svg, /<image\b/, `${door}: ${svg}`);
+      assert.match(svg, /<path\b/, `${door}: ${svg}`);
+      const back = page();
+      back.drawImage(await loadImage(Buffer.from(svg)), 0, 0);
+      agree(back.getImageData(0, 0, W, H).data, expected, door);
+    }
+  });
+
+  test("reaches an SVG export as fillText's does", async () => {
+    const count = (svg, tag) =>
+      (svg.match(new RegExp(`<${tag}\\b`, "g")) ?? []).length;
+    const exported = async (ctx) =>
+      (await ctx.canvas.toBuffer("svg")).toString();
+    // An opaque ground, so that an edge pixel a level apart premultiplied
+    // is not read as several apart once its colour is divided by its alpha.
+    const ground = (ctx) => {
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+    };
+    for (const [family, entity, text, size, opacity, asFills] of [
+      ["SvgTextColrV1", "&#xf0b00;", "\u{f0b00}", 72, 1, true],
+      ["SvgTextColrV0", "AB", "AB", 48, 1, true],
+      ["SvgTextColrV1", "&#xf0600;", "\u{f0600}", 72, 1, false],
+      ["SvgTextColrV0", "AB", "AB", 48, 0.5, false],
+    ]) {
+      const fromImage = page();
+      ground(fromImage);
+      fromImage.drawImage(
+        await loadImage(
+          Buffer.from(
+            `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">` +
+              `<text x="10" y="70" font-family="${family}" font-size="${size}" ` +
+              `fill="rgb(40,90,160)" opacity="${opacity}">${entity}</text></svg>`,
+          ),
         ),
+        0,
+        0,
       );
-      assert.ok(images(expected) > 0, `${family}: fillText wrote no image`);
-      assert.equal(images(got), images(expected), `${family}: ${got}`);
+      const draw = (ctx) => {
+        ground(ctx);
+        ctx.globalAlpha = opacity;
+        ctx.font = `${size}px ${family}`;
+        ctx.fillStyle = "rgb(40,90,160)";
+        ctx.fillText(text, 10, 70);
+      };
+      const fromText = page();
+      fromText.textRendering = "geometricPrecision";
+      draw(fromText);
+      // The same text in a canvas drawn into another, which reaches the
+      // document as the entries it holds.
+      const fromCanvas = page();
+      const source = page();
+      source.textRendering = "geometricPrecision";
+      draw(source);
+      fromCanvas.drawCanvas(source.canvas, 0, 0);
+      const expected = painted(draw);
+      for (const [door, ctx] of [
+        ["an SVG image", fromImage],
+        ["fillText", fromText],
+        ["drawCanvas", fromCanvas],
+      ]) {
+        const svg = await exported(ctx);
+        const label = `${family} ${JSON.stringify(text)} at ${opacity} from ${door}`;
+        if (!asFills) {
+          assert.ok(count(svg, "image") > 0, `${label}: ${svg}`);
+          continue;
+        }
+        assert.equal(count(svg, "image"), 0, `${label}: ${svg}`);
+        assert.ok(count(svg, "path") > 0, `${label}: ${svg}`);
+        const back = page();
+        back.drawImage(await loadImage(Buffer.from(svg)), 0, 0);
+        agree(back.getImageData(0, 0, W, H).data, expected, label);
+      }
     }
   });
 });
