@@ -3,8 +3,8 @@ use neon::prelude::*;
 use parking_lot::Mutex;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data,
-    FilterMode, IPoint, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
+    ColorFilter as SkColorFilter, ColorSpace, ColorType, Data, FilterMode,
+    IPoint, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
     MaskFilter as SkMaskFilter, MipmapMode, Paint, PaintCap, PaintJoin,
     PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
     PictureRecorder, Point, Rect, RoundOut, SamplingOptions,
@@ -6620,6 +6620,7 @@ mod tests {
         node::{filter::FilterSpec, utils::opt_color_space},
         pixels::PixelDepth,
     };
+    use skia_safe::Contains;
 
     /// An sRGB page keeps a recording for pixels only where it composites
     /// in eight bits, while `keeps_two_recordings` -- which places a
