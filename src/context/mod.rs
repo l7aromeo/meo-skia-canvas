@@ -83,8 +83,8 @@ use exact_blur::REACH_SIGMAS;
 use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
-    Entries, ExactColour, Group, Layer, LayerRec, LazyPicture, Replay,
-    coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
+    Entries, ExactColour, Group, HeldImage, Layer, LayerRec, LazyPicture,
+    Replay, coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
@@ -657,7 +657,9 @@ impl Context2D {
     /// only by its small JavaScript object: its page's pixels, a GPU page's
     /// multisample buffer with them -- see
     /// `page::RecordingSurface::budgeted_bytes` -- its recording -- see
-    /// [`PageRecorder::recorded_bytes`] -- and itself, [`CONTEXT_BYTES`].
+    /// [`PageRecorder::recorded_bytes`] -- the images the recording holds
+    /// that no other object reports -- see
+    /// [`PageRecorder::held_image_bytes`] -- and itself, [`CONTEXT_BYTES`].
     ///
     /// Called by the binding as the context is made, after a read, which
     /// builds the page surface or its tiles and files what was drawn, and
@@ -675,8 +677,10 @@ impl Context2D {
     /// finalized, and the engine is told so until then.
     pub(crate) fn report_resident<'a, C: Context<'a>>(&mut self, cx: &mut C) {
         let recorder = self.recorder.borrow();
-        let (pixels, recorded) =
-            (recorder.budgeted_bytes(), recorder.recorded_bytes());
+        let (pixels, recorded) = (
+            recorder.budgeted_bytes(),
+            recorder.recorded_bytes() + recorder.held_image_bytes(),
+        );
         drop(recorder);
         self.external.hold(cx, pixels);
         self.beside_page.hold(cx, recorded + CONTEXT_BYTES);
@@ -4589,13 +4593,16 @@ impl Context2D {
         })
     }
 
-    /// Draws one draw as entries of its own for each kind of target -- see
-    /// `layer::Split`: what `pixels` draws is played for pixels, and what
-    /// `document` draws is what a document backend writes. Each is filed as
-    /// it would be drawn alone, after everything drawn before it, and
-    /// nothing drawn after joins either.
+    /// Draws one draw of a canvas's `image` as entries of its own for each
+    /// kind of target -- see `layer::Split`: what `pixels` draws is played
+    /// for pixels, and what `document` draws is what a document backend
+    /// writes. Each is filed as it would be drawn alone, after everything
+    /// drawn before it, and nothing drawn after joins either. The page
+    /// counts `image` as held -- see [`PageRecorder::held_image_bytes`] --
+    /// since no other object reports its pixels while the page keeps it.
     pub(crate) fn draw_split(
         &mut self,
+        image: &Image,
         pixels: impl FnOnce(&mut Self),
         document: impl FnOnce(&mut Self),
     ) {
@@ -4603,7 +4610,9 @@ impl Context2D {
         pixels(self);
         let drawn = self.recorder.borrow_mut().take_split(&mut mark);
         document(self);
-        self.recorder.borrow_mut().end_split(mark, drawn);
+        self.recorder
+            .borrow_mut()
+            .end_split(mark, drawn, HeldImage::of(image));
     }
 
     /// [`Self::draw_source_image`], declared.

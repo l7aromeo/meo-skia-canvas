@@ -122,6 +122,12 @@ const HELD_BUFFERS = 4000;
  */
 const HELD_BUFFER_BYTES = 4096;
 
+/**
+ * Draws of one canvas into another, more than one so that a count made for
+ * each draw rather than for each image lands outside what the test allows.
+ */
+const DRAWS = 3;
+
 /** Fills drawn on a page whose recording is to weigh something. */
 const FILLS = 1000;
 
@@ -256,6 +262,35 @@ describe("Native memory reported to V8", () => {
         0,
         "what stays counted once the canvases are finalized",
       );
+    },
+  );
+
+  // A canvas drawn into another is its own pixels, held by the destination's
+  // recording and by the source as the image of its page. The pictures that
+  // hold it count none of its pixels, so the page counts the image itself,
+  // once however often it is drawn.
+  test(
+    "counts a canvas drawn into another once, on both canvases",
+    { skip: why ?? false },
+    async () => {
+      const source = drawn(1);
+      const before = await settled();
+      const dest = cpuCanvas();
+      const ctx = dest.getContext("2d");
+      for (let i = 0; i < DRAWS; i++) ctx.drawImage(source, 0, 0);
+      // The whole page, as `drawn` reads it: a smaller read is served from
+      // tiles, which hold less than a page.
+      ctx.getImageData(0, 0, SIDE[0], SIDE[1]);
+      // A read is what has the source report what it holds again.
+      source.getContext("2d").getImageData(0, 0, 1, 1);
+      const held = (await settled()) - before - PAGE_BYTES - CONTEXT_BYTES;
+      assert.ok(
+        held >= 2 * PAGE_BYTES && held < 2 * PAGE_BYTES + PAGE_BYTES / 2,
+        `${DRAWS} draws of one canvas count its image on each canvas: ` +
+          `${held} bytes beside the destination's page, one image ` +
+          `${PAGE_BYTES}`,
+      );
+      assert.equal(dest.width, SIDE[0]);
     },
   );
 

@@ -350,6 +350,40 @@ impl Layer {
     }
 }
 
+impl Layer {
+    /// Calls `each` with every image this entry holds that its pictures do
+    /// not count -- see [`Split::image`] -- once for each time it holds it:
+    /// the walk the count a page keeps as it files is held to.
+    #[cfg(debug_assertions)]
+    pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
+        let entries = |entries: &Entries, each: &mut dyn FnMut(HeldImage)| {
+            entries
+                .layers
+                .iter()
+                .for_each(|layer| layer.held_images(each));
+        };
+        match self {
+            Layer::Group(group) => entries(&group.contents, each),
+            Layer::Clipped(piece) => piece.entry.held_images(each),
+            Layer::Split(split) => {
+                if let Some(held) = split.image {
+                    each(held);
+                }
+                entries(&split.pixels, each);
+                entries(&split.document, each);
+            }
+            Layer::Picture(_)
+            | Layer::Blur(_)
+            | Layer::Targeted(_)
+            | Layer::Cut(_)
+            | Layer::Gradient(_)
+            | Layer::Pattern(_)
+            | Layer::Deferred(_)
+            | Layer::ReplayedText(_) => {}
+        }
+    }
+}
+
 /// The bytes the pictures of one generation of a page's recording hold --
 /// see [`PageRecorder::recorded_bytes`](super::page::PageRecorder::recorded_bytes)
 /// -- added to as each entry is filed and as each picture recorded when first
@@ -4226,6 +4260,33 @@ pub struct Split {
     pub(crate) pixels: Entries,
     /// What the draw files for a document.
     pub(crate) document: Entries,
+    /// The image the draw holds that no other object reports: a canvas's
+    /// own pixels, which its pictures keep alive and do not count -- see
+    /// [`Layer::recorded_bytes`].
+    pub(crate) image: Option<HeldImage>,
+}
+
+/// An image a page's recording holds, by Skia's identity for it and the
+/// bytes of its pixels, so that one image drawn many times counts once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HeldImage {
+    /// `SkImage::uniqueID`, which no other image alive shares.
+    pub(crate) id: u32,
+    /// The bytes its pixels take, at the rows Skia keeps them in.
+    pub(crate) bytes: usize,
+}
+
+impl HeldImage {
+    /// `image` as a recording holding it counts it: `None` for an image
+    /// whose pixels are not in main memory, which this library makes none
+    /// of for a recording to hold.
+    pub(crate) fn of(image: &Image) -> Option<Self> {
+        let pixmap = image.peek_pixels()?;
+        Some(Self {
+            id: image.unique_id(),
+            bytes: pixmap.compute_byte_size(),
+        })
+    }
 }
 
 impl Split {

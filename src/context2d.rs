@@ -4529,6 +4529,7 @@ fn place_capture(
         // Pixels replay nothing, so the destination is charged nothing for
         // them: they draw as any image's.
         Captive::Pixels(image) => ctx.draw_split(
+            image,
             |ctx| ctx.draw_source_image(image, src, dst, *apart),
             |ctx| ctx.draw_source_image(image, src, dst, *apart),
         ),
@@ -11128,7 +11129,7 @@ mod split_tests {
         document(ctx);
         let drawn = drawn.expect("the pixels");
         ctx.inner.with_recorder(|mut recorder| {
-            recorder.end_split(mark, drawn);
+            recorder.end_split(mark, drawn, None);
         });
     }
 
@@ -11626,5 +11627,105 @@ mod split_tests {
         let mut both = canvas(true, W, H);
         split(both.context(), red, colour_run);
         assert_eq!(flags(&mut both), (false, false));
+    }
+}
+
+#[cfg(test)]
+mod held_image_tests {
+    //! The images a page's recording holds that its pictures do not count
+    //! -- a canvas's own pixels, drawn in -- counted once each, by the page
+    //! holding them, for as long as it holds them: see
+    //! `page::PageRecorder::held_image_bytes`.
+    use super::*;
+
+    /// The source's side.
+    const SIDE: (f32, f32) = (120.0, 80.0);
+    /// The bytes one image of the source takes: four to a pixel, the
+    /// eight-bit colour types' size.
+    const IMAGE_BYTES: usize = (SIDE.0 * SIDE.1) as usize * 4;
+
+    /// A CPU canvas of `SIDE` with a canvas nested in it, so that it is
+    /// drawn into another as its own pixels -- see `capture`.
+    fn source() -> Canvas {
+        let mut inner = Canvas::new(8.0, 8.0);
+        inner.set_gpu(false);
+        inner.context().fill_rect(0.0, 0.0, 8.0, 8.0);
+        let mut source = Canvas::new(SIDE.0, SIDE.1);
+        source.set_gpu(false);
+        source.context().draw_canvas(&mut inner, 0.0, 0.0);
+        source
+    }
+
+    /// What `canvas`'s page counts as held.
+    fn held(canvas: &mut Canvas) -> usize {
+        let mut bytes = 0;
+        canvas.context().inner.with_recorder(|recorder| {
+            bytes = recorder.held_image_bytes();
+        });
+        bytes
+    }
+
+    /// A destination the size of the source, on the CPU.
+    fn destination() -> Canvas {
+        let mut canvas = Canvas::new(SIDE.0, SIDE.1);
+        canvas.set_gpu(false);
+        canvas
+    }
+
+    /// A canvas drawn in three times unchanged is one image held, and drawn
+    /// again after it changes is two; erasing the page lets both go.
+    #[test]
+    fn a_canvas_drawn_in_is_held_once_for_each_state_of_its_page() {
+        let mut source = source();
+        let mut dest = destination();
+        assert_eq!(held(&mut dest), 0, "nothing drawn, nothing held");
+        for _ in 0..3 {
+            dest.context().draw_canvas(&mut source, 0.0, 0.0);
+        }
+        assert_eq!(
+            held(&mut dest),
+            IMAGE_BYTES,
+            "one image, drawn three times"
+        );
+        source.context().fill_rect(0.0, 0.0, 1.0, 1.0);
+        dest.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert_eq!(held(&mut dest), 2 * IMAGE_BYTES, "an image for each state");
+        dest.context().fill_rect(0.0, 0.0, SIDE.0, SIDE.1);
+        assert_eq!(held(&mut dest), 0, "an opaque fill erases what it covers");
+    }
+
+    /// A canvas drawn inside a layer is held while the layer is open and
+    /// after it closes, once with the same image drawn on the page.
+    #[test]
+    fn a_canvas_drawn_in_a_layer_is_held_as_on_the_page() {
+        let mut source = source();
+        let mut dest = destination();
+        let ctx = dest.context();
+        ctx.save_layer();
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+        let open = {
+            let mut bytes = 0;
+            ctx.inner.with_recorder(|recorder| {
+                bytes = recorder.held_image_bytes();
+            });
+            bytes
+        };
+        assert_eq!(open, IMAGE_BYTES, "held while the layer is open");
+        dest.context().restore();
+        dest.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert_eq!(held(&mut dest), IMAGE_BYTES, "held once, in and out");
+    }
+
+    /// A canvas drawn into another holds the image of its page it made,
+    /// until its page changes and the next image replaces it.
+    #[test]
+    fn a_canvas_holds_the_image_of_its_page_it_made() {
+        let mut source = source();
+        assert_eq!(held(&mut source), 0, "no image made yet");
+        let mut dest = destination();
+        dest.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert_eq!(held(&mut source), IMAGE_BYTES, "the image it made");
+        dest.context().draw_canvas(&mut source, 0.0, 0.0);
+        assert_eq!(held(&mut source), IMAGE_BYTES, "made once");
     }
 }

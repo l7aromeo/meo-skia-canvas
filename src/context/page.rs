@@ -48,10 +48,10 @@ use crate::{
         faint::composited,
         layer::{
             BlurDraw, BlurOp, ClipData, Clipped, Composite, Coverage, CutOp,
-            Entries, GradientDraw, GradientPiece, GradientPixels, Group, Layer,
-            LayerRec, OnGpu, PatternDraw, RecordedCount, ReplayedText, Split,
-            Target, TileScope, holds_a_cut, in_document_space, play_entries,
-            tiles_exactly,
+            Entries, GradientDraw, GradientPiece, GradientPixels, Group,
+            HeldImage, Layer, LayerRec, OnGpu, PatternDraw, RecordedCount,
+            ReplayedText, Split, Target, TileScope, holds_a_cut,
+            in_document_space, play_entries, tiles_exactly,
         },
         resident::{Place, SharedSurface},
         tile_cuts::{InteriorSides, TileCuts, TileReach},
@@ -531,6 +531,13 @@ pub struct PageRecorder {
     clears: u64,
     /// Set while a split's document is drawn -- see [`Self::take_split`].
     documenting: bool,
+    /// The images the page's entries hold that their pictures do not count
+    /// -- see [`Split::image`] -- each once, by its identity, with the bytes
+    /// of its pixels: added to as a split is filed, and emptied with the
+    /// page's content, which is the only place an entry leaves the page.
+    held: HashMap<u32, usize>,
+    /// The bytes `held` holds, summed.
+    held_bytes: usize,
     id: Arc<PageId>,
     /// The `saveLayer`s open on the page, outermost first. While one is
     /// open `current` records the innermost one's contents, and what each
@@ -1185,6 +1192,47 @@ impl PageRecorder {
         );
     }
 
+    /// The bytes of the images this page's entries hold that their pictures
+    /// do not count -- see [`Split::image`] -- each counted once however
+    /// many entries hold it, with the image of the page made last -- see
+    /// [`Self::image`] -- which the page itself holds.
+    ///
+    /// An image held by this page and by another -- a canvas's image drawn
+    /// in, while that canvas still holds it as the image of its page -- is
+    /// counted by both, so the engine is told too much while both hold it
+    /// and never too little. A build with debug assertions holds the count
+    /// to a walk of the page's entries at every call.
+    pub fn held_image_bytes(&self) -> usize {
+        #[cfg(debug_assertions)]
+        self.hold_images_to_walk();
+        let own = self
+            .own_image
+            .as_ref()
+            .and_then(|own| HeldImage::of(&own.image))
+            .map_or(0, |own| own.bytes);
+        self.held_bytes + own
+    }
+
+    /// Panics where the images the page counts as held are not those a
+    /// walk of its entries finds.
+    #[cfg(debug_assertions)]
+    fn hold_images_to_walk(&self) {
+        let mut walked = HashMap::new();
+        self.layers
+            .iter()
+            .chain(self.open.iter().flat_map(|layer| layer.entries.iter()))
+            .for_each(|entry| {
+                entry.held_images(&mut |held| {
+                    walked.insert(held.id, held.bytes);
+                });
+            });
+        assert_eq!(
+            walked, self.held,
+            "the images the page counts as held are not those its entries \
+             hold"
+        );
+    }
+
     /// Adds what `entry` holds to the page's count, and has what it records
     /// when first played add to it then -- see [`Layer::count_into`].
     fn count(&self, entry: &Layer) {
@@ -1256,6 +1304,8 @@ impl PageRecorder {
             own_image: None,
             clears: 0,
             documenting: false,
+            held: HashMap::new(),
+            held_bytes: 0,
             open: Vec::new(),
             recorded: RecordedCount::default(),
         }
@@ -1442,6 +1492,8 @@ impl PageRecorder {
         // A count of its own, which what the old content records when an
         // export first plays it adds to rather than to this one's.
         self.recorded = RecordedCount::default();
+        self.held.clear();
+        self.held_bytes = 0;
         self.changed = false;
         self.isolated = None;
         self.filtered = 0;
@@ -1923,9 +1975,14 @@ impl PageRecorder {
     }
 
     /// Takes what was filed since `mark`, the draw's document, and files it
-    /// with `pixels` as one [`Layer::Split`], asking of a vector backend
-    /// what the document's entries ask.
-    pub(crate) fn end_split(&mut self, mark: SplitMark, pixels: Entries) {
+    /// with `pixels` as one [`Layer::Split`] holding `image`, asking of a
+    /// vector backend what the document's entries ask.
+    pub(crate) fn end_split(
+        &mut self,
+        mark: SplitMark,
+        pixels: Entries,
+        image: Option<HeldImage>,
+    ) {
         self.seal();
         self.documenting = false;
         (self.plays_apart_on_gpu, self.holds_reading_runs) = mark.on_gpu;
@@ -1945,9 +2002,19 @@ impl PageRecorder {
             pixels.layers.iter().for_each(|entry| self.count(entry));
         }
         let features = document.all_features();
-        // Each entry was counted as it was filed.
+        // Each entry was counted as it was filed; the image is counted here,
+        // once however many entries hold it.
+        if let Some(held) = image
+            && self.held.insert(held.id, held.bytes).is_none()
+        {
+            self.held_bytes += held.bytes;
+        }
         self.file_counted(
-            Layer::Split(Arc::new(Split { pixels, document })),
+            Layer::Split(Arc::new(Split {
+                pixels,
+                document,
+                image,
+            })),
             features,
         );
     }

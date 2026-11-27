@@ -1274,6 +1274,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
             let apart = source.plays_apart_on_gpu;
             match source.canvas {
                 true => ctx.draw_split(
+                    image,
                     |ctx| ctx.draw_source_image(image, &src, &dst, apart),
                     |ctx| ctx.draw_source_image(image, &src, &dst, apart),
                 ),
