@@ -300,16 +300,18 @@ function fill(args) {
 
 /**
  * `store`, vouched for by check-patched-skia's own reading of the log;
- * `build` is what `store` takes.
+ * `build` is what `store` takes. `put` is `store` but in a test.
+ *
+ * It reports on stderr, as everything else here does: a stored build's
+ * stdout is cargo's JSON message stream, which `lib/prebuild.mjs` hands to
+ * cargo-cp-artifact, and a line of ours there is not JSON.
  */
-function storeChecked(buildDir, build) {
+export function storeChecked(buildDir, build, { put = store } = {}) {
   const patched = PATCHED[process.platform];
   if (!patched)
     throw new Error(`skia-cache: no patches for ${process.platform}`);
-  const { dir, stored } = store(buildDir, build, (log) =>
-    refusal(log, patched),
-  );
-  console.log(`skia-cache: ${stored ? "stored" : "already held"} ${dir}`);
+  const { dir, stored } = put(buildDir, build, (log) => refusal(log, patched));
+  console.error(`skia-cache: ${stored ? "stored" : "already held"} ${dir}`);
 }
 
 const main =

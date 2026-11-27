@@ -1079,3 +1079,41 @@ describe("an entry names its compiler, and two builds of one key are compared by
     );
   });
 });
+
+describe("a store reports beside cargo's messages, not among them", async () => {
+  const { storeChecked } = await import(pathToFileURL(SCRIPT).href);
+
+  // lib/prebuild.mjs hands a stored build's stdout to cargo-cp-artifact as
+  // cargo's JSON stream, so a report written there fails the build after
+  // Skia compiled.
+  test("the report goes to stderr and stdout stays empty", () => {
+    for (const stored of [true, false]) {
+      let out = "";
+      let err = "";
+      const write = process.stdout.write;
+      const error = console.error;
+      process.stdout.write = (/** @type {any} */ text) => {
+        out += String(text);
+        return true;
+      };
+      console.error = (/** @type {any[]} */ ...parts) => {
+        err += `${parts.join(" ")}\n`;
+      };
+      try {
+        storeChecked(
+          "/target/debug/build/skia-bindings/abc123/out",
+          {},
+          { put: () => ({ dir: "/cache/entry", stored }) },
+        );
+      } finally {
+        process.stdout.write = write;
+        console.error = error;
+      }
+      assert.strictEqual(out, "", `stdout, stored ${stored}`);
+      assert.match(
+        err,
+        stored ? /skia-cache: stored \/cache\/entry/ : /already held/,
+      );
+    }
+  });
+});
