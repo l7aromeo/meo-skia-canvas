@@ -89,7 +89,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 11] = [
+const SKIA_PATCHES: [SkiaPatch; 12] = [
     // `containers/skia-atlas-placement.patch`: a path drawn into Ganesh's
     // path atlas relative to its own device top-left, rounded to a grid, and
     // only then moved by its whole-pixel location, so its coverage does not
@@ -138,6 +138,15 @@ const SKIA_PATCHES: [SkiaPatch; 11] = [
         cfg: "meo_exact_blend_division",
         file: "src/opts/SkRasterPipeline_opts.h",
         marker: "(d*sa) / (sa - s)",
+    },
+    // `containers/skia-lowp-paint-alpha.patch`: the CPU raster's eight-bit
+    // pipeline scales a colour by the paint's alpha with each product
+    // correctly rounded to a byte, where off arm64 it was a level off for
+    // about a quarter of them.
+    SkiaPatch {
+        cfg: "meo_lowp_paint_alpha",
+        file: "src/opts/SkRasterPipeline_opts.h",
+        marker: "LOWP_STAGE_PP(scale_1_float_accurate, const float* f)",
     },
     // `containers/skia-svg-synthetic-slant.patch`: an SVG document's `italic`
     // and `oblique <angle>` text in a face that does not lean is drawn

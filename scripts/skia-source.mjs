@@ -345,6 +345,25 @@ const EXACT_BLEND_DIVISION = join(
   "containers",
   "skia-exact-blend-division.patch",
 );
+
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_paint_alpha_scales_an_image_with_each_product_rounded_once against crates.io's Skia on x86-64, as the crates.io publish runs it; it holds that build to bytes off the rounded product, and fails there once the stage rounds exactly
+//
+// The CPU raster's eight-bit pipeline (src/opts/SkRasterPipeline_opts.h)
+// scales a colour by a paint's alpha in `scale_1_float`, through `div255`:
+// on NEON the exact two-step division by 255, elsewhere `(v + 255) >> 8`,
+// which the file's own comment says is a level off about a quarter of the
+// time. So an image drawn at an alpha below one landed apart on x86 and
+// arm64: over every premultiplied source alpha, every opaque backdrop and
+// every paint alpha, 16,945,540 of 67,108,864 channels on an x86-64 machine
+// were up to two levels off the product rounded once and composited, where
+// arm64 was off none (#828). The patch adds `scale_1_float_accurate`, the
+// same stage through `div255_accurate`, and appends it where a paint's alpha
+// is applied: the raster-pipeline sprite blitter, a shader's paint colour
+// and `drawAtlas`. Coverage keeps `scale_1_float`, so an antialiased edge on
+// x86 draws as it did, and the N32 sprite rows, `SkBlendARGB32` and its SIMD
+// forms, are not changed.
+const LOWP_PAINT_ALPHA = join("containers", "skia-lowp-paint-alpha.patch");
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 // Re-check: cargo test a_glyph_advances_its_units_times_the_size against crates.io's Skia on Linux; it holds that build to FreeType's 16.16 excess, and fails there once FreeType's advance is exact
 //
@@ -380,6 +399,7 @@ export const PATCHES = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
     PATCH_MARKER,
   ],
   linux: [
@@ -395,6 +415,7 @@ export const PATCHES = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
     FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
@@ -413,6 +434,7 @@ export const PATCHES = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
     PATCH_MARKER,
   ],
 };

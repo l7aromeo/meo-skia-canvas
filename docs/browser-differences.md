@@ -1816,6 +1816,27 @@ library is off it on none. What Chrome draws on an x86 machine was not
 measured: it runs the same stages, so it is expected to split by SIMD level
 as this library did.
 
+**An image or a pattern drawn at a `globalAlpha` below one scales its bytes
+by the alpha correctly rounded on every CPU, and Chrome's CPU canvas on x86
+rounds through an approximation.** Skia's eight-bit raster pipeline applies a
+paint's alpha in `scale_1_float`, which divides by 255 through `div255`: the
+exact two-step division on arm64's NEON, and `(v + 255) >> 8` elsewhere, a
+level off for about a quarter of products. Over every premultiplied source
+alpha, every opaque backdrop and every alpha byte, 16,945,540 of 67,108,864
+channels on an x86-64 machine landed up to two levels off each channel scaled
+and rounded, then composited and rounded, where arm64 was off none (#828).
+`containers/skia-lowp-paint-alpha.patch` applies a paint's alpha through
+`scale_1_float_accurate`, the same stage through the exact division, in the
+raster-pipeline sprite blitter, after a shader and in `drawAtlas`, so the
+three land the same bytes on both
+(`a_paint_alpha_scales_an_image_with_each_product_rounded_once`). An
+antialiased edge's coverage still scales through `div255`, so an edge on x86
+can land a level from arm64's. An eight-bit image in the page's own byte
+order, unscaled at a whole-pixel offset, takes Skia's sprite rows instead,
+which the patch does not change and which are not exact on either (#828).
+What Chrome draws on x86 was not measured: it runs the same stage, so it is
+expected to land apart as this library did.
+
 **A PDF's blend modes render as the canvas's in poppler, and macOS's
 CoreGraphics renders a few of them otherwise.** A composite operation on an
 sRGB canvas is written into the PDF as the blend mode it is, on a page whose

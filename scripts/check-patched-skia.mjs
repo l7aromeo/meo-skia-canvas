@@ -160,6 +160,14 @@ const EXACT_BLEND_DIVISION = {
   unit: "src/core/SkOpts.cpp",
 };
 
+/// containers/skia-lowp-paint-alpha.patch, on every platform. Its stage is in
+/// a header, held to `src/core/SkOpts.cpp` as `EXACT_BLEND_DIVISION` is.
+const LOWP_PAINT_ALPHA = {
+  patch: "containers/skia-lowp-paint-alpha.patch",
+  ...buildRsPatch("meo_lowp_paint_alpha"),
+  unit: "src/core/SkOpts.cpp",
+};
+
 /// containers/skia-svg-synthetic-slant.patch, on every platform.
 const SVG_SYNTHETIC_SLANT = {
   patch: "containers/skia-svg-synthetic-slant.patch",
@@ -212,6 +220,7 @@ export const PATCHED = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
     PATCH_MARKER,
   ],
   linux: [
@@ -225,6 +234,7 @@ export const PATCHED = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
     FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
@@ -243,6 +253,7 @@ export const PATCHED = {
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
     PATCH_MARKER,
   ],
 };
@@ -515,9 +526,12 @@ const COMPILED_WITH = {
 function cases(root, patched) {
   const ninja = join(root, "out", "skia");
   const relative = (file) => `../../skia/${file}`;
-  const files = Object.fromEntries(
-    patched.map(({ file, marker }) => [file, `before ${marker} after`]),
-  );
+  // Each patched file holding every marker a patch to it leaves: two patches
+  // change `SkRasterPipeline_opts.h`, and a file written for each in turn
+  // kept the second's alone.
+  const files = {};
+  for (const { file, marker } of patched)
+    files[file] = `${files[file] ?? "before"} ${marker} after`;
   const good = [
     "STARTING OFFLINE BUILD",
     `ninja: Entering directory \`${ninja}'`,
