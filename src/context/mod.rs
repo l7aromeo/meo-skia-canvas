@@ -1658,7 +1658,7 @@ impl Context2D {
                 CpuBytes::Gradient(dye) => {
                     self.gradient_path(dye, paint, paint_for(pixels), beyond)
                 }
-                CpuBytes::Source | CpuBytes::Image(_) => None,
+                CpuBytes::Source => None,
             };
             let piece = match path {
                 Some(path) => layer::GradientPiece {
@@ -1700,9 +1700,6 @@ impl Context2D {
                             &shadow,
                             &shape,
                         ),
-                        CpuBytes::Image(placed) => {
-                            Some(layer::OnGpu::Image(Arc::new(placed.clone())))
-                        }
                     };
                     let Some(gpu) = gpu else {
                         return;
@@ -5038,67 +5035,6 @@ impl Context2D {
             )
     }
 
-    /// The draw of `image` from `src_rect` into `dst_rect` through `paint`
-    /// as a GPU canvas composites it in the CPU's arithmetic -- see
-    /// `layer::OnGpu::Image` -- where the CPU composites it exactly and
-    /// Ganesh does not: an image in eight bits a channel and in the page's
-    /// colour space, unscaled at a whole-pixel offset, its source rectangle
-    /// on whole texels inside it, drawn `source-over` with nothing but an
-    /// alpha. `None` for any other draw, and for an opaque image at full
-    /// alpha, which composites to its own bytes, as Ganesh's fixed-function
-    /// blend stores them.
-    ///
-    /// Filed whatever the engine, since a CPU canvas's page is played on
-    /// the GPU when it is drawn into a GPU canvas.
-    fn image_as_bytes(
-        &self,
-        image: &Image,
-        src_rect: &Rect,
-        dst_rect: &Rect,
-        paint: &Paint,
-        drawn: ImageDraw,
-    ) -> Option<layer::GpuImage> {
-        let whole = |v: f32| v.fract() == 0.0;
-        let placed = Matrix::concat(
-            &self.state.matrix,
-            &Matrix::rect_2_rect(src_rect, dst_rect, None)?,
-        );
-        let eight_bits = matches!(
-            image.color_type(),
-            ColorType::RGBA8888 | ColorType::BGRA8888
-        );
-        let space = image.color_space().unwrap_or_else(ColorSpace::new_srgb);
-        let plain = drawn != ImageDraw::SplitDocument
-            && paint.as_blend_mode() == Some(BlendMode::SrcOver)
-            && paint.image_filter().is_none()
-            && paint.color_filter().is_none()
-            && paint.mask_filter().is_none()
-            && !self.casts_shadow();
-        let opaque = image.is_opaque() && paint.alpha() == u8::MAX;
-        let sits = placed.is_translate()
-            && whole(placed.translate_x())
-            && whole(placed.translate_y())
-            && [src_rect.left, src_rect.top, src_rect.right, src_rect.bottom]
-                .into_iter()
-                .all(whole)
-            && lies_within(src_rect, image.width(), image.height());
-        if !(plain && eight_bits && sits && !opaque)
-            || space != self.canvas_color_space
-        {
-            return None;
-        }
-        let at = IPoint::new(
-            placed.translate_x() as i32,
-            placed.translate_y() as i32,
-        );
-        Some(layer::GpuImage {
-            image: image.clone(),
-            at,
-            area: src_rect.round().with_offset(at),
-            alpha: paint.alpha_f(),
-        })
-    }
-
     /// [`Self::draw_source_image`], declared.
     fn draw_source_image_declared(
         &mut self,
@@ -5264,20 +5200,13 @@ impl Context2D {
         }
 
         let pixels = self.pixels_paint(&paint);
-        let route = match apart {
-            true => Some(CpuBytes::Source),
-            false => self
-                .image_as_bytes(image, src_rect, dst_rect, &paint, drawn)
-                .filter(|_| pixels.is_none())
-                .map(CpuBytes::Image),
-        };
         self.render_to_canvas(
             &paint,
             pixels.as_ref(),
             features,
             None,
             None,
-            route,
+            apart.then_some(CpuBytes::Source),
             |canvas, paint, _| {
                 blit(canvas, &self.faint().drawable(paint));
             },
@@ -6678,10 +6607,6 @@ pub enum CpuBytes<'a> {
     /// `layer::Layer::plays_apart_on_gpu` -- which a GPU canvas draws on
     /// the CPU instead.
     Source,
-    /// A translucent image drawn `source-over` at whole device pixels,
-    /// which a GPU canvas composites in the CPU's arithmetic -- see
-    /// `layer::OnGpu::Image`.
-    Image(layer::GpuImage),
 }
 
 /// A draw's gradient as the draw hands it to the page: what it is made

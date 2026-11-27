@@ -31,12 +31,6 @@
 //! channels -- see [`PACKED`]. Either hands on a whole level, which a
 //! half-precision output carries to an eight-bit target unchanged.
 //!
-//! An image is such an effect too, read through [`image_bytes`]: a
-//! translucent image drawn `source-over` at whole pixels -- see
-//! `layer::OnGpu::Image` -- composited through [`composite_once`]. The
-//! draw's alpha is the coverage, as the CPU scales a source by its paint's
-//! alpha in the same `div255` (#837).
-//!
 //! [`float_over`] is the same composite for a source the CPU draws on its
 //! float pipeline, rounded once, which a layer takes from a raster of
 //! sixteen bits a channel -- see `layer::rasterized_onto`.
@@ -45,12 +39,12 @@
 use std::cell::Cell;
 
 use skia_safe::{
-    AlphaType, BlendMode, Blender, Canvas as SkCanvas, Color, Data, FilterMode,
-    IRect, Image, Matrix, MipmapMode, Paint, RuntimeEffect, SamplingOptions,
-    Shader, TileMode, runtime_effect::ChildPtr, shaders,
+    BlendMode, Blender, Canvas as SkCanvas, Color, Data, FilterMode, IRect,
+    Matrix, MipmapMode, Paint, RuntimeEffect, SamplingOptions, Shader,
+    TileMode, runtime_effect::ChildPtr, shaders,
 };
 
-use crate::context::{exact_gradient::EXACT_SCALE, layer::byte_alpha};
+use crate::context::exact_gradient::EXACT_SCALE;
 
 /// The SkSL of the CPU's composite -- see the module's doc -- with
 /// `div255` both ways the CPU computes it, nearest where `nearest` -- see
@@ -146,31 +140,7 @@ half4 main(half4 src, half4 dst) {
 }
 "#;
 
-/// The SkSL handing on an image's texels as the bytes the CPU composites:
-/// read raw -- no colour conversion and no premultiplication of Skia's --
-/// and, where `straight` -- the image unpremultiplied -- premultiplied as the
-/// CPU's eight-bit `premul` stage does it, `div255_accurate(c * a)`, to the
-/// nearest level on every backend. That is not the `div255` the paint's
-/// alpha scales by, which off aarch64 is `(v + 255) >> 8` -- see
-/// [`COMPOSITE`]. Skia premultiplies an unpremultiplied image on the GPU in
-/// floats, which rounds otherwise.
-const IMAGE_BYTES: &str = r#"
-uniform shader image;
-uniform int straight;
-half4 main(float2 p) {
-    float4 c = floor(float4(image.eval(p)) * 255.0 + 0.5);
-    if (straight != 0) {
-        float3 v = c.rgb * c.a;
-        c.rgb = floor((v + 128.0 + floor((v + 128.0) / 256.0)) / 256.0);
-    }
-    return half4(c / 255.0);
-}
-"#;
-
 thread_local! {
-    /// [`IMAGE_BYTES`] compiled, once per thread.
-    static IMAGE: Option<RuntimeEffect> =
-        RuntimeEffect::make_for_shader(IMAGE_BYTES, None).ok();
     /// [`FLOAT_OVER`] compiled, once per thread.
     static FLOAT: Option<RuntimeEffect> =
         RuntimeEffect::make_for_blender(FLOAT_OVER, None).ok();
@@ -234,66 +204,6 @@ pub(crate) fn blended(
     };
     paint.set_shader(packed).set_blender(blender);
     true
-}
-
-/// An effect of `image`'s bytes as the CPU composites them -- see
-/// [`IMAGE_BYTES`] -- each texel on the pixel `local` maps it to and
-/// transparent past the image's edges: for an image in eight bits a
-/// channel, drawn onto a page in its own colour space, whose texels are
-/// whole levels. `None` where Skia refuses either shader.
-pub(crate) fn image_bytes(image: &Image, local: &Matrix) -> Option<Shader> {
-    let unpremul = image.alpha_type() == AlphaType::Unpremul;
-    let raw = image.to_raw_shader(
-        (TileMode::Decal, TileMode::Decal),
-        SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
-        Some(local),
-    )?;
-    let straight = i32::from(unpremul).to_ne_bytes();
-    IMAGE.with(|compiled| {
-        compiled.as_ref()?.make_shader(
-            Data::new_copy(&straight),
-            &[ChildPtr::Shader(raw)],
-            None,
-        )
-    })
-}
-
-/// The coverage a draw at `alpha` composites under: `None` for an opaque
-/// one, which [`COMPOSITE`] then takes as full coverage. The CPU scales a
-/// source by its paint's alpha as it scales it by coverage,
-/// `div255(s * a)`, the alpha first taken to a byte -- see `byte_alpha`.
-pub(crate) fn alpha_coverage(alpha: f32) -> Option<Shader> {
-    let byte = (byte_alpha(alpha) * f32::from(u8::MAX)).round() as u8;
-    (byte < u8::MAX)
-        .then(|| shaders::color(Color::from_argb(byte, 255, 255, 255)))
-}
-
-/// Composites `effect`, whose levels are whole, `source-over` under
-/// `coverage` onto `canvas` within `rect`, device pixels, in the CPU's
-/// arithmetic: over one snapshot of `rect` where `snapshot` -- the
-/// canvas's own surface holds the pixels beneath -- and through
-/// [`blended`]'s blender, which reads the destination itself, where not.
-pub(crate) fn composite_once(
-    canvas: &SkCanvas,
-    rect: IRect,
-    effect: Shader,
-    coverage: Option<Shader>,
-    snapshot: bool,
-) {
-    let pending = Pending {
-        rect,
-        effect,
-        coverage,
-        opaque: false,
-    };
-    if snapshot {
-        let mut batch = Batch {
-            pending: vec![pending],
-        };
-        batch.flush(canvas);
-        return;
-    }
-    draw_on_device(canvas, rect, &pending.unsnapped());
 }
 
 /// A blender compositing an unrounded source `source-over` as the CPU's

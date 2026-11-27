@@ -618,12 +618,6 @@ thread_local! {
     /// thread: off, every group composites through its layer, the reference
     /// the clips standing in for it are held to.
     pub(crate) static UNLAYERED: Cell<bool> = const { Cell::new(true) };
-    /// Whether [`drawn_as_bytes`] composites a translucent image on a GPU
-    /// canvas in the CPU's arithmetic on this thread: off, Ganesh draws it
-    /// as recorded, in its own blend (#837).
-    pub(crate) static EXACT_IMAGES: Cell<bool> = const { Cell::new(true) };
-    /// How many images [`drawn_as_bytes`] has composited on this thread.
-    pub(crate) static IMAGES_AS_BYTES: Cell<usize> = const { Cell::new(0) };
     /// How many layers' entries [`played_on_a_root`] has played on a
     /// surface of their own on this thread.
     pub(crate) static ROOTS_PLAYED: Cell<usize> = const { Cell::new(0) };
@@ -3368,26 +3362,6 @@ pub enum OnGpu {
     /// page would have kept in the same isolated layer -- see
     /// `PageRecorder::append_gradient`.
     Native,
-    /// A translucent image drawn `source-over` at whole device pixels,
-    /// composited in the CPU's arithmetic -- see [`GpuImage`] -- where
-    /// Ganesh's own blend on Metal parts from it a level within 0.18 of a
-    /// tie (#837).
-    Image(Arc<GpuImage>),
-}
-
-/// An image a GPU canvas composites as the CPU does -- see
-/// [`OnGpu::Image`]: unscaled, its texels on the recording's device
-/// pixels, in eight bits a channel and in the page's colour space.
-#[derive(Clone, Debug)]
-pub struct GpuImage {
-    pub image: Image,
-    /// The recording's device pixel the image's own origin lies on.
-    pub at: IPoint,
-    /// The recording's device pixels the draw covers: the source rectangle
-    /// where it lands.
-    pub area: IRect,
-    /// The draw's alpha, its `globalAlpha` included.
-    pub alpha: f32,
 }
 
 /// One layer of a draw [`OnGpu::Raster`] makes on the CPU: its recording,
@@ -3413,8 +3387,7 @@ impl OnGpu {
                 .map(|layer| layer.picture.approximate_bytes_used())
                 .sum(),
             OnGpu::Path(draw) => draw.path.lock().approximate_bytes_used(),
-            // The image is the draw's own, which the page counts as held.
-            OnGpu::Alone | OnGpu::Native | OnGpu::Image(_) => 0,
+            OnGpu::Alone | OnGpu::Native => 0,
         }
     }
 }
@@ -3831,43 +3804,6 @@ fn drawn_with_effect(
     true
 }
 
-/// Composites `draw` onto `canvas`, which maps the recording's device
-/// pixels onto its own whole, in the CPU's arithmetic -- see
-/// [`exact_composite`]: held in `batch` on the canvas's own surface, through
-/// the blender inside a layer. `false`, having drawn nothing, where Skia
-/// refuses the effect.
-fn drawn_as_bytes(
-    canvas: &SkCanvas,
-    draw: &GpuImage,
-    batch: &mut exact_composite::Batch,
-) -> bool {
-    #[cfg(test)]
-    if !EXACT_IMAGES.get() {
-        return false;
-    }
-    let outer = canvas.local_to_device_as_3x3();
-    let shift =
-        IPoint::new(outer.translate_x() as i32, outer.translate_y() as i32);
-    let at = draw.at + shift;
-    let Some(effect) = exact_composite::image_bytes(
-        &draw.image,
-        &Matrix::translate((at.x as f32, at.y as f32)),
-    ) else {
-        return false;
-    };
-    let area = draw.area.with_offset(shift);
-    let coverage = exact_composite::alpha_coverage(draw.alpha);
-    if InLayer::open() {
-        batch.flush_meeting(canvas, area);
-        exact_composite::composite_once(canvas, area, effect, coverage, false);
-    } else {
-        batch.hold(canvas, area, effect, coverage, false);
-    }
-    #[cfg(test)]
-    IMAGES_AS_BYTES.set(IMAGES_AS_BYTES.get() + 1);
-    true
-}
-
 /// Sampling the effect's image and the coverage take: each pixel's own
 /// texel, the two being laid out on the page's device pixels.
 fn nearest() -> SamplingOptions {
@@ -3958,12 +3894,6 @@ fn played_on_gpu(
     {
         return;
     }
-    if let OnGpu::Image(draw) = gpu
-        && whole
-        && drawn_as_bytes(canvas, draw, batch)
-    {
-        return;
-    }
     // Any other draw may read or write what a held draw covers.
     batch.flush(canvas);
     match gpu {
@@ -3971,9 +3901,7 @@ fn played_on_gpu(
             picture.playback(canvas);
             return;
         }
-        // An image off whole pixels, or one whose effect Skia refuses, is
-        // played as recorded.
-        OnGpu::Native | OnGpu::Image(_) => {
+        OnGpu::Native => {
             pixels.playback(canvas);
             return;
         }
@@ -4061,7 +3989,7 @@ fn played_on_gpu(
             &Paint::default(),
             Pipeline::Bytes,
         ),
-        OnGpu::Native | OnGpu::Image(_) => pixels.playback(canvas),
+        OnGpu::Native => pixels.playback(canvas),
     }
 }
 
@@ -4228,7 +4156,7 @@ impl GradientDraw {
                 !whole || draw.spec.exact(&draw.page, draw.alpha).is_none()
             }
             OnGpu::Effect { .. } => !whole,
-            OnGpu::Alone | OnGpu::Native | OnGpu::Image(_) => false,
+            OnGpu::Alone | OnGpu::Native => false,
         })
     }
 

@@ -218,10 +218,6 @@ fn curves(gpu: bool) -> Option<Canvas> {
 /// A clip, or none, set on the destination before the source is drawn in.
 type Clip = fn(&mut Context2D);
 
-/// The circle a clip cuts the source by: its centre and its radius, off
-/// whole pixels, so that its edge covers many pixels in part.
-const CIRCLE: (f32, f32, f32) = (80.0, 50.0, 25.3);
-
 #[test]
 fn a_canvas_drawn_in_at_a_whole_pixel_lands_its_own_pixels() {
     // Wherever the clip or the page's edge cuts it, as `drawImage` lands a
@@ -240,15 +236,8 @@ fn a_canvas_drawn_in_at_a_whole_pixel_lands_its_own_pixels() {
     };
     let circle: Clip = |ctx| {
         ctx.begin_path();
-        ctx.arc(
-            CIRCLE.0,
-            CIRCLE.1,
-            CIRCLE.2,
-            0.0,
-            std::f32::consts::TAU,
-            false,
-        )
-        .expect("an arc");
+        ctx.arc(80.0, 50.0, 25.3, 0.0, std::f32::consts::TAU, false)
+            .expect("an arc");
         ctx.clip(FillRule::NonZero);
     };
     // Each case: its name, where the source's corner lands, the part of the
@@ -275,7 +264,7 @@ fn a_canvas_drawn_in_at_a_whole_pixel_lands_its_own_pixels() {
             circle,
         ),
     ];
-    let (mut wrong, mut on_the_edge) = (Vec::new(), 0);
+    let mut wrong = Vec::new();
     let mut checked = 0;
     for gpu in common::engines() {
         for (name, (x, y), crop, clip) in cases {
@@ -326,40 +315,14 @@ fn a_canvas_drawn_in_at_a_whole_pixel_lands_its_own_pixels() {
                 }
             }
             let (drawn, reference) = (read(&mut drawn), read(&mut reference));
-            // A GPU canvas composites the canvas drawn in through Ganesh's
-            // own blend and an image of its bytes in the CPU's arithmetic
-            // (#837); the two agree wherever the clip covers a pixel whole,
-            // and may part by a level only where the circle's anti-aliased
-            // edge covers one in part.
-            let edge = |i: usize| {
-                let (x, y) = ((i / 4) % 200, (i / 4) / 200);
-                let (dx, dy) =
-                    (x as f32 + 0.5 - CIRCLE.0, y as f32 + 0.5 - CIRCLE.1);
-                ((dx * dx + dy * dy).sqrt() - CIRCLE.2).abs() < 1.0
-            };
-            let allowed = |i: usize, a: u8, b: u8| {
-                gpu && name.ends_with("by a circle")
-                    && a.abs_diff(b) <= 1
-                    && edge(i)
-            };
-            let apart = drawn
-                .iter()
-                .zip(&reference)
-                .enumerate()
-                .filter(|(_, (a, b))| a != b);
-            on_the_edge += apart
-                .clone()
-                .filter(|(i, (a, b))| allowed(*i, **a, **b))
-                .count();
-            let off = apart.filter(|(i, (a, b))| !allowed(*i, **a, **b));
-            let most = off.clone().map(|(_, (a, b))| a.abs_diff(*b)).max();
+            let apart = drawn.iter().zip(&reference).filter(|(a, b)| a != b);
+            let most = apart.clone().map(|(a, b)| a.abs_diff(*b)).max();
             if let Some(most) = most {
-                wrong.push((name, gpu, off.count(), most));
+                wrong.push((name, gpu, apart.count(), most));
             }
         }
     }
     assert!(checked >= cases.len(), "no CPU canvas");
-    eprintln!("bytes a level apart along the circle's edge: {on_the_edge}");
     assert!(
         wrong.is_empty(),
         "draw_canvas apart from the source's bytes drawn as an image (case, \

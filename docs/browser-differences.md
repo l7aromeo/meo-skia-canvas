@@ -61,16 +61,11 @@ a fill adds `(d · (256 − A)) >> 8`, the legacy blitter's term, to its product
 rounded once. A drawn image or canvas and a `saveLayer` premultiply
 their bytes by `A` and add `(d · (255 − A) + 127) / 255`, the raster
 pipeline's divide on ARM (`div255` in `SkRasterPipeline_opts.h`; x86 divides
-differently and is not measured here). On the GPU engine, Metal, a fill's
-blend runs in half precision, given the product placed on its byte and `A`.
-A drawn image composites in the CPU's arithmetic instead, in a shader
-(`exact_composite`), where it is drawn `source-over` under no more than a
-`globalAlpha`, holds eight bits a channel in the page's colour space and
-lands unscaled on whole pixels. An opaque image at an alpha of 1 stores its
-own bytes on both engines and is left to Metal. A drawn canvas and a
-`saveLayer` give Metal's blend the colour times the alpha unrounded (#837).
-`#dc2828` at `globalAlpha` 0.99 over white is 220.35, 42.15 exactly, and
-white's share at `A` = 252 is 3 where the exact share is 2.55:
+differently and is not measured here). On the GPU engine, Metal, the blend
+runs in half precision: a fill gives it the product placed on its byte and
+`A`, and an image, a canvas or a layer gives it the colour times the alpha
+unrounded. `#dc2828` at `globalAlpha` 0.99 over white is 220.35, 42.15
+exactly, and white's share at `A` = 252 is 3 where the exact share is 2.55:
 
 |                           | CPU         | GPU         |
 | ------------------------- | ----------- | ----------- |
@@ -83,14 +78,9 @@ Each rule above is a byte model that reproduces every pixel of a sweep of
 128, 37 and 0 -- and so does Chrome's legacy rule for its CPU canvas. Over
 5,592,064 colour, alpha and backdrop triples with the alpha off the byte grid,
 computed from those rules, a CPU fill stores 34.2% a level off the exact
-composite, a CPU image or layer 27.1%, and Chrome's rule 40.0%. A drawn
-canvas, a layer, and an image outside the shader's cases -- another blend, a
-filter, a scale or a placement off the pixel grid -- go to Metal's blend as
-the colour times the alpha unrounded, and their misses are all within 0.18 of
-a level of a tie, from the half-precision arithmetic: 3.3% of the sweep,
-against 21.4% for a fill. The shader composites bytes as they are stored; a
-resampled image composites texels interpolated first, and another blend or a
-filter is another composite, and it models neither.
+composite, a CPU image or layer 27.1%, and Chrome's rule 40.0%. On the GPU
+the misses of an image or layer are all within 0.18 of a level of a tie, from
+the half-precision arithmetic: 3.3% of the sweep, against 21.4% for a fill.
 
 Text sets its glyph masks' contrast from the colour it is drawn in, as Skia
 does (`SkMaskGamma`), and on this canvas that colour is the one that stores
@@ -1698,11 +1688,10 @@ apart, are the CPU canvas's bytes under a shadow, a blur filter,
 
 Where the GPU blends a glyph image with what lies beneath it at an alpha --
 a translucent glyph over another, over its own shadow, or under a
-`globalAlpha` -- Metal blends at half precision, as it blends an image the
-eight-bit composite entry's shader does not take, and parts from the exact
-composite only within 0.18 of a tie (see that entry above): 11 of 320
-overlapping bytes on the test sheet, and 674 of 5,697 channels of the four
-test glyphs at a `globalAlpha` of 0.5, a
+`globalAlpha` -- Metal blends at half precision, as it blends any image, and
+parts from the exact composite only within 0.18 of a tie (see the eight-bit
+composite entry above): 11 of 320 overlapping bytes on the test sheet, and
+674 of 5,697 channels of the four test glyphs at a `globalAlpha` of 0.5, a
 level from the CPU at most. The CPU canvas composites a glyph image through
 the `globalAlpha` as Chrome's CPU canvas does, byte for byte over
 `rgb(200 120 60)` at 0.5 and at 0.3 under `multiply`. Applying the alpha to
