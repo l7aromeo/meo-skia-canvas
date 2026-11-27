@@ -250,6 +250,14 @@ jobs:
           else
             cargo clippy --no-default-features --all-targets -- -D warnings
           fi
+      # `window` with no backend is the one feature set that has to fail, at
+      # the `compile_error!` naming the backend to add. It asks skia-safe for
+      # nothing, so it links the Skia the step above built.
+      - name: window alone stops at its named error
+        if: matrix.name == 'features off'
+        run: |
+          node scripts/check-window-backend.mjs --self-test
+          node scripts/check-window-backend.mjs
       - name: cargo clippy (backend alone)
         if: matrix.backendOnly
         run: |
