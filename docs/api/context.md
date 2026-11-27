@@ -463,6 +463,8 @@ drawCanvas(canvas, srcX, srcY, srcWidth, srcHeight, x, y, width, height);
 
 This method behaves identically to the standard [`drawImage()`][drawImage()] function with one key difference: if the first argument is a canvas, it will not be converted to a bitmap before being drawn. Instead its contents will be added to the canvas as resolution-independent vector graphics. This is especially useful when scaling or rotating since it preserves the fidelity of text, patterns, and gradients from the source canvas.
 
+A canvas that itself holds a drawn canvas or an image of an SVG is drawn as `drawImage()` draws it instead: its pixels on this canvas, and what it drew in a PDF or SVG export. Replayed, a page copied back and forth would be replayed once more each round.
+
 ```js
 let src = new Canvas(10, 10),
   srcCtx = src.getContext("2d");

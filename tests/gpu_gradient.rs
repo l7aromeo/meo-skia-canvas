@@ -385,11 +385,11 @@ fn a_canvas_drawn_into_a_gpu_canvas_under_a_transform_stores_the_cpus_bytes_insi
         // can move a value on a half level to the next. Nothing further.
         let most = interior_most_apart(&into(false), &into(true), SIDE_PX);
         assert!(most <= 1, "{name}: {most} levels apart");
-        // Through another blend, inside the layer the source is drawn
-        // through, the draw made on the CPU over transparent is composited
-        // through the blend by the GPU: a level apart where its rounding and
-        // the CPU's differ. `source-atop` inks nothing over transparent, so
-        // the draw is made there with `source-over`.
+        // Through another blend as well: the layer the source is drawn
+        // through plays on a surface of its own, where the draw is made on
+        // the CPU over the pixels it blends with, as on the page, rather than
+        // over transparent and composited through the blend by the GPU,
+        // which rounds twice. Bounded as the draw above, by the two origins.
         for blend in [BlendMode::Multiply, BlendMode::SourceAtop] {
             let blended = |gpu: bool| {
                 drawn(gpu, side, side, &|ctx| {

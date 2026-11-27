@@ -2884,7 +2884,7 @@ fn a_canvas_drawn_as_an_image_draws_as_it_did_on_the_cpu_and_in_a_document() {
         ctx.fill_rect(10.0, 10.0, 70.0, 60.0);
     }
     let inner = &source.context().inner;
-    let image = inner.source_image(false).expect("an image");
+    let image = inner.source_image().expect("an image");
     assert!(inner.plays_apart_on_gpu(), "the source holds a gradient");
     let whole = Rect::from_wh(side, side);
     let exported = || {

@@ -1593,6 +1593,130 @@ describe("Context2D", () => {
       assert.deepEqual(pixel(WIDTH / 2, HEIGHT / 2), CLEAR);
     });
 
+    describe("an image drawn larger with smoothing", () => {
+      // The source's side, and the page each scaled draw lands on, in
+      // pixels.
+      const SOURCE = 16,
+        PAGE = 64;
+      // Four times on the pixel grid, 3.7 times off it, and 2.5 across by
+      // 3.5 down: `[x, y, width, height]`.
+      const DESTINATIONS = [
+        [0, 0, 64, 64],
+        [0.3, 0.6, 59.2, 59.2],
+        [1.25, 2, 40, 56],
+      ];
+      // How far past half a level a CPU canvas may stand from the exact
+      // interpolation: its raster pipeline works a sample's weights in
+      // single precision. `CPU_SLACK_LEVELS` in `tests/image_smoothing.rs`.
+      const CPU_SLACK_LEVELS = 1 / 128;
+      // The bits of a texel a GPU's texture unit resolves a sample to, and
+      // the bound that puts on a GPU canvas: half a level of rounding and
+      // half a step of that resolution on each axis, times a channel's
+      // range. `GPU_LEVELS` in `tests/image_smoothing.rs` says why eight.
+      const SUBTEXEL_BITS = 8;
+      const GPU_LEVELS = 0.5 + (2 * 255) / 2 ** (SUBTEXEL_BITS + 1);
+
+      // Opaque pixels from the fixed sequence `source()` in
+      // `tests/image_smoothing.rs` draws, so each channel interpolates
+      // between unrelated neighbours.
+      const source = () => {
+        let state = 0x2545f491;
+        const next = () => {
+          state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+          return state >>> 24;
+        };
+        return Uint8ClampedArray.from(
+          { length: SOURCE * SOURCE * 4 },
+          (_, i) => (i % 4 == 3 ? 255 : next()),
+        );
+      };
+
+      // The exact bilinear interpolation at each pixel whose centre lies at
+      // least a pixel inside `rect`, as `[index, value]` per colour channel,
+      // the source's edge clamped.
+      const exact = (pixels, [dx, dy, dw, dh]) => {
+        const texel = (x, y, channel) => {
+          const at = (v) => Math.min(Math.max(v, 0), SOURCE - 1);
+          return pixels[(at(y) * SOURCE + at(x)) * 4 + channel];
+        };
+        const out = [];
+        for (let row = 0; row < PAGE; row++)
+          for (let column = 0; column < PAGE; column++) {
+            const [cx, cy] = [column + 0.5, row + 0.5];
+            if (cx < dx + 1 || cx >= dx + dw - 1) continue;
+            if (cy < dy + 1 || cy >= dy + dh - 1) continue;
+            const u = ((cx - dx) * SOURCE) / dw - 0.5,
+              v = ((cy - dy) * SOURCE) / dh - 0.5;
+            const [x0, y0] = [Math.floor(u), Math.floor(v)];
+            const [fx, fy] = [u - x0, v - y0];
+            for (let channel = 0; channel < 3; channel++)
+              out.push([
+                (row * PAGE + column) * 4 + channel,
+                (1 - fx) * (1 - fy) * texel(x0, y0, channel) +
+                  fx * (1 - fy) * texel(x0 + 1, y0, channel) +
+                  (1 - fx) * fy * texel(x0, y0 + 1, channel) +
+                  fx * fy * texel(x0 + 1, y0 + 1, channel),
+              ]);
+          }
+        return out;
+      };
+
+      // `pixels` put on a CPU canvas and drawn into `rect` on a page on
+      // `gpu`'s engine; `null` where that engine is not available.
+      const scaled = (pixels, rect, gpu) => {
+        const from = new Canvas(SOURCE, SOURCE);
+        from.gpu = false;
+        from
+          .getContext("2d")
+          .putImageData(new ImageData(pixels, SOURCE, SOURCE), 0, 0);
+        const page = new Canvas(PAGE, PAGE);
+        page.gpu = gpu;
+        if (page.engine.renderer != (gpu ? "GPU" : "CPU")) return null;
+        const pageCtx = page.getContext("2d");
+        pageCtx.drawImage(from, ...rect);
+        return pageCtx.getImageData(0, 0, PAGE, PAGE).data;
+      };
+
+      const beyond = (stored, values, bound) =>
+        values.filter(([at, value]) => Math.abs(stored[at] - value) > bound);
+
+      test("stores the nearest level on the CPU", () => {
+        const pixels = source(),
+          bound = 0.5 + CPU_SLACK_LEVELS;
+        for (const rect of DESTINATIONS) {
+          const values = exact(pixels, rect);
+          assert.ok(values.length > 4000, `${rect}: ${values.length}`);
+          // Chrome's truncation of the same values, which the check refuses.
+          const truncated = new Uint8Array(PAGE * PAGE * 4);
+          for (const [at, value] of values) truncated[at] = Math.floor(value);
+          assert.ok(
+            beyond(truncated, values, bound).length > 0,
+            `${rect}: the check passes the truncated values`,
+          );
+          const off = beyond(scaled(pixels, rect, false), values, bound);
+          assert.equal(
+            off.length,
+            0,
+            `${rect}: off the nearest level, first ${off[0]}`,
+          );
+        }
+      });
+
+      test("stores within the sampler's precision on the GPU", (t) => {
+        const pixels = source();
+        for (const rect of DESTINATIONS) {
+          const stored = scaled(pixels, rect, true);
+          if (!stored) return t.skip("no GPU here");
+          const off = beyond(stored, exact(pixels, rect), GPU_LEVELS);
+          assert.equal(
+            off.length,
+            0,
+            `${rect}: further off than ${GPU_LEVELS}, first ${off[0]}`,
+          );
+        }
+      });
+    });
+
     test("drawImage() clips a crop to the source image", async () => {
       // The HTML spec, on establishing the two rectangles: "If the source
       // rectangle is not entirely within the source image, then clip the
@@ -1669,6 +1793,70 @@ describe("Context2D", () => {
 
       let image = await loadAsset("checkers.png");
       assert.doesNotThrow(() => ctx.drawCanvas(image, 0, 0));
+    });
+
+    // A filter or a shadow on the destination spreads past the rectangle
+    // `drawCanvas` draws into, as it does past `drawImage`'s, which is what
+    // Chrome's `drawImage` does with one. At one to one the two land the
+    // same bytes, for a canvas replayed as its page and for one holding a
+    // drawn canvas, which is drawn as its pixels. The source fills its
+    // whole canvas, so a draw clipped to the destination leaves the pixels
+    // read outside it clear.
+    test("drawCanvas() spreads a filter or a shadow as drawImage() does", () => {
+      const SIDE = 60;
+      const AT = 70;
+      const PAGE = [220, 200];
+      const source = (/** @type {boolean} */ nesting) => {
+        const canvas = new Canvas(SIDE, SIDE);
+        canvas.gpu = false;
+        const c = canvas.getContext("2d");
+        c.fillStyle = "rgb(40,90,160)";
+        c.fillRect(0, 0, SIDE, SIDE);
+        if (nesting) {
+          const tiny = new Canvas(4, 4);
+          tiny.gpu = false;
+          tiny.getContext("2d").fillRect(0, 0, 4, 4);
+          c.drawImage(tiny, 0, 0);
+        }
+        return canvas;
+      };
+      /** @type {[string, (c: CanvasRenderingContext2D) => void, number][]} */
+      const effects = [
+        ["a blur", (c) => (c.filter = "blur(6px)"), AT - 3],
+        [
+          "a shadow",
+          (c) => {
+            c.shadowColor = "rgba(200,0,0,0.8)";
+            c.shadowBlur = 8;
+            c.shadowOffsetX = 30;
+          },
+          AT + SIDE + 10,
+        ],
+      ];
+      for (const [effect, set, outside] of effects) {
+        for (const nesting of [false, true]) {
+          const drawn = (/** @type {"drawCanvas" | "drawImage"} */ verb) => {
+            const page = new Canvas(...PAGE);
+            page.gpu = false;
+            const c = page.getContext("2d");
+            set(c);
+            c[verb](source(nesting), AT, AT);
+            return c.getImageData(0, 0, ...PAGE).data;
+          };
+          const what = `${effect}, ${nesting ? "nesting" : "plain"} source`;
+          const replayed = drawn("drawCanvas");
+          const row = (AT + SIDE / 2) * PAGE[0];
+          assert.ok(
+            replayed[(row + outside) * 4 + 3] > 0,
+            `${what}: reaches x ${outside}, outside the destination`,
+          );
+          assert.deepEqual(
+            replayed,
+            drawn("drawImage"),
+            `${what}: as drawImage`,
+          );
+        }
+      }
     });
 
     test("drawCanvas() composites the source as its own pixels", () => {
