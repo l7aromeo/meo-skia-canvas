@@ -1962,6 +1962,18 @@ surface of its own, where the gradient is drawn as on the page
 pixels of the sweep, as for an image of the same pixels. Chrome's GPU canvas
 was not measured: headless Chrome drew it on SwiftShader.
 
+**A shadow a GPU canvas casts from a fill in a flat colour is made from the
+edge the GPU draws, not the CPU canvas's.** A gradient fill's shadow is made
+from the CPU's coverage of its path (#766, above). A fill in a colour has no
+such coverage, so its shadow takes Ganesh's edge, which covers a pixel in
+steps of one sample -- see the `msaa` option. Sixteen discs of radius 8.3,
+32 pixels apart on a 128 by 128 page over a fill, filled `rgb(250 200 0)`
+at a `globalAlpha` of 0.6 off the page and casting `rgb(0 0 0 / 0.5)` onto
+it, stood apart from the CPU canvas on Metal at 4 samples in 848 pixels by
+up to 27 levels with no blur, and in 5,360 by up to 3 under a `shadowBlur`
+of 4. Dyed by an eight-bit ramp instead, the same shadows stood apart in
+1,344 pixels by a level, from the half-precision composite above.
+
 **On a CPU canvas a COLR colour glyph's image composites at full alpha as
 the exact source-over rounded to nearest, on every architecture; Chrome's
 CPU canvas may not on x86-64.** Skia's eight-bit source-over rounds to
