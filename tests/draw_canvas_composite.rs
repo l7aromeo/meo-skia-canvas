@@ -16,8 +16,10 @@ use meo_skia_canvas::prelude::*;
 
 mod common;
 
-/// The destination every case draws on: opaque blue.
-const PAGE: &str = "rgb(0,0,255)";
+/// The destination every case draws on: opaque, with no channel at 0 or 255,
+/// where Skia's approximate N32 sprite row happens to land the exact
+/// composite and so cannot be told from it.
+const PAGE: &str = "rgb(40,120,200)";
 
 /// A canvas on `gpu`'s engine, or `None` where the GPU's is not there --
 /// see [`common::on_gpu`].
@@ -175,8 +177,9 @@ fn transparent_bytes_put_leave_the_destination_as_it_was() {
     let mut drawn = page(4.0, 4.0, false);
     drawn.context().draw_canvas(&mut source, 0.0, 0.0);
     let pixels = read(&mut drawn);
+    let destination = read(&mut page(1.0, 1.0, false));
     assert!(
-        pixels.chunks(4).all(|pixel| pixel == [0, 0, 255, 255]),
+        pixels.chunks(4).all(|pixel| pixel == destination),
         "the destination read {:?}",
         &pixels[..4]
     );

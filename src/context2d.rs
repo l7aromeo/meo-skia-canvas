@@ -8889,3 +8889,144 @@ mod recording_tests {
         assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }
+
+#[cfg(test)]
+mod unlayered_tests {
+    use super::*;
+    use std::iter::zip;
+
+    use crate::{
+        canvas::Canvas,
+        context::layer::UNLAYERED,
+        pixels::{ImageDataExport, PixelExportOptions},
+    };
+
+    /// A page every channel of which is 0 or 255, where Skia's `N32` sprite
+    /// row lands the exact composite: a layer's restore is then exact on
+    /// every CPU, and the group drawn with no layer can be told from the
+    /// group drawn through one only where something confines them
+    /// differently.
+    const PAGE: &str = "rgb(0,0,255)";
+
+    /// An 80 by 60 canvas holding a turned ellipse and two translucent
+    /// rectangles overlapping it.
+    fn source() -> Canvas {
+        let mut source = Canvas::new(80.0, 60.0);
+        source.set_gpu(false);
+        let ctx = source.context();
+        ctx.set_fill_style_css("rgba(0,0,0,0.8)").expect("a colour");
+        ctx.begin_path();
+        ctx.ellipse(
+            40.0,
+            30.0,
+            35.0,
+            22.5,
+            0.4,
+            0.0,
+            std::f32::consts::TAU,
+            false,
+        )
+        .expect("an ellipse");
+        ctx.fill(FillRule::NonZero);
+        ctx.set_fill_style_css("rgba(200,80,30,0.6)")
+            .expect("a colour");
+        ctx.fill_rect(4.0, 4.0, 30.0, 30.0);
+        ctx.set_fill_style_css("rgba(20,160,90,0.45)")
+            .expect("a colour");
+        ctx.fill_rect(20.0, 20.0, 40.0, 30.0);
+        source
+    }
+
+    /// The page's premultiplied bytes after `draw` draws the source onto it.
+    fn drawn(draw: fn(&mut Context2D, &mut Canvas)) -> Vec<u8> {
+        let mut page = Canvas::new(200.0, 140.0);
+        page.set_gpu(false);
+        let ctx = page.context();
+        ctx.set_fill_style_css(PAGE).expect("a colour");
+        ctx.fill_rect(0.0, 0.0, 200.0, 140.0);
+        draw(ctx, &mut source());
+        page.to_image_data(
+            None,
+            &ImageDataExport {
+                pixels: PixelExportOptions {
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+                ..ImageDataExport::default()
+            },
+        )
+        .expect("pixels")
+        .pixels()
+        .to_vec()
+    }
+
+    /// A canvas drawn in with no layer around it lands what its layer
+    /// landed, where the destination confines it as it confined the layer:
+    /// under a fractional crop, a fractional or turned clip, and a turned
+    /// transform, whose bounds Skia rounds out to the device rectangle
+    /// around them.
+    #[test]
+    fn a_canvas_drawn_in_unlayered_lands_what_its_layer_does() {
+        type Case = (&'static str, fn(&mut Context2D, &mut Canvas));
+        let cases: [Case; 7] = [
+            ("at a whole pixel", |ctx, source| {
+                ctx.draw_canvas(source, 40.0, 20.0)
+            }),
+            ("cropped at a fractional source rectangle", |ctx, source| {
+                ctx.draw_canvas_region(
+                    source, 10.3, 8.6, 50.0, 40.0, 40.0, 20.0, 50.0, 40.0,
+                )
+            }),
+            ("cropped to a fractional destination", |ctx, source| {
+                ctx.draw_canvas_region(
+                    source, 10.0, 8.0, 50.0, 40.0, 40.4, 20.7, 50.0, 40.0,
+                )
+            }),
+            ("under a fractional clip", |ctx, source| {
+                ctx.begin_path();
+                ctx.rect(52.4, 31.6, 50.0, 30.0);
+                ctx.clip(FillRule::NonZero);
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("under a turned clip", |ctx, source| {
+                ctx.translate(80.0, 50.0);
+                ctx.rotate(0.3);
+                ctx.begin_path();
+                ctx.rect(-30.0, -20.0, 60.0, 40.0);
+                ctx.clip(FillRule::NonZero);
+                ctx.reset_transform();
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("turned", |ctx, source| {
+                ctx.translate(100.0, 70.0);
+                ctx.rotate(0.4);
+                ctx.draw_canvas(source, -40.0, -30.0);
+            }),
+            ("turned and cropped", |ctx, source| {
+                ctx.translate(100.0, 70.0);
+                ctx.rotate(0.4);
+                ctx.draw_canvas_region(
+                    source, 10.0, 8.0, 50.0, 40.0, -25.0, -20.0, 50.0, 40.0,
+                );
+            }),
+        ];
+        let mut wrong = vec![];
+        for (name, draw) in cases {
+            UNLAYERED.set(false);
+            let layered = drawn(draw);
+            UNLAYERED.set(true);
+            let unlayered = drawn(draw);
+            let apart: Vec<u8> = zip(&layered, &unlayered)
+                .filter(|(a, b)| a != b)
+                .map(|(a, b)| a.abs_diff(*b))
+                .collect();
+            if !apart.is_empty() {
+                wrong.push((name, apart.len(), apart.iter().max().copied()));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "unlayered apart from layered (case, bytes, most): {wrong:?}"
+        );
+    }
+}

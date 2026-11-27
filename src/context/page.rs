@@ -124,6 +124,38 @@ pub(crate) fn release_cached_pages() {
     });
 }
 
+/// The colour type pixels of the library's own are drawn back onto a page
+/// in, as an image -- what a canvas drawn in plays on, see `in_own_type` in
+/// the layer module: their own, but for eight-bit pixels, which are drawn in
+/// the eight-bit type that is not [`ColorType::N32`].
+///
+/// Drawn source-over at a whole-pixel offset onto an `N32` page, an `N32`
+/// image takes Skia's sprite blitter, whose row rounds `d * (256 - sa) >> 8`
+/// on x86 -- 18,760 of the 65,536 pairs of destination and source alpha a
+/// level off the exact composite -- and is off on every CPU under an alpha.
+/// Any other pairing takes the raster pipeline, which lands the exact
+/// composite at full alpha everywhere. The test is the image's own colour
+/// type, which Skia does not fold away as it can a paint that changes
+/// nothing.
+///
+/// It is the type of the image and not of a surface drawn into: entries
+/// drawn on a surface in this type are rasterized by the raster pipeline,
+/// not the blitters that drew a page's own pixels, and land other bytes. So
+/// the pixels are made as a page's are and read out in this type.
+// UPSTREAM: skia-safe 0.156.0 -- #828 -- worked around
+// Re-check: cargo test a_canvas_drawn_in_at_a_whole_pixel_lands_its_own_pixels
+pub(crate) fn own_image_type(color_type: ColorType) -> ColorType {
+    match color_type {
+        ColorType::RGBA8888 | ColorType::BGRA8888 => {
+            match ColorType::N32 == ColorType::RGBA8888 {
+                true => ColorType::BGRA8888,
+                false => ColorType::RGBA8888,
+            }
+        }
+        other => other,
+    }
+}
+
 //
 // Deferred canvas (records drawing commands for later replay on an output
 // surface)

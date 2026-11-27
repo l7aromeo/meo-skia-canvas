@@ -33,7 +33,7 @@ use std::{
 
 use parking_lot::Mutex;
 use skia_safe::{
-    AlphaType, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color,
+    AlphaType, Bitmap, BlendMode, BlurStyle, Canvas as SkCanvas, ClipOp, Color,
     Color4f, ColorFilter, ColorSpace, ColorType, Contains, Data, FilterMode,
     IPoint, IRect, ISize, Image, ImageFilter, ImageInfo, MaskFilter, Matrix,
     MipmapMode, Paint, PaintCap, PaintJoin, PaintStyle, Path, PathDirection,
@@ -54,7 +54,7 @@ use crate::{
         exact_gradient::{Exact, GradientSpec},
         faint::{Faint, composited},
         kept::CoverageInput,
-        page::{ExportOptions, Page},
+        page::{ExportOptions, Page, own_image_type},
         run_mask::{self, Kept},
     },
     export::{VectorFeatures, blend_features},
@@ -507,6 +507,10 @@ thread_local! {
     /// their own on this thread: off, every layer's entries play inside it,
     /// where their runs are drawn by the GPU.
     pub(crate) static OWN_ROOTS: Cell<bool> = const { Cell::new(true) };
+    /// Whether [`Group::played_unlayered`] draws a plain group on this
+    /// thread: off, every group composites through its layer, the reference
+    /// the clips standing in for it are held to.
+    pub(crate) static UNLAYERED: Cell<bool> = const { Cell::new(true) };
     /// How many layers' entries [`played_on_a_root`] has played on a
     /// surface of their own on this thread.
     pub(crate) static ROOTS_PLAYED: Cell<usize> = const { Cell::new(0) };
@@ -4132,7 +4136,8 @@ impl Group {
     fn draw_chained(&self, layer: &SkCanvas, target: Target, back: &Matrix) {
         let outer = Matrix::concat(&layer.local_to_device_as_3x3(), back);
         self.draw_chained_as(layer, target, back, |layer| {
-            if target == Target::Pixels && self.played_at_source(layer, &outer)
+            if target == Target::Pixels
+                && self.played_at_source(layer, &outer, None)
             {
                 return;
             }
@@ -4140,6 +4145,59 @@ impl Group {
                 entry.playback(layer, target);
             }
         });
+    }
+
+    /// Draws the group onto `canvas` from a surface of its own -- see
+    /// [`Self::played_at_source`] -- with no layer around it, where `rec`
+    /// composites nothing that surface's pixels do not already hold: at an
+    /// opacity of one, through no filter, over no backdrop and within no
+    /// bounds of its own. Whether it did; where it did not, nothing was
+    /// drawn.
+    ///
+    /// The surface already composites the group's entries apart from what
+    /// lies beneath them, which is all such a layer does. Drawn into the
+    /// layer instead, its pixels landed through the layer's own restore,
+    /// which on a raster on the CPU takes Skia's `N32` sprite row whatever
+    /// the surface was made in -- see [`own_image_type`]: a canvas drawn in
+    /// at a whole pixel stood 415 bytes a level apart from its own pixels
+    /// drawn as an image on an x86-64 machine.
+    ///
+    /// The destination confines the surface as it confines the layer: as a
+    /// clip where it holds what the group draws, and where it cuts it, by
+    /// multiplying the surface by its coverage before it is drawn, as the
+    /// layer is multiplied before it closes. Clipped by that coverage
+    /// instead, a crop to a fractional destination stood a level from the
+    /// layer's at the crop's edge. The footprint the layer is confined to is
+    /// the reach of the entries, which the surface, bounded by the source,
+    /// holds anyway.
+    fn played_unlayered(
+        &self,
+        canvas: &SkCanvas,
+        rec: &LayerRec,
+        base: &Matrix,
+    ) -> bool {
+        let plain = rec.opacity() == Some(1.0)
+            && rec.bounds.is_none()
+            && rec.pixels_paint.is_none()
+            && rec.pixels_backdrop.is_none()
+            && !rec.one_image;
+        if !plain || !blur_mask::draws_on_cpu(canvas) {
+            return false;
+        }
+        #[cfg(test)]
+        if !UNLAYERED.get() {
+            return false;
+        }
+        let to_device = Matrix::concat(base, &self.matrix);
+        canvas.save();
+        canvas.set_matrix(&to_device.into());
+        let crop = self.crop(canvas, Target::Pixels, &to_device);
+        if crop.is_none() {
+            self.confine(canvas, Target::Pixels, &to_device);
+        }
+        let drawn = self.played_at_source(canvas, base, crop.as_ref());
+        canvas.restore();
+        drawn
     }
 
     /// Draws a canvas or a vector image drawn in onto `canvas` from a surface
@@ -4152,10 +4210,11 @@ impl Group {
     /// corner lies in. The entries are played on it under the transform they
     /// are played under here, moved to that origin, and under no clip; its
     /// pixels are then drawn at the origin, under whatever clip `canvas`
-    /// holds, and the destination, a crop of the source, among it. Skia's
-    /// analytic anti-aliasing covers a curve by where it lies on the raster
-    /// it fills and cuts the coverage of a path its clip cuts -- see
-    /// `skia_covers_a_curve_by_where_it_lies` and [`CutOp`] -- so drawn
+    /// holds, and the destination, a crop of the source, among it -- or,
+    /// where `crop` is given, the surface is multiplied by that coverage
+    /// first. Skia's analytic anti-aliasing covers a curve by where it lies on
+    /// the raster it fills and cuts the coverage of a path its clip cuts --
+    /// see `skia_covers_a_curve_by_where_it_lies` and [`CutOp`] -- so drawn
     /// straight into a layer, the source's curves were covered by where the
     /// clip, or the page's edge, began the layer and by where they cut it:
     /// an ellipse drawn in at a whole-pixel offset stood up to 27 levels
@@ -4177,7 +4236,12 @@ impl Group {
     /// has no colour space to make the surface in: a Display P3 canvas drawn
     /// in through one landed sRGB red, and one drawn under a 180 by 24 clip
     /// rasterized its whole 1400 by 1400 page.
-    fn played_at_source(&self, canvas: &SkCanvas, outer: &Matrix) -> bool {
+    fn played_at_source(
+        &self,
+        canvas: &SkCanvas,
+        outer: &Matrix,
+        crop: Option<&Coverage>,
+    ) -> bool {
         let Some(source) = self.source else {
             return false;
         };
@@ -4200,7 +4264,10 @@ impl Group {
         //
         // The surface is what places the source's curves as the source
         // places them; were they covered alike wherever they lie, the
-        // entries could be played into the layer as they are.
+        // entries could be played into the layer as they are. It is made as
+        // the page is, so that the entries are rasterized by the blitters
+        // that drew the source's own pixels; only what is drawn back is in
+        // the type of `own_image_type`.
         let Some((mut surface, key)) =
             chain::layer_surface(canvas, Depth::Bytes, bounds)
         else {
@@ -4219,8 +4286,14 @@ impl Group {
                 root,
                 Target::Pixels,
             );
+            if let Some(crop) = crop {
+                root.reset_matrix();
+                root.translate(-origin);
+                crop.multiply(root);
+            }
         }
-        let played = surface.image_snapshot();
+        let played = in_own_type(&mut surface)
+            .unwrap_or_else(|| surface.image_snapshot());
         canvas.save();
         canvas.reset_matrix();
         canvas.draw_image(&played, origin, None);
@@ -4535,6 +4608,8 @@ impl Group {
                     }
                 }
             }
+            (Composite::Layer(rec), Target::Pixels)
+                if self.played_unlayered(canvas, rec, &base) => {}
             (Composite::Layer(rec) | Composite::Chain { rec, .. }, target) => {
                 let to_device = Matrix::concat(&base, &self.matrix);
                 canvas.set_matrix(&to_device.into());
@@ -4570,7 +4645,7 @@ impl Group {
                 // `Self::played_at_source`.
                 let placed = !rooted
                     && target == Target::Pixels
-                    && self.played_at_source(canvas, &base);
+                    && self.played_at_source(canvas, &base, None);
                 if !rooted && !placed {
                     let in_layer = InLayer::enter();
                     play_entries(
@@ -4590,6 +4665,33 @@ impl Group {
         }
         canvas.restore();
     }
+}
+
+/// `surface`'s pixels as an image in the colour type [`own_image_type`]
+/// gives its own, which an eight-bit surface in the page's type is not:
+/// `None` where it is already that type, or where the read fails.
+///
+/// The bytes are read out in the other order rather than drawn there, since
+/// a read reorders them exactly; drawn into a surface of that type, the
+/// entries were rasterized by the raster pipeline rather than the blitters
+/// that drew the source's own pixels, and a canvas drawn in at a whole pixel
+/// stood 678 bytes up to two levels from them on an x86-64 machine. What it
+/// costs is the read: a copy of the surface's pixels, which the image
+/// shares rather than copies again.
+fn in_own_type(surface: &mut Surface) -> Option<Image> {
+    let info = surface.image_info();
+    let own = info.with_color_type(own_image_type(info.color_type()));
+    if own.color_type() == info.color_type() {
+        return None;
+    }
+    let mut bitmap = Bitmap::new();
+    if !bitmap.try_alloc_pixels_info(&own, None)
+        || !surface.read_pixels_to_pixmap(bitmap.pixmap(), IPoint::new(0, 0))
+    {
+        return None;
+    }
+    bitmap.set_immutable();
+    Some(bitmap.as_image())
 }
 
 /// Plays `contents` into the layer open on `canvas` by way of a surface of
