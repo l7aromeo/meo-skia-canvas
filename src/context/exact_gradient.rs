@@ -17,7 +17,8 @@
 //! `t >= stop`, as the `gradient` stage counts, and each channel is rounded
 //! where the CPU rounds it: on the eight-bit pipeline (`lowp`) as
 //! `trunc(x * 255 + 0.5)`, premultiplied with `div255_accurate` and scaled
-//! by the paint's alpha with `div255`; on the float pipeline (`highp`) at
+//! by the paint's alpha as `EXACT_SCALE` says the CPU scales it; on the
+//! float pipeline (`highp`) at
 //! the store, which takes a half level to the even one on aarch64 and
 //! x86-64. The effect returns whole levels,
 //! which the half-precision fragment output carries to an eight-bit target
@@ -87,6 +88,7 @@ use skia_safe::{
 
 use crate::{
     cache_map::{GOLDEN_RATIO_64, KeptSets},
+    export::VectorFeatures,
     pixels::PixelColorSpace,
     shader::GradientColorSpace,
     started,
@@ -110,6 +112,38 @@ pub(crate) enum Geometry {
     },
     /// Around `center`, from `start` to `end` degrees clockwise from +x.
     Sweep { center: Point, start: f32, end: f32 },
+}
+
+impl Geometry {
+    /// What a vector backend has to reckon with to write a gradient on this
+    /// geometry, before the space it is mixed in.
+    ///
+    /// SVG names no paint server for a sweep. A two-point conical gradient
+    /// Skia's SVG device writes with its circles swapped, so that it reads
+    /// back up to 255 levels off; only one from a point at its end circle's
+    /// centre, which Skia makes a plain radial gradient and the device
+    /// writes as `cx`, `cy` and `r` alone, is written as itself.
+    pub(crate) fn vector_features(&self) -> VectorFeatures {
+        match self {
+            Self::Linear { .. } | Self::Radial { .. } => VectorFeatures::PLAIN,
+            Self::Conical {
+                start,
+                start_radius,
+                end,
+                end_radius,
+            } => {
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+                // Re-check: cargo test skia_svg_swaps_two_point_circles
+                let centred =
+                    start == end && *start_radius == 0.0 && *end_radius > 0.0;
+                match centred {
+                    true => VectorFeatures::PLAIN,
+                    false => VectorFeatures::EXOTIC_SHADER,
+                }
+            }
+            Self::Sweep { .. } => VectorFeatures::EXOTIC_SHADER,
+        }
+    }
 }
 
 /// Everything a gradient is made from, kept so that the shader the CPU draws
@@ -2503,10 +2537,16 @@ fn floats(data: &mut [u8], at: usize, values: &[f32]) {
     }
 }
 
-/// Whether the CPU's `div255` rounds to the nearest level, as NEON
-/// computes it, or is `(v + 255) >> 8`, as every other backend of
-/// `SkRasterPipeline_opts.h` computes it.
-pub(crate) const EXACT_SCALE: bool = cfg!(target_arch = "aarch64");
+/// Whether the CPU's eight-bit pipeline scales a colour by the paint's
+/// alpha to the nearest level, or as `(v + 255) >> 8`. It scales in
+/// `scale_1_float`, through `div255`, which NEON computes to the nearest
+/// level and every other backend of `SkRasterPipeline_opts.h` as
+/// `(v + 255) >> 8` -- unless Skia carries
+/// `containers/skia-lowp-paint-alpha.patch` (`cfg(meo_lowp_paint_alpha)`),
+/// whose `scale_1_float_accurate` divides through `div255_accurate` on
+/// every backend.
+const EXACT_SCALE: bool =
+    cfg!(any(target_arch = "aarch64", meo_lowp_paint_alpha));
 
 /// Whether the CPU's `highp` store rounds a half level to the even one, as
 /// NEON's `vcvtnq` and x86's `cvtps` do, or up, as `round` in

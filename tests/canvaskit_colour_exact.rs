@@ -783,3 +783,70 @@ fn a_gradient_under_a_blend_filter_lands_as_a_fill_of_its_colour() {
         ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
     }));
 }
+
+/// A lighting filter on an eight-bit page lights a flat surface overhead
+/// at its own colour, as a fill paints it.
+///
+/// Straight overhead a flat surface takes the light at N.L = 1, and its
+/// highlight at N.H = 1, so a diffuse light at kd 1 and a specular one at
+/// ks 1 and exponent 1 paint the light's colour. A specular result's alpha
+/// is its largest channel, so those colours carry a 255. The odd channels
+/// hold the light to its own bytes: a light half a level off one lands on
+/// the even byte beside it.
+#[test]
+fn a_light_lights_a_flat_surface_at_its_own_colour() {
+    let overhead = Point3::new(0.0, 0.0, 1.0);
+    let at = |draw: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(SIDE, SIDE);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        draw(ctx);
+        let data = ctx
+            .get_image_data(SIDE / 2.0, SIDE / 2.0, 1.0, 1.0)
+            .expect("a pixel");
+        let px = data.pixels();
+        [px[0], px[1], px[2], px[3]]
+    };
+    let diffuse = |colour| {
+        ImageFilter::distant_lit_diffuse(overhead, colour, 0.0, 1.0, None, None)
+    };
+    let specular = |colour| {
+        ImageFilter::distant_lit_specular(
+            overhead, colour, 0.0, 1.0, 1.0, None, None,
+        )
+    };
+    /// A light made in a colour, as each case builds its filter.
+    type Light<'a> = &'a dyn Fn(RgbaLinear) -> Result<ImageFilter, Error>;
+    let cases = [
+        (
+            &diffuse as Light,
+            [(201, 17, 99), (59, 127, 207), (255, 33, 7)],
+        ),
+        (
+            &specular as Light,
+            [(255, 33, 7), (3, 255, 171), (201, 17, 255)],
+        ),
+    ];
+    let off: Vec<String> = cases
+        .iter()
+        .enumerate()
+        .flat_map(|(kind, (make, colours))| {
+            colours.iter().filter_map(move |&(r, g, b)| {
+                let colour = RgbaLinear::from_srgb8(r, g, b, 1.0);
+                let want = at(&|ctx| {
+                    ctx.set_fill_style(colour);
+                    ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+                });
+                let got = at(&|ctx| {
+                    let filter = make(colour).expect("a filter");
+                    ctx.set_image_filter(Some(&filter));
+                    white(ctx);
+                });
+                (got != want).then(|| {
+                    format!("light {kind}: rgb({r} {g} {b}) lit {got:?}, filled {want:?}")
+                })
+            })
+        })
+        .collect();
+    assert!(off.is_empty(), "lit off its colour: {off:#?}");
+}

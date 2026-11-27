@@ -9,11 +9,12 @@
 //! in first, as `SkBlendMode_ShouldPreScaleCoverage` says for
 //! `source-over`: `s' = div255(s * c)`, then
 //! `s' + div255_accurate(d * (255 - s'.a))`. The two divisions are the
-//! eight-bit ones of `SkRasterPipeline_opts.h`. `div255` rounds to the
-//! nearest level on aarch64, and elsewhere is `(v + 255) >> 8` -- see
-//! [`EXACT_SCALE`]. `div255_accurate`, which the `source-over` stage takes,
-//! rounds to the nearest level everywhere. Measured on the edge scenes of
-//! `tests/gpu_gradient.rs` and the scenes of
+//! eight-bit ones of `SkRasterPipeline_opts.h`. The coverage's, in the
+//! `scale_*` and `lerp` stages, rounds to the nearest level on aarch64 and
+//! under the exact-coverage patch, and elsewhere is `(v + 255) >> 8` -- see
+//! [`EXACT_COVERAGE`]. `div255_accurate`, which the `source-over` stage
+//! takes, rounds to the nearest level everywhere. Measured on the edge scenes
+//! of `tests/gpu_gradient.rs` and the scenes of
 //! `context2d::exact_composite_tests`, those two land every byte the CPU
 //! canvas stores, on aarch64 and on x86-64. Ganesh composites `source-over`
 //! in its fixed-function stage instead: Metal in half precision, a level off
@@ -44,11 +45,21 @@ use skia_safe::{
     TileMode, runtime_effect::ChildPtr, shaders,
 };
 
-use crate::context::exact_gradient::EXACT_SCALE;
+/// Whether the CPU's eight-bit pipeline applies a coverage to the nearest
+/// level, or as `(v + 255) >> 8`. Its `scale_*` and `lerp` stages divide
+/// through `div255`, which NEON computes to the nearest level and every
+/// other backend of `SkRasterPipeline_opts.h` as `(v + 255) >> 8` -- unless
+/// Skia carries `containers/skia-lowp-exact-coverage.patch`
+/// (`cfg(meo_lowp_exact_coverage)`), which takes them through
+/// `div255_accurate` on every backend. A paint's alpha is another stage,
+/// `scale_1_float`, under another patch -- see `exact_gradient`'s
+/// `EXACT_SCALE`.
+const EXACT_COVERAGE: bool =
+    cfg!(any(target_arch = "aarch64", meo_lowp_exact_coverage));
 
 /// The SkSL of the CPU's composite -- see the module's doc -- with
 /// `div255` both ways the CPU computes it, nearest where `nearest` -- see
-/// [`EXACT_SCALE`] -- `div255_accurate` always nearest, and `opaque`
+/// [`EXACT_COVERAGE`] -- `div255_accurate` always nearest, and `opaque`
 /// whether the CPU draws the paint as `src`.
 const COMPOSITE: &str = r#"
 uniform int nearest;
@@ -170,7 +181,7 @@ thread_local! {
 /// The uniforms [`COMPOSITE`] takes, for a paint the CPU draws as `src`
 /// where `opaque`.
 fn uniforms(opaque: bool) -> Data {
-    let values: Vec<u8> = [i32::from(EXACT_SCALE), i32::from(opaque)]
+    let values: Vec<u8> = [i32::from(EXACT_COVERAGE), i32::from(opaque)]
         .iter()
         .flat_map(|value| value.to_ne_bytes())
         .collect();

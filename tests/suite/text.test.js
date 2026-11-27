@@ -1365,6 +1365,48 @@ describe("FreeType lays a size out at its 64th of a pixel", () => {
   );
 });
 
+describe("a glyph advances its units times the size", () => {
+  FontLibrary.use("AdvanceRecursive", [
+    "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf",
+  ]);
+  FontLibrary.use("AdvanceOswald", [
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  ]);
+
+  // Both faces have a 1000-unit em. A run's units are read at 125px, where
+  // FreeType's 16.16 scale, 125 × 64 × 65536 / 1000 = 524,288, is exact; at
+  // 1000px Linux read "I" as 499.999 units. On Linux a face is set to the 64th of a pixel at or below the size, as
+  // the test above holds, and an advance is the units times that size,
+  // rounded once to 16.16 -- containers/skia-freetype-advance.patch. Skia's
+  // FreeType scaler took the units times a 16.16 scale FreeType rounded
+  // first, so a 1000-unit em at 16px advanced 16 + 2/65536, the excess
+  // adding up along a line (#695). macOS and Windows lay out at the size
+  // asked for. A width may be off by half a 16.16 unit a glyph, where each
+  // rounded advance leaves it, and four f32 steps of the width.
+  const laidOut = (size) =>
+    process.platform === "linux" ? Math.trunc(size * 64) / 64 : size;
+
+  test("at whole, half and fractional sizes, alone and along a run", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    const off = [];
+    for (const family of ["AdvanceRecursive", "AdvanceOswald"]) {
+      for (const text of ["I", "H", "IIIIII", "HIHIHIHIHIHI"]) {
+        ctx.font = `125px ${family}`;
+        const units = (ctx.measureText(text).width * 1000) / 125;
+        for (const size of [16, 13, 12.5, 37, 40 / 3]) {
+          ctx.font = `${size}px ${family}`;
+          const got = ctx.measureText(text).width;
+          const exact = (units * laidOut(size)) / 1000;
+          const allowed = text.length / 131072 + exact * 2 ** -23 * 4;
+          if (Math.abs(got - exact) > allowed)
+            off.push(`${family} ${text} at ${size}px: ${got} for ${exact}`);
+        }
+      }
+    }
+    assert.deepEqual(off, []);
+  });
+});
+
 describe("a fractional font-weight is drawn at its fraction", () => {
   FontLibrary.use("FractionOswald", [
     "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",

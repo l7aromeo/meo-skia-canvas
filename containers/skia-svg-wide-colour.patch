@@ -1,0 +1,699 @@
+--- a/skia-bindings/skia/modules/svg/include/SkSVGFe.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGFe.h
+@@ -79,6 +79,15 @@
+ 
+     bool parseAndSetAttribute(const char*, const char*) override;
+ 
++    /**
++     * An sRGB colour, such as 'flood-color' or 'lighting-color', in the space this primitive
++     * works in: unchanged in sRGB, and in linear light in linearRGB, by the curve
++     * `SkColorFilters::SRGBToLinearGamma` applies to a primitive's input. Alpha is not encoded.
++     */
++    SkColor4f resolvePrimitiveColor(const SkSVGRenderContext&,
++                                    const SkSVGFilterContext&,
++                                    SkColor4f) const;
++
+ private:
+     /**
+      * Resolves the rect specified by the x, y, width and height attributes (if specified) on this
+--- a/skia-bindings/skia/modules/svg/include/SkSVGFeFlood.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGFeFlood.h
+@@ -34,7 +34,7 @@
+ private:
+     SkSVGFeFlood() : INHERITED(SkSVGTag::kFeFlood) {}
+ 
+-    SkColor resolveFloodColor(const SkSVGRenderContext&) const;
++    SkColor4f resolveFloodColor(const SkSVGRenderContext&) const;
+ 
+     using INHERITED = SkSVGFe;
+ };
+--- a/skia-bindings/skia/modules/svg/include/SkSVGFeLighting.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGFeLighting.h
+@@ -57,7 +57,8 @@
+                                                const SkSVGFilterContext&,
+                                                const SkSVGFeSpotLight*) const = 0;
+ 
+-    SkColor resolveLightingColor(const SkSVGRenderContext&) const;
++    // 'lighting-color' in the space the primitive works in.
++    SkColor4f resolveLightingColor(const SkSVGRenderContext&, const SkSVGFilterContext&) const;
+ 
+     SkPoint3 resolveXYZ(const SkSVGRenderContext&,
+                         const SkSVGFilterContext&,
+--- a/skia-bindings/skia/modules/svg/include/SkSVGRenderContext.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGRenderContext.h
+@@ -145,6 +145,8 @@
+     std::optional<SkPaint> strokePaint() const;
+ 
+     SkSVGColorType resolveSvgColor(const SkSVGColor&) const;
++    // meo-skia-canvas: the colour in extended sRGB, as wide as it was written.
++    SkColor4f resolveSvgColor4f(const SkSVGColor&) const;
+ 
+     // The local computed clip path (not inherited).
+     const SkPath* clipPath() const { return SkOptAddressOrNull(fClipPath); }
+--- a/skia-bindings/skia/modules/svg/include/SkSVGTypes.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGTypes.h
+@@ -184,13 +184,23 @@
+     using Vars = std::vector<SkString>;
+ 
+     SkSVGColor() : SkSVGColor(SK_ColorBLACK) {}
+-    explicit SkSVGColor(const SkSVGColorType& c) : fType(Type::kColor), fColor(c), fVars(nullptr) {}
++    explicit SkSVGColor(const SkSVGColorType& c)
++        : fType(Type::kColor), fColor(c), fVars(nullptr), fColor4f(SkColor4f::FromColor(c)) {}
+     explicit SkSVGColor(Type t, Vars&& vars)
+         : fType(t), fColor(SK_ColorBLACK)
+-        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars))) {}
++        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars)))
++        , fColor4f(SkColors::kBlack) {}
+     explicit SkSVGColor(const SkSVGColorType& c, Vars&& vars)
+         : fType(Type::kColor), fColor(c)
+-        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars))) {}
++        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars)))
++        , fColor4f(SkColor4f::FromColor(c)) {}
++    // meo-skia-canvas: a colour in extended sRGB, unclamped, so one outside
++    // sRGB reaches a wide surface. `fColor` keeps it as eight-bit sRGB for
++    // what reads only an SkColor.
++    explicit SkSVGColor(const SkColor4f& c, Vars&& vars)
++        : fType(Type::kColor), fColor(c.toSkColor())
++        , fVars(vars.empty() ? nullptr : new RefCntVars(std::move(vars)))
++        , fColor4f(c) {}
+ 
+     SkSVGColor(const SkSVGColor&)            = default;
+     SkSVGColor& operator=(const SkSVGColor&) = default;
+@@ -198,12 +208,14 @@
+     SkSVGColor& operator=(SkSVGColor&&)      = default;
+ 
+     bool operator==(const SkSVGColor& other) const {
+-        return fType == other.fType && fColor == other.fColor && fVars == other.fVars;
++        return fType == other.fType && fColor == other.fColor && fVars == other.fVars &&
++               fColor4f == other.fColor4f;
+     }
+     bool operator!=(const SkSVGColor& other) const { return !(*this == other); }
+ 
+     Type type() const { return fType; }
+     const SkSVGColorType& color() const { SkASSERT(fType == Type::kColor); return fColor; }
++    const SkColor4f& color4f() const { SkASSERT(fType == Type::kColor); return fColor4f; }
+     SkSpan<const SkString> vars() const {
+         return fVars ? SkSpan<const SkString>(fVars->fData) : SkSpan<const SkString>();
+     }
+@@ -219,6 +231,7 @@
+         Vars fData;
+     };
+     sk_sp<RefCntVars> fVars;
++    SkColor4f fColor4f;
+ };
+ 
+ class SK_API SkSVGPaint {
+--- a/skia-bindings/skia/modules/svg/src/SkSVGAttributeParser.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGAttributeParser.cpp
+@@ -419,6 +419,32 @@
+         *color = SkSVGColor(c, std::move(vars));
+         return true;
+     }
++    // meo-skia-canvas: `color(srgb r g b)` and `color(srgb r g b / a)`, the
++    // channels in extended sRGB and unclamped, so a colour outside sRGB
++    // keeps its value. The library writes a paint, a stop and a flood colour
++    // in this form; CSS Color 4's other forms are read there, not here.
++    if (SkColor4f c4; this->parseParenthesized("color", [this](SkColor4f* c) -> bool {
++            SkScalar r, g, b, a = 1;
++            if (!this->parseExpectedStringToken("srgb") || !this->parseWSToken() ||
++                !this->parseScalarToken(&r) || !this->parseWSToken() ||
++                !this->parseScalarToken(&g) || !this->parseWSToken() ||
++                !this->parseScalarToken(&b)) {
++                return false;
++            }
++            this->parseWSToken();
++            if (this->parseExpectedStringToken("/")) {
++                this->parseWSToken();
++                if (!this->parseScalarToken(&a)) {
++                    return false;
++                }
++                this->parseWSToken();
++            }
++            *c = {r, g, b, SkTPin(a, 0.0f, 1.0f)};
++            return true;
++        }, &c4)) {
++        *color = SkSVGColor(c4, std::move(vars));
++        return true;
++    }
+     if (this->parseExpectedStringToken("currentColor")) {
+         *color = SkSVGColor(SkSVGColor::Type::kCurrentColor, std::move(vars));
+         return true;
+--- a/skia-bindings/skia/modules/svg/src/SkSVGFe.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGFe.cpp
+@@ -7,6 +7,9 @@
+ 
+ #include "modules/svg/include/SkSVGFe.h"
+ 
++#include "include/core/SkColorSpace.h"
++#include "modules/skcms/skcms.h"
++
+ #include "modules/svg/include/SkSVGAttribute.h"
+ #include "modules/svg/include/SkSVGAttributeParser.h"
+ #include "modules/svg/include/SkSVGFilterContext.h"
+@@ -92,6 +95,17 @@
+     return cs == SkSVGColorspace::kAuto ? kDefaultCS : cs;
+ }
+ 
++SkColor4f SkSVGFe::resolvePrimitiveColor(const SkSVGRenderContext& ctx,
++                                         const SkSVGFilterContext& fctx,
++                                         SkColor4f color) const {
++    if (this->resolveColorspace(ctx, fctx) == SkSVGColorspace::kLinearRGB) {
++        for (float* channel : {&color.fR, &color.fG, &color.fB}) {
++            *channel = skcms_TransferFunction_eval(&SkNamedTransferFn::kSRGB, *channel);
++        }
++    }
++    return color;
++}
++
+ void SkSVGFe::applyProperties(SkSVGRenderContext* ctx) const { this->onPrepareToRender(ctx); }
+ 
+ bool SkSVGFe::parseAndSetAttribute(const char* name, const char* value) {
+--- a/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
+@@ -7,6 +7,8 @@
+ 
+ #include "modules/svg/include/SkSVGFeFlood.h"
+ 
++#include "include/core/SkBlendMode.h"
++#include "include/core/SkColorFilter.h"
+ #include "include/core/SkScalar.h"
+ #include "include/core/SkShader.h"
+ #include "include/effects/SkImageFilters.h"
+@@ -16,21 +18,32 @@
+ class SkImageFilter;
+ class SkSVGFilterContext;
+ 
+-SkColor SkSVGFeFlood::resolveFloodColor(const SkSVGRenderContext& ctx) const {
++SkColor4f SkSVGFeFlood::resolveFloodColor(const SkSVGRenderContext& ctx) const {
+     const auto floodColor = this->getFloodColor();
+     const auto floodOpacity = this->getFloodOpacity();
+     // Uninherited presentation attributes should have a concrete value by now.
+     if (!floodColor.isValue() || !floodOpacity.isValue()) {
+         SkDEBUGF("unhandled: flood-color or flood-opacity has no value\n");
+-        return SK_ColorBLACK;
++        return SkColors::kBlack;
+     }
+ 
+-    const SkColor color = ctx.resolveSvgColor(*floodColor);
+-    return SkColorSetA(color, SkScalarRoundToInt(*floodOpacity * 255));
++    SkColor4f color = ctx.resolveSvgColor4f(*floodColor);
++    color.fA *= *floodOpacity;
++    return color;
+ }
+ 
+ sk_sp<SkImageFilter> SkSVGFeFlood::onMakeImageFilter(const SkSVGRenderContext& ctx,
+                                                      const SkSVGFilterContext& fctx) const {
+-    return SkImageFilters::Shader(SkShaders::Color(resolveFloodColor(ctx)),
+-                                  this->resolveFilterSubregion(ctx, fctx));
++    // A linearRGB primitive works in linear light, and its result is encoded
++    // back to sRGB when the filter is drawn.
++    const SkColor4f color = this->resolvePrimitiveColor(ctx, fctx, resolveFloodColor(ctx));
++    // A colour filter rather than a shader. A shader is drawn into a layer
++    // of the page's eight bits, which in linear light rounds sRGB #070707 to
++    // 13; a colour filter on the source graphic stays one the conversion back
++    // to sRGB composes with, so a flood reaches the page in float. `kSrc`
++    // replaces what the source holds, so the source does not show; an empty
++    // input in its place is drawn into a layer as a shader is.
++    return SkImageFilters::ColorFilter(SkColorFilters::Blend(color, nullptr, SkBlendMode::kSrc),
++                                       nullptr,
++                                       this->resolveFilterSubregion(ctx, fctx));
+ }
+--- a/skia-bindings/skia/modules/svg/src/SkSVGFeLighting.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGFeLighting.cpp
+@@ -18,6 +18,37 @@
+ #include "modules/svg/include/SkSVGFilterContext.h"
+ #include "modules/svg/include/SkSVGRenderContext.h"
+ 
++// `SkImageFilters`' lighting filters with a float light colour, defined beside
++// them in src/effects/imagefilters/SkLightingImageFilter.cpp.
++namespace SkSVGLighting {
++sk_sp<SkImageFilter> DistantLitDiffuse(const SkPoint3& direction, const SkColor4f& lightColor,
++                                       SkScalar surfaceScale, SkScalar kd,
++                                       sk_sp<SkImageFilter> input,
++                                       const SkImageFilters::CropRect& cropRect);
++sk_sp<SkImageFilter> PointLitDiffuse(const SkPoint3& location, const SkColor4f& lightColor,
++                                     SkScalar surfaceScale, SkScalar kd,
++                                     sk_sp<SkImageFilter> input,
++                                     const SkImageFilters::CropRect& cropRect);
++sk_sp<SkImageFilter> SpotLitDiffuse(const SkPoint3& location, const SkPoint3& target,
++                                    SkScalar falloffExponent, SkScalar cutoffAngle,
++                                    const SkColor4f& lightColor, SkScalar surfaceScale,
++                                    SkScalar kd, sk_sp<SkImageFilter> input,
++                                    const SkImageFilters::CropRect& cropRect);
++sk_sp<SkImageFilter> DistantLitSpecular(const SkPoint3& direction, const SkColor4f& lightColor,
++                                        SkScalar surfaceScale, SkScalar ks, SkScalar shininess,
++                                        sk_sp<SkImageFilter> input,
++                                        const SkImageFilters::CropRect& cropRect);
++sk_sp<SkImageFilter> PointLitSpecular(const SkPoint3& location, const SkColor4f& lightColor,
++                                      SkScalar surfaceScale, SkScalar ks, SkScalar shininess,
++                                      sk_sp<SkImageFilter> input,
++                                      const SkImageFilters::CropRect& cropRect);
++sk_sp<SkImageFilter> SpotLitSpecular(const SkPoint3& location, const SkPoint3& target,
++                                     SkScalar falloffExponent, SkScalar cutoffAngle,
++                                     const SkColor4f& lightColor, SkScalar surfaceScale,
++                                     SkScalar ks, SkScalar shininess, sk_sp<SkImageFilter> input,
++                                     const SkImageFilters::CropRect& cropRect);
++}  // namespace SkSVGLighting
++
+ bool SkSVGFeLighting::parseAndSetAttribute(const char* n, const char* v) {
+     return INHERITED::parseAndSetAttribute(n, v) ||
+            this->setSurfaceScale(
+@@ -62,15 +93,18 @@
+     return nullptr;
+ }
+ 
+-SkColor SkSVGFeLighting::resolveLightingColor(const SkSVGRenderContext& ctx) const {
++SkColor4f SkSVGFeLighting::resolveLightingColor(const SkSVGRenderContext& ctx,
++                                                const SkSVGFilterContext& fctx) const {
+     const auto color = this->getLightingColor();
+     if (!color.isValue()) {
+         // Uninherited presentation attributes should have a concrete value by now.
+         SkDEBUGF("unhandled: lighting-color has no value\n");
+-        return SK_ColorWHITE;
++        return SkColors::kWhite;
+     }
+ 
+-    return ctx.resolveSvgColor(*color);
++    // A float colour: a byte would round it, which in linear light moves the
++    // darker sRGB levels by as much as six once the result is encoded back.
++    return this->resolvePrimitiveColor(ctx, fctx, ctx.resolveSvgColor4f(*color));
+ }
+ 
+ SkPoint3 SkSVGFeLighting::resolveXYZ(const SkSVGRenderContext& ctx,
+@@ -99,9 +133,9 @@
+         const SkSVGFilterContext& fctx,
+         const SkSVGFeDistantLight* light) const {
+     const SkPoint3 dir = light->computeDirection();
+-    return SkImageFilters::DistantLitSpecular(
++    return SkSVGLighting::DistantLitSpecular(
+             this->resolveXYZ(ctx, fctx, dir.fX, dir.fY, dir.fZ),
+-            this->resolveLightingColor(ctx),
++            this->resolveLightingColor(ctx, fctx),
+             this->getSurfaceScale(),
+             fSpecularConstant,
+             fSpecularExponent,
+@@ -112,9 +146,9 @@
+ sk_sp<SkImageFilter> SkSVGFeSpecularLighting::makePointLight(const SkSVGRenderContext& ctx,
+                                                              const SkSVGFilterContext& fctx,
+                                                              const SkSVGFePointLight* light) const {
+-    return SkImageFilters::PointLitSpecular(
++    return SkSVGLighting::PointLitSpecular(
+             this->resolveXYZ(ctx, fctx, light->getX(), light->getY(), light->getZ()),
+-            this->resolveLightingColor(ctx),
++            this->resolveLightingColor(ctx, fctx),
+             this->getSurfaceScale(),
+             fSpecularConstant,
+             fSpecularExponent,
+@@ -128,13 +162,13 @@
+     const auto& limitingConeAngle = light->getLimitingConeAngle();
+     const float cutoffAngle = limitingConeAngle.value_or(180.f);
+ 
+-    return SkImageFilters::SpotLitSpecular(
++    return SkSVGLighting::SpotLitSpecular(
+             this->resolveXYZ(ctx, fctx, light->getX(), light->getY(), light->getZ()),
+             this->resolveXYZ(
+                     ctx, fctx, light->getPointsAtX(), light->getPointsAtY(), light->getPointsAtZ()),
+             light->getSpecularExponent(),
+             cutoffAngle,
+-            this->resolveLightingColor(ctx),
++            this->resolveLightingColor(ctx, fctx),
+             this->getSurfaceScale(),
+             fSpecularConstant,
+             fSpecularExponent,
+@@ -153,9 +187,9 @@
+         const SkSVGFilterContext& fctx,
+         const SkSVGFeDistantLight* light) const {
+     const SkPoint3 dir = light->computeDirection();
+-    return SkImageFilters::DistantLitDiffuse(
++    return SkSVGLighting::DistantLitDiffuse(
+             this->resolveXYZ(ctx, fctx, dir.fX, dir.fY, dir.fZ),
+-            this->resolveLightingColor(ctx),
++            this->resolveLightingColor(ctx, fctx),
+             this->getSurfaceScale(),
+             this->getDiffuseConstant(),
+             fctx.resolveInput(ctx, this->getIn(), this->resolveColorspace(ctx, fctx)),
+@@ -165,9 +199,9 @@
+ sk_sp<SkImageFilter> SkSVGFeDiffuseLighting::makePointLight(const SkSVGRenderContext& ctx,
+                                                             const SkSVGFilterContext& fctx,
+                                                             const SkSVGFePointLight* light) const {
+-    return SkImageFilters::PointLitDiffuse(
++    return SkSVGLighting::PointLitDiffuse(
+             this->resolveXYZ(ctx, fctx, light->getX(), light->getY(), light->getZ()),
+-            this->resolveLightingColor(ctx),
++            this->resolveLightingColor(ctx, fctx),
+             this->getSurfaceScale(),
+             this->getDiffuseConstant(),
+             fctx.resolveInput(ctx, this->getIn(), this->resolveColorspace(ctx, fctx)),
+@@ -180,13 +214,13 @@
+     const auto& limitingConeAngle = light->getLimitingConeAngle();
+     const float cutoffAngle = limitingConeAngle.value_or(180.f);
+ 
+-    return SkImageFilters::SpotLitDiffuse(
++    return SkSVGLighting::SpotLitDiffuse(
+             this->resolveXYZ(ctx, fctx, light->getX(), light->getY(), light->getZ()),
+             this->resolveXYZ(
+                     ctx, fctx, light->getPointsAtX(), light->getPointsAtY(), light->getPointsAtZ()),
+             light->getSpecularExponent(),
+             cutoffAngle,
+-            this->resolveLightingColor(ctx),
++            this->resolveLightingColor(ctx, fctx),
+             this->getSurfaceScale(),
+             this->getDiffuseConstant(),
+             fctx.resolveInput(ctx, this->getIn(), this->resolveColorspace(ctx, fctx)),
+--- a/skia-bindings/skia/modules/svg/src/SkSVGGradient.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGGradient.cpp
+@@ -68,7 +68,7 @@
+         return SkColors::kBlack;
+     }
+ 
+-    const auto color = SkColor4f::FromColor(ctx.resolveSvgColor(*stopColor));
++    const auto color = ctx.resolveSvgColor4f(*stopColor);
+ 
+     return { color.fR, color.fG, color.fB, *stopOpacity * color.fA };
+ }
+--- a/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
+@@ -407,7 +407,7 @@
+ 
+     switch (paint_selector.type()) {
+     case SkSVGPaint::Type::kColor:
+-        p.setColor(this->resolveSvgColor(paint_selector.color()));
++        p.setColor(this->resolveSvgColor4f(paint_selector.color()), nullptr);
+         break;
+     case SkSVGPaint::Type::kIRI: {
+         // Our property inheritance is borked as it follows the render path and not the tree
+@@ -432,7 +432,7 @@
+         const auto node = this->findNodeById(paint_selector.iri());
+         if (!node || !node->asPaint(local_ctx, &p)) {
+             // Use the fallback color.
+-            p.setColor(this->resolveSvgColor(paint_selector.color()));
++            p.setColor(this->resolveSvgColor4f(paint_selector.color()), nullptr);
+         }
+     } break;
+     default:
+@@ -476,6 +476,19 @@
+     }
+ 
+     return p;
++}
++
++SkColor4f SkSVGRenderContext::resolveSvgColor4f(const SkSVGColor& color) const {
++    if (fPresentationContext->fNamedColors) {
++        for (auto&& ident : color.vars()) {
++            if (SkSVGColorType* c = fPresentationContext->fNamedColors->find(ident)) {
++                return SkColor4f::FromColor(*c);
++            }
++        }
++    }
++    return color.type() == SkSVGColor::Type::kColor
++                   ? color.color4f()
++                   : SkColor4f::FromColor(this->resolveSvgColor(color));
+ }
+ 
+ SkSVGColorType SkSVGRenderContext::resolveSvgColor(const SkSVGColor& color) const {
+--- a/skia-bindings/skia/src/effects/imagefilters/SkLightingImageFilter.cpp
++++ b/skia-bindings/skia/src/effects/imagefilters/SkLightingImageFilter.cpp
+@@ -22,6 +22,7 @@
+ #include "include/effects/SkRuntimeEffect.h"
+ #include "include/private/SkCPUTypes.h"
+ #include "include/private/SkFloatingPoint.h"
++#include "include/private/SkTPin.h"
+ #include "src/core/SkImageFilterTypes.h"
+ #include "src/core/SkImageFilter_Base.h"
+ #include "src/core/SkKnownRuntimeEffects.h"
+@@ -83,7 +84,10 @@
+     };
+ 
+     Type fType;
+-    SkColor fLightColor; // All lights
++    // All lights. Each channel is on an `SkColor`'s 0-255 scale but in float, so a light built
++    // from an `SkColor` holds its bytes exactly and one built from an `SkColor4f` keeps the
++    // precision a byte would round away.
++    SkV3 fLightColor;
+ 
+     // Location and direction are decomposed into typed XY and Z for how they are transformed from
+     // parameter space to layer space.
+@@ -97,7 +101,7 @@
+     float fFalloffExponent;
+     float fCosCutoffAngle;
+ 
+-    static Light Point(SkColor color, const SkPoint3& location) {
++    static Light Point(SkV3 color, const SkPoint3& location) {
+         return {Type::kPoint,
+                 color,
+                 skif::ParameterSpace<SkPoint>({location.fX, location.fY}),
+@@ -108,7 +112,7 @@
+                 /*cutoffAngle=*/0.f};
+     }
+ 
+-    static Light Distant(SkColor color, const SkPoint3& direction) {
++    static Light Distant(SkV3 color, const SkPoint3& direction) {
+         return {Type::kDistant,
+                 color,
+                 /*locationXY=*/{},
+@@ -119,7 +123,7 @@
+                 /*cutoffAngle=*/0.f};
+     }
+ 
+-    static Light Spot(SkColor color, const SkPoint3& location, const SkPoint3& direction,
++    static Light Spot(SkV3 color, const SkPoint3& location, const SkPoint3& direction,
+                       float falloffExponent, float cosCutoffAngle) {
+         return {Type::kSpot,
+                 color,
+@@ -131,7 +135,19 @@
+                 cosCutoffAngle};
+     }
+ };
++
++// An `SkColor`'s channels as a light holds them.
++SkV3 light_color(SkColor color) {
++    return {static_cast<float>(SkColorGetR(color)),
++            static_cast<float>(SkColorGetG(color)),
++            static_cast<float>(SkColorGetB(color))};
++}
+ 
++// An `SkColor4f`'s channels as a light holds them, on the 0-255 scale of `light_color`.
++SkV3 light_color(const SkColor4f& color) {
++    return SkV3{color.fR, color.fG, color.fB} * 255.f;
++}
++
+ struct Material {
+     enum class Type {
+         kDiffuse,
+@@ -224,7 +240,7 @@
+ 
+ sk_sp<SkShader> make_lighting_shader(sk_sp<SkShader> normalMap,
+                                      Light::Type lightType,
+-                                     SkColor lightColor,
++                                     SkV3 lightColor,
+                                      skif::LayerSpace<SkPoint> locationXY,
+                                      skif::LayerSpace<ZValue> locationZ,
+                                      skif::LayerSpace<skif::Vector> directionXY,
+@@ -275,9 +291,7 @@
+     //  - so for now, leave the color un-modified and apply K up front since no color space
+     //    transforms need to be performed on the original light color.
+     const float colorScale = k / 255.f;
+-    builder.uniform("lightColor") = SkV3{SkColorGetR(lightColor) * colorScale,
+-                                         SkColorGetG(lightColor) * colorScale,
+-                                         SkColorGetB(lightColor) * colorScale};
++    builder.uniform("lightColor") = lightColor * colorScale;
+ 
+     return builder.makeShader();
+ }
+@@ -315,12 +329,19 @@
+     return filter;
+ }
+ 
++// A spot light at `location` pointing at `target`, its cone `cutoffAngle` degrees either side.
++Light spot_light(SkV3 color, const SkPoint3& location, const SkPoint3& target,
++                 SkScalar falloffExponent, SkScalar cutoffAngle) {
++    float cosCutoffAngle = SkScalarCos(SkDegreesToRadians(cutoffAngle));
++    return Light::Spot(color, location, target - location, falloffExponent, cosCutoffAngle);
++}
++
+ } // anonymous namespace
+ 
+ sk_sp<SkImageFilter> SkImageFilters::DistantLitDiffuse(
+         const SkPoint3& direction, SkColor lightColor, SkScalar surfaceScale, SkScalar kd,
+         sk_sp<SkImageFilter> input, const CropRect& cropRect) {
+-    return make_lighting(Light::Distant(lightColor, direction),
++    return make_lighting(Light::Distant(light_color(lightColor), direction),
+                          Material::Diffuse(kd, surfaceScale),
+                          std::move(input), cropRect);
+ }
+@@ -328,7 +349,7 @@
+ sk_sp<SkImageFilter> SkImageFilters::PointLitDiffuse(
+         const SkPoint3& location, SkColor lightColor, SkScalar surfaceScale, SkScalar kd,
+         sk_sp<SkImageFilter> input, const CropRect& cropRect) {
+-    return make_lighting(Light::Point(lightColor, location),
++    return make_lighting(Light::Point(light_color(lightColor), location),
+                          Material::Diffuse(kd, surfaceScale),
+                          std::move(input), cropRect);
+ }
+@@ -337,9 +358,8 @@
+         const SkPoint3& location, const SkPoint3& target, SkScalar falloffExponent,
+         SkScalar cutoffAngle, SkColor lightColor, SkScalar surfaceScale, SkScalar kd,
+         sk_sp<SkImageFilter> input, const CropRect& cropRect) {
+-    SkPoint3 dir = target - location;
+-    float cosCutoffAngle = SkScalarCos(SkDegreesToRadians(cutoffAngle));
+-    return make_lighting(Light::Spot(lightColor, location, dir, falloffExponent, cosCutoffAngle),
++    return make_lighting(spot_light(light_color(lightColor), location, target, falloffExponent,
++                                    cutoffAngle),
+                          Material::Diffuse(kd, surfaceScale),
+                          std::move(input), cropRect);
+ }
+@@ -348,7 +368,7 @@
+ sk_sp<SkImageFilter> SkEmbossMaskFilter::LegacySpecular(
+         const SkPoint3& direction, SkColor lightColor, SkScalar surfaceScale, SkScalar ks,
+         SkScalar shininess, sk_sp<SkImageFilter> input) {
+-    return make_lighting(::Light::Distant(lightColor, direction),
++    return make_lighting(::Light::Distant(light_color(lightColor), direction),
+                          Material::EmbossSpecular(ks, shininess, surfaceScale),
+                          std::move(input), {});
+ }
+@@ -356,7 +376,7 @@
+ sk_sp<SkImageFilter> SkImageFilters::DistantLitSpecular(
+         const SkPoint3& direction, SkColor lightColor, SkScalar surfaceScale, SkScalar ks,
+         SkScalar shininess, sk_sp<SkImageFilter> input, const CropRect& cropRect) {
+-    return make_lighting(Light::Distant(lightColor, direction),
++    return make_lighting(Light::Distant(light_color(lightColor), direction),
+                          Material::Specular(ks, shininess, surfaceScale),
+                          std::move(input), cropRect);
+ }
+@@ -364,7 +384,7 @@
+ sk_sp<SkImageFilter> SkImageFilters::PointLitSpecular(
+         const SkPoint3& location, SkColor lightColor, SkScalar surfaceScale, SkScalar ks,
+         SkScalar shininess, sk_sp<SkImageFilter> input, const CropRect& cropRect) {
+-    return make_lighting(Light::Point(lightColor, location),
++    return make_lighting(Light::Point(light_color(lightColor), location),
+                          Material::Specular(ks, shininess, surfaceScale),
+                          std::move(input), cropRect);
+ }
+@@ -373,13 +393,77 @@
+         const SkPoint3& location, const SkPoint3& target, SkScalar falloffExponent,
+         SkScalar cutoffAngle, SkColor lightColor, SkScalar surfaceScale, SkScalar ks,
+         SkScalar shininess, sk_sp<SkImageFilter> input, const CropRect& cropRect) {
+-    SkPoint3 dir = target - location;
+-    float cosCutoffAngle = SkScalarCos(SkDegreesToRadians(cutoffAngle));
+-    return make_lighting(Light::Spot(lightColor, location, dir, falloffExponent, cosCutoffAngle),
++    return make_lighting(spot_light(light_color(lightColor), location, target, falloffExponent,
++                                    cutoffAngle),
++                         Material::Specular(ks, shininess, surfaceScale),
++                         std::move(input), cropRect);
++}
++
++// The `SkImageFilters` lighting filters above with an `SkColor4f` light, for the SVG module, whose
++// `lighting-color` is a float colour and in a linearRGB primitive a linear one, which a byte would
++// round. Declared where the SVG module calls them rather than in a public header.
++namespace SkSVGLighting {
++
++sk_sp<SkImageFilter> DistantLitDiffuse(const SkPoint3& direction, const SkColor4f& lightColor,
++                                       SkScalar surfaceScale, SkScalar kd,
++                                       sk_sp<SkImageFilter> input,
++                                       const SkImageFilters::CropRect& cropRect) {
++    return make_lighting(Light::Distant(light_color(lightColor), direction),
++                         Material::Diffuse(kd, surfaceScale),
++                         std::move(input), cropRect);
++}
++
++sk_sp<SkImageFilter> PointLitDiffuse(const SkPoint3& location, const SkColor4f& lightColor,
++                                     SkScalar surfaceScale, SkScalar kd,
++                                     sk_sp<SkImageFilter> input,
++                                     const SkImageFilters::CropRect& cropRect) {
++    return make_lighting(Light::Point(light_color(lightColor), location),
++                         Material::Diffuse(kd, surfaceScale),
++                         std::move(input), cropRect);
++}
++
++sk_sp<SkImageFilter> SpotLitDiffuse(const SkPoint3& location, const SkPoint3& target,
++                                    SkScalar falloffExponent, SkScalar cutoffAngle,
++                                    const SkColor4f& lightColor, SkScalar surfaceScale,
++                                    SkScalar kd, sk_sp<SkImageFilter> input,
++                                    const SkImageFilters::CropRect& cropRect) {
++    return make_lighting(spot_light(light_color(lightColor), location, target, falloffExponent,
++                                    cutoffAngle),
++                         Material::Diffuse(kd, surfaceScale),
++                         std::move(input), cropRect);
++}
++
++sk_sp<SkImageFilter> DistantLitSpecular(const SkPoint3& direction, const SkColor4f& lightColor,
++                                        SkScalar surfaceScale, SkScalar ks, SkScalar shininess,
++                                        sk_sp<SkImageFilter> input,
++                                        const SkImageFilters::CropRect& cropRect) {
++    return make_lighting(Light::Distant(light_color(lightColor), direction),
++                         Material::Specular(ks, shininess, surfaceScale),
++                         std::move(input), cropRect);
++}
++
++sk_sp<SkImageFilter> PointLitSpecular(const SkPoint3& location, const SkColor4f& lightColor,
++                                      SkScalar surfaceScale, SkScalar ks, SkScalar shininess,
++                                      sk_sp<SkImageFilter> input,
++                                      const SkImageFilters::CropRect& cropRect) {
++    return make_lighting(Light::Point(light_color(lightColor), location),
+                          Material::Specular(ks, shininess, surfaceScale),
+                          std::move(input), cropRect);
+ }
+ 
++sk_sp<SkImageFilter> SpotLitSpecular(const SkPoint3& location, const SkPoint3& target,
++                                     SkScalar falloffExponent, SkScalar cutoffAngle,
++                                     const SkColor4f& lightColor, SkScalar surfaceScale,
++                                     SkScalar ks, SkScalar shininess, sk_sp<SkImageFilter> input,
++                                     const SkImageFilters::CropRect& cropRect) {
++    return make_lighting(spot_light(light_color(lightColor), location, target, falloffExponent,
++                                    cutoffAngle),
++                         Material::Specular(ks, shininess, surfaceScale),
++                         std::move(input), cropRect);
++}
++
++} // namespace SkSVGLighting
++
+ void SkRegisterLightingImageFilterFlattenables() {
+     SK_REGISTER_FLATTENABLE(SkLightingImageFilter);
+     // TODO (michaelludwig): Remove after grace period for SKPs to stop using old name
+@@ -396,7 +480,7 @@
+ 
+     Light light;
+     light.fType = buffer.read32LE(Light::Type::kLast);
+-    light.fLightColor = buffer.readColor();
++    light.fLightColor = light_color(buffer.readColor());
+ 
+     SkPoint3 lightPos, lightDir;
+     buffer.readPoint3(&lightPos);
+@@ -439,11 +523,11 @@
+     switch (lightType) {
+         case Light::Type::kDistant: {
+             SkPoint3 dir = {buffer.readScalar(), buffer.readScalar(), buffer.readScalar()};
+-            return Light::Distant(lightColor, dir);
++            return Light::Distant(light_color(lightColor), dir);
+         }
+         case Light::Type::kPoint: {
+             SkPoint3 loc = {buffer.readScalar(), buffer.readScalar(), buffer.readScalar()};
+-            return Light::Point(lightColor, loc);
++            return Light::Point(light_color(lightColor), loc);
+         }
+         case Light::Type::kSpot: {
+             SkPoint3 loc = {buffer.readScalar(), buffer.readScalar(), buffer.readScalar()};
+@@ -455,7 +539,8 @@
+             buffer.readScalar(); // skip S, which is normalize(target - loc)
+             buffer.readScalar(); //  ""
+             buffer.readScalar(); //  ""
+-            return Light::Spot(lightColor, loc, target - loc, falloffExponent, cosOuterConeAngle);
++            return Light::Spot(light_color(lightColor), loc, target - loc, falloffExponent,
++                               cosOuterConeAngle);
+         }
+     }
+ 
+@@ -496,7 +581,12 @@
+ 
+     // Light
+     buffer.writeInt((int) fLight.fType);
+-    buffer.writeColor(fLight.fLightColor);
++    // An `SkColor`, the form `CreateProc` and every older reader of a flattened filter read, so a
++    // light given as an `SkColor4f` is written rounded to bytes.
++    const SkV3 c = fLight.fLightColor;
++    buffer.writeColor(SkColorSetRGB(SkScalarRoundToInt(SkTPin(c.x, 0.f, 255.f)),
++                                    SkScalarRoundToInt(SkTPin(c.y, 0.f, 255.f)),
++                                    SkScalarRoundToInt(SkTPin(c.z, 0.f, 255.f))));
+ 
+     buffer.writePoint(SkPoint(fLight.fLocationXY));
+     buffer.writeScalar(ZValue(fLight.fLocationZ));

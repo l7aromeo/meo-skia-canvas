@@ -13,7 +13,9 @@
 //! inks none more than 8 from it. So on every platform this module walks a
 //! glyph's paint graph with skrifa, Fontations' own reader, and records it
 //! as a [`Picture`], and the text routes draw that picture in place of the
-//! platform's glyph -- see `node::typography::draw_colour_run`.
+//! platform's glyph -- see `node::typography::draw_colour_run`. Text in an
+//! SVG image set in such a face reaches it too: `image::colr_text` takes that
+//! text from the SVG module and draws it through a canvas's text route.
 //!
 //! What each callback draws follows Skia's painter for Fontations
 //! (`ColorPainter` in `skia/src/ports/SkTypeface_fontations.cpp` under the
@@ -25,14 +27,17 @@
 //! own in the paint it is drawn with. The code is this crate's; the behaviour
 //! is Fontations', so that the two draw the same glyph alike.
 
-#[cfg(test)]
-use std::cell::Cell;
-use std::{cell::RefCell, iter::zip, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    iter::zip,
+    rc::Rc,
+};
 
 use parking_lot::Mutex;
 
 use crate::{
     cache_map::{CacheMap, CacheSet},
+    context::exact_gradient::Geometry,
     export::{VectorFeatures, blend_features},
     started,
 };
@@ -233,10 +238,12 @@ impl ColrFace {
             clips: Vec::new(),
             inked: None,
             features: VectorFeatures::PLAIN,
+            layered: false,
         };
         let painted = colour.paint(&self.location, &mut painter).is_ok();
         let inked = painter.inked;
         let inner = painter.features;
+        let plain_inside = !painter.layered && inner == VectorFeatures::PLAIN;
         // Culled to what it inks rather than to the reach it was recorded
         // over: a picture is written as a form on Skia's PDF device with its
         // cull as the form's box, and one 2^20 units wide is past the
@@ -249,6 +256,7 @@ impl ColrFace {
             // The glyph's own layer, and what is drawn inside it, which
             // that layer holds as a group.
             features: VectorFeatures::LAYER.with(inner).with(inner.nested()),
+            plain_inside,
         })
     }
 }
@@ -316,6 +324,13 @@ pub(crate) struct ColrGlyph {
     /// a document a backend cannot write it into embeds it as pixels -- see
     /// `export::VectorFeatures`.
     features: VectorFeatures,
+    /// Whether the recording opens no layer of its own and asks nothing of a
+    /// vector backend inside the glyph's layer: fills alone, each composited
+    /// over what the ones before it drew. Under a paint that composites at
+    /// full opacity, over, through no filter, its layer changes nothing a
+    /// document holds, and a document drawn while [`InlinePlainGlyphs`] is
+    /// held draws it without one -- see [`ColourRun::draw`].
+    plain_inside: bool,
 }
 
 /// The `COLR` face `typeface` is, kept for the next ask on this thread, or
@@ -389,6 +404,53 @@ thread_local! {
 /// and the foreground colour it was recorded with -- see [`packed`].
 type GlyphKey = (TypefaceId, GlyphId, u32);
 
+thread_local! {
+    /// Whether [`InlinePlainGlyphs`] is held on this thread.
+    static INLINES: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Held while a document's recording is made, so that each colour glyph
+/// [`inlined`] names is drawn there without the layer it is otherwise
+/// composited through: Skia's SVG device has no layers and drops what is
+/// drawn inside one, so the glyph reaches an SVG as its fills where it
+/// would otherwise be embedded as pixels. Pixels never hold it. Composited
+/// over the page in eight bits, the layer and the fills drawn straight onto
+/// the page round apart; a vector backend writes the same fills either way.
+pub(crate) struct InlinePlainGlyphs {
+    /// Whether it was held already, which it stays when this is dropped.
+    held: bool,
+}
+
+impl InlinePlainGlyphs {
+    pub(crate) fn hold() -> Self {
+        Self {
+            held: INLINES.replace(true),
+        }
+    }
+}
+
+impl Drop for InlinePlainGlyphs {
+    fn drop(&mut self) {
+        INLINES.set(self.held);
+    }
+}
+
+/// Whether `glyph` drawn in `paint` is the same drawn through its layer and
+/// without one: where nothing inside it opens a layer or blends -- see
+/// [`ColrGlyph::plain_inside`] -- and `paint` composites the layer at full
+/// opacity, over, through no filter. Source-over is associative, so the
+/// fills composited one by one over the page are the group composited over
+/// it; any other blend, an alpha below one or a filter applies to the group
+/// whole, and then the layer is what it applies to.
+fn inlined(glyph: &ColrGlyph, paint: &Paint) -> bool {
+    glyph.plain_inside
+        && paint.alpha() == u8::MAX
+        && paint.blend_mode_or(BlendMode::SrcOver) == BlendMode::SrcOver
+        && paint.image_filter().is_none()
+        && paint.color_filter().is_none()
+        && paint.mask_filter().is_none()
+}
+
 /// A run of glyphs in a face with a `COLR` table, drawn a glyph at a time:
 /// its colour glyphs from their paint graphs, and the rest left to the
 /// caller to draw as the platform would.
@@ -442,6 +504,23 @@ impl ColourRun {
     /// not a colour glyph -- see [`ColrGlyph::features`].
     pub(crate) fn features(&self, glyph: GlyphId) -> Option<VectorFeatures> {
         Some(self.glyph(glyph)?.features)
+    }
+
+    /// What drawing `glyph` in `paint` asks of a vector backend in a
+    /// document recorded while [`InlinePlainGlyphs`] is held, or `None`
+    /// where it is not a colour glyph: nothing, for a glyph drawn there
+    /// without its layer -- see [`inlined`] -- and what
+    /// [`Self::features`] says otherwise.
+    pub(crate) fn features_in_document(
+        &self,
+        glyph: GlyphId,
+        paint: &Paint,
+    ) -> Option<VectorFeatures> {
+        let recorded = self.glyph(glyph)?;
+        Some(match inlined(&recorded, paint) {
+            true => VectorFeatures::PLAIN,
+            false => recorded.features,
+        })
     }
 
     /// What `glyph` can ink with its origin at the run's, in the run's
@@ -506,6 +585,10 @@ impl ColourRun {
         if let Some(format) = ROUTE.with_borrow(Clone::clone)
             && self.draw_image(canvas, picture, bounds, &placed, paint, &format)
         {
+            return;
+        }
+        if INLINES.get() && inlined(glyph, paint) {
+            canvas.draw_picture(picture, Some(&placed), None);
             return;
         }
         canvas.save_layer(
@@ -2029,6 +2112,10 @@ struct Recorder<'a> {
     /// What the graph so far asks of a vector backend -- see
     /// [`ColrGlyph::features`].
     features: VectorFeatures,
+    /// Whether the graph so far opened a layer of its own -- see
+    /// [`ColrGlyph::plain_inside`]. A composite in source-over asks nothing
+    /// of a backend and still opens one, which Skia's SVG device drops.
+    layered: bool,
 }
 
 impl Recorder<'_> {
@@ -2179,10 +2266,10 @@ impl Recorder<'_> {
         })
     }
 
-    /// Notes a sweep gradient among what the graph asks of a vector
-    /// backend.
+    /// Notes among what the graph asks of a vector backend each gradient
+    /// Skia's SVG device writes as another -- see [`svg_writes_otherwise`].
     fn note(&mut self, brush: &Brush<'_>) {
-        if matches!(brush, Brush::SweepGradient { .. }) {
+        if svg_writes_otherwise(brush) {
             self.features = self.features.with(VectorFeatures::EXOTIC_SHADER);
         }
     }
@@ -2260,6 +2347,46 @@ fn tile_mode(extend: Extend) -> TileMode {
         Extend::Repeat => TileMode::Repeat,
         Extend::Reflect => TileMode::Mirror,
         _ => TileMode::Clamp,
+    }
+}
+
+/// Whether Skia's SVG device writes `brush` as another gradient: a sweep,
+/// which SVG has no paint server for; a linear or radial one that repeats
+/// or reflects, written with no `spreadMethod`, so padded; and a radial one
+/// between two circles, written as a `radialGradient` whose focal circle
+/// (`fx`, `fy`, `fr`) is the end circle and whose `cx`, `cy`, `r` are the
+/// start, which SVG reads the other way round. A radial gradient from a
+/// point at its end circle's centre is written as `cx`, `cy` and `r` alone,
+/// since Skia makes it a plain radial shader, and is the one written as
+/// itself.
+fn svg_writes_otherwise(brush: &Brush<'_>) -> bool {
+    match brush {
+        Brush::SweepGradient { .. } => true,
+        Brush::LinearGradient { extend, .. } => {
+            // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+            // Re-check: cargo test skia_svg_writes_no_spread_method
+            *extend != Extend::Pad
+        }
+        Brush::RadialGradient {
+            c0,
+            r0,
+            c1,
+            r1,
+            extend,
+            ..
+        } => {
+            let circles = Geometry::Conical {
+                start: Point::new(c0.x, c0.y),
+                start_radius: *r0,
+                end: Point::new(c1.x, c1.y),
+                end_radius: *r1,
+            };
+            // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+            // Re-check: cargo test skia_svg_writes_no_spread_method
+            *extend != Extend::Pad
+                || circles.vector_features() != VectorFeatures::PLAIN
+        }
+        Brush::Solid { .. } => false,
     }
 }
 
@@ -2475,6 +2602,7 @@ impl ColorPainter for Recorder<'_> {
     }
 
     fn push_layer(&mut self, composite_mode: CompositeMode) {
+        self.layered = true;
         let mode = blend_mode(composite_mode);
         // The layer's own source may be translucent wherever it inks.
         self.features = self.features.with(blend_features(mode, false));
@@ -4249,5 +4377,52 @@ mod tests {
             atlas_lines(ctx);
         });
         assert!(half_clipped <= half, "{half_clipped:?} past {half:?}");
+    }
+
+    /// A radial brush from the circle at `c0` of radius `r0` to the one at
+    /// `c1` of radius `r1`, padded.
+    fn radial_brush(
+        (c0, r0): ((f32, f32), f32),
+        (c1, r1): ((f32, f32), f32),
+    ) -> Brush<'static> {
+        Brush::RadialGradient {
+            c0: skrifa::raw::types::Point::new(c0.0, c0.1),
+            r0,
+            c1: skrifa::raw::types::Point::new(c1.0, c1.1),
+            r1,
+            color_stops: &[],
+            extend: Extend::Pad,
+        }
+    }
+
+    // Each case is a gradient whose round trip through an SVG export was
+    // measured: the one from its end circle's centre lands on the canvas's
+    // bytes, the others up to 250 levels off -- see
+    // `skia_svg_swaps_two_point_circles`.
+    #[test]
+    fn only_a_radial_from_its_end_circles_centre_is_written_as_itself() {
+        let centre = ((100.0, 40.0), 30.0);
+        assert!(!svg_writes_otherwise(&radial_brush(
+            ((100.0, 40.0), 0.0),
+            centre
+        )));
+        for start in [
+            // A focus inside the end circle, off its centre.
+            ((110.0, 40.0), 0.0),
+            // A focus outside it.
+            ((150.0, 40.0), 0.0),
+            // A circle of its own at the same centre.
+            ((100.0, 40.0), 10.0),
+        ] {
+            assert!(
+                svg_writes_otherwise(&radial_brush(start, centre)),
+                "{start:?}"
+            );
+        }
+        let mut repeated = radial_brush(((100.0, 40.0), 0.0), centre);
+        if let Brush::RadialGradient { extend, .. } = &mut repeated {
+            *extend = Extend::Repeat;
+        }
+        assert!(svg_writes_otherwise(&repeated));
     }
 }

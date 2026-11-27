@@ -17,8 +17,10 @@
 //!
 //! Below full alpha the image is scaled by the paint's alpha in Skia's
 //! eight-bit raster pipeline, whose `div255` is exact on arm64 and is
-//! `(v + 255) >> 8` elsewhere, so the alphas below full are held to the
-//! exact composite only on arm64: see [`EXACT_BELOW_FULL`].
+//! `(v + 255) >> 8` elsewhere. `containers/skia-lowp-paint-alpha.patch`
+//! scales a shader's paint colour exactly on every CPU, so the alphas below
+//! full are held to the exact composite on arm64 and wherever Skia carries
+//! that patch: see [`EXACT_BELOW_FULL`].
 
 use meo_skia_canvas::prelude::*;
 use skia_safe::{
@@ -29,7 +31,8 @@ use skia_safe::{
 /// Whether Skia's CPU scales a paint's colour by its alpha exactly here --
 /// see the module's documentation -- so that every alpha, and not full
 /// alpha alone, lands the exact composite.
-const EXACT_BELOW_FULL: bool = cfg!(target_arch = "aarch64");
+const EXACT_BELOW_FULL: bool =
+    cfg!(any(target_arch = "aarch64", meo_lowp_paint_alpha));
 
 /// Each side of the image and the page.
 const SIDE: u32 = 256;

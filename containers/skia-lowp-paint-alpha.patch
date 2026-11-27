@@ -1,0 +1,79 @@
+--- a/skia-bindings/skia/src/core/SkRasterPipelineOpList.h
++++ b/skia-bindings/skia/src/core/SkRasterPipelineOpList.h
+@@ -32,6 +32,7 @@
+     M(load_src) M(store_src) M(store_src_a)                           \
+     M(load_dst) M(store_dst)                                          \
+     M(scale_u8) M(scale_565) M(scale_1_float) M(scale_native)         \
++    M(scale_1_float_accurate)                                         \
+     M( lerp_u8) M( lerp_565) M( lerp_1_float) M(lerp_native)          \
+     M(dstatop) M(dstin) M(dstout) M(dstover)                          \
+     M(srcatop) M(srcin) M(srcout) M(srcover)                          \
+--- a/skia-bindings/skia/src/opts/SkRasterPipeline_opts.h
++++ b/skia-bindings/skia/src/opts/SkRasterPipeline_opts.h
+@@ -2899,6 +2899,13 @@
+     b = b * *c;
+     a = a * *c;
+ }
++// Highp scales in float, where `scale_1_float` rounds nothing to a byte.
++HIGHP_STAGE(scale_1_float_accurate, const float* c) {
++    r = r * *c;
++    g = g * *c;
++    b = b * *c;
++    a = a * *c;
++}
+ HIGHP_STAGE(scale_u8, const SkRasterPipelineContexts::MemoryCtx* ctx) {
+     auto ptr = ptr_at_xy<const uint8_t>(ctx, dx,dy);
+ 
+@@ -6835,6 +6842,18 @@
+     b = div255( b * c );
+     a = div255( a * c );
+ }
++// A paint's alpha scales the colour it draws with each channel's product
++// correctly rounded to a byte, on every platform. `div255` is [3] off
++// NEON, a level off for about a quarter of products, so the same image
++// drawn at the same alpha landed apart on x86 and arm64; `scale_1_float`
++// keeps it for coverage, which this stage does not replace.
++LOWP_STAGE_PP(scale_1_float_accurate, const float* f) {
++    U16 c = from_float(*f);
++    r = div255_accurate( r * c );
++    g = div255_accurate( g * c );
++    b = div255_accurate( b * c );
++    a = div255_accurate( a * c );
++}
+ LOWP_STAGE_PP(lerp_1_float, const float* f) {
+     U16 c = from_float(*f);
+     r = lerp(dr, r, c);
+--- a/skia-bindings/skia/src/core/SkBlitter_Sprite.cpp
++++ b/skia-bindings/skia/src/core/SkBlitter_Sprite.cpp
+@@ -158,7 +158,7 @@
+                 ->apply(&p);
+         }
+         if (fPaintColor.fA != 1.0f) {
+-            p.append(SkRasterPipelineOp::scale_1_float, &fPaintColor.fA);
++            p.append(SkRasterPipelineOp::scale_1_float_accurate, &fPaintColor.fA);
+         }
+ 
+         bool is_opaque = fSource.isOpaque() && fPaintColor.fA == 1.0f;
+--- a/skia-bindings/skia/src/core/SkRasterPipelineBlitter.cpp
++++ b/skia-bindings/skia/src/core/SkRasterPipelineBlitter.cpp
+@@ -183,7 +183,7 @@
+                 SkStageRec{shaderPipeline, alloc, dstCT, dstCS, *dstPaintColor, props, devBounds},
+                 ctm)) {
+         if (dstPaintColor->fA != 1.0f) {
+-            shaderPipeline->append(SkRasterPipelineOp::scale_1_float,
++            shaderPipeline->append(SkRasterPipelineOp::scale_1_float_accurate,
+                                    alloc->make<float>(dstPaintColor->fA));
+         }
+         return true;
+--- a/skia-bindings/skia/src/core/SkDraw_atlas.cpp
++++ b/skia-bindings/skia/src/core/SkDraw_atlas.cpp
+@@ -127,7 +127,8 @@
+ 
+     bool isOpaque = colors.empty() && transformShader->isOpaque();
+     if (p.getAlphaf() != 1) {
+-        rec.fPipeline->append(SkRasterPipelineOp::scale_1_float, alloc.make<float>(p.getAlphaf()));
++        rec.fPipeline->append(SkRasterPipelineOp::scale_1_float_accurate,
++                              alloc.make<float>(p.getAlphaf()));
+         isOpaque = false;
+     }
+ 

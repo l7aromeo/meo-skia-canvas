@@ -137,7 +137,10 @@ it in `PATCHES` says why Metal and Vulkan get the same memory either way.
 Every platform carries `containers/skia-svg-synthetic-slant.patch`, which makes
 Skia's SVG text synthesise the slant a `font-style` asks a family with no
 slanted face for, as canvas text does, and parse `oblique <angle>`. Its
-UPSTREAM note in `scripts/skia-source.mjs` says how.
+UPSTREAM note in `scripts/skia-source.mjs` says how. `build.rs` turns on
+`meo_svg_synthetic_slant` for a build that carries it, and
+`svg_text_leans_by_the_slant_it_asks_for_in_a_face_that_does_not` holds a
+crate build to the slant with it and to upright text without it.
 
 Windows binaries are built from a patched source too, carrying the atlas
 placement, the triangulation tolerance, the Graphite bindings and

@@ -869,6 +869,310 @@ describe("an SVG's font-relative lengths", () => {
   });
 });
 
+describe("an SVG's references", () => {
+  /** A document painting red, then `body`, as a data URL. */
+  const document = (body) =>
+    "data:image/svg+xml;base64," +
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">` +
+        `<rect width="4" height="2" fill="red"/>${body}</svg>`,
+    ).toString("base64");
+
+  /** What `src` draws at (1, 1) on a 4x2 canvas in `colorSpace`. */
+  const drawn = async (src, colorSpace = "srgb") => {
+    const canvas = new Canvas(4, 2, { colorSpace });
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(await loadImage(src), 0, 0);
+    return [...ctx.getImageData(1, 1, 1, 1, { colorSpace }).data];
+  };
+
+  /** A 4x2 PNG of one colour, written by a canvas in `colorSpace`. */
+  const png = (fill, colorSpace = "srgb") => {
+    const canvas = new Canvas(4, 2, { colorSpace });
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = fill;
+    ctx.fillRect(0, 0, 4, 2);
+    return `data:image/png;base64,${canvas.toBufferSync("png").toString("base64")}`;
+  };
+
+  // Chrome 156 draws each of these blue: SVG 2's `href`, which Skia's SVG
+  // module did not read, on an <image>, a <use> and a gradient inheriting
+  // its stops.
+  test("an href names what xlink:href does", async () => {
+    const blue = png("blue");
+    for (const body of [
+      `<image href="${blue}" width="4" height="2"/>`,
+      `<defs><rect id="a" width="4" height="2" fill="blue"/></defs><use href="#a"/>`,
+      `<defs><linearGradient id="g"><stop offset="0" stop-color="blue"/>` +
+        `<stop offset="1" stop-color="blue"/></linearGradient>` +
+        `<linearGradient id="h" href="#g"/></defs>` +
+        `<rect width="4" height="2" fill="url(#h)"/>`,
+    ]) {
+      assert.deepEqual(await drawn(document(body)), [0, 0, 255, 255], body);
+    }
+  });
+
+  // An image keeps its colours through the document: P3 green, drawn on a
+  // display-p3 canvas, reads P3 green, as Chrome 158 reads it. Clipped to
+  // sRGB on the way, as the crate's `Svg::rasterize` clips it, it reads
+  // 117, 251, 76.
+  test("an image in a wide space keeps its colours", async () => {
+    const green = png("color(display-p3 0 1 0)", "display-p3");
+    assert.deepEqual(
+      await drawn(
+        document(`<image href="${green}" width="4" height="2"/>`),
+        "display-p3",
+      ),
+      [0, 255, 0, 255],
+    );
+  });
+});
+
+describe("an SVG's paint", () => {
+  /** A 4x4 document whose square `body` paints, as a data URL. */
+  const document = (body) =>
+    "data:image/svg+xml;base64," +
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">${body}</svg>`,
+    ).toString("base64");
+
+  /** What `src` draws at (2, 2) on a 4x4 sRGB canvas. */
+  const drawn = async (src) => {
+    const canvas = new Canvas(4, 4);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(await loadImage(src), 0, 0);
+    return [...ctx.getImageData(2, 2, 1, 1).data];
+  };
+
+  /** What a `fillRect` in `css` reads at (2, 2) on the same canvas. */
+  const filled = (css) => {
+    const canvas = new Canvas(4, 4);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = css;
+    ctx.fillRect(0, 0, 4, 4);
+    return [...ctx.getImageData(2, 2, 1, 1).data];
+  };
+
+  // Skia's SVG module parses paints itself and reads hex, its own names,
+  // rgb() and rgba() alone, so every other form drew the initial black
+  // (#815). Each is drawn as the canvas draws the same text as a fillStyle,
+  // a colour outside sRGB clipped to it: Chrome 156 fills
+  // color(display-p3 0 1 0) 0, 255, 0 on an sRGB canvas.
+  test("is the colour it names, in each form a fillStyle reads", async () => {
+    const forms = [
+      "#00cc0080",
+      "rebeccapurple",
+      "transparent",
+      "rgb(0 204 0 / 50%)",
+      "hsl(120 100% 40%)",
+      "hwb(120 0% 20%)",
+      "lab(70 -60 50)",
+      "oklch(0.7 0.18 140)",
+      "color(srgb-linear 0 0.5 0)",
+      "color(display-p3 0 1 0)",
+      "color(display-p3 1 0.5 0 / 0.5)",
+    ];
+    const bodies = (value) => [
+      `<rect width="4" height="4" fill="${value}"/>`,
+      `<rect width="4" height="4" style="fill: ${value}"/>`,
+      `<g color="${value}"><rect width="4" height="4" fill="currentcolor"/></g>`,
+      `<defs><linearGradient id="g"><stop offset="0" stop-color="${value}"/>` +
+        `<stop offset="1" stop-color="${value}"/></linearGradient></defs>` +
+        `<rect width="4" height="4" fill="url(#g)"/>`,
+    ];
+    const off = [];
+    for (const form of forms) {
+      const expected = filled(form);
+      // A level apart where the colour is translucent: the document's
+      // premultiplied raster rounds once more than the fill does.
+      const allowed = expected[3] === 255 ? 0 : 1;
+      for (const body of bodies(form)) {
+        const got = await drawn(document(body));
+        if (got.some((channel, i) => Math.abs(channel - expected[i]) > allowed))
+          off.push(`${body}: ${got}, the canvas ${expected}`);
+      }
+    }
+    assert.deepEqual(off, []);
+  });
+
+  // The control: a paint Skia reads already is drawn as the fill is.
+  test("a hex paint Skia reads matches the fill", async () => {
+    assert.deepEqual(
+      await drawn(document(`<rect width="4" height="4" fill="#00cc00"/>`)),
+      filled("#00cc00"),
+    );
+  });
+
+  // A paint outside sRGB reaches a display-p3 canvas as it is, as Chrome
+  // 156 reads fill="color(display-p3 0 1 0)" back as 0, 255, 0 there: the
+  // paints, a gradient's stops and <feFlood>'s colour are held in extended
+  // sRGB by containers/skia-svg-wide-colour.patch. `color`, and so
+  // currentcolor, is an eight-bit SkColor in Skia and stays sRGB's green.
+  test("keeps a wide colour on a wide canvas", async () => {
+    const wide = "color(display-p3 0 1 0)";
+    /** P3's green, and sRGB's green, as a display-p3 canvas stores them. */
+    const [kept, clipped] = [
+      [0, 255, 0, 255],
+      [117, 251, 76, 255],
+    ];
+    const rect = (paint) => `<rect width="4" height="4" ${paint}/>`;
+    const cases = [
+      [rect(`fill="${wide}"`), kept],
+      [rect(`style="fill: ${wide}"`), kept],
+      [
+        `<line x1="0" y1="2" x2="4" y2="2" stroke-width="4" stroke="${wide}"/>`,
+        kept,
+      ],
+      [
+        `<defs><linearGradient id="g"><stop offset="0" stop-color="${wide}"/>` +
+          `<stop offset="1" stop-color="${wide}"/></linearGradient></defs>` +
+          rect(`fill="url(#g)"`),
+        kept,
+      ],
+      [
+        `<defs><filter id="f" x="0" y="0" width="1" height="1" ` +
+          `color-interpolation-filters="sRGB"><feFlood flood-color="${wide}"/>` +
+          `</filter></defs>` +
+          rect(`filter="url(#f)"`),
+        kept,
+      ],
+      [`<g color="${wide}">${rect(`fill="currentcolor"`)}</g>`, clipped],
+    ];
+    const off = [];
+    for (const [body, expected] of cases) {
+      const canvas = new Canvas(4, 4, { colorSpace: "display-p3" });
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(await loadImage(document(body)), 0, 0);
+      const got = [
+        ...ctx.getImageData(2, 2, 1, 1, { colorSpace: "display-p3" }).data,
+      ];
+      if (got.join() !== expected.join())
+        off.push(`${body}: ${got}, expected ${expected}`);
+    }
+    assert.deepEqual(off, []);
+  });
+
+  // A line has no interior, so its fill paints nothing, as Chrome 156 draws
+  // it: Skia's SVG module drew a line's fill as a hairline along it, so the
+  // initial black showed with no stroke and through a translucent one
+  // (#825).
+  test("of a <line> paints no fill", async () => {
+    const line = (paint) => `<line x1="0" y1="2" x2="4" y2="2" ${paint}/>`;
+    const stroke = `stroke-width="4" stroke="rgba(0, 204, 0, 0.5)"`;
+    const cases = [
+      [line(""), [0, 0, 0, 0]],
+      [line(`fill="red"`), [0, 0, 0, 0]],
+      [line(stroke), filled("rgba(0, 204, 0, 0.5)")],
+      // The control: with no fill it already draws its stroke alone.
+      [line(`fill="none" ${stroke}`), filled("rgba(0, 204, 0, 0.5)")],
+    ];
+    const off = [];
+    for (const [body, expected] of cases) {
+      const got = await drawn(document(body));
+      if (got.some((channel, i) => Math.abs(channel - expected[i]) > 1))
+        off.push(`${body}: ${got}, expected ${expected}`);
+    }
+    assert.deepEqual(off, []);
+  });
+
+  // A filter's colour is sRGB like any other and is taken into the filter's
+  // linear light for a linearRGB primitive, so a lone flood draws its own
+  // colour in either space, as Chrome 156 draws it: Skia's SVG module took
+  // the sRGB value as linear and encoded it once more, so #808080 drew 188
+  // (#826).
+  test("of an <feFlood> is its own colour in a linearRGB filter", async () => {
+    const flood = (space, colour, opacity = "") =>
+      `<defs><filter id="f" x="0" y="0" width="1" height="1"${space}>` +
+      `<feFlood flood-color="${colour}"${opacity}/></filter></defs>` +
+      `<rect width="4" height="4" filter="url(#f)"/>`;
+    const off = [];
+    for (const space of [
+      "",
+      ` color-interpolation-filters="linearRGB"`,
+      // The control: in sRGB the colour already reaches the page unchanged.
+      ` color-interpolation-filters="sRGB"`,
+    ])
+      for (const [colour, opacity, expected] of [
+        ["#808080", "", filled("#808080")],
+        ["#0c0", "", filled("#0c0")],
+        ["#3a7fd0", "", filled("#3a7fd0")],
+        ["#070707", "", filled("#070707")],
+        ["rgba(0, 204, 0, 0.5)", "", filled("rgba(0, 204, 0, 0.5)")],
+        ["#808080", ` flood-opacity="0.5"`, filled("rgb(128 128 128 / 0.5)")],
+      ]) {
+        const body = flood(space, colour, opacity);
+        const allowed = expected[3] === 255 ? 0 : 1;
+        const got = await drawn(document(body));
+        if (got.some((channel, i) => Math.abs(channel - expected[i]) > allowed))
+          off.push(`${body}: ${got}, expected ${expected}`);
+      }
+    assert.deepEqual(off, []);
+  });
+
+  test("of a light is its own colour in a linearRGB filter", async () => {
+    // A flat surface lit from straight overhead, so the diffuse result is
+    // the light's colour and the specular one too (N.H = 1). Skia's module
+    // took `lighting-color`'s sRGB value as linear and encoded it once more:
+    // diffuse #808080 read 188 where Chrome 156 reads 128. Each expected
+    // value is Chrome's; #3a7fd0 lights at 59 rather than 58 because the
+    // light is stored in an eight-bit layer in linear light, in both.
+    const lit = (space, primitive) =>
+      `<defs><filter id="f" x="0" y="0" width="1" height="1"${space}>` +
+      `${primitive}</filter></defs><rect width="4" height="4" filter="url(#f)"/>`;
+    const diffuse = (colour, kd = 1) =>
+      `<feDiffuseLighting lighting-color="${colour}" diffuseConstant="${kd}" surfaceScale="0">` +
+      `<feDistantLight azimuth="0" elevation="90"/></feDiffuseLighting>`;
+    const specular = (colour) =>
+      `<feSpecularLighting lighting-color="${colour}" specularConstant="1" specularExponent="1" surfaceScale="0">` +
+      `<feDistantLight azimuth="0" elevation="90"/></feSpecularLighting>`;
+    const linear = [
+      [diffuse("#0c0"), [0, 204, 0, 255]],
+      [specular("#0c0"), [0, 255, 0, 154]],
+      [diffuse("#808080"), [128, 128, 128, 255]],
+      [specular("#808080"), [255, 255, 255, 55]],
+      [diffuse("#3a7fd0"), [59, 127, 208, 255]],
+      [specular("#3a7fd0"), [74, 157, 255, 161]],
+      [diffuse("#070707"), [13, 13, 13, 255]],
+      // Lit in float, where Chrome rounds the light to a byte first: #111111
+      // is byte 1 in linear light, and half of it Chrome draws as 0. See
+      // docs/browser-differences.md.
+      [diffuse("#111111", 0.5), [13, 13, 13, 255]],
+      // A colour between two bytes reaches the light as it is, and Chrome
+      // agrees: as the byte 18 it would light at 22.
+      [diffuse("color(srgb 0.069 0.069 0.069)"), [13, 13, 13, 255]],
+    ];
+    const off = [];
+    for (const [space, rows] of [
+      ["", linear],
+      [` color-interpolation-filters="linearRGB"`, linear],
+      // The control: in sRGB the light was already its own colour.
+      [
+        ` color-interpolation-filters="sRGB"`,
+        [
+          [diffuse("#0c0"), [0, 204, 0, 255]],
+          [specular("#0c0"), [0, 255, 0, 204]],
+          [diffuse("#808080"), [128, 128, 128, 255]],
+          [specular("#808080"), [255, 255, 255, 128]],
+          [diffuse("#3a7fd0"), [58, 127, 208, 255]],
+          [specular("#3a7fd0"), [71, 156, 255, 208]],
+        ],
+      ],
+    ])
+      for (const [primitive, expected] of rows) {
+        const body = lit(space, primitive);
+        const got = await drawn(document(body));
+        if (got.some((channel, i) => channel !== expected[i]))
+          off.push(`${body}: ${got}, expected ${expected}`);
+      }
+    assert.deepEqual(off, []);
+  });
+});
+
 describe("a refusal takes the type the standard names", () => {
   /** The name and constructor of whatever `run` throws. */
   const thrown = (run) => {
@@ -952,5 +1256,338 @@ describe("a refusal takes the type the standard names", () => {
       thrown(() => new ImageData(2, 2)),
       "no throw",
     );
+  });
+});
+
+// Text in an SVG set in a face with a COLR table is drawn as fillText draws
+// it, from the glyph's paint graph, rather than by the platform's scaler:
+// CoreText on macOS 27.2 draws a COLRv0 glyph as nothing and one of COLRv1 in
+// its own colours, and FreeType and DirectWrite draw both apart from Chrome
+// (#663). The canvas draws the text under geometricPrecision, since the SVG
+// module draws text unhinted.
+describe("an SVG's text in a colour face", () => {
+  const W = 200,
+    H = 80;
+  const fonts = {
+    SvgTextColrV1:
+      "tests/assets/fonts/color-fonts/test_glyphs-glyf_colr_1_variable.ttf",
+    SvgTextColrV0: "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf",
+    SvgTextPlain: "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  };
+  for (const [family, path] of Object.entries(fonts))
+    FontLibrary.use(family, path);
+
+  /** A CPU canvas of this size and its context. */
+  const page = () => {
+    const canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    return canvas.getContext("2d");
+  };
+  /** The pixels of `body` as a document of this size, drawn as an image. */
+  const drawn = async (body) => {
+    const ctx = page();
+    const xml = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">${body}</svg>`;
+    ctx.drawImage(await loadImage(Buffer.from(xml)), 0, 0);
+    return ctx.getImageData(0, 0, W, H).data;
+  };
+  /** The pixels `draw` leaves on a canvas whose text is set unhinted. */
+  const painted = (draw) => {
+    const ctx = page();
+    ctx.textRendering = "geometricPrecision";
+    draw(ctx);
+    return ctx.getImageData(0, 0, W, H).data;
+  };
+  /** How many pixels stand more than a level apart, and by how much. */
+  const apart = (a, b) => {
+    let pixels = 0,
+      far = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      let d = 0;
+      for (let k = 0; k < 4; k++)
+        d = Math.max(d, Math.abs(a[i + k] - b[i + k]));
+      if (d > 1) pixels++;
+      far = Math.max(far, d);
+    }
+    return { pixels, far };
+  };
+  const inked = (data) => data.filter((_, i) => i % 4 === 3 && data[i]).length;
+  const agree = (got, expected, label) => {
+    assert.ok(inked(expected) > 0, `${label}: the canvas drew nothing`);
+    assert.deepEqual(
+      apart(got, expected).pixels,
+      0,
+      `${label}: ${JSON.stringify(apart(got, expected))}, the document inked ` +
+        `${inked(got)} pixels and the canvas ${inked(expected)}`,
+    );
+  };
+
+  test("is drawn as fillText draws it", async () => {
+    for (const [family, entity, text, size] of [
+      ["SvgTextColrV1", "&#xf0100;", "\u{f0100}", 72],
+      ["SvgTextColrV0", "AB", "AB", 48],
+    ]) {
+      const got = await drawn(
+        `<text x="10" y="70" font-family="${family}" font-size="${size}" ` +
+          `fill="rgb(40,90,160)">${entity}</text>`,
+      );
+      const expected = painted((ctx) => {
+        ctx.font = `${size}px ${family}`;
+        ctx.fillStyle = "rgb(40,90,160)";
+        ctx.fillText(text, 10, 70);
+      });
+      agree(got, expected, family);
+    }
+  });
+
+  // The control: text in a face with no COLR table is the SVG module's
+  // drawing, and agrees with fillText already.
+  test("leaves plain text to the SVG module, which agrees already", async () => {
+    const got = await drawn(
+      `<text x="10" y="60" font-family="SvgTextPlain" font-size="48" ` +
+        `fill="rgb(40,90,160)">AB</text>`,
+    );
+    const expected = painted((ctx) => {
+      ctx.font = "48px SvgTextPlain";
+      ctx.fillStyle = "rgb(40,90,160)";
+      ctx.fillText("AB", 10, 60);
+    });
+    agree(got, expected, "plain");
+  });
+
+  test("draws a text mixing colour and plain runs whole", async () => {
+    const got = await drawn(
+      `<text x="10" y="60" font-family="SvgTextPlain" font-size="40" ` +
+        `fill="#246">Ab<tspan font-family="SvgTextColrV1">&#xf0101;</tspan></text>`,
+    );
+    const expected = painted((ctx) => {
+      ctx.fillStyle = "#246";
+      ctx.font = "40px SvgTextPlain";
+      ctx.fillText("Ab", 10, 60);
+      const advance = ctx.measureText("Ab").width;
+      ctx.font = "40px SvgTextColrV1";
+      ctx.fillText("\u{f0101}", 10 + advance, 60);
+    });
+    agree(got, expected, "mixed");
+  });
+
+  // A document is written as the canvas draws. A glyph whose layers are
+  // plain fills is written as those fills, from fillText and from an SVG
+  // image alike, and draws back as the canvas does; one whose layer changes
+  // what is under it -- a composite inside the glyph, or the text's opacity
+  // -- is written as pixels from both, rather than dropped with the layer,
+  // which the SVG backend has no way to write.
+  // A page of floats keeps one recording, which a run shares between its
+  // targets unless a document draws it otherwise, as it draws a colour glyph
+  // without its layer.
+  test("reaches an SVG export as fills from a page of floats", async () => {
+    const floats = () => {
+      const canvas = new Canvas(W, H, { colorType: "RGBAF16" });
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      return ctx;
+    };
+    const fromText = floats();
+    fromText.textRendering = "geometricPrecision";
+    fromText.font = "48px SvgTextColrV0";
+    fromText.fillStyle = "rgb(40,90,160)";
+    fromText.fillText("AB", 10, 70);
+    const fromCanvas = floats();
+    fromCanvas.drawCanvas(fromText.canvas, 0, 0);
+    for (const [door, ctx] of [
+      ["fillText", fromText],
+      ["drawCanvas", fromCanvas],
+    ]) {
+      // The pixels first, so that the document cannot be handed the
+      // recording they keep.
+      const expected = ctx.getImageData(0, 0, W, H, { colorType: "rgba" }).data;
+      const svg = (await ctx.canvas.toBuffer("svg")).toString();
+      assert.doesNotMatch(svg, /<image\b/, `${door}: ${svg}`);
+      assert.match(svg, /<path\b/, `${door}: ${svg}`);
+      const back = page();
+      back.drawImage(await loadImage(Buffer.from(svg)), 0, 0);
+      agree(back.getImageData(0, 0, W, H).data, expected, door);
+    }
+  });
+
+  test("reaches an SVG export as fillText's does", async () => {
+    const count = (svg, tag) =>
+      (svg.match(new RegExp(`<${tag}\\b`, "g")) ?? []).length;
+    const exported = async (ctx) =>
+      (await ctx.canvas.toBuffer("svg")).toString();
+    // An opaque ground, so that an edge pixel a level apart premultiplied
+    // is not read as several apart once its colour is divided by its alpha.
+    const ground = (ctx) => {
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+    };
+    for (const [family, entity, text, size, opacity, asFills] of [
+      ["SvgTextColrV1", "&#xf0b00;", "\u{f0b00}", 72, 1, true],
+      ["SvgTextColrV0", "AB", "AB", 48, 1, true],
+      ["SvgTextColrV1", "&#xf0600;", "\u{f0600}", 72, 1, false],
+      ["SvgTextColrV0", "AB", "AB", 48, 0.5, false],
+    ]) {
+      const fromImage = page();
+      ground(fromImage);
+      fromImage.drawImage(
+        await loadImage(
+          Buffer.from(
+            `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">` +
+              `<text x="10" y="70" font-family="${family}" font-size="${size}" ` +
+              `fill="rgb(40,90,160)" opacity="${opacity}">${entity}</text></svg>`,
+          ),
+        ),
+        0,
+        0,
+      );
+      const draw = (ctx) => {
+        ground(ctx);
+        ctx.globalAlpha = opacity;
+        ctx.font = `${size}px ${family}`;
+        ctx.fillStyle = "rgb(40,90,160)";
+        ctx.fillText(text, 10, 70);
+      };
+      const fromText = page();
+      fromText.textRendering = "geometricPrecision";
+      draw(fromText);
+      // The same text in a canvas drawn into another, which reaches the
+      // document as the entries it holds.
+      const fromCanvas = page();
+      const source = page();
+      source.textRendering = "geometricPrecision";
+      draw(source);
+      fromCanvas.drawCanvas(source.canvas, 0, 0);
+      const expected = painted(draw);
+      for (const [door, ctx] of [
+        ["an SVG image", fromImage],
+        ["fillText", fromText],
+        ["drawCanvas", fromCanvas],
+      ]) {
+        const svg = await exported(ctx);
+        const label = `${family} ${JSON.stringify(text)} at ${opacity} from ${door}`;
+        if (!asFills) {
+          assert.ok(count(svg, "image") > 0, `${label}: ${svg}`);
+          continue;
+        }
+        assert.equal(count(svg, "image"), 0, `${label}: ${svg}`);
+        assert.ok(count(svg, "path") > 0, `${label}: ${svg}`);
+        const back = page();
+        back.drawImage(await loadImage(Buffer.from(svg)), 0, 0);
+        agree(back.getImageData(0, 0, W, H).data, expected, label);
+      }
+    }
+  });
+});
+
+// Skia's SVG module draws some of a document through a layer -- an opacity on
+// a group, a mask, a filter -- which Skia's SVG device drops whole, and paints
+// some of it in paint the device writes as other paint: a pattern, a repeating
+// gradient, a radial one whose focus is off its centre. A document holding any
+// is embedded in an SVG export as pixels, and the rest stays vectors.
+describe("an SVG image in an SVG export", () => {
+  const W = 200,
+    H = 80;
+  const R = `<rect x="20" y="10" width="120" height="60" fill="rgb(40,90,160)"/>`;
+  const C = `<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)"/>`;
+  const STOPS = `<stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/>`;
+  const F = `<defs><filter id="f"><feGaussianBlur stdDeviation="3"/></filter></defs>`;
+  const FILL = `<rect width="200" height="80" fill="url(#g)"/>`;
+  FontLibrary.use(
+    "SvgExportPlain",
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  );
+
+  /** A white CPU canvas of this size and its context. */
+  const page = () => {
+    const canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, W, H);
+    return ctx;
+  };
+  /** A canvas holding `body` as a document of this size, and its export. */
+  const exported = async (body) => {
+    const ctx = page();
+    const xml = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">${body}</svg>`;
+    ctx.drawImage(await loadImage(Buffer.from(xml)), 0, 0);
+    return [ctx, (await ctx.canvas.toBuffer("svg")).toString()];
+  };
+  /** How many bytes of `svg` drawn back stand more than a level from `ctx`. */
+  const apart = async (svg, ctx) => {
+    const back = page();
+    back.drawImage(await loadImage(Buffer.from(svg)), 0, 0);
+    const [a, b] = [ctx, back].map((c) => c.getImageData(0, 0, W, H).data);
+    return a.filter((byte, i) => Math.abs(byte - b[i]) > 1).length;
+  };
+
+  test("embeds what the SVG device would drop or repaint", async () => {
+    for (const [kind, body] of [
+      ["a filter", `${F}<g filter="url(#f)">${R}</g>`],
+      ["a filter declared in style", `${F}<g style="filter:url(#f)">${R}</g>`],
+      [
+        "a mask",
+        `<defs><mask id="m"><rect width="100" height="80" fill="white"/></mask></defs><g mask="url(#m)">${R}</g>`,
+      ],
+      ["a group's opacity", `<g opacity="0.5">${R}${C}</g>`],
+      ["a nested svg's opacity", `<svg opacity="0.5">${R}${C}</svg>`],
+      [
+        "the opacity of a shape both filled and stroked",
+        `${R}<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)" stroke="black" stroke-width="6" opacity="0.5"/>`,
+      ],
+      [
+        "a text's opacity",
+        `<text x="10" y="60" font-family="SvgExportPlain" font-size="48" fill="rgb(40,90,160)" opacity="0.5">AB</text>`,
+      ],
+      [
+        "a pattern",
+        `<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="red"/></pattern></defs><rect width="200" height="80" fill="url(#p)"/>`,
+      ],
+      [
+        "a radial gradient's focus off its centre",
+        `<defs><radialGradient id="g" fx="0.7">${STOPS}</radialGradient></defs>${FILL}`,
+      ],
+      [
+        "a reflected gradient",
+        `<defs><linearGradient id="g" x2="0.2" spreadMethod="reflect">${STOPS}</linearGradient></defs>${FILL}`,
+      ],
+    ]) {
+      const [ctx, svg] = await exported(body);
+      assert.match(svg, /<image\b/, `${kind}: ${svg}`);
+      assert.equal(await apart(svg, ctx), 0, kind);
+    }
+  });
+
+  // The controls: what the device writes as drawn stays vectors.
+  test("writes the rest of a document as vectors", async () => {
+    for (const [kind, body] of [
+      ["shapes", `${R}${C}`],
+      [
+        "a clip-path",
+        `<defs><clipPath id="c"><circle cx="80" cy="40" r="30"/></clipPath></defs><g clip-path="url(#c)">${R}</g>`,
+      ],
+      [
+        "a mix-blend-mode, which the module does not apply",
+        `${R}<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)" style="mix-blend-mode:multiply"/>`,
+      ],
+      [
+        "the opacity of a shape only filled",
+        `${R}<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)" opacity="0.5"/>`,
+      ],
+      [
+        "a padded gradient",
+        `<defs><linearGradient id="g">${STOPS}</linearGradient></defs>${FILL}`,
+      ],
+      [
+        "a radial gradient from its centre",
+        `<defs><radialGradient id="g">${STOPS}</radialGradient></defs>${FILL}`,
+      ],
+    ]) {
+      const [ctx, svg] = await exported(body);
+      assert.doesNotMatch(svg, /<image\b/, `${kind}: ${svg}`);
+      assert.match(svg, /<(path|rect)\b/, `${kind}: ${svg}`);
+      assert.equal(await apart(svg, ctx), 0, kind);
+    }
   });
 });

@@ -371,6 +371,88 @@ describe("an entry's SDK is named by its version", async () => {
   });
 });
 
+// A fresh cargo home holds no registry, so `cargo tree --offline` fails
+// before the build has fetched anything -- on every fresh CI runner, where
+// every build then compiled Skia (#659). The tree is asked again after the
+// target's crates are fetched. A stub cargo stands in for the real one: it
+// fails the tree until a fetch has run, and records what the fetch asked.
+describe("the features resolve before the build has fetched anything", async () => {
+  const { skiaFeatures } = await import(
+    pathToFileURL(join(__dirname, "..", "..", "scripts", "skia-binaries.mjs"))
+      .href
+  );
+  const {
+    mkdtempSync,
+    readFileSync,
+    existsSync,
+    writeFileSync,
+    chmodSync,
+  } = require("fs");
+  const { tmpdir } = require("os");
+  const { delimiter } = require("path");
+
+  /**
+   * A cargo whose tree fails until a fetch has run, and whose fetch fails
+   * where `fetchFails`, with the environment that puts it first on `PATH`.
+   * @param {boolean} [fetchFails]
+   */
+  const stub = (fetchFails = false) => {
+    const dir = mkdtempSync(join(tmpdir(), "skia-cache-fetch-"));
+    const cargo = join(dir, "cargo");
+    writeFileSync(
+      cargo,
+      [
+        "#!/bin/sh",
+        'case "$1" in',
+        `  tree) [ -f "${dir}/fetched" ] && { echo "svg,binary-cache"; exit 0; }; exit 101 ;;`,
+        `  fetch) echo "$@" > "${dir}/fetch-args"; ${fetchFails ? "exit 101" : `touch "${dir}/fetched"`} ;;`,
+        "esac",
+      ].join("\n"),
+    );
+    chmodSync(cargo, 0o755);
+    return {
+      dir,
+      env: { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH}` },
+    };
+  };
+  const skip =
+    process.platform === "win32" &&
+    "the stub is a shell script, which Windows does not run as cargo";
+
+  test(
+    "an empty registry is fetched for the target, then resolved",
+    { skip },
+    () => {
+      const { dir, env } = stub();
+      const args = ["--target", "x86_64-unknown-linux-gnu"];
+      assert.deepStrictEqual(skiaFeatures(args, dir, env), [
+        "binary-cache",
+        "svg",
+      ]);
+      assert.strictEqual(
+        readFileSync(join(dir, "fetch-args"), "utf8").trim(),
+        "fetch --locked --target x86_64-unknown-linux-gnu",
+      );
+    },
+  );
+
+  test("a registry that cannot be fetched resolves nothing", { skip }, () => {
+    const { dir, env } = stub(true);
+    assert.strictEqual(
+      skiaFeatures(["--target", "x86_64-unknown-linux-gnu"], dir, env),
+      null,
+    );
+    assert.ok(existsSync(join(dir, "fetch-args")), "the fetch was tried");
+  });
+
+  test("a registry already there is not fetched", { skip }, () => {
+    const { dir, env } = stub();
+    writeFileSync(join(dir, "fetched"), "");
+    assert.deepStrictEqual(skiaFeatures([], dir, env), ["binary-cache", "svg"]);
+    assert.ok(!existsSync(join(dir, "fetch-args")), "nothing was fetched");
+  });
+});
+
 // A build through the script that misses the cache compiles Skia, and stores
 // what it compiled so the next build of that key links it (#638). cargo
 // names the out-dir and the features in its JSON messages, so such a build

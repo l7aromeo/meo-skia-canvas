@@ -1,0 +1,29 @@
+--- a/skia-bindings/skia/src/ports/SkFontHost_FreeType.cpp
++++ b/skia-bindings/skia/src/ports/SkFontHost_FreeType.cpp
+@@ -1393,7 +1393,25 @@
+         }
+     } else {
+         if (fDoLinearMetrics) {
+-            const SkScalar advanceScalar = SkFT_FixedToScalar(fFace->glyph->linearHoriAdvance);
++            // The glyph's advance in font units times the size the face is
++            // set to, rounded once to 16.16, as HarfBuzz scales one.
++            // FreeType's `linearHoriAdvance` is the units times a 16.16 scale
++            // it rounded first, so a 1000-unit em at 16px advanced
++            // 16 + 2/65536. The size is the 26.6 one `FT_Set_Char_Size` was
++            // given, which the outlines are drawn at, and is exact in 16.16.
++            // Under one pixel `fMatrix22Scalar` carries the part of the size
++            // FreeType cannot take, and the advance stays FreeType's.
++            SkScalar advanceScalar = SkFT_FixedToScalar(fFace->glyph->linearHoriAdvance);
++            FT_Fixed units;
++            if (FT_IS_SCALABLE(fFace) && fScale.fX >= 1 &&
++                FT_Get_Advance(fFace, glyph.getGlyphID(), fLoadGlyphFlags | FT_LOAD_NO_SCALE,
++                               &units) == 0) {
++                const int64_t size = static_cast<int64_t>(SkScalarToFDot6(fScale.fX)) << 10;
++                const int64_t upem = fFace->units_per_EM;
++                const int64_t scaled = static_cast<int64_t>(units) * size;
++                const int64_t half = scaled < 0 ? -upem / 2 : upem / 2;
++                advanceScalar = SkFixedToScalar(static_cast<SkFixed>((scaled + half) / upem));
++            }
+             mx.advance.fX = fMatrix22Scalar.getScaleX() * advanceScalar;
+             mx.advance.fY = fMatrix22Scalar.getSkewY() * advanceScalar;
+         } else {

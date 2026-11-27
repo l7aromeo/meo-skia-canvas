@@ -178,3 +178,49 @@ describe("a colour built into a texture or a CanvasKit filter", () => {
     }
   });
 });
+
+describe("a CanvasKit light on an eight-bit page", () => {
+  /** The middle pixel of what `draw` paints on an eight-bit sRGB canvas. */
+  const at = (/** @type {(ctx: any) => void} */ draw) => {
+    const canvas = new Canvas(SIDE, SIDE);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    draw(ctx);
+    return [...ctx.getImageData(SIDE / 2, SIDE / 2, 1, 1).data];
+  };
+
+  test("lights a flat surface overhead at its own colour", () => {
+    // Straight overhead a flat surface takes the light at N.L = 1, and its
+    // highlight at N.H = 1, so a diffuse light at kd 1 and a specular one at
+    // ks 1 and exponent 1 paint the light's colour. A specular result's
+    // alpha is its largest channel, so those colours carry a 255. The odd
+    // channels hold the light to its own bytes: a light half a level off one
+    // lands on the even byte beside it.
+    const off = [];
+    for (const [make, colours] of [
+      [
+        (/** @type {string} */ c) =>
+          ImageFilter.MakeDistantLitDiffuse([0, 0, 1], c, 0, 1),
+        ["rgb(201 17 99)", "rgb(59 127 207)", "rgb(255 33 7)"],
+      ],
+      [
+        (/** @type {string} */ c) =>
+          ImageFilter.MakeDistantLitSpecular([0, 0, 1], c, 0, 1, 1),
+        ["rgb(255 33 7)", "rgb(3 255 171)", "rgb(201 17 255)"],
+      ],
+    ])
+      for (const colour of /** @type {string[]} */ (colours)) {
+        const want = at((ctx) => {
+          ctx.fillStyle = colour;
+          ctx.fillRect(0, 0, SIDE, SIDE);
+        });
+        const got = at((ctx) => {
+          ctx.imageFilter = make(colour);
+          white(ctx);
+        });
+        if (got.some((channel, i) => channel !== want[i]))
+          off.push(`${make}: ${colour} lit ${got}, filled ${want}`);
+      }
+    assert.deepEqual(off, []);
+  });
+});
