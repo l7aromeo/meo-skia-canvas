@@ -184,10 +184,24 @@ fn slant_keyword(slant: Slant) -> &'static str {
 /// `unmatched_name` unless one was registered under that name.
 pub(crate) fn group_alias(family: &str, style: FontStyle) -> String {
     private_alias(&format!(
-        "{GROUP_ALIAS_LEAD}{} and slant {} of {family}",
+        "{GROUP_ALIAS_LEAD}{} and slant {}{GROUP_FAMILY_LEAD}{family}",
         *style.width(),
         slant_keyword(style.slant())
     ))
+}
+
+/// What comes between a [`group_alias`]'s width and slant and the family it
+/// was made for. The width is a number and the slant a [`slant_keyword`],
+/// so its first occurrence is the one before the family.
+const GROUP_FAMILY_LEAD: &str = " of ";
+
+/// The name the faces behind a [`group_alias`] are filed under -- a family,
+/// or itself a private alias -- or `None` for a name that is not one.
+pub(crate) fn family_of_group_alias(name: &str) -> Option<&str> {
+    name.strip_prefix(PRIVATE_ALIAS_PREFIX)?
+        .strip_prefix(GROUP_ALIAS_LEAD)?
+        .split_once(GROUP_FAMILY_LEAD)
+        .map(|(_, family)| family)
 }
 
 /// Whether `name` spells a [`group_alias`], which an SVG document is not let

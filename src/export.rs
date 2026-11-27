@@ -86,14 +86,20 @@ impl VectorFeatures {
     pub(crate) const ERASE: Self = Self(1 << 11);
     /// A sweep gradient, a gradient mixed in a working space of its own, a
     /// procedural shader, or a canvas's pattern, which is a picture shader.
-    /// SVG names four paint servers and none of these is among them.
+    /// SVG names four paint servers and none of these is among them. A
+    /// colour glyph's gradient that SVG would show as another too -- see
+    /// `font::colr` -- one that repeats or reflects, which Skia's SVG device
+    /// writes with no `spreadMethod`, and a radial one between two circles
+    /// it writes as a focus SVG places otherwise.
     pub(crate) const EXOTIC_SHADER: Self = Self(1 << 0);
     /// An image filter, which is also how a shadow is drawn here.
     pub(crate) const IMAGE_FILTER: Self = Self(1 << 1);
     /// A layer: one opened with `saveLayer`, filed whole once it closes, or
     /// a group of draws composited as one through the context's alpha and
     /// blend. The SVG backend has none: it drops whatever is drawn inside
-    /// one, plain, translucent or nested.
+    /// one, plain, translucent or nested. A colour glyph composited through
+    /// one is this too, except in a document that draws it without the
+    /// layer -- see `font::colr::InlinePlainGlyphs`.
     pub(crate) const LAYER: Self = Self(1 << 5);
     /// A blend Skia's PDF backend writes through a soft mask -- see
     /// [`blend_features`]. Never without [`Self::BLEND_MODE`] or

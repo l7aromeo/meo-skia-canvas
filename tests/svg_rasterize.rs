@@ -187,3 +187,36 @@ fn an_embedded_image_keeps_colours_outside_srgb() {
         "P3's red through the document",
     );
 }
+
+/// A paint the document names outside sRGB keeps it: Display P3's green as
+/// a `fill` reaches a P3 canvas as P3's green, where sRGB's green, the most
+/// an eight-bit sRGB surface could hold, reads 117, 251, 76 in P3.
+///
+/// The red is 1 rather than 0: P3's green is sRGB's red below zero, which
+/// the half float stores to within a level, and drawing it back into P3
+/// lands a level above zero. Held to those bytes so a change to either the
+/// surface or the conversion is seen. Without the SVG wide-colour patch the
+/// paint is clipped to sRGB's green before anything is drawn.
+#[test]
+fn a_wide_paint_reaches_a_wide_canvas() {
+    /// P3's green read back in P3 through the document.
+    const KEPT: [u8; 3] = [1, 255, 0];
+    /// sRGB's green read back in P3.
+    const CLIPPED: [u8; 3] = [117, 251, 76];
+    let want = if cfg!(meo_svg_wide_colour) {
+        KEPT
+    } else {
+        CLIPPED
+    };
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{SIDE}" height="{SIDE}"><rect width="{SIDE}" height="{SIDE}" fill="color(display-p3 0 1 0)"/></svg>"#
+    );
+    let image = Svg::parse(&svg)
+        .expect("the SVG parses")
+        .rasterize(SIDE, SIDE)
+        .expect("rasterizes");
+    let mut canvas = p3();
+    canvas.context().draw_image(&image, 0.0, 0.0);
+    let read = read_in(&mut canvas, PixelColorSpace::DisplayP3);
+    assert_eq!(&read[..3], &want, "P3's green through the document");
+}

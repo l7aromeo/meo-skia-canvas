@@ -450,8 +450,11 @@ pub struct GradientStop {
 pub struct Shader {
     pub(crate) inner: SkShader,
     /// What a vector backend would have to reckon with to write this shader
-    /// out. Linear, radial and two-point conical gradients are paint servers
-    /// SVG names; a sweep gradient and either noise shader are not.
+    /// out. Linear and radial gradients are paint servers SVG names, and a
+    /// two-point conical one from a point at its end circle's centre; a
+    /// sweep gradient, either noise shader and any other two-point conical
+    /// gradient, which Skia's SVG device writes with its circles swapped,
+    /// are not -- see [`Geometry::vector_features`].
     pub(crate) features: VectorFeatures,
     /// What a gradient is made from, so that a GPU canvas can draw it in the
     /// CPU's bytes -- see [`GradientSpec::exact`]. `None` for the noise
@@ -692,8 +695,12 @@ impl Shader {
     /// Two-point conical (two-circle) gradient between a start circle `(start,
     /// start_radius)` and an end circle `(end, end_radius)`.
     ///
-    /// The two-circle form CanvasKit exposes that the Canvas2D radial gradient
-    /// does not.
+    /// The gradient the Canvas API's `createRadialGradient` makes;
+    /// [`radial_gradient`](Self::radial_gradient) is the one-circle form.
+    ///
+    /// An SVG export embeds a draw with it as pixels unless `start` is `end`
+    /// and `start_radius` is 0: Skia's SVG backend writes any other with its
+    /// circles swapped, which reads back up to 255 levels off.
     ///
     /// Outside the stop range the endpoint colors extend indefinitely: the
     /// tile mode is fixed at clamp and is not selectable.
@@ -714,14 +721,18 @@ impl Shader {
         let interpolation = interpolation.into();
         let (colors, positions, interp) =
             Self::prepare_stops(stops, interpolation)?;
+        let geometry = Geometry::Conical {
+            start: SkPoint::new(start.x, start.y),
+            start_radius,
+            end: SkPoint::new(end.x, end.y),
+            end_radius,
+        };
+        let features = geometry
+            .vector_features()
+            .with(interpolation.space.vector_features());
         Self::gradient(
             GradientSpec {
-                geometry: Geometry::Conical {
-                    start: SkPoint::new(start.x, start.y),
-                    start_radius,
-                    end: SkPoint::new(end.x, end.y),
-                    end_radius,
-                },
+                geometry,
                 local: None,
                 colors,
                 positions,
@@ -732,7 +743,7 @@ impl Shader {
                 interpolation: interp,
             },
             "two-point conical",
-            interpolation.space.vector_features(),
+            features,
         )
     }
 

@@ -1,0 +1,223 @@
+--- a/skia-bindings/skia/modules/svg/include/SkSVGContainer.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGContainer.h
+@@ -22,6 +22,10 @@
+ public:
+     void appendChild(sk_sp<SkSVGNode>) override;
+ 
++    // Whether this group's one child is a shape, or another group whose one
++    // child is: the chain along which a group's opacity reaches one paint.
++    bool meoFoldsOpacityIntoChild() const;
++
+ protected:
+     explicit SkSVGContainer(SkSVGTag);
+ 
+--- a/skia-bindings/skia/modules/svg/include/SkSVGRenderContext.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGRenderContext.h
+@@ -102,9 +102,16 @@
+ 
+     enum ApplyFlags {
+         kLeaf = 1 << 0, // the target node doesn't have descendants
++        // A <g> or <svg> whose one child is a shape, or another such group:
++        // with byte paint alpha on, its opacity reaches that shape's paint.
++        kMeoFoldsIntoChild = 1 << 1,
+     };
+     void applyPresentationAttributes(const SkSVGPresentationAttributes&, uint32_t flags);
+ 
++    // `alpha` placed on a byte where byte paint alpha is on for this thread
++    // -- see `meo_svg_byte_paint_alpha` -- and `alpha` itself where it is off.
++    static float MeoPaintAlpha(float alpha);
++
+     // Scoped wrapper that temporarily clears the original node reference.
+     class BorrowedNode {
+     public:
+@@ -201,6 +208,7 @@
+     SkSVGRenderContext& operator=(const SkSVGRenderContext&) = delete;
+ 
+     void applyOpacity(SkScalar opacity, uint32_t flags, bool hasFilter);
++    void meoApplyOpacity(SkScalar opacity, uint32_t flags, bool hasFilter);
+     void applyFilter(const SkSVGFuncIRI&);
+     void applyClip(const SkSVGFuncIRI&);
+     void applyMask(const SkSVGFuncIRI&);
+@@ -223,6 +231,10 @@
+ 
+     // Deferred opacity optimization for leaf nodes.
+     float                                         fDeferredPaintOpacity = 1;
++
++    // With byte paint alpha on, the opacity a group passes to the context of
++    // its one child, which takes it as deferred opacity.
++    float                                         fMeoChildOpacity = 1;
+ 
+     // Current object bounding box scope.
+     const OBBScope                                fOBBScope;
+--- a/skia-bindings/skia/modules/svg/src/SkSVGContainer.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGContainer.cpp
+@@ -25,6 +25,29 @@
+     return !fChildren.empty();
+ }
+ 
++bool SkSVGContainer::meoFoldsOpacityIntoChild() const {
++    if (fChildren.size() != 1) {
++        return false;
++    }
++    const SkSVGNode* child = fChildren[0].get();
++    switch (child->tag()) {
++        case SkSVGTag::kCircle:
++        case SkSVGTag::kEllipse:
++        case SkSVGTag::kLine:
++        case SkSVGTag::kPath:
++        case SkSVGTag::kPolygon:
++        case SkSVGTag::kPolyline:
++        case SkSVGTag::kRect:
++            return true;
++        case SkSVGTag::kG:
++            return static_cast<const SkSVGContainer*>(child)->meoFoldsOpacityIntoChild();
++        default:
++            // Text, <use> and <image> draw from contexts of their own or not
++            // through a paint, so a group over one of them keeps its layer.
++            return false;
++    }
++}
++
+ void SkSVGContainer::onRender(const SkSVGRenderContext& ctx) const {
+     for (int i = 0; i < fChildren.size(); ++i) {
+         fChildren[i]->render(ctx);
+--- a/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
+@@ -28,7 +28,7 @@
+     }
+ 
+     SkColor4f color = ctx.resolveSvgColor4f(*floodColor);
+-    color.fA *= *floodOpacity;
++    color.fA = SkSVGRenderContext::MeoPaintAlpha(color.fA * *floodOpacity);
+     return color;
+ }
+ 
+--- a/skia-bindings/skia/modules/svg/src/SkSVGNode.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGNode.cpp
+@@ -13,6 +13,7 @@
+ #include "include/core/SkPath.h"
+ #include "include/pathops/SkPathOps.h"
+ #include "include/private/SkAssert.h"
++#include "modules/svg/include/SkSVGContainer.h"
+ #include "modules/svg/include/SkSVGRenderContext.h"
+ 
+ #include <algorithm>
+@@ -68,8 +69,13 @@
+ }
+ 
+ bool SkSVGNode::onPrepareToRender(SkSVGRenderContext* ctx) const {
+-    ctx->applyPresentationAttributes(fPresentationAttributes,
+-                                     this->hasChildren() ? 0 : SkSVGRenderContext::kLeaf);
++    const bool foldsIntoChild =
++            (fTag == SkSVGTag::kG || fTag == SkSVGTag::kSvg) &&
++            static_cast<const SkSVGContainer*>(this)->meoFoldsOpacityIntoChild();
++    ctx->applyPresentationAttributes(
++            fPresentationAttributes,
++            (this->hasChildren() ? 0 : SkSVGRenderContext::kLeaf) |
++                    (foldsIntoChild ? SkSVGRenderContext::kMeoFoldsIntoChild : 0));
+ 
+     // visibility:hidden and display:none disable rendering.
+     // TODO: if display is not a value (true when display="inherit"), we currently
+--- a/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGRenderContext.cpp
+@@ -27,11 +27,28 @@
+ #include "modules/svg/include/SkSVGNode.h"
+ #include "modules/svg/include/SkSVGTypes.h"
+ 
++#include <cmath>
+ #include <cstring>
+ #include <vector>
+ 
+ using namespace skia_private;
+ 
++// Whether a paint's alpha is placed on a byte on this thread: on while a
++// raster playback that composites as a browser does is drawing the document,
++// and off for every other drawing of it.
++static thread_local bool gMeoBytePaintAlpha = false;
++
++// Sets whether this thread places each paint's alpha on a byte. A browser
++// paints an SVG with an eight-bit alpha: the product of a paint's colour
++// alpha, its `fill-opacity` or `stroke-opacity`, and the `opacity` folded into
++// it, rounded once. A half-float surface keeps that product unrounded, so a
++// tie such as 0.5 lands a level from the browser's byte.
++extern "C" void meo_svg_byte_paint_alpha(bool on) { gMeoBytePaintAlpha = on; }
++
++float SkSVGRenderContext::MeoPaintAlpha(float alpha) {
++    return gMeoBytePaintAlpha ? std::round(alpha * 255) / 255 : alpha;
++}
++
+ namespace {
+ 
+ SkScalar length_size_for_type(const SkSize& viewport, SkSVGLengthContext::LengthType t) {
+@@ -202,7 +219,10 @@
+                              *other.fLengthContext,
+                              *other.fPresentationContext,
+                              OBBScope{node, this},
+-                             other.fTextShapingFactory) {}
++                             other.fTextShapingFactory) {
++    // A group that folds its opacity into its one child hands it on here.
++    fDeferredPaintOpacity = other.fMeoChildOpacity;
++}
+ 
+ SkSVGRenderContext::~SkSVGRenderContext() {
+     fCanvas->restoreToCount(fCanvasSaveCount);
+@@ -258,7 +278,11 @@
+     // Uninherited attributes.  Only apply to the current context.
+ 
+     const bool hasFilter = attrs.fFilter.isValue();
+-    if (attrs.fOpacity.isValue()) {
++    if (gMeoBytePaintAlpha) {
++        // Called whatever the node states, since a group may have handed it
++        // opacity to place.
++        this->meoApplyOpacity(attrs.fOpacity.isValue() ? *attrs.fOpacity : 1, flags, hasFilter);
++    } else if (attrs.fOpacity.isValue()) {
+         this->applyOpacity(*attrs.fOpacity, flags, hasFilter);
+     }
+ 
+@@ -311,6 +335,36 @@
+     }
+ }
+ 
++// With byte paint alpha on, the opacity a group hands on and this node's own
++// are folded into one paint's alpha wherever they affect one atomic draw: a
++// shape with a fill or a stroke but not both, and no filter, as
++// `applyOpacity` folds a leaf's, and a group whose one child is such a shape,
++// or another such group (`kMeoFoldsIntoChild`). A browser folds a group over
++// one draw so, and rounds the product once; rounding the group's layer and
++// the paint apart rounds twice. Anything else takes the product as a layer.
++void SkSVGRenderContext::meoApplyOpacity(SkScalar opacity, uint32_t flags, bool hasFilter) {
++    const float total = fDeferredPaintOpacity * SkTPin(opacity, 0.0f, 1.0f);
++    fDeferredPaintOpacity = 1;
++    if (total >= 1) {
++        return;
++    }
++
++    const auto& props = fPresentationContext->fInherited;
++    const bool hasFill   = props.fFill  ->type() != SkSVGPaint::Type::kNone,
++               hasStroke = props.fStroke->type() != SkSVGPaint::Type::kNone;
++
++    if ((flags & kLeaf) && (hasFill ^ hasStroke) && !hasFilter) {
++        fDeferredPaintOpacity = total;
++    } else if ((flags & kMeoFoldsIntoChild) && !hasFilter) {
++        fMeoChildOpacity = total;
++    } else {
++        SkPaint opacityPaint;
++        opacityPaint.setAlphaf(total);
++        // Balanced in the destructor, via restoreToCount().
++        fCanvas->saveLayer(nullptr, &opacityPaint);
++    }
++}
++
+ void SkSVGRenderContext::applyFilter(const SkSVGFuncIRI& filter) {
+     if (filter.type() != SkSVGFuncIRI::Type::kIRI) {
+         return;
+@@ -445,7 +499,8 @@
+     //   - initial paint server opacity (e.g. color stop opacity)
+     //   - paint-specific opacity (e.g. 'fill-opacity', 'stroke-opacity')
+     //   - deferred opacity override (optimization for leaf nodes 'opacity')
+-    p.setAlphaf(SkTPin(p.getAlphaf() * paint_opacity * fDeferredPaintOpacity, 0.0f, 1.0f));
++    p.setAlphaf(MeoPaintAlpha(
++            SkTPin(p.getAlphaf() * paint_opacity * fDeferredPaintOpacity, 0.0f, 1.0f)));
+ 
+     return p;
+ }

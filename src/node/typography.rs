@@ -552,14 +552,8 @@ struct DrawnAt {
 impl LaidOut {
     /// What the run's colour glyphs ask of a vector backend when drawn in
     /// `paint` -- see [`colour_features`].
-    pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
-        colour_features(
-            self.drawn
-                .runs
-                .iter()
-                .map(|run| (&run.font, &run.glyphs[..])),
-            paint,
-        )
+    pub(crate) fn colour_features(&self, paint: &Paint) -> ColourFeatures {
+        self.drawn.colour_features(paint)
     }
 
     /// Whether the run holds a glyph the platform draws in its own colours
@@ -788,6 +782,15 @@ impl fmt::Debug for RunPaint {
 }
 
 impl RunPaint {
+    /// What the run's colour glyphs ask of a vector backend when drawn in
+    /// `paint` -- see [`colour_features`].
+    pub(crate) fn colour_features(&self, paint: &Paint) -> ColourFeatures {
+        colour_features(
+            self.runs.iter().map(|run| (&run.font, &run.glyphs[..])),
+            paint,
+        )
+    }
+
     /// Each run as a text blob in its own font, sheared as `shears`
     /// says, to draw at the run's origin, or `None` where it draws nothing.
     ///
@@ -1294,19 +1297,20 @@ struct RunInks {
 /// Whether a run's reach takes in the box its font declares around every
 /// glyph, as well as each glyph's own box.
 ///
-/// Not where the reach sweep -- `text_in_a_chain_is_bounded_by_all_it_inks`
-/// with TEXT_REACH_SWEEP=full -- has been played without it: on CoreText each
-/// glyph's own box holds the ink within `layer::HINTED_INK_DRIFT`, and the
-/// font's box only widened what a blurred run reads, zeroes and blurs --
-/// Helvetica's, from 45.6 pixels across 40px "Ag" to 122.5. FreeType's and
-/// DirectWrite's sweeps were measured with it, and keep it until they are
-/// played without it.
+/// Only on FreeType. The reach sweep --
+/// `text_in_a_chain_is_bounded_by_all_it_inks` with TEXT_REACH_SWEEP=full --
+/// played without it holds the ink within `layer::HINTED_INK_DRIFT` on CoreText
+/// and on DirectWrite, x64 and arm64 alike, so there each glyph's own box is
+/// the reach, and the font's box would only widen what a blurred run reads,
+/// zeroes and blurs -- Helvetica's, from 45.6 pixels across 40px "Ag" to 122.5.
+/// Played without it on FreeType, the sweep inked 2.328 pixels past the reach,
+/// more than the drift allows, so FreeType keeps it.
 fn keeps_font_box() -> bool {
     #[cfg(test)]
     if FONT_BOX_FLOOR.get() {
         return true;
     }
-    !cfg!(target_os = "macos")
+    !cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 /// How many paints a kept run keeps blobs for: as many as one draw takes it
@@ -2940,6 +2944,39 @@ fn shares_a_pixel(a: &IRect, b: &IRect) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
+/// What the colour glyphs of a run ask of a vector backend -- see
+/// [`colour_features`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ColourFeatures {
+    /// Drawn as pixels and recordings draw them, each through its layer.
+    pub(crate) all: VectorFeatures,
+    /// Drawn into a document recorded while
+    /// `font::colr::InlinePlainGlyphs` is held, which draws a glyph
+    /// without its layer where that changes nothing a document holds.
+    pub(crate) in_document: VectorFeatures,
+}
+
+impl ColourFeatures {
+    /// Nothing asked of a backend, by a run holding no colour glyph.
+    pub(crate) const PLAIN: Self = Self {
+        all: VectorFeatures::PLAIN,
+        in_document: VectorFeatures::PLAIN,
+    };
+
+    fn with(self, other: Self) -> Self {
+        Self {
+            all: self.all.with(other.all),
+            in_document: self.in_document.with(other.in_document),
+        }
+    }
+
+    /// Whether a document recorded while `font::colr::InlinePlainGlyphs` is
+    /// held draws some glyph without the layer pixels draw it through.
+    pub(crate) fn inlines(self) -> bool {
+        self.all != self.in_document
+    }
+}
+
 /// What the colour glyphs among `runs`, each a font and its glyphs, ask of a
 /// vector backend when drawn in `paint` -- see `font::colr::ColourRun::
 /// features` -- so that a document a backend cannot write them into embeds
@@ -2947,18 +2984,24 @@ fn shares_a_pixel(a: &IRect, b: &IRect) -> bool {
 pub(crate) fn colour_features<'a>(
     runs: impl IntoIterator<Item = (&'a Font, &'a [GlyphId])>,
     paint: &Paint,
-) -> VectorFeatures {
+) -> ColourFeatures {
     runs.into_iter()
         .filter_map(|(font, glyphs)| {
             let run = ColourRun::of(font, paint)?;
             Some(
                 glyphs
                     .iter()
-                    .filter_map(|&glyph| run.features(glyph))
-                    .fold(VectorFeatures::PLAIN, VectorFeatures::with),
+                    .filter_map(|&glyph| {
+                        Some(ColourFeatures {
+                            all: run.features(glyph)?,
+                            in_document: run
+                                .features_in_document(glyph, paint)?,
+                        })
+                    })
+                    .fold(ColourFeatures::PLAIN, ColourFeatures::with),
             )
         })
-        .fold(VectorFeatures::PLAIN, VectorFeatures::with)
+        .fold(ColourFeatures::PLAIN, ColourFeatures::with)
 }
 
 /// What the colour glyphs `paragraph` sets ask of a vector backend -- see
@@ -2971,10 +3014,13 @@ pub(crate) fn paragraph_colour_features(
         return VectorFeatures::PLAIN;
     }
     let runs = glyph_runs(paragraph);
+    // A paragraph's document is recorded as its pixels are, each colour
+    // glyph through its layer.
     colour_features(
         runs.iter().map(|run| (&run.font, &run.glyphs[..])),
         &Paint::default(),
     )
+    .all
 }
 
 /// Whether `paragraph` sets a run in a face whose colour glyphs this library
@@ -3521,19 +3567,27 @@ impl<'a> Typesetter<'a> {
     /// Laying every first draw out again to ask cost 35% more on a page of
     /// three thousand strings each drawn once; a text whose characters its
     /// own faces hold, none of them colour faces, holds no colour glyph.
-    pub(crate) fn colour_features(&self, paint: &Paint) -> VectorFeatures {
+    pub(crate) fn colour_features(&self, paint: &Paint) -> ColourFeatures {
         if !self.can_hold(|face| colr_face(face).is_some()) {
-            return VectorFeatures::PLAIN;
+            return ColourFeatures::PLAIN;
         }
         let mut layout = self.layout(&Paint::default());
         if !holds_colour_runs(&layout.paragraph) {
-            return VectorFeatures::PLAIN;
+            return ColourFeatures::PLAIN;
         }
         let runs = glyph_runs(&mut layout.paragraph);
         colour_features(
             runs.iter().map(|run| (&run.font, &run.glyphs[..])),
             paint,
         )
+    }
+
+    /// Whether the run sets a glyph in a face whose colour glyphs this
+    /// library draws itself -- see [`draw_colour_run`] -- laid out to answer
+    /// only where it can hold one, as [`Self::colour_features`] is.
+    pub(crate) fn holds_colour_glyphs(&self) -> bool {
+        self.can_hold(|face| colr_face(face).is_some())
+            && holds_colour_runs(&self.layout(&Paint::default()).paragraph)
     }
 
     /// Whether the run holds a glyph the platform draws in its own colours
@@ -3955,20 +4009,6 @@ impl<'a> Typesetter<'a> {
             let shift = self.char_style().baseline_shift();
             (ascent - shift, descent + shift)
         };
-
-        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- not worked around
-        // Re-check: on Linux, measureText("H") in 16px Oswald (561 of 1000
-        // units) is 8.976013 while this stands and 8.976 once fixed
-        //
-        // Skia's FreeType scaler takes an unhinted advance from FreeType's
-        // `linearHoriAdvance` (`SkFontHost_FreeType.cpp`), the font's units
-        // scaled by the 16.16 `x_scale` that `FT_Set_Char_Size` rounds: at
-        // 16px in a 1000-unit face 67,108.864 is stored as 67,109, so every
-        // advance is about 2/65536 px an em over, and a 1000-unit ideograph
-        // measures 16.000031 where CoreText gives 16. Skia hands HarfBuzz the
-        // same advances through its own font functions
-        // (`SkShaper_harfbuzz.cpp`), so no route here takes an exact one;
-        // docs/browser-differences.md has the measurements.
 
         // UPSTREAM: FreeType 2.14.3 -- unfiled -- not worked around
         // Re-check: bun run test:suite --test-name-pattern fraction

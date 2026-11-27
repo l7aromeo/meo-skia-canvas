@@ -47,6 +47,8 @@ pub mod typesetting;
 use crate::node::typography::Painter;
 use exact_gradient::GradientSpec;
 
+#[cfg(test)]
+use crate::font::colr::InlinePlainGlyphs;
 use crate::{
     cache_map::{GOLDEN_RATIO_64, KeptSets},
     context2d::{FontKerning, TextRendering, font_spec_from_css},
@@ -2451,6 +2453,10 @@ impl Context2D {
             };
             recording = LazyPicture::from(Some(recorded));
             if dual {
+                // A document's recording draws a colour glyph without the
+                // layer that changes nothing, as `recorded_for_document`
+                // records it.
+                let _inline = InlinePlainGlyphs::hold();
                 let Some(recorded) = record(Recording::Document) else {
                     return false;
                 };
@@ -5664,6 +5670,13 @@ impl Context2D {
             )
     }
 
+    /// Whether `text`, laid out in the font set now, sets a glyph in a face
+    /// whose colour glyphs this library draws itself -- see
+    /// `typography::draw_colour_run`.
+    pub(crate) fn sets_colour_glyphs(&self, text: &str) -> bool {
+        Typesetter::new(&self.state, text, None).holds_colour_glyphs()
+    }
+
     /// One painting of a run of text -- see [`Self::draw_text`].
     fn paint_text(
         &mut self,
@@ -5684,12 +5697,17 @@ impl Context2D {
             let kept = typesetter.laid_out();
             // What the colour glyphs this library draws itself ask for, beside
             // what the paint does -- see `typography::colour_features`.
-            let colour = match &kept {
+            // A document records the run while
+            // `colr::InlinePlainGlyphs` is held -- see
+            // `layer::ReplayedText::recorded_for_document` -- so the draw is
+            // filed with what it asks there.
+            let colours = match &kept {
                 Some(kept) => kept.colour_features(&paint),
                 None => typesetter.colour_features(&paint),
             };
-            let features =
-                self.vector_features(&paint, Some(style)).with(colour);
+            let features = self
+                .vector_features(&paint, Some(style))
+                .with(colours.in_document);
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
             // Whether the run holds a glyph the platform draws in its own
@@ -5706,7 +5724,7 @@ impl Context2D {
             // they are drawn under -- see `typography::KEYS_OWN_COLOUR_BLOBS`
             // -- which a recording holding one set of them for every matrix
             // cannot be.
-            let colour = (colour.refused_by(VectorFeatures::LAYER)
+            let colour = (colours.all.refused_by(VectorFeatures::LAYER)
                 || own_colours && KEYS_OWN_COLOUR_BLOBS)
                 .then(|| {
                     let (run, offset, condensation) =
@@ -9231,7 +9249,12 @@ mod tests {
         let picture = inner.picture().expect("the page's picture");
         let size = inner.bounds.size();
         let recorded = CanvasPattern::from_parts(
-            Content::Vector(picture, size),
+            Content::Vector {
+                picture,
+                size,
+                features: VectorFeatures::PLAIN,
+                document: None,
+            },
             size,
             repeat,
             identity,
@@ -10204,12 +10227,17 @@ mod text_reach_tests {
                     ["tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"],
                 )
                 .expect("registers");
-            FontLibrary::new()
-                .use_paths(
-                    Some(MONOTON),
-                    ["tests/assets/fonts/Monoton-Regular.woff2"],
-                )
-                .expect("registers");
+            // Windows builds without FreeType, so nothing decodes WOFF2
+            // there: Monoton does not register, and its scenes fall to
+            // `resolves` and are left out.
+            let monoton = FontLibrary::new().use_paths(
+                Some(MONOTON),
+                ["tests/assets/fonts/Monoton-Regular.woff2"],
+            );
+            assert!(
+                monoton.is_ok() || cfg!(target_os = "windows"),
+                "registers: {monoton:?}"
+            );
         }
     }
 
@@ -10854,37 +10882,54 @@ mod text_reach_tests {
 
     #[test]
     fn the_font_box_widens_a_reach_only_where_it_is_kept() {
-        // A run's reach takes in its font's declared box only where the
-        // sweep has not been played without it -- see `keeps_font_box`.
-        // Helvetica's box reaches far past "Ag": on macOS the reach is the
-        // glyphs' own boxes and lies inside the one with the font's box.
-        let scene = Scene {
-            font: "Helvetica",
-            filter: "blur(3px)",
-            ..BASE
-        };
-        if !resolves(scene.font) {
-            return;
+        // A run's reach takes in its font's declared box only on FreeType,
+        // where the sweep played without it inked past the drift -- see
+        // `keeps_font_box`. Elsewhere the reach is the glyphs' own boxes and
+        // lies inside the one with the font's box: Oswald's, which every
+        // platform registers, and Helvetica's, which reaches far past "Ag".
+        let keeps = !cfg!(any(target_os = "macos", target_os = "windows"));
+        let mut checked = 0;
+        for font in [OSWALD, "Helvetica"] {
+            let scene = Scene {
+                font,
+                filter: "blur(3px)",
+                ..BASE
+            };
+            if !resolves(scene.font) {
+                continue;
+            }
+            forget_laid_out();
+            let own = reached(&scene).expect("a reach");
+            FONT_BOX_FLOOR.set(true);
+            forget_laid_out();
+            let boxed = reached(&scene).expect("a reach");
+            FONT_BOX_FLOOR.set(false);
+            forget_laid_out();
+            eprintln!(
+                "{font}: own {own:?}, {} wide; with the font's box {boxed:?}, {} wide",
+                own.width(),
+                boxed.width()
+            );
+            let mut joined = own;
+            joined.join(boxed);
+            assert_eq!(
+                joined, boxed,
+                "{font}: the font's box holds the glyphs' own"
+            );
+            if keeps {
+                assert_eq!(own, boxed, "{font}");
+            } else {
+                assert_ne!(
+                    own, boxed,
+                    "{font}: the reach took in the font's box"
+                );
+            }
+            if font == "Helvetica" && !keeps {
+                assert!(own.width() < boxed.width() / 2.0, "{own:?}");
+            }
+            checked += 1;
         }
-        forget_laid_out();
-        let own = reached(&scene).expect("a reach");
-        FONT_BOX_FLOOR.set(true);
-        forget_laid_out();
-        let boxed = reached(&scene).expect("a reach");
-        FONT_BOX_FLOOR.set(false);
-        forget_laid_out();
-        eprintln!(
-            "own {own:?}, {} wide; with the font's box {boxed:?}, {} wide",
-            own.width(),
-            boxed.width()
-        );
-        let mut joined = own;
-        joined.join(boxed);
-        assert_eq!(joined, boxed, "the font's box holds the glyphs' own");
-        match cfg!(target_os = "macos") {
-            true => assert!(own.width() < boxed.width() / 2.0, "{own:?}"),
-            false => assert_eq!(own, boxed),
-        }
+        assert!(checked > 0, "Oswald is registered, so a font was checked");
     }
 
     /// The reach of each of `scenes`, drawn in turn on fresh canvases that

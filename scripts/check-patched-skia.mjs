@@ -63,13 +63,6 @@ import { cacheRoot, treeName } from "./skia-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/// containers/skia-svg-synthetic-slant.patch, on every platform.
-const SVG_SYNTHETIC_SLANT = {
-  patch: "containers/skia-svg-synthetic-slant.patch",
-  file: "modules/svg/src/SkSVGText.cpp",
-  marker: "!Leans(font.getTypeface())",
-};
-
 /// containers/skia-font-match-slant-first.patch, on every platform.
 const FONT_MATCH_SLANT_FIRST = {
   patch: "containers/skia-font-match-slant-first.patch",
@@ -88,10 +81,15 @@ export function skiaPatchTable(rust) {
     /^const SKIA_PATCHES: \[SkiaPatch; \d+\] = \[([\s\S]*?)^\];/m,
   );
   if (!table) return { error: "no SKIA_PATCHES table" };
+  // A Rust string literal, its `\"` and `\\` escapes read as the characters
+  // they stand for, which is what build.rs compares against the source. Any
+  // other escape is left unmatched, and the entry refused.
   const literal = (body, field) =>
-    body.match(
-      new RegExp(`^\\s*${field}: "((?:[^"\\\\]|\\\\.)*)",$`, "m"),
-    )?.[1];
+    body
+      .match(
+        new RegExp(`^\\s*${field}: "((?:[^"\\\\]|\\\\["\\\\])*)",$`, "m"),
+      )?.[1]
+      ?.replace(/\\(["\\])/g, "$1");
   const entries = {};
   for (const [, body] of table[1].matchAll(/SkiaPatch \{([^}]*)\}/g)) {
     const [cfg, file, marker] = ["cfg", "file", "marker"].map((field) =>
@@ -162,6 +160,54 @@ const EXACT_BLEND_DIVISION = {
   unit: "src/core/SkOpts.cpp",
 };
 
+/// containers/skia-lowp-paint-alpha.patch, on every platform. Its stage is in
+/// a header, held to `src/core/SkOpts.cpp` as `EXACT_BLEND_DIVISION` is.
+const LOWP_PAINT_ALPHA = {
+  patch: "containers/skia-lowp-paint-alpha.patch",
+  ...buildRsPatch("meo_lowp_paint_alpha"),
+  unit: "src/core/SkOpts.cpp",
+};
+
+/// containers/skia-lowp-exact-coverage.patch, on every platform. Its stages
+/// are in a header, held to `src/core/SkOpts.cpp` as `EXACT_BLEND_DIVISION`
+/// is.
+const LOWP_EXACT_COVERAGE = {
+  patch: "containers/skia-lowp-exact-coverage.patch",
+  ...buildRsPatch("meo_lowp_exact_coverage"),
+  unit: "src/core/SkOpts.cpp",
+};
+
+/// containers/skia-svg-synthetic-slant.patch, on every platform.
+const SVG_SYNTHETIC_SLANT = {
+  patch: "containers/skia-svg-synthetic-slant.patch",
+  ...buildRsPatch("meo_svg_synthetic_slant"),
+};
+
+/// containers/skia-svg-wide-colour.patch, on every platform.
+const SVG_WIDE_COLOUR = {
+  patch: "containers/skia-svg-wide-colour.patch",
+  ...buildRsPatch("meo_svg_wide_colour"),
+};
+
+/// containers/skia-svg-line-fill.patch, on every platform.
+const SVG_LINE_FILL = {
+  patch: "containers/skia-svg-line-fill.patch",
+  ...buildRsPatch("meo_svg_line_fill"),
+};
+
+/// containers/skia-svg-byte-paint-alpha.patch, on every platform.
+const SVG_BYTE_PAINT_ALPHA = {
+  patch: "containers/skia-svg-byte-paint-alpha.patch",
+  ...buildRsPatch("meo_svg_byte_paint_alpha"),
+};
+
+/// containers/skia-freetype-advance.patch, on Linux, the one platform whose
+/// build compiles Skia's FreeType port.
+const FREETYPE_ADVANCE = {
+  patch: "containers/skia-freetype-advance.patch",
+  ...buildRsPatch("meo_freetype_advance"),
+};
+
 /// containers/skia-patch-marker.patch, on every platform.
 const PATCH_MARKER = {
   patch: "containers/skia-patch-marker.patch",
@@ -183,10 +229,15 @@ export const PATCHED = {
     TRIANGULATION,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
   linux: [
@@ -194,10 +245,16 @@ export const PATCHED = {
     TRIANGULATION,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
+    FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
   win32: [
@@ -209,10 +266,15 @@ export const PATCHED = {
       marker: "fsSelection.field.Oblique",
     },
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
 };
@@ -471,8 +533,12 @@ const COMPILED_WITH = {
   "src/gpu/ganesh/GrRecordingContextPriv.cpp": "ganesh",
   "src/text/gpu/SubRunContainer.cpp": "gpu",
   "modules/svg/src/SkSVGText.cpp": null,
+  "modules/svg/src/SkSVGAttributeParser.cpp": null,
+  "modules/svg/src/SkSVGLine.cpp": null,
+  "modules/svg/src/SkSVGRenderContext.cpp": null,
   "src/core/SkFontMgr.cpp": null,
   "src/ports/SkTypeface_win_dw.cpp": null,
+  "src/ports/SkFontHost_FreeType.cpp": null,
   "src/core/SkOpts.cpp": null,
   "src/opts/SkRasterPipeline_opts.h": null,
   "src/core/SkGraphics.cpp": null,
@@ -482,9 +548,12 @@ const COMPILED_WITH = {
 function cases(root, patched) {
   const ninja = join(root, "out", "skia");
   const relative = (file) => `../../skia/${file}`;
-  const files = Object.fromEntries(
-    patched.map(({ file, marker }) => [file, `before ${marker} after`]),
-  );
+  // Each patched file holding every marker a patch to it leaves: two patches
+  // change `SkRasterPipeline_opts.h`, and a file written for each in turn
+  // kept the second's alone.
+  const files = {};
+  for (const { file, marker } of patched)
+    files[file] = `${files[file] ?? "before"} ${marker} after`;
   const good = [
     "STARTING OFFLINE BUILD",
     `ninja: Entering directory \`${ninja}'`,
@@ -850,6 +919,16 @@ function selfTest() {
       table(entry("a", "f.cpp", "x").replace('"x"', "MARKER")),
       null,
       "a marker that is no literal",
+    ],
+    [
+      table(entry("a", "f.cpp", 'f(\\"x\\", a\\\\b)')),
+      { a: { file: "f.cpp", marker: 'f("x", a\\b)' } },
+      "a marker with escaped quotes and backslashes",
+    ],
+    [
+      table(entry("a", "f.cpp", "x\\ny")),
+      null,
+      "a marker with an escape other than a quote or a backslash",
     ],
   ]) {
     const read = skiaPatchTable(rust);

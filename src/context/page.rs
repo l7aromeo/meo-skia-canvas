@@ -6714,6 +6714,19 @@ impl Page {
         compositor.finish_recording_as_picture(None)
     }
 
+    /// The page as a document is written from it: played for
+    /// [`Target::Document`], where [`Self::picture`] plays it for pixels --
+    /// a colour glyph drawn without its layer where that changes nothing a
+    /// document holds, among the rest -- for an SVG image whose text a
+    /// canvas drew, which a document draws from this -- see
+    /// `image::colr_text`.
+    pub(crate) fn document_picture(&self) -> Option<Picture> {
+        let mut compositor = PictureRecorder::new();
+        let output = compositor.begin_recording(self.bounds, true);
+        play_entries(&self.layers, &self.features, output, Target::Document);
+        compositor.finish_recording_as_picture(None)
+    }
+
     /// Plays the layers `range` names onto `canvas` as pixels, in order --
     /// none where it reaches past the page -- with the canvas's GPU context
     /// flushed every so many layers they render offscreen: see [`pacing`].

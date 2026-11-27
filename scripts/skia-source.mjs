@@ -205,6 +205,70 @@ const SVG_SYNTHETIC_SLANT = join(
 );
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: node scripts/test.mjs tests/suite/image.test.js against a binary built from a tree prepared without this patch; "keeps a wide colour on a wide canvas" fails
+//
+// Skia's SVG module holds a paint as `SkSVGColorType`, an eight-bit sRGB
+// `SkColor`, so a colour outside sRGB is clipped before it is drawn: on a
+// display-p3 canvas `color(display-p3 0 1 0)` read 117, 251, 76 where Chrome
+// keeps 0, 255, 0. The patch keeps an `SkColor4f` in extended sRGB beside
+// `SkSVGColor`'s eight-bit one, and its parser reads `color(srgb r g b / a)`
+// unclamped, which is the form `colour_for_skia` in src/image.rs writes a
+// paint, a gradient stop and a flood colour in when the build carries the
+// patch. Paints, gradient stops and `feFlood` draw from the wide colour, and
+// `feFlood` multiplies the colour's alpha by `flood-opacity`, as Filter
+// Effects 1 section 9.13.2 says, where Skia replaced it. It does not change
+// `SkSVGColorType`: skia-safe reads `SkSVGColor`'s eight-bit `fColor` field
+// by name, so the field stays, and the `color` property stays eight-bit.
+//
+// In a linearRGB primitive, the initial one, Skia took `flood-color` and
+// `lighting-color` as linear values and encoded them once more, so #808080
+// flooded and lit at 188 where Chrome 156 draws 128 (#826).
+// `SkSVGFe::resolvePrimitiveColor` takes both into linear light. A flood is
+// a colour filter on the source rather than a shader, so it reaches the page
+// in float rather than through an eight-bit layer. The lighting filter's
+// light is float, an `SkV3` on the 0-255 scale, so its `SkColor` entry
+// points -- the CanvasKit-parity filters in src/filter.rs -- light exactly as
+// before, and `SkSVGLighting` beside them takes an `SkColor4f` for the SVG
+// module, declared where it is called so that no public header changes.
+// `flatten` still writes the light as an `SkColor`, rounding a float one:
+// this library flattens no image filter -- it serialises a colour filter
+// alone, as a cache key -- and reads no flattened picture back, so only a
+// caller using skia-safe directly against these archives reaches it.
+const SVG_WIDE_COLOUR = join("containers", "skia-svg-wide-colour.patch");
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_line_paints_no_fill against a build from a tree prepared without this patch; it holds that build to the hairline, and fails there once Skia draws no fill
+//
+// Skia's SVG module draws a `<line>` with `SkCanvas::drawLine` for every
+// paint the shape takes, its fill included, and `drawLine` strokes whatever
+// paint it is given, so the initial black fill drew as a hairline along the
+// line: alone where there is no stroke, and through a translucent one
+// (#825). A line has no interior, and Chrome paints its fill nowhere. The
+// patch makes `SkSVGLine::onDraw` draw nothing for a fill paint.
+const SVG_LINE_FILL = join("containers", "skia-svg-line-fill.patch");
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_document_rounds_its_opacities_as_chrome_does against a build from a tree prepared without this patch; it holds that build to the half-float ties, and fails there once Skia rounds a paint's alpha to a byte
+//
+// Skia's SVG module sets a paint's alpha to the product of its colour's
+// alpha, its `fill-opacity` or `stroke-opacity`, and a leaf's `opacity`
+// (`SkSVGRenderContext::commonPaint`), in float, and lays a group's
+// `opacity` down as a layer. Chrome paints an SVG with an eight-bit alpha:
+// it folds a group over one shape into that shape's paint and rounds the
+// product once, so black at 0.5 over red reads 127 there and 128 from a
+// half-float surface, where `Svg::rasterize` draws (#842). The patch adds a
+// per-thread switch, `meo_svg_byte_paint_alpha`, under which `commonPaint`
+// and `<feFlood>`'s colour round their alpha to a byte, and a `<g>` or
+// `<svg>` whose one child is a shape, or another such group, hands its
+// opacity to that shape's paint instead of laying a layer. Off, the module
+// draws as it did: the switch is on only while this library plays a
+// document into raster pixels, never into a PDF or an SVG.
+const SVG_BYTE_PAINT_ALPHA = join(
+  "containers",
+  "skia-svg-byte-paint-alpha.patch",
+);
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 // Re-check: node scripts/test.mjs tests/suite/text.test.js against a binary built from a tree prepared without this patch; "a family's italic face is drawn for italic whatever its weight" fails
 //
 // `SkFontStyleSet::matchStyleCSS3` (src/core/SkFontMgr.cpp) scores a
@@ -302,6 +366,63 @@ const EXACT_BLEND_DIVISION = join(
   "containers",
   "skia-exact-blend-division.patch",
 );
+
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_paint_alpha_scales_an_image_with_each_product_rounded_once against crates.io's Skia on x86-64, as the crates.io publish runs it; it holds that build to bytes off the rounded product, and fails there once the stage rounds exactly
+//
+// The CPU raster's eight-bit pipeline (src/opts/SkRasterPipeline_opts.h)
+// scales a colour by a paint's alpha in `scale_1_float`, through `div255`:
+// on NEON the exact two-step division by 255, elsewhere `(v + 255) >> 8`,
+// which the file's own comment says is a level off about a quarter of the
+// time. So an image drawn at an alpha below one landed apart on x86 and
+// arm64: over every premultiplied source alpha, every opaque backdrop and
+// every paint alpha, 16,945,540 of 67,108,864 channels on an x86-64 machine
+// were up to two levels off the product rounded once and composited, where
+// arm64 was off none (#828). The patch adds `scale_1_float_accurate`, the
+// same stage through `div255_accurate`, and appends it where a paint's alpha
+// is applied: the raster-pipeline sprite blitter, a shader's paint colour
+// and `drawAtlas`. Coverage keeps `scale_1_float`, which
+// `LOWP_EXACT_COVERAGE` makes exact on its own, and the N32 sprite rows,
+// `SkBlendARGB32` and its SIMD forms, are not changed.
+const LOWP_PAINT_ALPHA = join("containers", "skia-lowp-paint-alpha.patch");
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test coverage_scales_and_lerps_with_each_product_rounded_once against crates.io's Skia on x86-64, as the crates.io publish runs it; it holds that build to bytes off the rounded products, and fails there once every route rounds exactly
+//
+// The CPU raster's eight-bit pipeline (src/opts/SkRasterPipeline_opts.h)
+// applies an antialiased edge's, a mask's and a clip's coverage through
+// `div255`: on NEON the exact two-step division by 255, elsewhere
+// `(v + 255) >> 8`, a level off about a quarter of the time. Before a blend
+// that takes coverage as alpha -- source-over among them -- it scales the
+// colour in `scale_1_float`, `scale_u8`, `scale_native` or `scale_565`; after
+// one that cannot -- `copy`, `source-in`, `multiply`, a runtime blender -- it
+// lerps from the backdrop through `lerp`. So the same edge landed apart on x86
+// and arm64: a colour glyph written into an SVG document and drawn back landed
+// up to two levels from the canvas's on x86-64 and one on arm64 (#836). The
+// patch divides each of those through `div255_accurate`. Only partly covered
+// pixels take these stages, and the blends keep their own division:
+// source-over's is already exact, and `multiply`'s, `source-atop`'s, `xor`'s
+// and the other modes' stay `div255` on x86. `scale_1_float_accurate`, which
+// `LOWP_PAINT_ALPHA` adds for a paint's alpha, is the same arithmetic as
+// `scale_1_float` once this applies; both patches keep it, so each can be
+// dropped alone.
+const LOWP_EXACT_COVERAGE = join(
+  "containers",
+  "skia-lowp-exact-coverage.patch",
+);
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_glyph_advances_its_units_times_the_size against crates.io's Skia on Linux; it holds that build to FreeType's 16.16 excess, and fails there once FreeType's advance is exact
+//
+// Skia's FreeType port (src/ports/SkFontHost_FreeType.cpp) takes a glyph's
+// unhinted advance from `linearHoriAdvance`: its units times a 16.16 scale
+// FreeType rounds once, so a 1000-unit em at 16px advances 16 + 2/65536, and
+// the error grows with every glyph on a line (#695). The patch scales the
+// glyph's unscaled advance by the size the face is set to -- the 26.6 one
+// the outlines are drawn at -- and rounds once to 16.16, as HarfBuzz scales
+// one. A variable face's advance still takes its `HVAR` delta rounded to a
+// whole unit, which is FreeType's `FT_LOAD_NO_SCALE` reading and not
+// Chrome's.
+const FREETYPE_ADVANCE = join("containers", "skia-freetype-advance.patch");
+
 // Not a fix: one function, `meo_skia_canvas_needs_its_patched_skia_see_SKIA_BINARIES_URL`,
 // in a file every build compiles. A crate build that names this repository's
 // archives in SKIA_BINARIES_URL calls it (`cfg(meo_skia_marker)`), so one that
@@ -317,10 +438,15 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
   linux: [
@@ -330,10 +456,16 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
+    FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
   // No brotli patch: the published Windows build has no `freetype`, so
@@ -345,10 +477,15 @@ export const PATCHES = {
     GRAPHITE_BINDINGS,
     DWRITE_OBLIQUE,
     SVG_SYNTHETIC_SLANT,
+    SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
+    SVG_BYTE_PAINT_ALPHA,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
+    LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
 };
@@ -365,6 +502,8 @@ export const WITHHELD = {
       "skia-bindings drops brotli on macOS, so there is nothing for it to link",
     [DWRITE_OBLIQUE]:
       "it changes Skia's DirectWrite port, which only Windows builds",
+    [FREETYPE_ADVANCE]:
+      "it changes Skia's FreeType port, which macOS builds without -- skia-safe takes `embed-freetype` on Linux only",
   },
   linux: {
     [METAL_UNTIMED_COMPILE]:
@@ -379,6 +518,8 @@ export const WITHHELD = {
       "it fixes a `freetype` build's link, and Windows builds without `freetype` (`CARGO_FEATURES` in lib/prebuild.mjs)",
     [ASYNC_TRANSFER_REUSE]:
       "skbug.com/40042671: the switch crashed Chromium's GPU process on Windows, with no cause found",
+    [FREETYPE_ADVANCE]:
+      "it changes Skia's FreeType port, which Windows builds without (`CARGO_FEATURES` in lib/prebuild.mjs)",
   },
 };
 

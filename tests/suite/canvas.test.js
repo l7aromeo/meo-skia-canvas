@@ -1208,7 +1208,8 @@ describe("Canvas", () => {
       // and image shaders, and drops everything else without a word: a conic
       // gradient came out as a path with no fill at all, which renders black.
       // Those draws are rasterized into the document instead, and the rest of
-      // the page stays vector.
+      // the page stays vector. A radial gradient between two circles it
+      // writes with the circles swapped; see the test after this one.
       let plain = new Canvas(60, 60),
         ctx = plain.getContext("2d");
       ctx.fillStyle = "orange";
@@ -1241,6 +1242,44 @@ describe("Canvas", () => {
       ctx.fillStyle = gradient;
       ctx.fillRect(10, 10, 40, 40);
       assert.match(wide.toBufferSync("svg").toString("utf-8"), /<image/);
+    });
+
+    test("SVGs embed a radial gradient between two circles", async () => {
+      // The backend writes one with its circles swapped -- the end circle as
+      // the focal circle -- so that it read back up to 255 levels off. Such a
+      // draw is embedded and reads back as drawn; one from a point at its end
+      // circle's centre the backend writes as itself, and stays a vector.
+      const [W, H] = [200, 80];
+      const drawn = (x0, r0) => {
+        const page = new Canvas(W, H);
+        page.gpu = false;
+        const ctx = page.getContext("2d");
+        const gradient = ctx.createRadialGradient(x0, 40, r0, 100, 40, 30);
+        gradient.addColorStop(0, "red");
+        gradient.addColorStop(1, "blue");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, W, H);
+        return ctx;
+      };
+      const apart = async (ctx, svg) => {
+        const back = new Canvas(W, H);
+        back.gpu = false;
+        const into = back.getContext("2d");
+        into.drawImage(await loadImage(Buffer.from(svg)), 0, 0);
+        const [a, b] = [ctx, into].map((c) => c.getImageData(0, 0, W, H).data);
+        return a.filter((byte, i) => Math.abs(byte - b[i]) > 1).length;
+      };
+      for (const [kind, x0, r0, embedded] of [
+        ["a focus off the centre", 110, 0, true],
+        ["a start circle", 100, 10, true],
+        ["from the centre", 100, 0, false],
+      ]) {
+        const ctx = drawn(x0, r0);
+        const svg = (await ctx.canvas.toBuffer("svg")).toString();
+        const image = embedded ? assert.match : assert.doesNotMatch;
+        image(svg, /<image\b/, `${kind}: ${svg}`);
+        assert.equal(await apart(ctx, svg), 0, kind);
+      }
     });
 
     test("SVGs show a putImageData() as the canvas holds it", async () => {

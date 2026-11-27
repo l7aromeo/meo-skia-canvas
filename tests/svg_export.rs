@@ -1266,3 +1266,54 @@ fn a_canvas_drawn_in_writes_its_own_colours_into_an_svg() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// A radial gradient between the circles `(start, start_radius)` and
+/// `(end, 15)`, red to blue, as `createRadialGradient` makes one.
+fn circles(start: Point, start_radius: f32, end: Point) -> Shader {
+    Shader::two_point_conical_gradient(
+        start,
+        start_radius,
+        end,
+        15.0,
+        &[
+            GradientStop {
+                position: 0.0,
+                color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+            },
+            GradientStop {
+                position: 1.0,
+                color: RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+            },
+        ],
+        GradientColorSpace::Srgb,
+    )
+    .expect("a gradient")
+}
+
+/// Skia's SVG device writes a gradient between two circles with the
+/// circles swapped, so one whose start is off its end circle's centre, or
+/// a circle rather than a point, is embedded as pixels and renders back as
+/// the canvas drew it. One from a point at the end circle's centre, which
+/// the device writes as itself, stays a vector.
+#[test]
+fn a_radial_gradient_between_two_circles_is_embedded() {
+    let centre = Point { x: 40.0, y: 20.0 };
+    let cases = [
+        ("off centre", Point { x: 45.0, y: 20.0 }, 0.0),
+        ("a start circle", centre, 5.0),
+    ];
+    for (case, start, start_radius) in cases {
+        let (svg, apart) = exported_svg(|ctx| {
+            ctx.set_fill_shader(&circles(start, start_radius, centre));
+            ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+        });
+        assert_eq!(count(&svg, "image"), 1, "{case}: embedded");
+        assert_eq!(apart, 0, "{case}: renders back as drawn");
+    }
+    let (svg, apart) = exported_svg(|ctx| {
+        ctx.set_fill_shader(&circles(centre, 0.0, centre));
+        ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+    });
+    assert_eq!(count(&svg, "image"), 0, "from the centre: a vector");
+    assert_eq!(apart, 0, "from the centre: renders back as drawn");
+}

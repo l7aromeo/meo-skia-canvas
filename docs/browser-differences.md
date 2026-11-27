@@ -82,6 +82,54 @@ composite, a CPU image or layer 27.1%, and Chrome's rule 40.0%. On the GPU
 the misses of an image or layer are all within 0.18 of a level of a tie, from
 the half-precision arithmetic: 3.3% of the sweep, against 21.4% for a fill.
 
+**A decoded image drawn at a `globalAlpha` below 1 lands the composite with
+each step rounded, on every platform, and Chrome's CPU canvas lands up to two
+levels from it.** The Canvas compositing model scales each premultiplied
+channel by the global alpha and rounds it to a byte, then composites
+`source-over` and rounds again: `round(s * A / 255) + round(d * (255 - A') /
+255)`, `A` the alpha byte and `A'` the source's scaled alpha. A decoded image
+lands exactly that (#828), where Skia's sprite rows, which an unscaled image
+in the page's own byte order at a whole-pixel offset would otherwise take,
+divide by 256. `tests/decoded_image_composite.rs` holds it at every alpha
+wherever Skia scales a paint's alpha exactly: on arm64, and on x86-64 with
+this repository's patched Skia.
+
+Measured with a 256 by 256 baseline JPEG, `tests/assets/images/halved-1.jpeg`,
+drawn at the origin over an opaque ramp on a CPU canvas at every alpha byte
+from 1 to 255, against that formula over the image's own decoded bytes:
+
+|                                    | alphas apart | bytes apart, of 66,846,720 | most |
+| ---------------------------------- | ------------ | -------------------------- | ---- |
+| here, x86-64 Linux and macOS arm64 | 0            | 0                          | 0    |
+| Chrome 156, x86-64 Linux           | 254          | 23,602,378                 | 2    |
+| Chrome 159, macOS arm64            | 254          | 23,602,378                 | 2    |
+
+Both engines decode the JPEG to the same bytes, read at full alpha onto a
+transparent canvas, so the difference is the composite and not the decoder,
+and at full alpha they agree. Chrome 156 on x86-64 Linux and Chrome 159 on
+macOS arm64 land the same bytes at all 255 alphas, so Chrome's rule does not
+depend on the processor's division. At an alpha byte of 1, a source of 226,
+231, 237 over a backdrop of 0, 255, 40 composites to 1, 255, 41; Chrome stores
+1, 254, 41.
+
+Chrome's rule was not identified. Over the same bytes it matches none of
+Skia's sprite rows (`SkBlendARGB32`), the eight-bit raster pipeline with
+x86's `div255`, the legacy blitter's backdrop term `(d * (256 - A)) >> 8`
+under four roundings of the source, a single lerp `s * A + d * (255 - A)`
+divided exactly or through x86's `div255`, or float `source-over` rounded
+once. The nearest misses 15,680,940 bytes.
+
+**An SVG group over overlapping shapes composites exactly through
+`Svg::rasterize`, where Chrome takes the backdrop's share with the legacy
+blitter's divide.** A group's `opacity` over more than one draw is a layer in
+both. Chrome 159 composites it as above, `d * (255 - A)` over 256: a blue
+shape over a black one at 0.5 over red reads 126, 0, 128, where red and blue
+sum to 254 rather than 255, and 177, 0, 77 at 0.3. `rasterize` draws into
+half floats and lands the exact composite, 128, 0, 128 and 179, 0, 77 --
+127.5 and 76.5 are ties, so either neighbour is as near. The same document
+drawn onto a canvas through `drawImage` takes the canvas's rule and lands
+Chrome's bytes (`tests/svg_opacity.rs`, `tests/suite/svg-opacity.test.js`).
+
 Text sets its glyph masks' contrast from the colour it is drawn in, as Skia
 does (`SkMaskGamma`), and on this canvas that colour is the one that stores
 the exact product. Each channel is drawn in the colour nearest the one named
@@ -108,8 +156,10 @@ anywhere else. OpenType 1.9.1 rounds the normalised coordinate to 2.14 and
 nothing after: "It is recommended that at least 16 fractional bits of
 precision be maintained, and that any rounding be done at the last point
 before a value is used." So Oswald's "0" at weight 450 and 1000px measures
-526 on Linux and 525.52 on macOS, where Chrome 156 on macOS measures 525.516;
-Chrome on Linux was not measured. `ch` and `ic` take the advance from the
+526 on Linux and 525.52 on macOS, where Chrome 156 on macOS measures 525.516,
+and its "W" at weight 300 is 715 units on Linux and 714.625 on macOS: 11.44 at
+16px, where macOS measures 11.434006 and Chrome 156 on macOS 11.43399. Chrome
+on Linux was not measured. `ch` and `ic` take the advance from the
 face's tables and are the interpolation's on every platform. The `UPSTREAM`
 note at the width in `Typesetter::measure` carries the re-check.
 
@@ -120,11 +170,10 @@ corrects its matrix for the size FreeType chose only below 1px, so advances and
 outlines come from the truncated size while the font's metrics take the one
 asked for. In Oswald, `measureText("Hamburgefonstiv")` at each hundredth from
 17.00px to 18.00px steps by 0 at 36 of the 100 and by 0.0956 to 0.0973 at the
-rest, where on macOS every step is 0.0617 or 0.0618, and each width is within
-0.0005 of macOS's at `floor(size × 64) / 64`, the rest being FreeType's
-advances against CoreText's: 17.29px measures 106.69469 on Linux and 17.28125px
-106.69444 on macOS; 17.30px measures 106.79041 on Linux and 17.296875px
-106.79089 on macOS. Hinting on and off measure alike. Chrome on Linux takes its
+rest, where on macOS every step is 0.0617 or 0.0618, and each width is
+macOS's at `floor(size × 64) / 64`: 17.29px measures 106.69441 on Linux and
+17.28125px 106.69444 on macOS; 17.30px measures 106.79088 on Linux and
+17.296875px 106.79089 on macOS. Hinting on and off measure alike. Chrome on Linux takes its
 glyph advances from the same scaler -- Blink's `SkFontGetGlyphWidthForHarfBuzz`
 in `skia_text_metrics.cc` reads them from the Skia strike -- but does not step
 the same way: at a device scale of 1 it lays a web font out without subpixel
@@ -132,30 +181,30 @@ positioning, and that function then rounds each advance to a whole pixel. The
 next entry has the measurements. The `UPSTREAM` note at the size in
 `Context2D::set_font` carries the re-check.
 
-On Linux an advance comes out a fraction off its exact size, in every face
-whose units per em do not divide the size's 64ths into 16.16 fixed point
-exactly. Skia's FreeType scaler takes an unhinted advance from FreeType's
-`linearHoriAdvance` (`SkFontHost_FreeType.cpp`), which scales the font's units
-by the 16.16 `x_scale` that `FT_Set_Char_Size` rounds: at 16px in a face of
-1000 units, 1024 × 65536 / 1000 is 67,108.864 and is stored as 67,109. So a
-1000-unit ideograph advances 16 + 2/65536 px, about 3 × 10⁻⁵, where CoreText
-gives 16, as #695 found DirectWrite does, and the excess adds up along a line:
-past 512 glyphs it passes Chrome's 1/64 px layout unit. Measured at 16px with
-npm 7.1.0's linux-arm64-glibc binary, against this library on macOS:
+On Linux an advance is the glyph's font units times the size the face is set
+to, rounded once to 16.16, as HarfBuzz scales one. Skia's FreeType scaler takes
+an unhinted advance from FreeType's `linearHoriAdvance`
+(`SkFontHost_FreeType.cpp`), which scales the units by the 16.16 `x_scale` that
+`FT_Set_Char_Size` rounds: at 16px in a face of 1000 units, 1024 × 65536 / 1000
+is 67,108.864 and is stored as 67,109, so a 1000-unit ideograph advanced 16 +
+2/65536 px and the excess added up along a line (#695).
+`containers/skia-freetype-advance.patch` scales the glyph's unscaled advance
+instead, so a crate build against crates.io's Skia, which does not carry it,
+still takes FreeType's. At 16px, against this library on macOS:
 
-| face, text                                 | Linux      | macOS      |
-| ------------------------------------------ | ---------- | ---------- |
-| Noto Sans SC (1000 units), `漢`            | 16.0000305 | 16         |
-| Noto Sans SC, six `漢`                     | 96.0001831 | 96         |
-| Oswald (1000 units), `H`                   | 8.9760132  | 8.9759979  |
-| Amstelvar (2000 units), `H` at `"opsz" 14` | 13.9198151 | 13.9199982 |
-| Arial (2048 units), `Hamburgefonstiv`      | 120.945313 | 120.945313 |
+| face, text                                 | crates.io's Skia | patched    | macOS      |
+| ------------------------------------------ | ---------------- | ---------- | ---------- |
+| Noto Sans SC (1000 units), `漢`            | 16.0000305       | --         | 16         |
+| Recursive (1000 units), `I`                | 8.0000153        | 8          | 8          |
+| Recursive, six `I`                         | 48.0000916       | 48         | 48         |
+| Oswald (1000 units), `H`                   | 8.9760132        | 8.9759979  | 8.9759979  |
+| Amstelvar (2000 units), `H` at `"opsz" 14` | 13.9198151       | 13.9199982 | 13.9199982 |
 
-A face of 2000 units comes out under, its scale of 33,554.432 stored as
-33,554, and one of 2048 units is exact, its scale a whole number. Amstelvar at
-its default instance stands a further 0.0016 apart, the `HVAR` rounding
-recorded above. Skia hands HarfBuzz these same advances through its own font
-functions (`SkShaper_harfbuzz.cpp`), so no route here takes an exact one.
+The crates.io column is npm 7.1.0's linux-arm64-glibc binary for the faces
+#695 measured, and the unpatched tree on Linux x86-64 for Recursive; the
+patched column is Linux x86-64. A face whose units divide the size's 64ths
+exactly, as 2048 does, was exact either way. A variable face away from its
+default instance still takes `HVAR` in whole units, the entry above records.
 
 Chrome 158.0.8127.18 on Linux (Chrome for Testing's headless shell, in
 Playwright's `v1.65.0-noble` image on arm64) lays #695's ideograph out
@@ -181,8 +230,7 @@ pixels. Liberation Sans, a system face reached through fontconfig, measures
 fractional advances at both scales: `measureText("a")` at 16px is 8.8984375,
 its 1139 units of 2048 exactly. This library keeps every advance fractional on
 every platform, as Chrome does on macOS, so on Linux it stands apart from
-Chrome's whole pixels by more than the 16.16 excess does. The `UPSTREAM` note
-at the width in `Typesetter::measure` carries the re-check.
+Chrome's whole pixels at a scale of 1.
 
 A line fits a paragraph up to a hundredth narrower than it. With
 SkParagraph's rounding hack off, as every paragraph here is,
@@ -1139,6 +1187,90 @@ stays within a level of its fill on the same canvas:
 filters 149, 108, 204 in Chrome. On an sRGB canvas Chrome's filter and fill
 agree.
 
+**An SVG image's `color`, and so `currentcolor`, and its `lighting-color`
+are drawn in sRGB, so a wide colour in them is clipped on a wide canvas, where
+Chrome keeps it.** Skia's SVG
+module parses no CSS Color 4 form, so every colour property -- `fill`,
+`stroke`, `stop-color`, `flood-color`, `lighting-color` and `color`, as an
+attribute or in `style` -- is read here by the reader a `fillStyle` uses and
+written back before Skia parses the document (`colour_for_skia` in
+`src/image.rs`). The paints, a gradient's stops and `<feFlood>`'s colour are
+written as `color(srgb ...)` in extended sRGB, which
+`containers/skia-svg-wide-colour.patch` teaches Skia to read and keep as an
+`SkColor4f`: `fill="color(display-p3 0 1 0)"` reads back 0, 255, 0 on a
+`display-p3` canvas, here and in Chrome 156, and on an sRGB canvas 0, 255, 0
+in both. Skia holds `color` as an eight-bit sRGB `SkColor`, through a reader
+the patch leaves alone, so it is written as `rgba()` clipped to sRGB:
+`color="color(display-p3 0 1 0)"` under `fill="currentcolor"` reads sRGB
+green on a `display-p3` canvas, 117, 251, 76. `lighting-color` is written as
+`color(srgb ...)` clipped to sRGB, because Skia's lighting filter applies no
+colour conversion to its light and lights in whatever space it draws into;
+the patch keeps it in float, as the next entry says. Chrome was measured only
+for `fill`; CSS Color 4 resolves
+`currentcolor` to the colour `color` computes, so it is expected to keep P3
+green there as it does for `fill`. `Svg::rasterize` draws into half floats
+in sRGB, so a paint keeps a wide colour there too: P3's green reads 1, 255, 0
+on a `display-p3` canvas, a level of red from the half float's sRGB below
+zero (`a_wide_paint_reaches_a_wide_canvas`). It blends in sRGB rather than in
+the canvas's space the image is later drawn onto
+([#816](https://github.com/l7aromeo/meo-skia-canvas/issues/816)).
+
+**An SVG's opacities land each paint's alpha on a byte, as Chrome's do.** A
+browser paints an SVG with an eight-bit alpha: a paint's alpha is the
+product of its colour's alpha, its `fill-opacity` or `stroke-opacity`, and an
+`opacity` folded into that one draw -- a shape's own, and a group's whose one
+child is a shape -- rounded once. Measured in Chrome 159's headless shell,
+black over opaque red: at 0.5, `opacity`, `fill-opacity`, `stroke-opacity`,
+`flood-opacity`, an `rgba()` alpha and a group over one shape each read 127,
+and a group at 0.3 over a shape at `fill-opacity` 0.5 reads 217, 255 less
+0.15 times 255 rounded; rounding the group and the paint apart reads 216.
+Skia's SVG module keeps the product in float and lays a group down as a
+layer, so `Svg::rasterize`'s half floats landed every tie a level high and a
+`drawImage` of an SVG rounded such a group twice.
+`containers/skia-svg-byte-paint-alpha.patch` rounds the product, folds a
+group over one shape into that shape's paint, and is switched on only while a
+document is played into raster pixels (`BytePaintAlpha`), never into a PDF or
+an SVG. A canvas records its `drawImage` of an SVG, so a PDF or an SVG of
+that canvas takes the byte alpha: under half a level from the document's
+own, and what the canvas shows. `tests/svg_opacity.rs` and
+`tests/suite/svg-opacity.test.js` hold 40 cases to Chrome's bytes; the group
+over overlapping shapes is the entry near the top of this file.
+
+**An SVG's `stop-opacity` at a tie lands a level from Chrome, and the
+difference is the representation, not a rounding rule.** Chrome keeps a
+gradient stop's opacity in float, as this library does, so it is not placed
+on a byte. 178.5, black at 0.3 over red, is an exact tie: Chrome's eight-bit
+surface rounds it half to even, 178, and `Svg::rasterize`'s half float stores
+0.7 as 0.70020 and reads 179. At 0.5 `drawImage` lands 127.5 as 127 through
+the canvas's eight-bit pipeline, where Chrome lands 128. Each is as near the
+exact value as the other, and rounding the stop to a byte would move the
+ties that agree.
+
+**An SVG light is lit in float, where Chrome 156 rounds it to a byte in
+linear light.** A lighting primitive in a linearRGB filter, which
+`color-interpolation-filters`' initial value makes it, lights in linear
+light, and Chrome rounds `lighting-color` to an eight-bit colour once it has
+taken it there. Linear light puts the dark levels close together, so the
+rounding moves them: #111111 is 0.0056 in linear light, 1.43 as a byte, and
+Chrome lights with 1. Here the light keeps its float value
+(`containers/skia-svg-wide-colour.patch`, `SkSVGLighting` beside Skia's
+lighting filter). Measured in Chrome Headless Shell 156.0.8078.47, a flat
+surface under `<feDiffuseLighting diffuseConstant="0.5">` lit from straight
+overhead, over the 256 grey levels: 56 differ, and of those this library is
+nearer the exact result on 47 and further on 9; the largest error is 6.4
+levels here and 9.2 in Chrome. #111111 should light at 9.2: Chrome lights it
+at half of byte 1, which its layer stores as 0, and draws 0, where this
+library draws 13. A model of each -- the light rounded to a byte or not, then
+the layer rounded half to even, as Skia's pipeline rounds -- predicts 252 of
+Chrome's 256 levels and 253 of this library's.
+
+Neither is exact, because the lit result is stored in the document's
+eight-bit layer, in linear light, before it is encoded back to sRGB. At
+`diffuseConstant="1"` that layer rounds exactly where Chrome's light does, so
+the two agree on all 256 levels and each is exact on 183; #3a7fd0 lights at
+59 rather than 58 in both. The 9 levels where Chrome is nearer are ones where
+the layer's rounding lands this library on the far side of the exact value.
+
 **`AccentColor` and `AccentColorText` are read; Chrome 156 refuses both.**
 CSS Color 4 section 6.2 lists them among the system colours, valued by the
 user agent like the rest, so a string naming one is a valid colour. Here they
@@ -1668,6 +1800,40 @@ so Linux takes it too. The font's 20 code points with no colour paint are
 drawn by the platform here and by Fontations' outlines in Chrome, and stand
 up to 215 apart on macOS.
 
+**Text in an SVG image set in a COLR face is drawn by the canvas's text
+route, as `fillText` draws it, wherever the document can be cut around the
+text; anywhere else it is Skia's SVG module's, through the platform's
+scaler.** The module draws `<text>` through the typeface, so on macOS 27.2 a
+COLRv0 glyph in an SVG drew nothing and a COLRv1 one CoreText's colours, and
+on Linux FreeType's (#663). A `<text>` holding a run in such a face is laid
+out here instead -- each addressable character where its `x`, `y`, `dx` and
+`dy` lists place it, each text chunk shifted by its `text-anchor` and its own
+advance, white space collapsed as `white-space: normal` collapses it -- and
+drawn with `fillText` under `geometricPrecision`, between the module's
+drawings of what precedes and follows it, each a parse of the document with
+everything outside it set to `display: none` (`src/image/colr_text.rs`).
+Against chrome-headless-shell 156 on macOS 27.2, with the fonts embedded,
+nine of eleven documents are Chrome's byte for byte: the two test fonts at 48
+and 72px, both anchors, position lists with a `tspan`'s `dx` and `dy`, white
+space across a `tspan`, `opacity`, `fill-opacity` and `currentcolor`, and a
+`font-weight` the face has no bold for. Under a `viewBox` scale of 2 the
+glyphs sit a device row from Chrome's, as `fillText` under the same scale
+does (#142); a text mixing a plain run and a colour one is Chrome's in the
+colour glyph and the module's in the plain run, whose glyph masks stand from
+Chrome's as the module's plain text does. A text this layout does not carry
+out is left to the module: one under a group whose `opacity`, `filter`,
+`clip-path`, `mask`, `mix-blend-mode` or `isolation` a cut would apply to
+part of its content, or under any container but `<g>`; one holding a
+`textPath`, or stating `rotate`, `textLength`, `writing-mode`, `direction`,
+`unicode-bidi`, `baseline-shift`, `dominant-baseline`, `alignment-baseline`,
+`text-decoration`, `letter-spacing`, `word-spacing`, `font-variant`,
+`font-feature-settings`, `font-variation-settings` or `text-rendering`; one
+stroked, filled from a gradient or a pattern, or positioned in percentages;
+and every text in a document that `<use>`s an element of its own flow, whose
+clone a cut would hide too. On a GPU canvas the document's vectors are the
+GPU's, these glyphs among them: a 48px COLRv1 glyph stands 106 pixels from
+`fillText` there, as a circle in an SVG stands 228 from the CPU canvas's.
+
 **On a GPU canvas a COLR colour glyph is an image made on the CPU, as Skia
 draws a colour glyph from the image its scaler context makes, so that the GPU
 canvas composites the bytes the CPU canvas does.** Composited through a layer
@@ -1867,6 +2033,47 @@ is off that value on the same 304 pixels under `color-dodge` and 4 under
 library is off it on none. What Chrome draws on an x86 machine was not
 measured: it runs the same stages, so it is expected to split by SIMD level
 as this library did.
+
+**An image or a pattern drawn at a `globalAlpha` below one scales its bytes
+by the alpha correctly rounded on every CPU, and Chrome's CPU canvas on x86
+rounds through an approximation.** Skia's eight-bit raster pipeline applies a
+paint's alpha in `scale_1_float`, which divides by 255 through `div255`: the
+exact two-step division on arm64's NEON, and `(v + 255) >> 8` elsewhere, a
+level off for about a quarter of products. Over every premultiplied source
+alpha, every opaque backdrop and every alpha byte, 16,945,540 of 67,108,864
+channels on an x86-64 machine landed up to two levels off each channel scaled
+and rounded, then composited and rounded, where arm64 was off none (#828).
+`containers/skia-lowp-paint-alpha.patch` applies a paint's alpha through
+`scale_1_float_accurate`, the same stage through the exact division, in the
+raster-pipeline sprite blitter, after a shader and in `drawAtlas`, so the
+three land the same bytes on both
+(`a_paint_alpha_scales_an_image_with_each_product_rounded_once`). An
+antialiased edge's coverage is applied exactly too, by
+`containers/skia-lowp-exact-coverage.patch` (#836). An eight-bit image in the page's own byte
+order, unscaled at a whole-pixel offset, takes Skia's sprite rows instead,
+which the patch does not change and which are not exact on either (#828).
+What Chrome draws on x86 was not measured: it runs the same stage, so it is
+expected to land apart as this library did.
+
+**An antialiased edge, a mask and a clip apply their coverage correctly
+rounded on every CPU, and Chrome's CPU canvas on x86 rounds through an
+approximation.** On a partly covered pixel, Skia's eight-bit raster pipeline
+scales the colour by the coverage before a blend that takes coverage as
+alpha, source-over among them, and lerps from the backdrop by it after one
+that cannot, `copy` among them. Both divide by 255 through `div255`, exact
+on arm64 and `(v + 255) >> 8` elsewhere. Over a 256 by 256 page of sixteen
+discs in a translucent ink, on an x86-64 machine every route -- an edge, a
+blurred mask, a clip shader and an edge inside one -- landed partly covered
+pixels off the products rounded once, under source-over and `copy` alike: by
+a level, and by two for the edge inside a clip. arm64 was off none.
+`containers/skia-lowp-exact-coverage.patch` divides those stages through
+`div255_accurate`, and x86-64 is off none too
+(`coverage_scales_and_lerps_with_each_product_rounded_once`). The blends
+keep their own division: source-over's is exact on both, and `multiply`,
+`source-atop`, `xor` and the other modes that divide through `div255` keep
+it, so their translucent interiors on x86 round as they did. What Chrome
+draws on x86 was not measured: it runs the same stages, so it is expected to
+land apart as this library did.
 
 **A PDF's blend modes render as the canvas's in poppler, and macOS's
 CoreGraphics renders a few of them otherwise.** A composite operation on an

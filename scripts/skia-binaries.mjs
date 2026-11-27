@@ -289,11 +289,18 @@ export function readArgs(args) {
 
 /**
  * The features cargo resolves for skia-bindings under `featureArgs`, sorted,
- * or `null` where cargo cannot say without the network.
+ * or `null` where cargo cannot say. `env` is cargo's environment.
+ *
+ * Asked offline first. Where that fails -- a cargo home that holds no
+ * registry yet, as on a fresh CI runner, where the tree fails before the
+ * build has fetched anything -- the lock file's crates for the target are
+ * fetched and the tree asked again. The build fetches those same crates
+ * moments later, so the fetch costs it nothing. Where there is no network,
+ * or `CARGO_NET_OFFLINE` is set, the fetch fails and the answer stays `null`.
  */
-export function skiaFeatures(featureArgs, root = ROOT) {
-  try {
-    const line = execFileSync(
+export function skiaFeatures(featureArgs, root = ROOT, env = process.env) {
+  const tree = () =>
+    execFileSync(
       "cargo",
       [
         "tree",
@@ -308,9 +315,26 @@ export function skiaFeatures(featureArgs, root = ROOT) {
         "{f}",
         ...featureArgs,
       ],
-      { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    return line.split(",").filter(Boolean).sort();
+      { cwd: root, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    )
+      .trim()
+      .split(",")
+      .filter(Boolean)
+      .sort();
+  try {
+    return tree();
+  } catch {
+    // Fetched below.
+  }
+  const at = featureArgs.indexOf("--target");
+  const target = at >= 0 ? featureArgs[at + 1] : hostTarget();
+  try {
+    execFileSync("cargo", ["fetch", "--locked", "--target", target], {
+      cwd: root,
+      env,
+      stdio: "ignore",
+    });
+    return tree();
   } catch {
     return null;
   }

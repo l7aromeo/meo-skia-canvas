@@ -10,17 +10,26 @@ use skia_safe::{
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
+mod byte_paint_alpha;
+mod colr_text;
+mod document_features;
+
+pub(crate) use byte_paint_alpha::BytePaintAlpha;
+
 use crate::{
-    color::{RgbaLinear, rgba_linear_to_skia_color},
+    color::{RgbaLinear, rgba_linear_to_skia_color, skia_color_to_rgba_linear},
+    context::layer::Target,
     css,
     decode::bmp::space_of,
     error::Error,
+    export::VectorFeatures,
     font::caseless,
     font_library::{
         FontLibrary as SharedFonts, ObliqueFamily, StyleGroups, is_group_alias,
         is_oblique_alias, oblique_alias, unmatched_name,
     },
     geometry::Size,
+    node::utils::{css_to_color4f, is_named_color},
     pixels::{ImageData, PixelColorSpace, PixelExportOptions},
     start_skia, started,
 };
@@ -692,9 +701,32 @@ impl Image {
 /// `usePseudos` stays at `['']`, which skips `:hover` and its neighbours --
 /// right for the same reason, since a still image never enters those states.
 pub struct Svg {
+    /// The document as Skia's module reads it: what sizes it, and what draws
+    /// it where `layers` does not.
     dom: svg::Dom,
+    /// The document cut around its text in colour faces, in paint order, or
+    /// `None` where it holds none -- see `colr_text`.
+    layers: Option<Vec<Layer>>,
+    /// What the module's drawing of the document asks of a vector backend
+    /// -- see `document_features`.
+    features: VectorFeatures,
     intrinsic: Size,
     autosized: bool,
+}
+
+/// One step of drawing a document cut around its colour text.
+enum Layer {
+    /// The module's drawing of one segment of the document.
+    Segment(svg::Dom),
+    /// A `<text>` drawn by the canvas's text route.
+    Text(colr_text::TextDraw),
+}
+
+/// A document as parsed, before its size is derived.
+pub(crate) struct ParsedSvg {
+    dom: svg::Dom,
+    layers: Option<Vec<Layer>>,
+    features: VectorFeatures,
 }
 
 /// An [`ImageData`] as an image to draw, which is how JavaScript's
@@ -760,7 +792,7 @@ impl Svg {
     /// Returns [`Error::DecodeImage`] if the XML cannot be parsed.
     pub fn parse(xml: &str) -> Result<Self, Error> {
         start_skia();
-        Ok(Self::from_dom(Self::parse_shared(xml.as_bytes())?))
+        Ok(Self::from_parsed(Self::parse_shared(xml.as_bytes())?))
     }
 
     /// Parses SVG bytes against the shared font library: the font manager it
@@ -769,11 +801,20 @@ impl Svg {
     ///
     /// Both doors into this crate go through here -- [`Svg::parse`] and the
     /// Neon binding's `record_svg` -- so that a document's text is set in the
-    /// same faces whichever loaded it. The library also holds the system font
-    /// manager, which costs 6.6 ms to build on macOS: a door that built its
-    /// own on every parse paid that for each document.
-    pub(crate) fn parse_shared(xml: &[u8]) -> Result<svg::Dom, Error> {
-        SharedFonts::with_shared(|lib| {
+    /// same faces whichever loaded it, and so that the two cannot disagree
+    /// about what a document says: what is rewritten before Skia reads it --
+    /// see `rewrite_text` -- and what is cut out of it, is rewritten and cut
+    /// here and nowhere else. The library also holds the system font manager,
+    /// which costs 6.6 ms to build on macOS: a door that built its own on
+    /// every parse paid that for each document.
+    ///
+    /// Text set in a face with a `COLR` table is taken out of what the module
+    /// draws and drawn by the canvas -- see `colr_text`. Whether a `<text>`
+    /// is set in one is asked of the canvas's own layout, after the library
+    /// is released, since a layout takes the library itself. A segment that
+    /// fails to parse leaves the whole document to the module.
+    pub(crate) fn parse_shared(xml: &[u8]) -> Result<ParsedSvg, Error> {
+        let (rewritten, font_mgr) = SharedFonts::with_shared(|lib| {
             let generics = lib.generic_families();
             let claimed = lib.claimed_families();
             let obliques = lib.oblique_families();
@@ -781,31 +822,40 @@ impl Svg {
             // cannot be built before they are known. See `families_named`.
             let wanted = families_named(xml, &generics, &claimed);
             let (font_mgr, groups) = lib.svg_fonts(&wanted);
-            Self::parse_dom(
-                xml, font_mgr, &generics, &claimed, &obliques, &groups,
-            )
+            let rewritten = rewrite_text(
+                xml, &generics, &claimed, &obliques, &groups, &font_mgr,
+            );
+            (rewritten, font_mgr)
+        });
+        let bytes = rewritten.as_deref().unwrap_or(xml);
+        let dom = Self::dom_of(bytes, font_mgr.clone())?;
+        let layers = colr_text::plan(bytes)
+            .and_then(|plan| {
+                let colour = colr_text::set_in_colour(&plan.candidates);
+                plan.parts(bytes, &colour)
+            })
+            .and_then(|parts| {
+                parts
+                    .into_iter()
+                    .map(|part| match part {
+                        colr_text::Part::Segment(bytes) => {
+                            Self::dom_of(&bytes, font_mgr.clone())
+                                .ok()
+                                .map(Layer::Segment)
+                        }
+                        colr_text::Part::Text(text) => Some(Layer::Text(text)),
+                    })
+                    .collect()
+            });
+        Ok(ParsedSvg {
+            dom,
+            layers,
+            features: document_features::features_of(bytes),
         })
     }
 
-    /// Parses SVG bytes into a document, rewriting what has to be rewritten
-    /// before Skia reads it.
-    ///
-    /// Every parse goes through here, by way of [`Svg::parse_shared`], so
-    /// that the two doors cannot disagree about what a document says. They
-    /// did once: the rewrite of text positioning lengths landed on
-    /// `parse` alone would have left `loadImage` short by six per cent on
-    /// exactly the documents the crate side had just fixed.
-    pub(crate) fn parse_dom(
-        xml: &[u8],
-        font_mgr: FontMgr,
-        generics: &[(String, String)],
-        claimed: &[(String, String)],
-        obliques: &[ObliqueFamily],
-        groups: &StyleGroups,
-    ) -> Result<svg::Dom, Error> {
-        let rewritten =
-            rewrite_text(xml, generics, claimed, obliques, groups, &font_mgr);
-        let bytes = rewritten.as_deref().unwrap_or(xml);
+    /// `bytes` as Skia's module parses them.
+    fn dom_of(bytes: &[u8], font_mgr: FontMgr) -> Result<svg::Dom, Error> {
         svg::Dom::from_bytes(bytes, font_mgr).map_err(|_| Error::DecodeImage {
             reason: "could not parse SVG XML".to_string(),
         })
@@ -816,11 +866,24 @@ impl Svg {
     /// The Neon binding records the result into a `Picture` rather than a
     /// raster surface, so it needs the sizing without [`Svg::rasterize`]'s
     /// surface.
-    pub(crate) fn from_dom(mut dom: svg::Dom) -> Self {
+    pub(crate) fn from_parsed(parsed: ParsedSvg) -> Self {
+        let ParsedSvg {
+            mut dom,
+            mut layers,
+            features,
+        } = parsed;
         let (intrinsic, autosized) = derive_intrinsic_size(&mut dom);
         descend(&dom.root());
+        for layer in layers.iter_mut().flatten() {
+            if let Layer::Segment(segment) = layer {
+                derive_intrinsic_size(segment);
+                descend(&segment.root());
+            }
+        }
         Self {
             dom,
+            layers,
+            features,
             intrinsic,
             autosized,
         }
@@ -948,7 +1011,13 @@ impl Svg {
         // Re-check: grep -n "color?: Color"
         // ~/.cargo/registry/src/*/skia-safe-*/src/modules/svg/node.rs
         // An SVG node's `color` is an `SkColor` and nothing wider.
-        self.dom.root().set_color(rgba_linear_to_skia_color(color));
+        let color = rgba_linear_to_skia_color(color);
+        self.dom.root().set_color(color);
+        for layer in self.layers.iter_mut().flatten() {
+            if let Layer::Segment(segment) = layer {
+                segment.root().set_color(color);
+            }
+        }
     }
 
     /// Rasterizes the document into an [`Image`] of the given dimensions.
@@ -957,10 +1026,13 @@ impl Svg {
     /// transparent surface of half floats in sRGB and snapshotted, so its
     /// translucent draws composite in sRGB, as a browser composites them,
     /// and an image it embeds keeps colours outside sRGB, such as a Display
-    /// P3 PNG's, for a wide-gamut canvas it is drawn onto. The fit is uniform
-    /// and centred -- `preserveAspectRatio`'s own `xMidYMid meet` -- so a
-    /// 3-by-2 document in a 2-by-1 box inks 150 by 100 of it and is never
-    /// distorted.
+    /// P3 PNG's, for a wide-gamut canvas it is drawn onto. Each paint's alpha
+    /// lands on a byte, as a browser's does, where Skia's SVG module carries
+    /// `containers/skia-svg-byte-paint-alpha.patch`: black at 0.5 over red
+    /// reads 127, where the half floats alone would keep 127.5 and read 128.
+    /// The fit is uniform and centred -- `preserveAspectRatio`'s own
+    /// `xMidYMid meet` -- so a 3-by-2 document in a 2-by-1 box inks 150 by
+    /// 100 of it and is never distorted.
     ///
     /// **This is not `object-fit`.** `contain` is what this gives; `cover`
     /// and `fill` mean scaling the returned [`Image`], which is an operation
@@ -1003,9 +1075,6 @@ impl Svg {
                 height: height as f32,
             });
         }
-        self.dom
-            .set_container_size(SkSize::new(width as f32, height as f32));
-
         let info = render_info(width, height);
         let mut surface =
             started::raster(&info, None, None).ok_or_else(|| {
@@ -1049,16 +1118,74 @@ impl Svg {
                 }
             }
 
-            self.dom.render(canvas);
+            // Each paint's alpha on a byte, as a browser paints the document:
+            // the half floats below would otherwise keep a tie such as 0.5 a
+            // level from Chrome's byte. See `BytePaintAlpha`.
+            let _byte_alpha = BytePaintAlpha::hold();
+            self.render(
+                canvas,
+                SkSize::new(width as f32, height as f32),
+                Target::Pixels,
+            );
         }
 
         Ok(Image::still(surface.image_snapshot()))
     }
 
-    /// The parsed document, for a caller that draws it somewhere other than a
-    /// raster surface.
-    pub(crate) fn dom_mut(&mut self) -> &mut svg::Dom {
-        &mut self.dom
+    /// Whether the canvas draws text of the document -- see `colr_text` --
+    /// which a document draws otherwise than pixels do -- see
+    /// [`Self::render`].
+    pub(crate) fn draws_text(&self) -> bool {
+        self.layers
+            .iter()
+            .flatten()
+            .any(|layer| matches!(layer, Layer::Text(_)))
+    }
+
+    /// Draws the document onto `canvas` with its viewport `container`: the
+    /// module's drawing of it, or, where it holds text in a colour face, each
+    /// segment of it and each such text in turn.
+    ///
+    /// The one way both doors draw a document, so that a text the canvas
+    /// draws is drawn by each.
+    ///
+    /// Each such text is drawn as the canvas's page plays for `kind` -- see
+    /// `colr_text::TextDraw::draw`. Says what the drawing asks of a vector
+    /// backend: what the module's asks, judged from the document -- see
+    /// `document_features` -- and what those texts ask.
+    pub(crate) fn render(
+        &mut self,
+        canvas: &skia_safe::Canvas,
+        container: SkSize,
+        kind: Target,
+    ) -> VectorFeatures {
+        self.dom.set_container_size(container);
+        let Some(layers) = self.layers.as_mut() else {
+            self.dom.render(canvas);
+            return self.features;
+        };
+        // What `currentcolor` resolves to at the root: the override where
+        // one is set, which replaces the root's own `color`, and black, the
+        // initial value, where neither says.
+        let current = self
+            .dom
+            .root()
+            .color()
+            .map_or(RgbaLinear::from_srgb(0.0, 0.0, 0.0, 1.0), |color| {
+                skia_color_to_rgba_linear(*color)
+            });
+        let root = self.dom.root();
+        layers
+            .iter_mut()
+            .fold(self.features, |features, layer| match layer {
+                Layer::Segment(segment) => {
+                    segment.set_container_size(container);
+                    segment.render(canvas);
+                    features
+                }
+                Layer::Text(text) => features
+                    .with(text.draw(canvas, &root, container, current, kind)),
+            })
     }
 }
 
@@ -1534,6 +1661,162 @@ impl<'a> ExRatios<'a> {
     }
 }
 
+/// The attribute Skia's SVG module reads every reference from: an
+/// `<image>`'s source, a `<use>` target, a `<textPath>`'s path, an
+/// `<feImage>`'s, and the gradient or pattern another inherits from. SVG 2
+/// names it `href`, which Skia does not read.
+const XLINK_HREF: &str = "xlink:href";
+
+/// What an element's `xlink:href` is renamed to where the element carries an
+/// `href` too: a name Skia reads nothing from, so that `href` alone decides
+/// the reference, as SVG 2 says it does.
+const SHADOWED_XLINK_HREF: &str = "data-shadowed-xlink-href";
+
+/// The properties whose value is a colour, as an attribute or a `style`
+/// declaration, that Skia's SVG module parses for itself.
+const COLOUR_PROPERTIES: [&str; 6] = [
+    "fill",
+    "stroke",
+    "stop-color",
+    "flood-color",
+    "lighting-color",
+    "color",
+];
+
+/// The colour properties whose value Skia's SVG module, patched by
+/// `containers/skia-svg-wide-colour.patch`, keeps as an `SkColor4f` in
+/// extended sRGB: the paints, a gradient's stops and `<feFlood>`'s colour.
+///
+/// `color` is not among them, because Skia parses it as an `SkColor` through
+/// a reader the patch does not change, and neither is `lighting-color` --
+/// see [`FLOAT_SRGB_COLOUR_PROPERTIES`].
+const WIDE_COLOUR_PROPERTIES: [&str; 4] =
+    ["fill", "stroke", "stop-color", "flood-color"];
+
+/// The colour properties the patched module keeps in float but that are
+/// clipped to sRGB here: `lighting-color`, because Skia's lighting filter
+/// applies no colour conversion to its light and lights in whatever space it
+/// draws into, so only a colour inside sRGB means the same everywhere.
+const FLOAT_SRGB_COLOUR_PROPERTIES: [&str; 1] = ["lighting-color"];
+
+/// The CSS named colours Skia's SVG module has no entry for, which it draws
+/// as the initial black.
+///
+/// Measured against skia-safe 0.156.0, every name of CSS Color 4's table
+/// drawn through `SkSVGDOM` alone: `SkParse::FindNamedColor` holds the SVG
+/// 1.1 names, without CSS's `grey` spellings of the greys, its `lightgray`,
+/// or CSS Color 4's `rebeccapurple`. `transparent` is not a named colour and
+/// is rewritten with every other form.
+///
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+/// Re-check: cargo test skia_reads_every_named_colour_but_these
+const SKIA_UNNAMED: [&str; 8] = [
+    "darkgrey",
+    "darkslategrey",
+    "dimgrey",
+    "grey",
+    "lightgray",
+    "lightslategrey",
+    "rebeccapurple",
+    "slategrey",
+];
+
+/// The spelling of `currentcolor` Skia's SVG module matches, and the only
+/// one: `SkSVGAttributeParser::parseSVGColor` compares it case-sensitively,
+/// where a CSS keyword is ASCII case-insensitive.
+const SKIA_CURRENT_COLOR: &str = "currentColor";
+
+/// A colour property's value written as Skia's SVG module reads it, or
+/// `None` where it already reads it as CSS does.
+///
+/// Skia parses a paint itself and knows `#rgb`, `#rrggbb`, its own table of
+/// names in lower case, `rgb()` and `rgba()`; anything else -- `color()`,
+/// `oklch()`, `#rrggbbaa`, the space-separated `rgb()`, `transparent`,
+/// `Red` -- fails to parse and draws the initial black. So every colour but
+/// the two hex forms and the names Skia holds, which it reads exactly, is
+/// resolved through [`css_to_color4f`], the reader `fillStyle` uses, and
+/// written back as `rgba()` with eight-bit channels and the alpha as a
+/// number.
+///
+/// Where Skia's SVG module is patched to read one
+/// (`cfg(meo_svg_wide_colour)`), a property of [`WIDE_COLOUR_PROPERTIES`] is
+/// written as `color(srgb r g b / a)` instead, its channels in extended sRGB
+/// and unclamped, so a colour outside sRGB reaches a wide canvas as it is.
+/// A property of [`FLOAT_SRGB_COLOUR_PROPERTIES`] is written the same way
+/// with its channels clipped to sRGB. Every other property, and every
+/// property on an unpatched build, is clipped to sRGB here and rounded, as an
+/// eight-bit sRGB canvas clips a `fillStyle`, because `SkSVGColorType` is an
+/// eight-bit sRGB `SkColor` and holds nothing wider.
+///
+/// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+/// Re-check: cargo test an_svg_paint_is_the_colour_it_names
+/// with this function answering `None`; it fails while
+/// `SkSVGAttributeParser` reads no CSS Color 4 form and `SkSVGColorType` is
+/// an `SkColor`.
+fn colour_for_skia(property: &str, value: &str) -> Option<String> {
+    /// Steps in one eight-bit channel.
+    const LEVELS: f32 = 255.0;
+    let value = value.trim();
+    if value.eq_ignore_ascii_case(SKIA_CURRENT_COLOR) {
+        return (value != SKIA_CURRENT_COLOR)
+            .then(|| SKIA_CURRENT_COLOR.to_string());
+    }
+    let hex = value.strip_prefix('#').filter(|digits| {
+        matches!(digits.len(), 3 | 6)
+            && digits.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    let named = is_named_color(value) && !SKIA_UNNAMED.contains(&value);
+    if hex.is_some() || named {
+        return None;
+    }
+    let colour = css_to_color4f(value)?;
+    let alpha = colour.a.clamp(0.0, 1.0);
+    if cfg!(meo_svg_wide_colour) && WIDE_COLOUR_PROPERTIES.contains(&property) {
+        let Color4f { r, g, b, .. } = colour;
+        return Some(format!("color(srgb {r} {g} {b} / {alpha})"));
+    }
+    if cfg!(meo_svg_wide_colour)
+        && FLOAT_SRGB_COLOUR_PROPERTIES.contains(&property)
+    {
+        let [r, g, b] = [colour.r, colour.g, colour.b]
+            .map(|channel| channel.clamp(0.0, 1.0));
+        return Some(format!("color(srgb {r} {g} {b} / {alpha})"));
+    }
+    let [r, g, b] = [colour.r, colour.g, colour.b]
+        .map(|channel| (channel.clamp(0.0, 1.0) * LEVELS).round() as u8);
+    Some(format!("rgba({r}, {g}, {b}, {alpha})"))
+}
+
+/// A `style` attribute with each colour declaration written as Skia reads
+/// it -- see [`colour_for_skia`] -- or `None` where none needs to be.
+///
+/// Every other declaration, and the separators between them, are kept as
+/// written.
+fn style_colours_for_skia(style: &str) -> Option<String> {
+    let mut changed = false;
+    let rewritten: Vec<String> = style
+        .split(';')
+        .map(|declaration| {
+            let Some((name, value)) = declaration.split_once(':') else {
+                return declaration.to_string();
+            };
+            let property = name.trim().to_ascii_lowercase();
+            match COLOUR_PROPERTIES
+                .contains(&property.as_str())
+                .then(|| colour_for_skia(&property, value))
+                .flatten()
+            {
+                Some(colour) => {
+                    changed = true;
+                    format!("{name}:{colour}")
+                }
+                None => declaration.to_string(),
+            }
+        })
+        .collect();
+    changed.then(|| rewritten.join(";"))
+}
+
 /// The elements whose positioning attributes Skia will not let us write.
 ///
 /// Matched by bare name, with no namespace resolution, because that is what
@@ -1849,6 +2132,7 @@ fn rewrite_text(
         // declaration, which wins -- and the slant it computes to.
         let mut family_attribute: Option<String> = None;
         let mut own_slant = inherited.slant;
+        let mut states_href = false;
         let mut own_weight = inherited.weight;
 
         for attribute in element.attributes() {
@@ -1857,6 +2141,7 @@ fn rewrite_text(
             let Cow::Borrowed(raw) = attribute.value else {
                 return None;
             };
+            states_href |= key == "href";
             if raw.contains('&') {
                 continue;
             }
@@ -1962,18 +2247,41 @@ fn rewrite_text(
             let Cow::Borrowed(raw) = attribute.value else {
                 return None;
             };
+            // Skia's SVG module reads a reference from `xlink:href` alone, on
+            // every element that takes one, so SVG 2's `href` -- what a
+            // document written today carries -- named no image, no `<use>`
+            // target and no gradient or pattern to inherit from. `href` is
+            // renamed to the attribute Skia reads, and where an element
+            // carries both, its `xlink:href` to one Skia reads nothing from:
+            // SVG 2 has `href` win, and Chrome takes it whichever comes
+            // first, an empty one included. Only the name is spliced, so a
+            // value carrying an entity reference is renamed too.
+            let renamed = match key {
+                "href" => Some(XLINK_HREF),
+                XLINK_HREF if states_href => Some(SHADOWED_XLINK_HREF),
+                _ => None,
+            };
+            if let Some(renamed) = renamed {
+                splices.push((borrowed_range(text, key)?, renamed.to_string()));
+                continue;
+            }
             if raw.contains('&') {
                 continue;
             }
             let range = borrowed_range(text, raw)?;
 
             let converted = if key == "style" {
-                // Only the family is rewritten; the rest of the declaration
-                // is passed through as written.
-                style_declaration(Some(raw), "font-family")
+                // The family and the colours are rewritten, in one splice
+                // since they share the attribute; the rest of the
+                // declaration is passed through as written.
+                let family = style_declaration(Some(raw), "font-family")
                     .zip(written.as_deref())
                     .filter(|(family, written)| family.trim() != *written)
-                    .map(|(family, written)| raw.replacen(family, written, 1))
+                    .map(|(family, written)| raw.replacen(family, written, 1));
+                style_colours_for_skia(family.as_deref().unwrap_or(raw))
+                    .or(family)
+            } else if COLOUR_PROPERTIES.contains(&key) {
+                colour_for_skia(key, raw)
             } else if key == "font-family" {
                 // A family stated in `style` too is the one Skia reads, so
                 // the attribute is left as it is.
@@ -2707,7 +3015,303 @@ fn labelled_bmp(image: SkImage, bytes: &[u8]) -> SkImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::image::{Content, record_svg};
+
+    /// Skia's SVG module, given no rewrite, draws every CSS named colour but
+    /// [`SKIA_UNNAMED`] as CSS does, and each of those as something else.
+    /// Holds the list to what Skia's table is, in both directions: a name
+    /// Skia gains fails here as surely as one it loses.
+    #[test]
+    fn skia_reads_every_named_colour_but_these() {
+        use crate::{node::utils::NAMED_COLORS, started};
+        use skia_safe::Color;
+        let drawn = |fill: &str| {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="{fill}"/></svg>"#
+            );
+            let dom = svg::Dom::from_str(&svg, FontMgr::new()).expect("parses");
+            let mut surface =
+                started::raster_n32_premul((2, 2)).expect("surface");
+            surface.canvas().clear(Color::WHITE);
+            dom.render(surface.canvas());
+            let pixels = surface.image_snapshot();
+            let colour = pixels
+                .peek_pixels()
+                .expect("raster pixels")
+                .get_color((1, 1));
+            [colour.r(), colour.g(), colour.b()]
+        };
+        let wrong: Vec<&str> = NAMED_COLORS
+            .iter()
+            .filter(|(name, rgb)| {
+                (drawn(name) == *rgb) == SKIA_UNNAMED.contains(name)
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "Skia's table and SKIA_UNNAMED disagree over {wrong:?}"
+        );
+    }
+    /// A paint outside sRGB reaches a wide surface as it is where Skia's SVG
+    /// module is patched to keep one (`cfg(meo_svg_wide_colour)`), and is
+    /// clipped to sRGB where it is not. `color`, and so `currentcolor`, is
+    /// clipped on both, Skia holding it as an `SkColor`.
+    ///
+    /// Drawn through the document's own DOM onto a `display-p3` raster, so
+    /// the paint lands in the surface's own space rather than in the half
+    /// floats in sRGB [`Svg::rasterize`] draws into.
+    #[test]
+    fn a_wide_svg_paint_reaches_a_wide_surface() {
+        use crate::{node::utils::opt_color_space, started};
+        use skia_safe::Color;
+        /// `color(display-p3 0 1 0)`, P3's green, which sRGB cannot hold.
+        const WIDE: &str = "color(display-p3 0 1 0)";
+        /// P3's green as a `display-p3` surface stores it.
+        const KEPT: [u8; 3] = [0, 255, 0];
+        /// sRGB's green as a `display-p3` surface stores it: what P3's
+        /// green is drawn as once clipped to sRGB.
+        const CLIPPED: [u8; 3] = [117, 251, 76];
+        let drawn = |body: &str| {
+            let svg = Svg::parse(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
+            ))
+            .expect("parses");
+            let info = ImageInfo::new(
+                (4, 4),
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                opt_color_space("display-p3"),
+            );
+            let mut surface =
+                started::raster(&info, None, None).expect("surface");
+            surface.canvas().clear(Color::WHITE);
+            svg.dom.render(surface.canvas());
+            let mut px = [0u8; 4];
+            assert!(surface.read_pixels(
+                &info.with_dimensions((1, 1)),
+                &mut px,
+                4,
+                (2, 2)
+            ));
+            [px[0], px[1], px[2]]
+        };
+        let rect =
+            |paint: &str| format!(r#"<rect width="4" height="4" {paint}/>"#);
+        let wide = if cfg!(meo_svg_wide_colour) {
+            KEPT
+        } else {
+            CLIPPED
+        };
+        let cases = [
+            (rect(&format!(r#"fill="{WIDE}""#)), wide, "fill"),
+            (
+                rect(&format!(r#"style="fill: {WIDE}""#)),
+                wide,
+                "style fill",
+            ),
+            (
+                format!(
+                    r#"<line x1="0" y1="2" x2="4" y2="2" stroke-width="4" stroke="{WIDE}"/>"#
+                ),
+                wide,
+                "stroke",
+            ),
+            (
+                format!(
+                    r#"<defs><linearGradient id="g"><stop offset="0" stop-color="{WIDE}"/><stop offset="1" stop-color="{WIDE}"/></linearGradient></defs>{}"#,
+                    rect(r#"fill="url(#g)""#)
+                ),
+                wide,
+                "stop-color",
+            ),
+            (
+                format!(
+                    r#"<defs><filter id="f" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB"><feFlood flood-color="{WIDE}"/></filter></defs>{}"#,
+                    rect(r#"filter="url(#f)""#)
+                ),
+                wide,
+                "flood-color",
+            ),
+            (
+                format!(
+                    r#"<g color="{WIDE}">{}</g>"#,
+                    rect(r#"fill="currentcolor""#)
+                ),
+                CLIPPED,
+                "currentcolor",
+            ),
+        ];
+        let off: Vec<String> = cases
+            .iter()
+            .filter_map(|(body, expected, what)| {
+                let got = drawn(body);
+                (got != *expected)
+                    .then(|| format!("{what}: {got:?}, expected {expected:?}"))
+            })
+            .collect();
+        assert!(off.is_empty(), "{off:#?}");
+    }
+
+    /// What a 4x4 document whose body is `body` draws at (2, 2) over white,
+    /// through the module alone.
+    fn drawn_at_centre(body: &str) -> [u8; 3] {
+        use crate::started;
+        use skia_safe::Color;
+        let svg = Svg::parse(&format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
+        ))
+        .expect("parses");
+        let mut surface = started::raster_n32_premul((4, 4)).expect("surface");
+        surface.canvas().clear(Color::WHITE);
+        svg.dom.render(surface.canvas());
+        let colour = surface
+            .image_snapshot()
+            .peek_pixels()
+            .expect("raster pixels")
+            .get_color((2, 2));
+        [colour.r(), colour.g(), colour.b()]
+    }
+
+    /// A translucent `flood-color` is drawn at its own alpha times
+    /// `flood-opacity`, as Filter Effects 1 section 9.13.2 says: "If the
+    /// flood-color value includes an alpha channel, the alpha channel gets
+    /// multiplied with the computed value of the flood-opacity property."
+    /// Skia replaces the colour's alpha with the opacity, so the flood is
+    /// opaque where the patched module (`cfg(meo_svg_wide_colour)`)
+    /// multiplies.
+    #[test]
+    fn a_translucent_flood_keeps_its_alpha() {
+        for (colour, opacity) in [
+            ("rgba(0, 204, 0, 0.5)", "1"),
+            ("rgba(0, 204, 0, 0.5)", "0.5"),
+            ("color(srgb 0 0.8 0 / 0.25)", "1"),
+        ] {
+            let flood = drawn_at_centre(&format!(
+                r#"<defs><filter id="f" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB"><feFlood flood-color="{colour}" flood-opacity="{opacity}"/></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
+            ));
+            let fill = drawn_at_centre(&format!(
+                r#"<rect width="4" height="4" fill="{colour}" fill-opacity="{opacity}"/>"#
+            ));
+            assert_eq!(
+                flood == fill,
+                cfg!(meo_svg_wide_colour),
+                "{colour} at {opacity}: the flood {flood:?}, the fill {fill:?}"
+            );
+        }
+    }
+
+    /// A flood in a linearRGB filter, `color-interpolation-filters`'
+    /// initial value, is its own colour on the page, as Chrome 156 draws it
+    /// (#826). Skia took the sRGB value as linear and encoded it once more,
+    /// so #808080 drew 188; the patched module (`cfg(meo_svg_wide_colour)`)
+    /// takes it into linear light and keeps it in float, where an eight-bit
+    /// layer in linear light would round #070707 to 13.
+    #[test]
+    fn a_flood_is_its_own_colour_in_a_linear_filter() {
+        for colour in ["#808080", "#3a7fd0", "#070707"] {
+            let flood = drawn_at_centre(&format!(
+                r#"<defs><filter id="f" x="0" y="0" width="1" height="1"><feFlood flood-color="{colour}"/></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
+            ));
+            let fill = drawn_at_centre(&format!(
+                r#"<rect width="4" height="4" fill="{colour}"/>"#
+            ));
+            assert_eq!(
+                flood == fill,
+                cfg!(meo_svg_wide_colour),
+                "{colour}: the flood {flood:?}, the fill {fill:?}"
+            );
+        }
+    }
+
+    /// A 4x4 document lit by `<feDiffuseLighting>` in a linearRGB filter, a
+    /// flat surface under a light straight overhead, so every pixel is the
+    /// light's colour times `kd`.
+    fn lit_overhead(colour: &str, kd: f32) -> [u8; 3] {
+        drawn_at_centre(&format!(
+            r#"<defs><filter id="f" x="0" y="0" width="1" height="1"><feDiffuseLighting lighting-color="{colour}" diffuseConstant="{kd}" surfaceScale="0"><feDistantLight azimuth="0" elevation="90"/></feDiffuseLighting></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
+        ))
+    }
+
+    /// A light in a linearRGB filter is its own colour on the page, as
+    /// Chrome 156 lights it (#826): at `diffuseConstant="1"` the surface
+    /// is lit at the light's colour. Skia's module took `lighting-color`'s
+    /// sRGB value as linear and encoded it once more, so #808080 lit at 188;
+    /// the patched module (`cfg(meo_svg_wide_colour)`) takes it into linear
+    /// light, where the lit page is the fill.
+    #[test]
+    fn a_light_is_its_own_colour_in_a_linear_filter() {
+        for colour in ["#808080", "#00cc00"] {
+            let lit = lit_overhead(colour, 1.0);
+            let fill = drawn_at_centre(&format!(
+                r#"<rect width="4" height="4" fill="{colour}"/>"#
+            ));
+            assert_eq!(
+                lit == fill,
+                cfg!(meo_svg_wide_colour),
+                "{colour}: lit {lit:?}, the fill {fill:?}"
+            );
+        }
+    }
+
+    /// The patched module (`cfg(meo_svg_wide_colour)`) lights in float
+    /// rather than by a light rounded to a byte, as Chrome 156 rounds it.
+    /// #111111 is 0.0056 in linear light, byte 1 once rounded, and half of
+    /// that rounds to nothing: Chrome draws 0. Lit in float it is 0.0028,
+    /// which the eight-bit layer the document is drawn into holds as byte 1,
+    /// and the page reads that encoded back. `color(srgb 0.069 ...)` is
+    /// kept in float on its way to the module as well: as the byte 18 it
+    /// would light at 22, where in float it lights at 13, as Chrome draws
+    /// it.
+    #[test]
+    fn a_light_keeps_the_precision_of_its_colour() {
+        use crate::color::{linear_to_srgb_byte, srgb_to_linear};
+        for (colour, value, kd) in [
+            ("#111111", f32::from(0x11u8) / 255.0, 0.5),
+            ("color(srgb 0.069 0.069 0.069)", 0.069, 1.0),
+        ] {
+            let linear = srgb_to_linear(value) * kd;
+            let expected =
+                linear_to_srgb_byte((linear * 255.0).round() / 255.0);
+            let lit = lit_overhead(colour, kd);
+            assert_eq!(
+                lit == [expected; 3],
+                cfg!(meo_svg_wide_colour),
+                "{colour} at {kd}: lit {lit:?}, in float {expected}"
+            );
+        }
+    }
+
+    /// A line has no interior, so its fill paints nothing, as Chrome 156
+    /// draws it (#825): Skia's module drew a line's fill as a hairline, the
+    /// initial black under a translucent stroke and alone where there is no
+    /// stroke. The patched module (`cfg(meo_svg_line_fill)`) draws a line's
+    /// stroke alone, as `fill="none"` does.
+    #[test]
+    fn a_line_paints_no_fill() {
+        let line = |paint: &str| {
+            drawn_at_centre(&format!(
+                r#"<line x1="0" y1="2" x2="4" y2="2" {paint}/>"#
+            ))
+        };
+        let stroke = r#"stroke-width="4" stroke="rgba(0, 204, 0, 0.5)""#;
+        for (paint, unfilled) in [
+            (String::new(), r#"fill="none""#.to_string()),
+            (r#"fill="red""#.into(), r#"fill="none""#.into()),
+            (stroke.into(), format!(r#"fill="none" {stroke}"#)),
+        ] {
+            let (filled, unfilled) = (line(&paint), line(&unfilled));
+            assert_eq!(
+                filled == unfilled,
+                cfg!(meo_svg_line_fill),
+                "{paint:?}: {filled:?}, with no fill {unfilled:?}"
+            );
+        }
+    }
+
+    use crate::node::{
+        image::{Content, record_svg},
+        typography::FAKE_ITALIC_SKEW,
+    };
     use skia_safe::textlayout::TypefaceFontProvider;
 
     /// A one-pixel PNG, which is a still image however it is asked about.
@@ -3255,6 +3859,302 @@ mod tests {
             "rows disagreeing, as (x, y, w, h):\n{}",
             wrong.join("\n")
         );
+    }
+
+    /// An SVG blends what it draws over itself in sRGB, as Chrome renders an
+    /// SVG image and as the canvas blends.
+    ///
+    /// Black over an opaque red ground three ways: at `fill-opacity` 0.5,
+    /// covering half a pixel, and both at once. Chrome 158 draws the
+    /// document as an `<img>`, from a data URL and from a blob alike, into a
+    /// canvas reading 127, 128 and 191 -- the arithmetic of sRGB values.
+    /// Blended in linear light they read 188, 188 and 225. The first is an
+    /// exact tie, 127.5: Chrome lands it 127 because it rounds the paint's
+    /// alpha to a byte, which Skia's SVG module does only with
+    /// `containers/skia-svg-byte-paint-alpha.patch`; without it, as from
+    /// crates.io's Skia, the half floats keep the tie and it reads 128.
+    #[test]
+    fn an_svg_blends_its_layers_in_srgb_as_chrome_does() {
+        /// The red channel Chrome 158 reads from the probe below, pixel by
+        /// pixel; every pixel is opaque and holds no green or blue.
+        const CHROME_RED: [u8; 4] = [255, 127, 128, 191];
+        /// The same without the byte-paint-alpha patch: the tie lands high.
+        const UNROUNDED_RED: [u8; 4] = [255, 128, 128, 191];
+        let red = if cfg!(meo_svg_byte_paint_alpha) {
+            CHROME_RED
+        } else {
+            UNROUNDED_RED
+        };
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="1">
+<rect width="4" height="1" fill="rgb(255,0,0)"/>
+<rect x="1" width="1" height="1" fill="black" fill-opacity="0.5"/>
+<rect x="2" width="0.5" height="1" fill="black"/>
+<rect x="3" width="0.5" height="1" fill="black" fill-opacity="0.5"/>
+</svg>"#;
+        let image = Svg::parse(xml)
+            .expect("valid SVG")
+            .rasterize(4, 1)
+            .expect("rasterizes");
+        let info = ImageInfo::new(
+            (4, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let mut pixels = [0u8; 16];
+        assert!(
+            image.inner.read_pixels(
+                &info,
+                &mut pixels,
+                16,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ),
+            "the surface reads back"
+        );
+        let want: Vec<u8> =
+            red.iter().flat_map(|&red| [red, 0, 0, u8::MAX]).collect();
+        assert_eq!(pixels.to_vec(), want);
+    }
+
+    /// Translucent over translucent blends in sRGB too, where the result
+    /// stays translucent and is unpremultiplied on the way out.
+    ///
+    /// Black at `fill-opacity` 0.6 over red at 0.6, on nothing. Chrome 156
+    /// draws the document as an `<img>` into a canvas reading 73, 0, 0, 214
+    /// where they overlap and each alone where it does not. Blended in
+    /// linear light the overlap reads 146.
+    #[test]
+    fn an_svg_blends_translucent_over_translucent_in_srgb_as_chrome_does() {
+        /// What Chrome 156 reads at each pixel below, unpremultiplied: the
+        /// overlap, red alone and black alone.
+        const CHROME: [((i32, i32), [u8; 4]); 3] = [
+            ((10, 0), [73, 0, 0, 214]),
+            ((10, 30), [255, 0, 0, 153]),
+            ((60, 0), [0, 0, 0, 153]),
+        ];
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">
+<rect width="40" height="40" fill="red" fill-opacity="0.6"/>
+<rect width="80" height="20" fill="black" fill-opacity="0.6"/>
+</svg>"#;
+        let image = Svg::parse(xml)
+            .expect("valid SVG")
+            .rasterize(80, 40)
+            .expect("rasterizes");
+        let info = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let got: Vec<_> = CHROME
+            .iter()
+            .map(|&(at, _)| {
+                let mut pixel = [0u8; 4];
+                assert!(
+                    image.inner.read_pixels(
+                        &info,
+                        &mut pixel,
+                        4,
+                        at,
+                        skia_safe::image::CachingHint::Allow,
+                    ),
+                    "the surface reads back"
+                );
+                (at, pixel)
+            })
+            .collect();
+        assert_eq!(got, CHROME.to_vec());
+    }
+
+    /// SVG 2's `href` names what `xlink:href` does, on every element that
+    /// takes a reference, and wins over an `xlink:href` beside it.
+    ///
+    /// Each document paints red and then something blue only through a
+    /// reference: an `<image>` of a blue PNG, a `<use>` of a blue rect, a
+    /// gradient and a pattern inheriting their blue from another. Chrome 156
+    /// draws each as an `<img>` into a canvas reading blue in the middle,
+    /// with and without `xmlns:xlink` declared; with both attributes on one
+    /// `<image>` it takes `href` whichever comes first, and an empty `href`
+    /// draws no image at all. Chrome refuses a document using `xlink:href`
+    /// without declaring the prefix, so those run only with it declared.
+    #[test]
+    fn an_svg_follows_href_as_chrome_does() {
+        /// A one-pixel PNG of opaque blue, and one of opaque lime.
+        const BLUE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNgYPj/HwADAgH/OSkZvgAAAABJRU5ErkJggg==";
+        const LIME: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNg+M/wHwAEAQH/rrVV9QAAAABJRU5ErkJggg==";
+        /// What Chrome 156 reads at (1, 1): the reference followed, or the
+        /// red ground where no image is drawn.
+        const BLUE_PIXEL: [u8; 4] = [0, 0, 255, 255];
+        const RED_PIXEL: [u8; 4] = [255, 0, 0, 255];
+        let ground = r#"<rect width="4" height="2" fill="red"/>"#;
+        let by_href = [
+            format!(r#"{ground}<image href="{BLUE}" width="4" height="2"/>"#),
+            format!(
+                r##"<defs><rect id="a" width="4" height="2" fill="blue"/></defs>{ground}<use href="#a"/>"##
+            ),
+            r##"<defs><linearGradient id="g"><stop offset="0" stop-color="blue"/><stop offset="1" stop-color="blue"/></linearGradient><linearGradient id="h" href="#g"/></defs><rect width="4" height="2" fill="url(#h)"/>"##.to_string(),
+            r##"<defs><pattern id="p" width="4" height="2" patternUnits="userSpaceOnUse"><rect width="4" height="2" fill="blue"/></pattern><pattern id="q" href="#p"/></defs><rect width="4" height="2" fill="url(#q)"/>"##.to_string(),
+        ];
+        let declared = [
+            (
+                format!(
+                    r#"{ground}<image xlink:href="{BLUE}" width="4" height="2"/>"#
+                ),
+                BLUE_PIXEL,
+            ),
+            (
+                format!(
+                    r#"{ground}<image href="{BLUE}" xlink:href="{LIME}" width="4" height="2"/>"#
+                ),
+                BLUE_PIXEL,
+            ),
+            (
+                format!(
+                    r#"{ground}<image xlink:href="{LIME}" href="{BLUE}" width="4" height="2"/>"#
+                ),
+                BLUE_PIXEL,
+            ),
+            (
+                format!(
+                    r#"{ground}<image href="" xlink:href="{BLUE}" width="4" height="2"/>"#
+                ),
+                RED_PIXEL,
+            ),
+        ];
+        let documents = by_href
+            .iter()
+            .flat_map(|body| {
+                [
+                    (String::new(), body.clone(), BLUE_PIXEL),
+                    (XLINK_DECLARATION.to_string(), body.clone(), BLUE_PIXEL),
+                ]
+            })
+            .chain(declared.into_iter().map(|(body, want)| {
+                (XLINK_DECLARATION.to_string(), body, want)
+            }));
+        let info = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let wrong: Vec<String> = documents
+            .filter_map(|(declaration, body, want)| {
+                let xml = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg"{declaration} width="4" height="2">{body}</svg>"#
+                );
+                let image = Svg::parse(&xml)
+                    .expect("valid SVG")
+                    .rasterize(4, 2)
+                    .expect("rasterizes");
+                let mut pixel = [0u8; 4];
+                assert!(image.inner.read_pixels(
+                    &info,
+                    &mut pixel,
+                    4,
+                    (1, 1),
+                    skia_safe::image::CachingHint::Allow,
+                ));
+                (pixel != want).then(|| format!("{xml}: {pixel:?}, not {want:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The declaration of the `xlink` prefix, as it sits on a root element.
+    const XLINK_DECLARATION: &str =
+        r#" xmlns:xlink="http://www.w3.org/1999/xlink""#;
+
+    /// An SVG document's `italic` and `oblique <angle>` text in a family
+    /// with no face that leans is drawn skewed, as canvas text is: a quarter
+    /// for `italic`, `tan(angle)` for `oblique <angle>` at any angle, a
+    /// negative one leaning back -- see docs/browser-differences.md for
+    /// where Chrome differs. A build of crates.io's Skia, without
+    /// `containers/skia-svg-synthetic-slant.patch`, draws all of it upright,
+    /// as `docs/rust.md` says; this holds each build to what it says.
+    ///
+    /// The lean is read off an "I": the left edge of its stem near its top
+    /// and near its baseline, apart by the skew over the height between,
+    /// less what the upright "I" measures, since Recursive's has serifs.
+    #[test]
+    fn svg_text_leans_by_the_slant_it_asks_for_in_a_face_that_does_not() {
+        /// How far a measured lean may stand from the skew asked for: a
+        /// quarter of a pixel of edge over the rows the lean is read across.
+        const LEAN_TOLERANCE: f32 = 0.25 / 70.0;
+        crate::font::FontLibrary::new()
+            .register_font_from_path(
+                SVG_UPRIGHT_FAMILY,
+                "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf",
+            )
+            .expect("a bundled face registers");
+        // Rows inside the stem, clear of the serifs at its top, about row
+        // 110, and at the baseline, row 250.
+        let (side, top, bottom) = (300u32, 140u32, 210u32);
+        let lean = |style: &str| {
+            let xml = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="{side}" height="{side}"><text x="100" y="250" font-size="200" font-family="{SVG_UPRIGHT_FAMILY}" font-style="{style}">I</text></svg>"#
+            );
+            let image = Svg::parse(&xml)
+                .expect("valid SVG")
+                .rasterize(side, side)
+                .expect("rasterizes");
+            let info = ImageInfo::new(
+                (side as i32, side as i32),
+                ColorType::Alpha8,
+                AlphaType::Premul,
+                None,
+            );
+            let mut alpha = vec![0u8; (side * side) as usize];
+            assert!(image.inner.read_pixels(
+                &info,
+                &mut alpha,
+                side as usize,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ));
+            // Where the stem's left edge crosses the row, to a fraction of a
+            // pixel: the first fully covered pixel, less the coverage of the
+            // anti-aliased pixels before it, which is what a straight edge
+            // leaves of each.
+            let edge = |y: u32| {
+                let row =
+                    &alpha[(y * side) as usize..((y + 1) * side) as usize];
+                let full = row
+                    .iter()
+                    .position(|&a| a == u8::MAX)
+                    .unwrap_or_else(|| panic!("{style}: no stem on row {y}"));
+                let partial: f32 = row[..full]
+                    .iter()
+                    .map(|&a| f32::from(a) / f32::from(u8::MAX))
+                    .sum();
+                full as f32 - partial
+            };
+            (edge(top) - edge(bottom)) / (bottom - top) as f32
+        };
+        let patched = cfg!(meo_svg_synthetic_slant);
+        let skew = |degrees: f32| match patched {
+            true => degrees.to_radians().tan(),
+            false => 0.0,
+        };
+        let quarter = match patched {
+            true => FAKE_ITALIC_SKEW.abs(),
+            false => 0.0,
+        };
+        let upright = lean("normal");
+        let mut wrong = Vec::new();
+        for (style, want) in [
+            ("italic", quarter),
+            ("oblique 20deg", skew(20.0)),
+            ("oblique 10deg", skew(10.0)),
+            ("oblique -20deg", skew(-20.0)),
+        ] {
+            let got = lean(style) - upright;
+            if (got - want).abs() > LEAN_TOLERANCE {
+                wrong.push(format!("{style}: leans {got}, not {want}"));
+            }
+        }
+        assert!(wrong.is_empty(), "patched {patched}: {}", wrong.join("; "));
     }
 
     /// Rasterizing does not leave the document resized behind it.
@@ -4666,6 +5566,10 @@ mod tests {
         );
     }
 
+    /// The family the crate's SVG slant test registers: Recursive's upright
+    /// face alone, under a name nothing on the system answers to.
+    const SVG_UPRIGHT_FAMILY: &str = "SvgSlantUprightOnly";
+
     /// The family the crate's SVG door test registers: Oswald, under a name
     /// nothing on the system answers to.
     const SVG_DOOR_FAMILY: &str = "SvgDoorOswald";
@@ -4695,7 +5599,7 @@ mod tests {
             .expect("valid SVG")
             .rasterize(width, height)
             .expect("rasterizes");
-        let Some((Content::Vector(picture, _), _)) =
+        let Some((Content::Vector { picture, .. }, _)) =
             record_svg(&Data::new_copy(xml.as_bytes()), None)
         else {
             panic!("the binding records the document");

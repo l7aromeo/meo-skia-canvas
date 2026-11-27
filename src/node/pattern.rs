@@ -89,7 +89,12 @@ impl CanvasPattern {
             true => ctx.source_image().map(Content::Bitmap).unwrap_or_default(),
             false => ctx
                 .picture()
-                .map(|picture| Content::Vector(picture, dims))
+                .map(|picture| Content::Vector {
+                    picture,
+                    size: dims,
+                    features: ctx.page().vector_features(),
+                    document: None,
+                })
                 .unwrap_or_default(),
         };
         let (text_contrast, text_gamma) = ctx.canvas_text;
@@ -192,7 +197,7 @@ impl CanvasPattern {
                     None,
                 )
                 .map(|shader| shader.with_local_matrix(&stamp.matrix)),
-            Content::Vector(pict, ..) => {
+            Content::Vector { picture: pict, .. } => {
                 let tile_rect = Rect::from_size(stamp.dims);
                 let shader = pict.to_shader(
                     stamp.repeat,

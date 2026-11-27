@@ -11,12 +11,13 @@ use std::cell::RefCell;
 
 #[cfg(debug_assertions)]
 use super::CONTEXT_BYTES;
-use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
+use super::{
+    BoxedContext2D, Context2D, Dye, layer::Entries, page::ExportOptions,
+};
 use crate::{
     color_filter::BoxedColorFilter,
     context2d::{FontKerning, TextRendering, decoration_from_css},
     css::parse_filter_named,
-    export::VectorFeatures,
     gpu::RenderingEngine,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
@@ -1279,7 +1280,12 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
                 None => ctx.draw_source_image(image, &src, &dst, apart),
             }
         }
-        Content::Vector(picture, size) => {
+        Content::Vector {
+            picture,
+            size,
+            features,
+            document,
+        } => {
             // An SVG with no intrinsic size is scaled to the canvas instead,
             // except where the call gave a destination rect to scale to.
             if source.autosized && nums.len() != 4 {
@@ -1310,7 +1316,24 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
             // viewport reached the part of the destination the crop had
             // excluded, until this started taking the clipped pair.
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_picture(picture, &src, &dst, VectorFeatures::PLAIN);
+            match document {
+                // A pair, which a page draws as its entries so that each
+                // target plays its own -- see `layer::holds_a_pair`.
+                Some(document) => ctx.draw_picture_costing(
+                    &|| Some(picture.clone()),
+                    Some(Entries::pair(
+                        picture.clone(),
+                        document.clone(),
+                        *features,
+                    )),
+                    picture.cull_rect(),
+                    &src,
+                    &dst,
+                    *features,
+                    1,
+                ),
+                None => ctx.draw_picture(picture, &src, &dst, *features),
+            }
         }
         Content::Loading | Content::Broken => (),
     }
