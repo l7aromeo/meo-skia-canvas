@@ -170,13 +170,15 @@ pub(crate) const CONTEXT_BYTES: usize = 4_800;
 pub(crate) const DOCUMENT_REPLAY_BUDGET: usize = 64;
 
 /// How many pages of its own pixels a page's entries may hold in images of
-/// other canvases, and in the rasters of the patterns of them they draw
-/// from, before the page lets go of them -- see `PageRecorder::flatten`.
+/// other canvases, in the rasters of the patterns of them they draw from,
+/// and in the pixels put into it, before the page lets go of them -- see
+/// `PageRecorder::flatten`.
 ///
 /// Chosen rather than derived: past it a page holds one page of pixels for
 /// what it drew, so a page never cleared that keeps drawing changing
-/// canvases in, or filling with patterns of them, levels off at a few
-/// pages, where it held a page for every draw. Below it what the page drew
+/// canvases in, filling with patterns of them, or putting `ImageData`,
+/// levels off at a few pages, where it held a page for every draw and a
+/// copy of every put. Below it what the page drew
 /// itself stays entries, which a read at another density draws at that
 /// density; past it they are the base's pixels, scaled there. The images a
 /// document of the page holds count too -- canvases drawn in past
@@ -5402,6 +5404,8 @@ impl Context2D {
                 })
             });
             self.pop(); // restore discarded matrix & clip
+            // The put's pixels, a copy of what was put, the page now holds.
+            self.flatten_past_budget();
             return true;
         }
         false

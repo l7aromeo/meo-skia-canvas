@@ -357,14 +357,25 @@ impl Layer {
 
 impl Layer {
     /// Calls `each` with every image this entry holds that its pictures do
-    /// not count -- see [`Split::image`] and [`Entries::held`] -- once for
+    /// not count -- see [`Split::image`], [`Entries::held`] and a put's
+    /// pixels, [`PutPixels::image`] -- once for
     /// each time it holds it: the walk the count a page keeps as it files
     /// is held to, and what a document of a canvas is found to hold.
     pub(crate) fn held_images(&self, each: &mut dyn FnMut(HeldImage)) {
         match self {
             Layer::Group(group) => group.contents.held_images(each),
             Layer::Clipped(piece) => piece.entry.held_images(each),
-            Layer::Erase(erase) => erase.entry.held_images(each),
+            // A put's pixels, which its entry's picture draws and does not
+            // count: a copy of the `ImageData`, held for as long as the entry.
+            Layer::Erase(erase) => {
+                erase.entry.held_images(each);
+                erase
+                    .written
+                    .as_ref()
+                    .and_then(|written| HeldImage::of(&written.image))
+                    .into_iter()
+                    .for_each(each);
+            }
             Layer::Split(split) => split.held_images(each),
             Layer::Pattern(draw) => draw.source.held_images(each),
             Layer::Picture(_)
@@ -4640,7 +4651,8 @@ pub struct Erase {
 /// export pays for writing it.
 #[derive(Clone, Debug)]
 pub(crate) struct PutPixels {
-    /// The put's pixels.
+    /// The put's pixels: the image the eraser's entry draws, which the page
+    /// counts as held -- see [`Layer::held_images`].
     pub(crate) image: Image,
     /// The region of `image` the put writes.
     pub(crate) src: Rect,

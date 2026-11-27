@@ -1329,21 +1329,23 @@ impl PageRecorder {
     /// as one [`Split`] whose document is what a document plays of the page
     /// as it stood: see [`Self::document_entries`].
     ///
-    /// A page into which canvases are drawn as images, round after round and
-    /// never cleared, otherwise holds an image for each, a page of pixels a
-    /// draw. Flattened, it holds one for pixels however many rounds it has
-    /// drawn, and a document still writes every round from its own entries,
-    /// which it never sees the base of.
+    /// A page into which canvases are drawn as images, or `ImageData` put,
+    /// round after round and never cleared, otherwise holds an image for
+    /// each, a page of pixels a draw or a put's own. Flattened, it holds one
+    /// for pixels however many rounds it has drawn, and a document still
+    /// writes every round from its own entries, which it never sees the base
+    /// of.
     ///
     /// Except where those entries hold images themselves -- canvases drawn
     /// in past `DOCUMENT_REPLAY_BUDGET`, which a document writes as their
-    /// images, see [`Entries::held`] -- and keeping them would leave the
-    /// page holding more than `budget` bytes of images with the base. Then
-    /// the document is the base as well: a PDF or an SVG writes what the
-    /// page drew before the flatten as its pixels, and what it draws after
-    /// as vectors and text. A page into which no canvas past that budget
-    /// was drawn holds no such image, and its document is kept whole
-    /// through every flatten.
+    /// images, see [`Entries::held`], and puts, which it writes as their
+    /// pixels, see [`Erase`] -- and keeping them would leave the page
+    /// holding more than `budget` bytes of images with the base. Then the
+    /// document is the base as well: a PDF or an SVG writes what the page
+    /// drew before the flatten as its pixels, and what it draws after as
+    /// vectors and text. A page into which no canvas past that budget was
+    /// drawn and nothing was put holds no such image, and its document is
+    /// kept whole through every flatten.
     ///
     /// `base` is drawn untransformed and unclipped onto the emptied page, so
     /// its pixels at density 1 are what they were. At another density the base
