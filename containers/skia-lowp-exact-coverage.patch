@@ -1,0 +1,78 @@
+--- a/skia-bindings/skia/src/opts/SkRasterPipeline_opts.h
++++ b/skia-bindings/skia/src/opts/SkRasterPipeline_opts.h
+@@ -5743,7 +5743,14 @@
+ 
+ SI U16 from_float(float f) { return U16_(f * 255.0f + 0.5f); }
+ 
+-SI U16 lerp(U16 from, U16 to, U16 t) { return div255( from*inv(t) + to*t ); }
++// Coverage -- an antialiased edge's, a mask's, a clip's -- is applied through
++// `div255_accurate`, correctly rounded on every platform, both where it scales
++// the colour before a blend that takes it as alpha (the `scale_*` stages) and
++// where it lerps after one that cannot (`lerp` and the `lerp_*` stages).
++// `div255` is [3] off NEON, a level off about a quarter of the time, so the
++// same edge landed apart on x86 and arm64. Only partly covered pixels reach
++// these stages; the blends themselves keep their own division.
++SI U16 lerp(U16 from, U16 to, U16 t) { return div255_accurate( from*inv(t) + to*t ); }
+ 
+ template <typename D, typename S>
+ SI D cast(S src) {
+@@ -6837,10 +6844,10 @@
+ 
+ LOWP_STAGE_PP(scale_1_float, const float* f) {
+     U16 c = from_float(*f);
+-    r = div255( r * c );
+-    g = div255( g * c );
+-    b = div255( b * c );
+-    a = div255( a * c );
++    r = div255_accurate( r * c );
++    g = div255_accurate( g * c );
++    b = div255_accurate( b * c );
++    a = div255_accurate( a * c );
+ }
+ // A paint's alpha scales the colour it draws with each channel's product
+ // correctly rounded to a byte, on every platform. `div255` is [3] off
+@@ -6863,10 +6870,10 @@
+ }
+ LOWP_STAGE_PP(scale_native, const uint16_t scales[]) {
+     auto c = sk_unaligned_load<U16>(scales);
+-    r = div255( r * c );
+-    g = div255( g * c );
+-    b = div255( b * c );
+-    a = div255( a * c );
++    r = div255_accurate( r * c );
++    g = div255_accurate( g * c );
++    b = div255_accurate( b * c );
++    a = div255_accurate( a * c );
+ }
+ 
+ LOWP_STAGE_PP(lerp_native, const uint16_t scales[]) {
+@@ -6879,10 +6886,10 @@
+ 
+ LOWP_STAGE_PP(scale_u8, const SkRasterPipelineContexts::MemoryCtx* ctx) {
+     U16 c = load_8(ptr_at_xy<const uint8_t>(ctx, dx,dy));
+-    r = div255( r * c );
+-    g = div255( g * c );
+-    b = div255( b * c );
+-    a = div255( a * c );
++    r = div255_accurate( r * c );
++    g = div255_accurate( g * c );
++    b = div255_accurate( b * c );
++    a = div255_accurate( a * c );
+ }
+ LOWP_STAGE_PP(lerp_u8, const SkRasterPipelineContexts::MemoryCtx* ctx) {
+     U16 c = load_8(ptr_at_xy<const uint8_t>(ctx, dx,dy));
+@@ -6902,10 +6909,10 @@
+     load_565_(ptr_at_xy<const uint16_t>(ctx, dx,dy), &cr,&cg,&cb);
+     U16 ca = alpha_coverage_from_rgb_coverage(a,da, cr,cg,cb);
+ 
+-    r = div255( r * cr );
+-    g = div255( g * cg );
+-    b = div255( b * cb );
+-    a = div255( a * ca );
++    r = div255_accurate( r * cr );
++    g = div255_accurate( g * cg );
++    b = div255_accurate( b * cb );
++    a = div255_accurate( a * ca );
+ }
+ LOWP_STAGE_PP(lerp_565, const SkRasterPipelineContexts::MemoryCtx* ctx) {
+     U16 cr,cg,cb;

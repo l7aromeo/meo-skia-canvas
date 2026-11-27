@@ -360,10 +360,34 @@ const EXACT_BLEND_DIVISION = join(
 // arm64 was off none (#828). The patch adds `scale_1_float_accurate`, the
 // same stage through `div255_accurate`, and appends it where a paint's alpha
 // is applied: the raster-pipeline sprite blitter, a shader's paint colour
-// and `drawAtlas`. Coverage keeps `scale_1_float`, so an antialiased edge on
-// x86 draws as it did, and the N32 sprite rows, `SkBlendARGB32` and its SIMD
-// forms, are not changed.
+// and `drawAtlas`. Coverage keeps `scale_1_float`, which
+// `LOWP_EXACT_COVERAGE` makes exact on its own, and the N32 sprite rows,
+// `SkBlendARGB32` and its SIMD forms, are not changed.
 const LOWP_PAINT_ALPHA = join("containers", "skia-lowp-paint-alpha.patch");
+// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test coverage_scales_and_lerps_with_each_product_rounded_once against crates.io's Skia on x86-64, as the crates.io publish runs it; it holds that build to bytes off the rounded products, and fails there once every route rounds exactly
+//
+// The CPU raster's eight-bit pipeline (src/opts/SkRasterPipeline_opts.h)
+// applies an antialiased edge's, a mask's and a clip's coverage through
+// `div255`: on NEON the exact two-step division by 255, elsewhere
+// `(v + 255) >> 8`, a level off about a quarter of the time. Before a blend
+// that takes coverage as alpha -- source-over among them -- it scales the
+// colour in `scale_1_float`, `scale_u8`, `scale_native` or `scale_565`; after
+// one that cannot -- `copy`, `source-in`, `multiply`, a runtime blender -- it
+// lerps from the backdrop through `lerp`. So the same edge landed apart on x86
+// and arm64: a colour glyph written into an SVG document and drawn back landed
+// up to two levels from the canvas's on x86-64 and one on arm64 (#836). The
+// patch divides each of those through `div255_accurate`. Only partly covered
+// pixels take these stages, and the blends keep their own division:
+// source-over's is already exact, and `multiply`'s, `source-atop`'s, `xor`'s
+// and the other modes' stay `div255` on x86. `scale_1_float_accurate`, which
+// `LOWP_PAINT_ALPHA` adds for a paint's alpha, is the same arithmetic as
+// `scale_1_float` once this applies; both patches keep it, so each can be
+// dropped alone.
+const LOWP_EXACT_COVERAGE = join(
+  "containers",
+  "skia-lowp-exact-coverage.patch",
+);
 // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 // Re-check: cargo test a_glyph_advances_its_units_times_the_size against crates.io's Skia on Linux; it holds that build to FreeType's 16.16 excess, and fails there once FreeType's advance is exact
 //
@@ -400,6 +424,7 @@ export const PATCHES = {
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
     LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
   linux: [
@@ -416,6 +441,7 @@ export const PATCHES = {
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
     LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
@@ -435,6 +461,7 @@ export const PATCHES = {
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
     LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
 };

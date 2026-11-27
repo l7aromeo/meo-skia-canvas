@@ -1914,12 +1914,32 @@ and rounded, then composited and rounded, where arm64 was off none (#828).
 raster-pipeline sprite blitter, after a shader and in `drawAtlas`, so the
 three land the same bytes on both
 (`a_paint_alpha_scales_an_image_with_each_product_rounded_once`). An
-antialiased edge's coverage still scales through `div255`, so an edge on x86
-can land a level from arm64's. An eight-bit image in the page's own byte
+antialiased edge's coverage is applied exactly too, by
+`containers/skia-lowp-exact-coverage.patch` (#836). An eight-bit image in the page's own byte
 order, unscaled at a whole-pixel offset, takes Skia's sprite rows instead,
 which the patch does not change and which are not exact on either (#828).
 What Chrome draws on x86 was not measured: it runs the same stage, so it is
 expected to land apart as this library did.
+
+**An antialiased edge, a mask and a clip apply their coverage correctly
+rounded on every CPU, and Chrome's CPU canvas on x86 rounds through an
+approximation.** On a partly covered pixel, Skia's eight-bit raster pipeline
+scales the colour by the coverage before a blend that takes coverage as
+alpha, source-over among them, and lerps from the backdrop by it after one
+that cannot, `copy` among them. Both divide by 255 through `div255`, exact
+on arm64 and `(v + 255) >> 8` elsewhere. Over a 256 by 256 page of sixteen
+discs in a translucent ink, on an x86-64 machine every route -- an edge, a
+blurred mask, a clip shader and an edge inside one -- landed partly covered
+pixels off the products rounded once, under source-over and `copy` alike: by
+a level, and by two for the edge inside a clip. arm64 was off none.
+`containers/skia-lowp-exact-coverage.patch` divides those stages through
+`div255_accurate`, and x86-64 is off none too
+(`coverage_scales_and_lerps_with_each_product_rounded_once`). The blends
+keep their own division: source-over's is exact on both, and `multiply`,
+`source-atop`, `xor` and the other modes that divide through `div255` keep
+it, so their translucent interiors on x86 round as they did. What Chrome
+draws on x86 was not measured: it runs the same stages, so it is expected to
+land apart as this library did.
 
 **A PDF's blend modes render as the canvas's in poppler, and macOS's
 CoreGraphics renders a few of them otherwise.** A composite operation on an

@@ -168,6 +168,15 @@ const LOWP_PAINT_ALPHA = {
   unit: "src/core/SkOpts.cpp",
 };
 
+/// containers/skia-lowp-exact-coverage.patch, on every platform. Its stages
+/// are in a header, held to `src/core/SkOpts.cpp` as `EXACT_BLEND_DIVISION`
+/// is.
+const LOWP_EXACT_COVERAGE = {
+  patch: "containers/skia-lowp-exact-coverage.patch",
+  ...buildRsPatch("meo_lowp_exact_coverage"),
+  unit: "src/core/SkOpts.cpp",
+};
+
 /// containers/skia-svg-synthetic-slant.patch, on every platform.
 const SVG_SYNTHETIC_SLANT = {
   patch: "containers/skia-svg-synthetic-slant.patch",
@@ -221,6 +230,7 @@ export const PATCHED = {
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
     LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
   linux: [
@@ -235,6 +245,7 @@ export const PATCHED = {
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
     LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     FREETYPE_ADVANCE,
     PATCH_MARKER,
   ],
@@ -254,6 +265,7 @@ export const PATCHED = {
     TRANSFORMED_MASK_REUSE,
     EXACT_BLEND_DIVISION,
     LOWP_PAINT_ALPHA,
+    LOWP_EXACT_COVERAGE,
     PATCH_MARKER,
   ],
 };
