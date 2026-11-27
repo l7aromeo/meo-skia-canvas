@@ -14141,6 +14141,31 @@ mod exact_composite_tests {
         ctx.set_fill_shader(&ramp());
     }
 
+    /// A flush forgets the draws it drew: a disc, a second meeting it, which
+    /// draws the first, and a third meeting where the first lay but not the
+    /// second take two snapshots -- the first disc alone, then the other two
+    /// together -- and land the bytes they do held run by run.
+    #[test]
+    fn a_flush_forgets_the_draws_it_drew() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            for at in
+                [(30.3, 64.7, 10.2), (48.4, 64.6, 10.1), (22.6, 64.3, 6.1)]
+            {
+                disc(ctx, at);
+                ctx.fill(FillRule::NonZero);
+            }
+        };
+        let ((held, snapshots), (by_run, _)) = held_and_by_run(&scene);
+        assert_eq!(snapshots, 2, "snapshots");
+        assert_eq!(bytes_apart(&held, &by_run), 0, "bytes apart");
+    }
+
     /// Discs on a grid 32 pixels apart, none meeting another or another's
     /// shadow, each casting a shadow, take one snapshot between them, as
     /// they do casting none, where held run by run they took one each
