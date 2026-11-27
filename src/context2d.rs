@@ -7524,10 +7524,10 @@ mod overlapping_glyph_tests {
     /// A layer holding a gradient whose bytes a GPU canvas computes with an
     /// effect of its own -- opaque, interpolated in the page's space,
     /// filling a rectangle and a path with an edge -- takes no root on whole
-    /// pixels, and lands the bytes the same draws land on the GPU page
-    /// without the layer: those part from the CPU's along the path's edge by
-    /// Metal's half-precision composite, which `docs/browser-differences.md`
-    /// lists, and the layer adds nothing to that. Drawn into a GPU canvas
+    /// pixels, and lands the CPU canvas's bytes, as the same draws do on the
+    /// GPU page without the layer: the path's edge is composited in the
+    /// CPU's arithmetic, inside the layer by a blender reading the layer's
+    /// pixels -- see `context::exact_composite` (#783). Drawn into a GPU canvas
     /// under a scale, where the effect's image would be resampled, the
     /// draws are made over a read back, and land the CPU canvas's bytes.
     #[test]
@@ -7603,6 +7603,12 @@ mod overlapping_glyph_tests {
             layered == direct,
             "{} levels from the page without the layer",
             most_apart(&layered, &direct)
+        );
+        let (on_cpu, _) = read(&mut page(false, true));
+        assert!(
+            layered == on_cpu,
+            "{} levels from the CPU canvas",
+            most_apart(&layered, &on_cpu)
         );
         // Two roots, as for runs in a layer of the page's own: one for the
         // group the canvas is drawn through, one for the layer within it.
@@ -9148,6 +9154,294 @@ mod recording_tests {
         }
         FORKS_LAZILY.set(true);
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod float_layer_tests {
+    //! Draws the CPU makes on its float pipeline, inside a layer a backdrop
+    //! seeds on a GPU page -- see `context::layer::rasterized_onto` (#800).
+    use super::*;
+    use crate::{
+        canvas::EngineKind,
+        color::RgbaLinear,
+        geometry::Point,
+        pixels::PixelDepth,
+        shader::{GradientColorSpace, GradientInterpolation, GradientStop},
+    };
+    use std::iter::zip;
+
+    const SIDE: f32 = 128.0;
+
+    /// The page's colour under the layer, in levels.
+    const UNDER: [f32; 4] = [20.0, 40.0, 200.0, 255.0];
+
+    /// How near a half level a float composite lies where a GPU page may
+    /// store it apart from the CPU page: the precision its source reaches
+    /// the composite in. Measured on an Apple M4 Pro, whose blender takes it
+    /// as a half, every byte apart lies within 0.18; through the
+    /// fixed-function blend, llvmpipe and an NVIDIA GTX 1050 Ti left more
+    /// than 4,500 of 65,536 bytes beyond it.
+    const NEAR_A_TIE: f32 = 0.18;
+
+    /// A translucent radial gradient interpolated in Oklab, which the CPU
+    /// draws in floats, of many stops, so that its colours fall across the
+    /// levels.
+    fn dye() -> Shader {
+        let stops: Vec<GradientStop> = (0..12)
+            .flat_map(|k| {
+                let at = k as f32 / 12.0;
+                [
+                    GradientStop {
+                        position: at,
+                        color: RgbaLinear::from_srgb8(200, 30, 90, 0.7),
+                    },
+                    GradientStop {
+                        position: at + 0.5 / 12.0,
+                        color: RgbaLinear::from_srgb8(0, 255, 0, 1.0),
+                    },
+                ]
+            })
+            .collect();
+        Shader::two_point_conical_gradient(
+            Point::new(40.0, 50.0),
+            3.0,
+            Point::new(70.0, 60.0),
+            90.0,
+            &stops,
+            GradientInterpolation::new(GradientColorSpace::Oklab),
+        )
+        .expect("a gradient")
+    }
+
+    /// A scene: its name, and what it draws.
+    type Scene = (&'static str, fn(&mut Context2D));
+
+    /// The scenes: a rectangle on whole pixels, one off them, a disc and a
+    /// stroke, each drawn with [`dye`].
+    const SCENES: [Scene; 4] = [
+        ("rectangle", |ctx| ctx.fill_rect(10.0, 10.0, 108.0, 108.0)),
+        ("off whole pixels", |ctx| {
+            ctx.translate(0.4, 0.3);
+            ctx.fill_rect(10.0, 10.0, 108.0, 108.0);
+        }),
+        ("disc", |ctx| {
+            ctx.begin_path();
+            ctx.arc(64.3, 63.6, 50.2, 0.0, 7.0, false).expect("an arc");
+            ctx.fill(FillRule::NonZero);
+        }),
+        ("stroke", |ctx| {
+            ctx.set_line_width(9.0);
+            ctx.stroke_rect(20.5, 20.5, 87.0, 87.0);
+        }),
+    ];
+
+    /// `scene` drawn with [`dye`] over [`UNDER`], inside a layer its
+    /// backdrop seeds: an opaque page, whose bytes read the same
+    /// premultiplied or not.
+    fn page(gpu: bool, scene: fn(&mut Context2D)) -> Vec<u8> {
+        let backdrop =
+            ImageFilter::offset(0.0, 0.0, None, None).expect("a filter");
+        let mut canvas = Canvas::new(SIDE, SIDE);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("rgb(20 40 200)").expect("a colour");
+        ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+        ctx.save_layer_with(1.0, None, Some(&backdrop));
+        let dye = dye();
+        ctx.set_fill_shader(&dye);
+        ctx.set_stroke_shader(&dye);
+        scene(ctx);
+        ctx.restore();
+        let bytes = ctx
+            .get_image_data(0.0, 0.0, SIDE, SIDE)
+            .expect("the canvas reads back")
+            .pixels()
+            .to_vec();
+        let engine = canvas.engine_kind();
+        assert_eq!(engine == EngineKind::Gpu, gpu, "read on {engine:?}");
+        bytes
+    }
+
+    /// `scene` drawn over transparent on a float page as the CPU's float
+    /// pipeline makes it, unrounded: premultiplied, in levels.
+    fn source(scene: fn(&mut Context2D)) -> Vec<f32> {
+        let mut canvas = Canvas::with_options(
+            SIDE,
+            SIDE,
+            CanvasOptions {
+                color_type: PixelDepth::F32,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        let dye = dye();
+        ctx.set_fill_shader(&dye);
+        ctx.set_stroke_shader(&dye);
+        scene(ctx);
+        let data = ctx
+            .get_image_data_as(
+                0.0,
+                0.0,
+                SIDE,
+                SIDE,
+                PixelExportOptions {
+                    depth: PixelDepth::F32,
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+            )
+            .expect("the page reads back");
+        data.pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&word| f32::from_ne_bytes(word) * 255.0)
+            .collect()
+    }
+
+    /// Each draw, made in floats inside a layer seeded from an opaque page,
+    /// lands on a GPU page where the CPU page lands it but near a tie: the
+    /// CPU composites its unrounded colour onto the backdrop and rounds
+    /// once, which the source-over of the float page's draw onto the page
+    /// accounts for to the byte -- the control -- and the GPU page parts
+    /// from it only where the composite lies within [`NEAR_A_TIE`] of a half
+    /// level. Composited from a raster of bytes, or through the
+    /// fixed-function blend of a device that blends an eight-bit target at
+    /// its own precision, it parts a level from it at any distance.
+    #[test]
+    fn a_float_draw_in_a_backdrop_layer_parts_from_the_cpu_only_near_a_tie() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for (name, scene) in SCENES {
+            let source = source(scene);
+            let cpu = page(false, scene);
+            let gpu = page(true, scene);
+            let exact = |i: usize| {
+                source[i]
+                    + UNDER[i % 4] * (255.0 - source[(i & !3) + 3]) / 255.0
+            };
+            let unaccounted = (0..cpu.len())
+                .filter(|&i| (exact(i) - f32::from(cpu[i])).abs() > 0.5 + 1e-3)
+                .count();
+            assert_eq!(unaccounted, 0, "{name}: the CPU page's composite");
+            let far: Vec<(usize, u8, u8, f32)> = (0..cpu.len())
+                .filter(|&i| cpu[i] != gpu[i])
+                .map(|i| (i, cpu[i], gpu[i], exact(i)))
+                .filter(|&(.., exact)| {
+                    (exact - exact.floor() - 0.5).abs() > NEAR_A_TIE
+                })
+                .collect();
+            assert!(
+                far.is_empty(),
+                "{name}: {} bytes apart beyond a tie, the first {:?}",
+                far.len(),
+                far.first()
+            );
+        }
+    }
+
+    /// The same draws inside a layer that starts transparent, on a
+    /// transparent page, with each layer's entries played inside it: there
+    /// the CPU stores the draw's colour rounded once, which a raster of
+    /// bytes holds and the GPU copies, every byte the CPU page's. A raster
+    /// of sixteen bits composited through the float blender parts from it
+    /// near a tie wherever the blender takes its source in less than a
+    /// float, as Metal does.
+    #[test]
+    fn a_float_draw_in_a_layer_starting_transparent_lands_the_cpu_pages_bytes()
+    {
+        use crate::context::layer::OWN_ROOTS;
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let page = |gpu: bool, scene: fn(&mut Context2D)| {
+            let mut canvas = Canvas::new(SIDE, SIDE);
+            canvas.set_gpu(gpu);
+            let ctx = canvas.context();
+            ctx.save_layer();
+            let dye = dye();
+            ctx.set_fill_shader(&dye);
+            ctx.set_stroke_shader(&dye);
+            scene(ctx);
+            ctx.restore();
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, SIDE, SIDE)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            assert_eq!(canvas.engine_kind() == EngineKind::Gpu, gpu);
+            bytes
+        };
+        OWN_ROOTS.set(false);
+        let apart: Vec<(&str, usize)> = SCENES
+            .iter()
+            .map(|&(name, scene)| {
+                let (cpu, gpu) = (page(false, scene), page(true, scene));
+                (name, zip(&cpu, &gpu).filter(|(c, g)| c != g).count())
+            })
+            .collect();
+        OWN_ROOTS.set(true);
+        assert!(
+            apart.iter().all(|&(_, apart)| apart == 0),
+            "bytes apart from the CPU page's: {apart:?}"
+        );
+    }
+
+    /// A pattern of a canvas holding [`dye`], drawn inside a layer a
+    /// backdrop seeds on a GPU page, lands the bytes it lands on that page
+    /// without the layer: its tile is drawn on a surface of its own, a root
+    /// whose entries are drawn as on a page, not as inside the layer around
+    /// the draw of the pattern. Drawn as inside that layer, the tile's float
+    /// draw would be composited as onto a backdrop, which a tile starting
+    /// transparent does not hold: 963 bytes apart on an Apple M4 Pro.
+    #[test]
+    fn a_pattern_in_a_backdrop_layer_draws_its_tile_as_on_the_page() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let page = |layer: bool| {
+            let mut held = Canvas::new(108.0, 108.0);
+            {
+                let ctx = held.context();
+                ctx.set_fill_shader(&dye());
+                ctx.fill_rect(0.0, 0.0, 108.0, 108.0);
+            }
+            let mut canvas = Canvas::new(SIDE, SIDE);
+            canvas.set_gpu(true);
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(20 40 200)").expect("a colour");
+            ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+            if layer {
+                let backdrop = ImageFilter::offset(0.0, 0.0, None, None)
+                    .expect("a filter");
+                ctx.save_layer_with(1.0, None, Some(&backdrop));
+            }
+            let pattern = ctx
+                .create_pattern_from_canvas(&mut held, PatternRepeat::Repeat);
+            ctx.set_fill_pattern(&pattern);
+            ctx.fill_rect(10.0, 10.0, 108.0, 108.0);
+            if layer {
+                ctx.restore();
+            }
+            let bytes = ctx
+                .get_image_data(0.0, 0.0, SIDE, SIDE)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            assert_eq!(canvas.engine_kind(), EngineKind::Gpu, "a GPU page");
+            bytes
+        };
+        let apart = zip(page(false), page(true))
+            .filter(|(page, layer)| page != layer)
+            .count();
+        assert_eq!(apart, 0, "bytes apart from the page's");
     }
 }
 
@@ -13607,6 +13901,278 @@ mod pattern_memory_tests {
                 0,
                 "frame {n}: nothing toward the budget"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod exact_composite_tests {
+    //! Gradient paths on a GPU canvas composited `source-over` in the CPU's
+    //! arithmetic, held for one snapshot of what they cover -- see
+    //! `context::exact_composite` (#783).
+    use super::*;
+    use std::f32::consts::TAU;
+
+    use crate::{
+        canvas::EngineKind,
+        color::RgbaLinear,
+        context::exact_composite::SNAPSHOTS,
+        geometry::Point,
+        shader::{GradientColorSpace, GradientInterpolation, GradientStop},
+    };
+
+    const SIDE: f32 = 128.0;
+
+    fn stop(
+        position: f32,
+        (r, g, b): (u8, u8, u8),
+        alpha: f32,
+    ) -> GradientStop {
+        GradientStop {
+            position,
+            color: RgbaLinear::from_srgb8(r, g, b, alpha),
+        }
+    }
+
+    /// An opaque ramp across the page, which the CPU makes in eight bits.
+    fn ramp() -> Shader {
+        Shader::linear_gradient(
+            Point::new(4.0, 0.0),
+            Point::new(SIDE - 4.0, 0.0),
+            &[stop(0.0, (250, 200, 0), 1.0), stop(1.0, (0, 60, 200), 1.0)],
+            GradientInterpolation::default(),
+        )
+        .expect("a ramp")
+    }
+
+    /// A translucent ramp interpolated in Oklab, which the CPU makes in
+    /// floats and a GPU canvas has the CPU draw over its pixels -- see
+    /// `layer::OnGpu`.
+    fn float_made() -> Shader {
+        Shader::linear_gradient(
+            Point::new(4.0, 0.0),
+            Point::new(SIDE - 4.0, 0.0),
+            &[
+                stop(0.0, (200, 40, 90), 0.6),
+                stop(1.0, (30, 120, 200), 0.4),
+            ],
+            GradientInterpolation::new(GradientColorSpace::Oklab),
+        )
+        .expect("a ramp in Oklab")
+    }
+
+    fn disc(ctx: &mut Context2D, (x, y, radius): (f32, f32, f32)) {
+        ctx.begin_path();
+        ctx.arc(x, y, radius, 0.0, TAU, false)
+            .expect("a positive radius");
+    }
+
+    /// The bytes of `scene` drawn on a page on the GPU or the CPU, cleared
+    /// or over a fill, and the snapshots the page's batches took.
+    fn page(
+        gpu: bool,
+        over_a_fill: bool,
+        scene: &dyn Fn(&mut Context2D),
+    ) -> (Vec<u8>, usize) {
+        let mut canvas = Canvas::new(SIDE, SIDE);
+        canvas.set_gpu(gpu);
+        let ctx = canvas.context();
+        if over_a_fill {
+            ctx.set_fill_style_css("rgb(200 220 240)")
+                .expect("a colour");
+            ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+        }
+        scene(ctx);
+        let before = SNAPSHOTS.get();
+        let bytes = canvas
+            .context()
+            .get_image_data(0.0, 0.0, SIDE, SIDE)
+            .expect("pixels")
+            .pixels()
+            .to_vec();
+        assert_eq!(
+            canvas.engine_kind() == EngineKind::Gpu,
+            gpu,
+            "a GPU page where the GPU is selectable"
+        );
+        (bytes, SNAPSHOTS.get() - before)
+    }
+
+    /// The bytes a GPU page stores for `scene` over a fill apart from the
+    /// CPU's, each as (pixel, CPU, GPU), and the snapshots the GPU page
+    /// took.
+    ///
+    /// Two kinds of pixel are left out, neither the composite's to answer
+    /// for. One where `dye`, filling the page, already parts on its own: a
+    /// gradient's own bytes may stand a level apart at a tie -- see
+    /// `every_shape_stores_the_cpus_bytes_inside_it`. And one where
+    /// `shapes`, filled and stroked with an opaque gradient on a clear page,
+    /// stand a level apart, both inked: there the alpha is the coverage the
+    /// GPU canvas draws the edge with, which stands a level from the CPU
+    /// canvas's on some edges -- along the bottom of a disc of radius 10.3
+    /// at (16.4, 16.7), 3 of its pixels. A pixel the GPU page leaves
+    /// uninked, or further off, is a draw losing its edge, and counts.
+    fn apart(
+        scene: &dyn Fn(&mut Context2D),
+        dye: &dyn Fn(&mut Context2D),
+        shapes: &dyn Fn(&mut Context2D),
+    ) -> (Vec<(usize, u8, u8)>, usize) {
+        let fill = |ctx: &mut Context2D| {
+            dye(ctx);
+            ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+        };
+        let coverage = |ctx: &mut Context2D| {
+            ctx.set_fill_shader(&ramp());
+            ctx.set_stroke_shader(&ramp());
+            shapes(ctx);
+        };
+        let ((gpu, snapshots), (cpu, _)) =
+            (page(true, true, scene), page(false, true, scene));
+        let ((gpu_dye, _), (cpu_dye, _)) =
+            (page(true, true, &fill), page(false, true, &fill));
+        let ((gpu_ink, _), (cpu_ink, _)) =
+            (page(true, false, &coverage), page(false, false, &coverage));
+        let apart = (0..cpu.len())
+            .filter(|&i| cpu[i] != gpu[i])
+            .filter(|&i| {
+                let pixel = i & !3;
+                let (cpu_ink, gpu_ink) =
+                    (cpu_ink[pixel + 3], gpu_ink[pixel + 3]);
+                let coverage_apart = cpu_ink > 0
+                    && gpu_ink > 0
+                    && cpu_ink.abs_diff(gpu_ink) == 1;
+                (pixel..pixel + 4).all(|k| cpu_dye[k] == gpu_dye[k])
+                    && !coverage_apart
+            })
+            .map(|i| (i / 4, cpu[i], gpu[i]))
+            .collect();
+        (apart, snapshots)
+    }
+
+    /// A grid of anti-aliased discs and of stroked rings dyed by an eight-bit
+    /// gradient, none meeting another, lands the CPU canvas's bytes, opaque
+    /// and translucent, and takes one snapshot of the page for all of them.
+    /// Held by the path's bounds without its stroke, a ring loses its outer
+    /// edge; held by the reach a mitred stroke is allowed, or by the pixels
+    /// the effect's image covers, each meets the next and takes a snapshot
+    /// of its own.
+    #[test]
+    fn draws_that_do_not_meet_share_one_snapshot() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for alpha in [1.0, 0.6] {
+            let dye = |ctx: &mut Context2D| {
+                ctx.set_global_alpha(alpha);
+                ctx.set_fill_shader(&ramp());
+                ctx.set_stroke_shader(&ramp());
+            };
+            for stroked in [false, true] {
+                let grid = |ctx: &mut Context2D| {
+                    ctx.set_line_width(5.0);
+                    for k in 0..16 {
+                        let (x, y) = ((k % 4) as f32, (k / 4) as f32);
+                        disc(ctx, (16.4 + 32.0 * x, 16.7 + 32.0 * y, 10.3));
+                        match stroked {
+                            true => ctx.stroke(),
+                            false => ctx.fill(FillRule::NonZero),
+                        }
+                    }
+                };
+                let scene = |ctx: &mut Context2D| {
+                    dye(ctx);
+                    grid(ctx);
+                };
+                let (apart, snapshots) = apart(&scene, &dye, &grid);
+                let name = format!("alpha {alpha}, stroked {stroked}");
+                assert!(
+                    apart.is_empty(),
+                    "{name}: {} bytes apart, the first (pixel, CPU, GPU) {:?}",
+                    apart.len(),
+                    apart.first()
+                );
+                assert_eq!(snapshots, 1, "{name}: snapshots");
+            }
+        }
+    }
+
+    /// A draw meeting one held is drawn after it, over what it drew: two
+    /// discs that overlap and a third apart from both land the CPU canvas's
+    /// bytes, the second flushing the first.
+    #[test]
+    fn a_draw_meeting_a_held_one_is_drawn_over_it() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let dye = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+        };
+        let discs = |ctx: &mut Context2D| {
+            for at in
+                [(40.3, 40.6, 25.2), (60.7, 55.1, 25.4), (104.2, 24.5, 12.3)]
+            {
+                disc(ctx, at);
+                ctx.fill(FillRule::NonZero);
+            }
+        };
+        let scene = |ctx: &mut Context2D| {
+            dye(ctx);
+            discs(ctx);
+        };
+        let (apart, snapshots) = apart(&scene, &dye, &discs);
+        assert!(
+            apart.is_empty(),
+            "{} bytes apart, the first (pixel, CPU, GPU) {:?}",
+            apart.len(),
+            apart.first()
+        );
+        assert_eq!(snapshots, 2, "snapshots");
+    }
+
+    /// A draw the CPU makes over the GPU's pixels, alone or as a run of
+    /// two, is drawn after the held draw before it, over what it drew: a
+    /// disc under a translucent gradient interpolated in Oklab lands the
+    /// CPU canvas's bytes.
+    #[test]
+    fn a_draw_made_on_the_cpu_is_drawn_over_the_held_ones() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for over in [1, 2] {
+            let under = (50.3, 50.6, 30.2);
+            let overs = (0..over).map(|k| {
+                let at = 70.4 + 12.0 * k as f32;
+                (at, at, 30.3)
+            });
+            let shapes = |ctx: &mut Context2D| {
+                for at in std::iter::once(under).chain(overs.clone()) {
+                    disc(ctx, at);
+                    ctx.fill(FillRule::NonZero);
+                }
+            };
+            let scene = |ctx: &mut Context2D| {
+                ctx.set_fill_shader(&ramp());
+                disc(ctx, under);
+                ctx.fill(FillRule::NonZero);
+                ctx.set_fill_shader(&float_made());
+                for at in overs.clone() {
+                    disc(ctx, at);
+                    ctx.fill(FillRule::NonZero);
+                }
+            };
+            let dye = |ctx: &mut Context2D| ctx.set_fill_shader(&ramp());
+            let (apart, snapshots) = apart(&scene, &dye, &shapes);
+            assert!(
+                apart.is_empty(),
+                "{over} over: {} bytes apart, the first (pixel, CPU, GPU) {:?}",
+                apart.len(),
+                apart.first()
+            );
+            assert_eq!(snapshots, 1, "{over} over: snapshots");
         }
     }
 }

@@ -605,75 +605,11 @@ fn a_canvas_holding_one_drawn_into_a_gpu_canvas_stores_the_cpus_bytes() {
 /// rounding the composite takes.
 const HALF_FLOAT_SPACING_ABOVE_128: f64 = 1.0 / (1u32 << (10 - 7)) as f64;
 
-/// How many times a source-over composite through the coverage mask rounds
-/// to half precision: the source's product with the coverage, `1 - a`,
-/// `d * (1 - a)` and the sum. Measured, a byte the GPU rounds the other way
-/// lies 0.147 of a level from a tie at most for source-over and 0.143 for
-/// multiply, inside the bound these give for both.
+/// How many times a composite through the coverage mask rounds to half
+/// precision: the source's product with the coverage, `1 - a`, `d * (1 -
+/// a)` and the sum. Measured, a `multiply` byte the GPU rounds the other way
+/// lies 0.143 of a level from a tie at most, inside the bound this gives.
 const BLEND_ROUNDINGS: u32 = 4;
-
-/// How many bits of fraction NVIDIA's fixed-function stage keeps of a
-/// `source-over` composite's source term before it rounds that term to a
-/// byte, cutting the rest off. Measured, not chosen: on a GeForce GTX 1050
-/// Ti under driver 580, every one of 30,340 distinct edge inputs fits
-/// twelve bits truncated, and no other width from ten to sixteen fits them
-/// all.
-const NVIDIA_SOURCE_FRACTION_BITS: u32 = 12;
-
-/// How a GPU's fixed-function stage rounds a `source-over` composite at
-/// eight bits, on the GPUs that do not blend it in floats as Metal does.
-/// The CPU rounds the composite once, so on these an edge byte stands
-/// within a level of the exact composite at any distance from a tie -- see
-/// the llvmpipe and NVIDIA entries in `docs/browser-differences.md`. A blend
-/// the shader does, such as `multiply`, rounds once on both.
-#[derive(Clone, Copy)]
-enum EightBitBlend {
-    /// Mesa's llvmpipe, the software Vulkan the Linux binding job draws on:
-    /// the source's term and the destination's each rounded to the nearest
-    /// byte, then added. A source byte of 128 under a coverage of 41 over a
-    /// backdrop of 220 has an exact composite of 205.21, which the CPU
-    /// stores as 205; llvmpipe stores 128 * 41 / 255 = 20.58 and
-    /// 220 * 214 / 255 = 184.63 rounded apart, 21 + 185 = 206.
-    TermsApart,
-    /// NVIDIA's: as [`Self::TermsApart`], but the source's term is first
-    /// cut to [`NVIDIA_SOURCE_FRACTION_BITS`] of fraction and its tie rounds
-    /// down. A source byte of 128 under a coverage of 3 over 220 has an
-    /// exact composite of 218.92, which the CPU stores as 219; the source's
-    /// term 1.506, cut to twelve bits, is 1.494, so NVIDIA stores
-    /// 1 + 217 = 218.
-    SourceCut,
-}
-
-impl EightBitBlend {
-    /// This machine's, or `None` where its GPU composites in floats.
-    fn here() -> Option<Self> {
-        let device = BackendInfo::query().device?;
-        if device.contains("llvmpipe") {
-            Some(Self::TermsApart)
-        } else if device.contains("NVIDIA") {
-            Some(Self::SourceCut)
-        } else {
-            None
-        }
-    }
-
-    /// The byte stored for a source term `source` and a destination term
-    /// `destination`, each in levels. Neither term as drawn falls on a tie
-    /// -- each is a byte times `k / 255`, and 255 is odd -- so the tie rule
-    /// of `f64::round` is never taken. A term cut to twelve bits can, and
-    /// its tie goes down.
-    fn composite(self, source: f64, destination: f64) -> f64 {
-        let source = match self {
-            Self::TermsApart => source.round(),
-            Self::SourceCut => {
-                let scale = f64::from(1u32 << NVIDIA_SOURCE_FRACTION_BITS);
-                let cut = (source / 255.0 * scale).floor() / scale * 255.0;
-                (cut - 0.5).ceil()
-            }
-        };
-        source + destination.round()
-    }
-}
 
 /// The backdrop [`edge_misses`] draws over.
 const BACKDROP: [u8; 3] = [200, 220, 240];
@@ -713,18 +649,18 @@ fn ramp(width: f32) -> Shader {
 /// `blend` over [`BACKDROP`] on a `width` by `height` page, that are neither
 /// the CPU canvas's nor explained: each as (pixel, CPU, GPU, exact).
 ///
-/// A byte is explained where the exact composite `d + c * (blend(s, d) -
-/// d)` -- `s` the gradient's own bytes, `c` the CPU's coverage -- lies
-/// within the GPU's blend noise of a half level, or where the gradient's
-/// own byte already parts from the CPU's, which
-/// `every_shape_stores_the_cpus_bytes_inside_it` holds. Under a blend the
-/// CPU rounds before it takes the coverage, so a byte the GPU stores as the
-/// exact composite rounded once may stand a level from the CPU's: that is
-/// the CPU's eight-bit order of rounding, #736's case, and is explained too.
+/// A byte is explained where the gradient's own byte already parts from the
+/// CPU's, which `every_shape_stores_the_cpus_bytes_inside_it` holds. A
+/// `source-over` byte is explained by nothing else: the GPU composites it
+/// in the CPU's arithmetic (#783).
 ///
-/// On llvmpipe and NVIDIA a `source-over` byte is explained where it is the
-/// byte that GPU's eight-bit composite stores -- see [`EightBitBlend`] --
-/// whatever its distance from a tie, and only that byte.
+/// Under any other blend a byte is explained too where the exact composite
+/// `d + c * (blend(s, d) - d)` -- `s` the gradient's own bytes, `c` the
+/// CPU's coverage -- lies within the GPU's blend noise of a half level.
+/// Under a blend the CPU rounds before it takes the coverage, so a byte the
+/// GPU stores as the exact composite rounded once may stand a level from
+/// the CPU's: that is the CPU's eight-bit order of rounding, #736's case,
+/// and is explained too.
 fn edge_misses(
     (width, height): (f32, f32),
     draw: &dyn Fn(&mut Context2D),
@@ -762,28 +698,15 @@ fn edge_misses(
         };
         d + c * (blended - d)
     };
-    let eight_bit =
-        EightBitBlend::here().filter(|_| blend == BlendMode::SourceOver);
-    let eight_bit_byte = |rounding: EightBitBlend, i: usize| {
-        let c = f64::from(coverage[i | 3]) / 255.0;
-        let alpha = (f64::from(cpu_source[i | 3]) * c).round();
-        let d = f64::from(BACKDROP[i % 4]);
-        rounding.composite(
-            f64::from(cpu_source[i]) * c,
-            d * (255.0 - alpha) / 255.0,
-        )
-    };
     let noise = BLEND_ROUNDINGS as f64 * HALF_FLOAT_SPACING_ABOVE_128 / 2.0;
     (0..cpu.len())
         .filter(|&i| i % 4 != 3 && cpu[i] != gpu[i])
         .filter(|&i| cpu_source[i] == gpu_source[i])
-        .filter(|&i| {
-            eight_bit.is_none_or(|rounding| {
-                f64::from(gpu[i]) != eight_bit_byte(rounding, i)
-            })
-        })
         .map(|i| (i / 4, cpu[i], gpu[i], exact(i)))
         .filter(|&(_, cpu, gpu, exact)| {
+            if blend == BlendMode::SourceOver {
+                return true;
+            }
             let rounded_once =
                 f64::from(gpu) == exact.round() && cpu.abs_diff(gpu) == 1;
             let tie = (exact.fract() - 0.5).abs() < noise;

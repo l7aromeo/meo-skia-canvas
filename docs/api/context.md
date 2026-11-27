@@ -432,6 +432,8 @@ What they default to differs between the two methods, and deliberately. `createI
 
 The `getImageData()` method also accepts a handful of rendering options which have the same behaviors and default values as their equivalents in the Canvas [toFile()][toFile] method: [`density`][density], [`matte`][matte], and [`msaa`][msaa].
 
+On a GPU canvas, `msaa` defaults to 4 samples a pixel, so an anti-aliased edge's coverage lands in quarter steps where a CPU canvas computes it exactly: the two engines' edges differ, most on sub-pixel geometry. [Performance](../performance.md) has the sweep.
+
 :::tip
 Calling `getImageData` involves copying bitmaps between the GPU and main memory. If you're invoking it frequently in your code (e.g., within a tight loop), you may get better performance by disabling the [`gpu` property][canvas_gpu] for that canvas to avoid this overhead.
 :::
@@ -1131,7 +1133,7 @@ Always `false`. Context loss is a GPU-compositor event — a browser reclaiming 
 [transforms]: #transform--settransform
 [matte]: https://www.jsdocs.io/package/meo-skia-canvas
 [density]: https://www.jsdocs.io/package/meo-skia-canvas
-[msaa]: ../../README.md#performance-and-memory
+[msaa]: https://www.jsdocs.io/package/meo-skia-canvas
 [p2d_closePath]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/closePath
 [css_transform]: https://developer.mozilla.org/en-US/docs/Web/CSS/transform
 [css_transform_fns]: https://developer.mozilla.org/en-US/docs/Web/CSS/transform-function

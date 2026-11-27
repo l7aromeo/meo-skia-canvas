@@ -51,9 +51,10 @@ use crate::{
             self, Depth, Step,
             pool::{self, LayerScope},
         },
-        chain_cache, coverage_of, covers_beyond_the_draw,
-        exact_gradient::{Exact, GradientSpec},
+        chain_cache, coverage_of, covers_beyond_the_draw, exact_composite,
+        exact_gradient::{Exact, GradientSpec, HIGHP_TIES_TO_EVEN},
         faint::{Faint, composited},
+        inked_bounds,
         kept::CoverageInput,
         page::{ExportOptions, Page, own_image_type},
         run_mask::{self, Kept},
@@ -2020,6 +2021,9 @@ impl TileSource {
             tile.set_matrix(
                 &Matrix::scale((density as f32, density as f32)).into(),
             );
+            // The tile's surface is a root of its own, whose pixels its
+            // entries read back, whatever layer the pattern is drawn in.
+            let _root = OwnRoot::enter();
             for entry in self.page.layers.iter() {
                 entry.playback(tile, Target::Pixels);
             }
@@ -2889,6 +2893,7 @@ impl ReplayedText {
                 ),
                 format,
                 &Paint::default(),
+                Pipeline::Bytes,
             );
         }
     }
@@ -2927,6 +2932,88 @@ impl ReplayedText {
     }
 }
 
+/// The pipeline a CPU canvas draws a draw on, as Skia's raster pipeline
+/// chooses it for an eight-bit destination: its eight-bit one (`lowp`) where
+/// every stage the draw takes has an eight-bit form, which
+/// `SK_RASTER_PIPELINE_OPS_LOWP` in `SkRasterPipelineOpList.h` lists, and its
+/// float one (`highp`) where any stage has none -- see [`pipeline_of`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pipeline {
+    /// Eight bits a channel, or a draw the CPU rounds to bytes before it
+    /// composites it: one whose image filter Skia runs in a layer of its own.
+    Bytes,
+    /// Floats, rounded once, as the draw is stored onto what it lands on.
+    Floats,
+}
+
+/// The blend modes whose stages `SK_RASTER_PIPELINE_OPS_LOWP` leaves out, in
+/// `SkRasterPipelineOpList.h`: a draw through one is drawn on the CPU's
+/// float pipeline whatever else it takes.
+const FLOAT_BLENDS: [BlendMode; 7] = [
+    BlendMode::ColorDodge,
+    BlendMode::ColorBurn,
+    BlendMode::SoftLight,
+    BlendMode::Hue,
+    BlendMode::Saturation,
+    BlendMode::Color,
+    BlendMode::Luminosity,
+];
+
+/// The pipeline the CPU draws a draw on straight onto an eight-bit page in
+/// `page` -- see [`Pipeline`] -- one made with `paint`, dyed by `spec` where a
+/// gradient dyes it, and composited through `blend`.
+///
+/// Floats where `spec` is shaded in floats -- see
+/// [`GradientSpec::shaded_in_floats`] -- where `blend` is one of
+/// [`FLOAT_BLENDS`], or where the paint dithers or has a colour filter other
+/// than a blend mode's with an eight-bit stage. An image filter that is a
+/// colour filter is one: Skia moves it into the paint's colour filter slot
+/// where the paint has no mask filter (`SkCanvasPriv::ImageToColorFilter`).
+/// Any other image filter is drawn into a layer of its own and rounded there
+/// to its pixels, whose depth is the raster's, so such a draw is `Bytes`. A
+/// shader other than a gradient's is taken to have an eight-bit form, which
+/// an image's and a colour's have.
+pub(crate) fn pipeline_of(
+    spec: Option<&GradientSpec>,
+    page: &ColorSpace,
+    paint: &Paint,
+    blend: BlendMode,
+) -> Pipeline {
+    let folded = match paint.image_filter() {
+        None => None,
+        Some(filter) => match filter.to_a_color_filter() {
+            Some(filter) if paint.mask_filter().is_none() => Some(filter),
+            _ => return Pipeline::Bytes,
+        },
+    };
+    let float_filter = |filter: &ColorFilter| {
+        filter
+            .to_a_color_mode()
+            .is_none_or(|(_, mode)| FLOAT_BLENDS.contains(&mode))
+    };
+    let floats = spec.and_then(|spec| spec.shaded_in_floats(page))
+        == Some(true)
+        || FLOAT_BLENDS.contains(&blend)
+        || paint.is_dither()
+        || paint.color_filter().iter().chain(&folded).any(float_filter);
+    match floats {
+        true => Pipeline::Floats,
+        false => Pipeline::Bytes,
+    }
+}
+
+/// The colour type a draw the CPU makes on its float pipeline is rasterized
+/// in, inside a layer a backdrop seeds, on an eight-bit page -- see
+/// [`rasterized_onto`]: sixteen bits a channel, unsigned, which holds the
+/// CPU's float to within half of 1/65535 -- a 514th of a level.
+///
+/// Fixed by what Ganesh can sample rather than chosen: neither its Metal
+/// caps nor its Vulkan caps list a 32-bit float format (`GrMtlCaps.mm`,
+/// `GrVkCaps.cpp`), and it uploads an `RGBAF32` image as eight bits, which
+/// rounds what this exists to keep. Half floats hold a level near 255 to
+/// within a sixteenth.
+const UNROUNDED_SOURCE: ColorType = ColorType::R16G16B16A16UNorm;
+
 /// Draws `recorded` onto `canvas` through a raster made on the CPU in
 /// `format`, under the transform `canvas` carries, composited as an image at
 /// whole device pixels through `through`: the same steps whichever engine
@@ -2940,12 +3027,30 @@ impl ReplayedText {
 /// transparent, so the draw is composited as the CPU composites a layer of
 /// it: on pixels it covers whole, through `through`'s blend, the bytes the
 /// CPU would draw there.
+///
+/// Inside a layer a backdrop seeded, where the draw lands on what lies
+/// beneath the layer and its pixels cannot be read, a draw `made_in` the
+/// CPU's float pipeline is rasterized in [`UNROUNDED_SOURCE`] on an
+/// eight-bit page: the CPU blends its unrounded colour onto that backdrop
+/// and rounds once, where a raster of bytes rounds the colour first and the
+/// GPU's blend rounds again, a level apart wherever the two differ -- 9,689
+/// of 65,536 bytes of an Oklab radial. A `source-over` one is composited
+/// through [`exact_composite::float_over`]'s blender, which reads the
+/// destination and rounds once as the CPU does. The fixed-function blend
+/// cannot carry the unrounded source everywhere: llvmpipe and NVIDIA blend
+/// an eight-bit target at its own precision, so there the sixteen-bit
+/// raster moved none of those bytes. What the blender leaves apart lies
+/// within a fraction of a level of a tie: the precision its source arrives
+/// in, a half on Metal. Anywhere else the raster is in `format`: a layer
+/// that starts transparent stores the draw's colour rounded once, which a
+/// raster of bytes holds exactly and the GPU copies.
 pub(crate) fn rasterized_onto(
     canvas: &SkCanvas,
     recorded: &Picture,
     inked: Option<Rect>,
     format: &Format,
     through: &Paint,
+    made_in: Pipeline,
 ) {
     let device = canvas.local_to_device_as_3x3();
     if device.has_perspective() {
@@ -2970,9 +3075,27 @@ pub(crate) fn rasterized_onto(
     // is rasterized under the page's contrast and gamma rather than Skia's
     // defaults, which differ from the page's on Linux.
     let props = canvas.props();
-    let Some(mut surface) =
-        started::raster(&format.image_info(area.size()), None, props.as_ref())
-    else {
+    let mut info = format.image_info(area.size());
+    let unrounded = made_in == Pipeline::Floats
+        && InLayer::seeded()
+        && matches!(
+            info.color_type(),
+            ColorType::RGBA8888 | ColorType::BGRA8888
+        );
+    let mut over = None;
+    if unrounded {
+        info = info.with_color_type(UNROUNDED_SOURCE);
+        if through.as_blend_mode() == Some(BlendMode::SrcOver) {
+            over = exact_composite::float_over(HIGHP_TIES_TO_EVEN).map(
+                |blender| {
+                    let mut over = through.clone();
+                    over.set_blender(blender);
+                    over
+                },
+            );
+        }
+    }
+    let Some(mut surface) = started::raster(&info, None, props.as_ref()) else {
         return;
     };
     let raster = surface.canvas();
@@ -2985,7 +3108,7 @@ pub(crate) fn rasterized_onto(
         canvas,
         &surface.image_snapshot(),
         IPoint::new(area.left, area.top),
-        through,
+        over.as_ref().unwrap_or(through),
     );
     canvas.restore();
 }
@@ -2994,6 +3117,9 @@ thread_local! {
     /// How many layers this thread is playing entries inside, opened by
     /// [`Group::playback_within`] -- see [`InLayer`].
     static IN_LAYERS: Cell<u32> = const { Cell::new(0) };
+    /// Whether the innermost of those layers was seeded from what lies
+    /// beneath it -- see [`InLayer::seeded`].
+    static SEEDED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Counts a layer [`Group::playback_within`] opens on a canvas around the
@@ -3002,23 +3128,35 @@ thread_local! {
 /// reads the canvas's root device, never an open layer. A layer whose
 /// entries play on a surface of their own counts none -- see
 /// [`played_on_a_root`].
-struct InLayer;
+///
+/// Holds whether the layer it counts out of, if any, was seeded.
+struct InLayer(bool);
 
 impl InLayer {
-    fn enter() -> Self {
+    /// Counts a layer, `seeded` where a backdrop seeds it with what lies
+    /// beneath it rather than leaving it transparent.
+    fn enter(seeded: bool) -> Self {
         IN_LAYERS.set(IN_LAYERS.get() + 1);
-        InLayer
+        InLayer(SEEDED.replace(seeded))
     }
 
     /// Whether entries are being played inside a layer on this thread.
     fn open() -> bool {
         IN_LAYERS.get() > 0
     }
+
+    /// Whether entries are being played inside a layer on this thread whose
+    /// backdrop seeded it, and so holds what lies beneath it under whatever
+    /// a draw inside it lands on.
+    fn seeded() -> bool {
+        Self::open() && SEEDED.get()
+    }
 }
 
 impl Drop for InLayer {
     fn drop(&mut self) {
         IN_LAYERS.set(IN_LAYERS.get().saturating_sub(1));
+        SEEDED.set(self.0);
     }
 }
 
@@ -3027,17 +3165,18 @@ impl Drop for InLayer {
 /// [`played_on_a_root`] -- are on that surface's root device, which
 /// `readPixels` reads, whatever is open on the canvas the surface is copied
 /// onto.
-struct OwnRoot(u32);
+struct OwnRoot(u32, bool);
 
 impl OwnRoot {
     fn enter() -> Self {
-        OwnRoot(IN_LAYERS.replace(0))
+        OwnRoot(IN_LAYERS.replace(0), SEEDED.replace(false))
     }
 }
 
 impl Drop for OwnRoot {
     fn drop(&mut self) {
         IN_LAYERS.set(self.0);
+        SEEDED.set(self.1);
     }
 }
 
@@ -3216,12 +3355,14 @@ pub enum OnGpu {
     /// whose pixels cannot be read -- one not played on a root of its own,
     /// see [`played_on_a_root`] -- over transparent and composited through
     /// `blend` -- `over`, the draw recorded with `SrcOver`, where `blend` is
-    /// another.
+    /// another -- in a raster of the depth `made_in` asks for, see
+    /// [`rasterized_onto`].
     Effect {
         picture: Picture,
         over: Option<Picture>,
         blend: BlendMode,
         beyond: bool,
+        made_in: Pipeline,
     },
     /// The draw made on the CPU, its layers -- its shadow, then itself --
     /// each recorded composited with `SrcOver` and composited in turn onto
@@ -3229,7 +3370,7 @@ pub enum OnGpu {
     /// clip's bounds whole where `beyond` says the blend changes what lies
     /// beyond the draw.
     Raster {
-        layers: Vec<Picture>,
+        layers: Vec<RasterLayer>,
         blend: BlendMode,
         beyond: bool,
     },
@@ -3251,6 +3392,15 @@ pub enum OnGpu {
     Native,
 }
 
+/// One layer of a draw [`OnGpu::Raster`] makes on the CPU: its recording,
+/// composited with `SrcOver`, and the pipeline the CPU draws it on, which
+/// says what depth of raster it is made in -- see [`rasterized_onto`].
+#[derive(Clone, Debug)]
+pub struct RasterLayer {
+    pub picture: Picture,
+    pub made_in: Pipeline,
+}
+
 impl OnGpu {
     /// The bytes the pictures, or the path, a GPU canvas plays hold -- see
     /// [`Layer::recorded_bytes`].
@@ -3260,9 +3410,10 @@ impl OnGpu {
                 picture.approximate_bytes_used()
                     + over.as_ref().map_or(0, Picture::approximate_bytes_used)
             }
-            OnGpu::Raster { layers, .. } => {
-                layers.iter().map(Picture::approximate_bytes_used).sum()
-            }
+            OnGpu::Raster { layers, .. } => layers
+                .iter()
+                .map(|layer| layer.picture.approximate_bytes_used())
+                .sum(),
             OnGpu::Path(draw) => draw.path.lock().approximate_bytes_used(),
             OnGpu::Alone | OnGpu::Native => 0,
         }
@@ -3282,6 +3433,12 @@ pub struct GradientPath {
     /// What the draw reaches, in the recording's device pixels: the path's
     /// bounds under `matrix`, widened as `context::drawn_bounds` widens them.
     pub bounds: Rect,
+    /// The recording's device pixels the CPU's coverage of the path can be
+    /// other than zero on, made on first use -- see [`Self::inked`].
+    pub inked: OnceLock<IRect>,
+    /// The pipeline the CPU draws the path on, made on first use -- see
+    /// [`Self::made_in`].
+    pub made_in: OnceLock<Pipeline>,
     /// The page's transform the path was drawn under.
     pub matrix: Matrix,
     /// The draw's paint with no shader and an alpha of 1, the effect
@@ -3307,6 +3464,40 @@ pub struct GradientPath {
     /// Whether `blend` changes what lies beyond the draw -- see
     /// [`OnGpu::Raster`].
     pub beyond: bool,
+}
+
+impl GradientPath {
+    /// The recording's device pixels the CPU's coverage of the path can be
+    /// other than zero on -- see `context::inked_bounds` -- which `bounds`
+    /// widens by a pixel of anti-aliasing either side. A stroke is bounded
+    /// by the outline Skia fills for it: the reach `bounds` allows a mitred
+    /// join, ten times its half width at the default limit, is a corner's
+    /// and not a curve's, and held that wide, the rectangles of a row of
+    /// stroked rings meet. Made where a GPU canvas plays the draw, so that a
+    /// CPU canvas never strokes the path twice.
+    pub fn inked(&self) -> IRect {
+        *self.inked.get_or_init(|| {
+            let style = self.paint.style();
+            let outline = style != PaintStyle::Fill;
+            inked_bounds(
+                &self.path.lock(),
+                &self.paint,
+                style,
+                &self.matrix,
+                outline,
+            )
+            .round_out()
+        })
+    }
+
+    /// The pipeline the CPU draws the path on, with `pixels` through `blend`
+    /// -- see [`pipeline_of`]. Made where a GPU canvas first makes the draw
+    /// on the CPU, which only a layer it cannot read back from asks for.
+    pub fn made_in(&self) -> Pipeline {
+        *self.made_in.get_or_init(|| {
+            pipeline_of(Some(&self.spec), &self.page, &self.pixels, self.blend)
+        })
+    }
 }
 
 /// Where an image of a [`GradientPath`]'s effect lies in an atlas: `at`, in
@@ -3494,17 +3685,25 @@ fn max_texture_size(_canvas: &SkCanvas) -> i32 {
 /// can be made.
 ///
 /// A rectangle on whole pixels is the effect itself. Any other path is an
-/// aliased rectangle over the pixels it reaches, its effect -- the atlas's
+/// aliased rectangle over the pixels it inks, its effect -- the atlas's
 /// image of it, or the effect itself for one the atlas does not hold --
 /// masked by the CPU's coverage of the path -- see [`draw_coverage`] -- so
 /// that its edge is the CPU canvas's, as its shadow and its blur already
 /// are, made on the CPU -- see `Context2D::chain_input`. Drawn through the
 /// path, it took Ganesh's anti-aliasing instead, up to 125 levels from the
 /// CPU canvas along a hard-stop conic's edge.
+///
+/// A `source-over` draw of an effect the CPU makes in eight bits is
+/// composited in the CPU's arithmetic, not Ganesh's -- see
+/// [`exact_composite`]: on the canvas's own surface it is held in `batch`,
+/// inside a layer it takes the blender. An opaque effect on whole pixels
+/// needs neither: it composites to itself, which the fixed-function blend
+/// stores exactly.
 fn drawn_with_effect(
     canvas: &SkCanvas,
     draw: &GradientPath,
     found: Option<&Found>,
+    mut batch: Option<&mut exact_composite::Batch>,
 ) -> bool {
     let effect = match found {
         Some(found) => found.effect.clone(),
@@ -3513,28 +3712,52 @@ fn drawn_with_effect(
     let Some(effect) = effect else {
         return false;
     };
+    let opaque = effect.opaque();
+    // A `highp` effect is composited on the CPU in float, which the eight-bit
+    // composite is not.
+    let exact_over = !effect.highp()
+        && draw.paint.as_blend_mode() == Some(BlendMode::SrcOver)
+        && !(draw.whole_pixels && opaque);
+    // A snapshot of the surface holds a layer's pixels only once the layer
+    // is drawn into it, so inside one a draw reads its destination itself.
+    let held = exact_over && !InLayer::open() && batch.is_some();
     let outer = canvas.local_to_device_as_3x3();
     // The canvas's whole-pixel offset from the page's device pixels.
     let shift =
         IPoint::new(outer.translate_x() as i32, outer.translate_y() as i32);
+    let inked = draw.inked().with_offset(shift);
     if draw.whole_pixels {
+        let Some(placed) = effect.placed(&draw.matrix, -shift) else {
+            return false;
+        };
+        if held && let Some(batch) = batch.as_deref_mut() {
+            batch.hold(canvas, inked, placed, None, opaque);
+            return true;
+        }
+        if let Some(batch) = batch.as_deref_mut() {
+            batch.flush_meeting(canvas, inked);
+        }
         // Drawn through the rectangle under the page's transform, at the
         // canvas's identity: its local matrix undoes the canvas's, so that
         // the effect is handed each device pixel.
-        let Some(shader) = Matrix::concat(&outer, &draw.matrix)
+        let device = Matrix::concat(&outer, &draw.matrix);
+        let Some(shader) = device
             .invert()
-            .and_then(|device| {
-                Some(
-                    effect
-                        .placed(&draw.matrix, -shift)?
-                        .with_local_matrix(&device),
-                )
-            })
+            .map(|device| placed.with_local_matrix(&device))
         else {
             return false;
         };
         let mut paint = draw.paint.clone();
-        paint.set_shader(shader);
+        if !(exact_over
+            && exact_composite::blended(
+                &mut paint,
+                shader.clone(),
+                None,
+                opaque,
+            ))
+        {
+            paint.set_shader(shader);
+        }
         canvas.save();
         canvas.concat(&draw.matrix);
         canvas.draw_path(&draw.path.lock(), &paint);
@@ -3573,15 +3796,38 @@ fn drawn_with_effect(
     let Some((effect, coverage)) = layers else {
         return false;
     };
+    // The pixels the draw can change. `reach` adds the slot's margin and
+    // `draw.area` a pixel of anti-aliasing, and a held rectangle that large
+    // meets its neighbours' and flushes the batch draw by draw. A path that
+    // inks nothing on the page changes nothing.
+    let Some(inked) = IRect::intersect(&inked, &on_canvas) else {
+        return true;
+    };
+    if held && let Some(batch) = batch.as_deref_mut() {
+        batch.hold(canvas, inked, effect, Some(coverage), opaque);
+        return true;
+    }
+    if let Some(batch) = batch {
+        batch.flush_meeting(canvas, inked);
+    }
     let mut paint = draw.paint.clone();
+    if !(exact_over
+        && exact_composite::blended(
+            &mut paint,
+            effect.clone(),
+            Some(coverage.clone()),
+            opaque,
+        ))
+    {
+        paint.set_shader(shaders::blend(BlendMode::DstIn, effect, coverage));
+    }
     paint
-        .set_shader(shaders::blend(BlendMode::DstIn, effect, coverage))
         .set_anti_alias(false)
         .set_style(PaintStyle::Fill)
         .set_path_effect(None);
     canvas.save();
     canvas.reset_matrix();
-    canvas.draw_irect(on_canvas, &paint);
+    canvas.draw_irect(inked, &paint);
     canvas.restore();
     true
 }
@@ -3659,20 +3905,26 @@ fn coverage_info(size: impl Into<ISize>) -> ImageInfo {
 /// Plays `pixels`, a draw dyed by a gradient as the page's pixels recording
 /// records it, onto `canvas`, a GPU canvas, as `gpu` says -- see [`OnGpu`]
 /// -- with what the run's atlas `found` for it. A draw made on the CPU, on
-/// a canvas whose pixels cannot be read, plays `pixels`.
+/// a canvas whose pixels cannot be read, plays `pixels`. A path the effect
+/// draws may be held in `batch` -- see [`drawn_with_effect`]; any other
+/// draw flushes it first.
 fn played_on_gpu(
     canvas: &SkCanvas,
     pixels: &GradientPixels,
     gpu: &OnGpu,
     found: Option<&Found>,
+    batch: &mut exact_composite::Batch,
 ) {
     let whole = on_whole_pixels(canvas);
+    if let OnGpu::Path(draw) = gpu
+        && whole
+        && drawn_with_effect(canvas, draw, found, Some(&mut *batch))
+    {
+        return;
+    }
+    // Any other draw may read or write what a held draw covers.
+    batch.flush(canvas);
     match gpu {
-        OnGpu::Path(draw)
-            if whole && drawn_with_effect(canvas, draw, found) =>
-        {
-            return;
-        }
         OnGpu::Effect { picture, .. } if whole => {
             picture.playback(canvas);
             return;
@@ -3708,12 +3960,14 @@ fn played_on_gpu(
                 (!draw.beyond).then(|| layer.cull_rect()),
                 &format,
                 &through,
+                draw.made_in(),
             );
         }
         OnGpu::Effect {
             over,
             blend,
             beyond,
+            made_in,
             ..
         } => {
             if drawn_on_its_backdrop(canvas, recorded, &format, *beyond) {
@@ -3728,6 +3982,7 @@ fn played_on_gpu(
                 (!beyond).then(|| layer.cull_rect()),
                 &format,
                 &through,
+                *made_in,
             );
         }
         OnGpu::Raster {
@@ -3743,19 +3998,24 @@ fn played_on_gpu(
             for layer in layers {
                 rasterized_onto(
                     canvas,
-                    layer,
-                    (!beyond).then(|| layer.cull_rect()),
+                    &layer.picture,
+                    (!beyond).then(|| layer.picture.cull_rect()),
                     &format,
                     &through,
+                    layer.made_in,
                 );
             }
         }
+        // Into a chain's layer, which starts transparent and holds bytes on
+        // the CPU as well: there the CPU rounds the draw's colour once, which
+        // a raster of bytes holds exactly.
         OnGpu::Alone => rasterized_onto(
             canvas,
             recorded,
             Some(recorded.cull_rect()),
             &format,
             &Paint::default(),
+            Pipeline::Bytes,
         ),
         OnGpu::Native => pixels.playback(canvas),
     }
@@ -3830,6 +4090,7 @@ impl GradientDraw {
         };
         let found_for =
             |index: usize| found.get(index).and_then(Option::as_ref);
+        let mut batch = exact_composite::Batch::default();
         let mut index = 0;
         while index < self.draws.len() {
             // Draws one after another that the CPU makes over the GPU's
@@ -3876,6 +4137,9 @@ impl GradientDraw {
                         clip: None,
                     })
                     .collect();
+                if drawn.len() > 1 {
+                    batch.flush(canvas);
+                }
                 if drawn.len() > 1
                     && Format::of(canvas).is_some_and(|format| {
                         drawn_on_their_backdrop(canvas, &drawn, &format)
@@ -3897,10 +4161,12 @@ impl GradientDraw {
                     &piece.pixels,
                     &piece.gpu,
                     found_for(index),
+                    &mut batch,
                 ),
             }
             index += 1;
         }
+        batch.flush(canvas);
         canvas.restore();
     }
 
@@ -5654,7 +5920,11 @@ impl Group {
                     && target == Target::Pixels
                     && self.played_at_source(canvas, &base, None, None);
                 if !rooted && !placed {
-                    let in_layer = InLayer::enter();
+                    let in_layer = InLayer::enter(
+                        target == Target::Pixels
+                            && (rec.backdrop.is_some()
+                                || rec.pixels_backdrop.is_some()),
+                    );
                     play_entries(
                         &self.contents.layers,
                         &self.contents.features,
@@ -7616,6 +7886,7 @@ impl CutOp {
             false => vec![],
         };
         let draws = self.draws_for(target).iter().zip(&self.gpu);
+        let mut batch = exact_composite::Batch::default();
         for (index, (draw, on_gpu)) in draws.enumerate() {
             match on_gpu.as_ref().filter(|_| gpu) {
                 Some(on_gpu) => {
@@ -7625,14 +7896,17 @@ impl CutOp {
                         &GradientPixels::Recorded(draw.clone()),
                         on_gpu,
                         found.get(index).and_then(Option::as_ref),
+                        &mut batch,
                     );
                     canvas.restore();
                 }
                 None => {
+                    batch.flush(canvas);
                     canvas.draw_picture(draw, None, None);
                 }
             }
         }
+        batch.flush(canvas);
     }
 
     /// Draws the cut draws for `target` onto `canvas`, under whatever
@@ -8488,6 +8762,7 @@ mod tests {
             Some(picture.cull_rect()),
             &format,
             &Paint::default(),
+            super::Pipeline::Bytes,
         );
         let (direct, routed) = (read(&mut direct), read(&mut routed));
         assert!(direct.iter().any(|&b| b != 0), "the run inks the page");
@@ -12066,5 +12341,293 @@ mod colour_glyph_coverage_tests {
             .map(|fill| drawn_times(OSWALD, "Hamburg", fill, "blur(2px)", 3));
         assert_eq!(routed, 3, "the run of outlines left the route");
         assert!(a != b);
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    //! [`pipeline_of`] held to the pipeline Skia's raster pipeline draws each
+    //! paint on, read from the bytes it stores (#800).
+    use super::{Pipeline, pipeline_of};
+    use crate::{
+        color::RgbaLinear,
+        geometry::Point,
+        shader::{
+            GradientColorSpace, GradientInterpolation, GradientStop, Shader,
+        },
+        started,
+    };
+    use skia_safe::{
+        AlphaType, BlendMode, BlurStyle, Color, ColorSpace, ColorType,
+        ImageInfo, MaskFilter, Paint, color_filters, image_filters,
+    };
+
+    const SIDE: i32 = 64;
+
+    /// How near a level, or a half level, a float lies for the distance to
+    /// be arithmetic error rather than value: well under the 1/255 apart two
+    /// byte sources' composites lie, and over the error of a float worked
+    /// out in levels rather than in Skia's units. A composite this near a
+    /// half level is one a store may round either way.
+    const AT_A_TIE: f32 = 1e-3;
+
+    /// The identity colour matrix, row-major.
+    const IDENTITY: [f32; 20] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+
+    fn stop(
+        position: f32,
+        (r, g, b): (u8, u8, u8),
+        alpha: f32,
+    ) -> GradientStop {
+        GradientStop {
+            position,
+            color: RgbaLinear::from_srgb8(r, g, b, alpha),
+        }
+    }
+
+    /// A translucent ramp across the raster, eight-bit where interpolated in
+    /// the page's space.
+    fn ramp(space: GradientColorSpace) -> Shader {
+        Shader::linear_gradient(
+            Point::new(0.0, 0.0),
+            Point::new(SIDE as f32, 0.0),
+            &[
+                stop(0.0, (200, 30, 90), 0.7),
+                stop(0.5, (0, 255, 0), 0.8),
+                stop(1.0, (30, 120, 200), 0.45),
+            ],
+            GradientInterpolation::new(space),
+        )
+        .expect("a ramp")
+    }
+
+    /// The pixels of a raster of `color_type` in sRGB, premultiplied, in
+    /// levels: `paint` drawn over its whole, over an opaque vertical ramp of
+    /// bytes where `under`, whose share of a blend is seldom a whole level.
+    fn drawn(
+        color_type: ColorType,
+        under: bool,
+        paint: Option<&Paint>,
+    ) -> Vec<f32> {
+        let info = ImageInfo::new(
+            (SIDE, SIDE),
+            color_type,
+            AlphaType::Premul,
+            ColorSpace::new_srgb(),
+        );
+        let mut surface = started::raster(&info, None, None).expect("a raster");
+        let canvas = surface.canvas();
+        if under {
+            let mut backdrop = Paint::default();
+            backdrop.set_shader(
+                Shader::linear_gradient(
+                    Point::new(0.0, 0.0),
+                    Point::new(0.0, SIDE as f32),
+                    &[
+                        stop(0.0, (37, 101, 173), 1.0),
+                        stop(1.0, (219, 7, 66), 1.0),
+                    ],
+                    GradientInterpolation::default(),
+                )
+                .expect("a backdrop")
+                .inner,
+            );
+            canvas.draw_paint(&backdrop);
+        }
+        if let Some(paint) = paint {
+            canvas.draw_paint(paint);
+        }
+        let row = info.min_row_bytes();
+        let mut bytes = vec![0u8; info.compute_byte_size(row)];
+        assert!(surface.read_pixels(&info, &mut bytes, row, (0, 0)));
+        match color_type {
+            ColorType::RGBAF32 => bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&word| f32::from_ne_bytes(word) * 255.0)
+                .collect(),
+            _ => bytes.into_iter().map(f32::from).collect(),
+        }
+    }
+
+    /// The pipeline the CPU draws `paint` on, from what it stores over the
+    /// backdrop: the unrounded source-over of what it draws over transparent
+    /// into floats, rounded once, where it blends in floats, and that of
+    /// what it draws over transparent into bytes where it blends those.
+    /// Panics where both or neither account for every byte, which a scene
+    /// that tells the two apart does not, or where the dither of a dithered
+    /// paint moves nothing.
+    ///
+    /// A dithered paint is read differently: Skia does not dither a float
+    /// raster, so no source here composites to what it stores, and its
+    /// dither stage is one the byte pipeline does not have, so a store the
+    /// dither moves is a store of the float pipeline.
+    fn cpu_pipeline(name: &str, paint: &Paint) -> Pipeline {
+        let page = drawn(ColorType::RGBA8888, true, Some(paint));
+        if paint.is_dither() {
+            let mut plain = paint.clone();
+            plain.set_dither(false);
+            return match page == drawn(ColorType::RGBA8888, true, Some(&plain))
+            {
+                true => panic!("{name}: the dither moved nothing"),
+                false => Pipeline::Floats,
+            };
+        }
+        let under = drawn(ColorType::RGBA8888, true, None);
+        // The float pipeline clamps a colour into the gamut before an
+        // eight-bit store. A composite this close to a half level is one
+        // the CPU's own float arithmetic, in other units and order, may round
+        // either way; a byte source never lands within it.
+        let composited = |source: &[f32]| {
+            (0..page.len()).all(|i| {
+                let alpha = source[(i & !3) + 3].clamp(0.0, 255.0);
+                let colour = source[i].clamp(0.0, alpha);
+                let exact = colour + under[i] * (255.0 - alpha) / 255.0;
+                (exact - page[i]).abs() < 0.5 + AT_A_TIE
+            })
+        };
+        let float_source = drawn(ColorType::RGBAF32, false, Some(paint));
+        let byte_source = drawn(ColorType::RGBA8888, false, Some(paint));
+        // A float raster that stores the byte raster's levels was handed a
+        // source rounded before it -- an image filter's own eight-bit layer --
+        // so the draw is in bytes whatever the raster under it.
+        if float_source
+            .iter()
+            .all(|level| (level - level.round()).abs() < AT_A_TIE)
+        {
+            return Pipeline::Bytes;
+        }
+        match (composited(&float_source), composited(&byte_source)) {
+            (true, false) => Pipeline::Floats,
+            (false, true) => Pipeline::Bytes,
+            both => panic!("{name}: floats and bytes fit {both:?}"),
+        }
+    }
+
+    /// Each paint lands the pipeline `pipeline_of` says it does, on an
+    /// eight-bit sRGB page: a ramp in the page's space in bytes, at an alpha
+    /// or through a blend mode's colour filter as well; one in Oklab, a
+    /// two-point conical one, one through a colour matrix -- as a colour
+    /// filter, or as an image filter Skia moves into the paint -- or one
+    /// dithered, in floats; and one whose image filter Skia runs in a layer
+    /// of its own, which an image filter beside a mask filter is, in bytes.
+    #[test]
+    fn the_pipeline_a_draw_is_said_to_take_is_the_one_the_cpu_takes() {
+        let page = ColorSpace::new_srgb();
+        let srgb = ramp(GradientColorSpace::Srgb);
+        let oklab = ramp(GradientColorSpace::Oklab);
+        let conical = Shader::two_point_conical_gradient(
+            Point::new(20.0, 30.0),
+            25.0,
+            Point::new(40.0, 34.0),
+            10.0,
+            &[stop(0.0, (200, 30, 90), 0.7), stop(1.0, (0, 255, 0), 0.9)],
+            GradientInterpolation::default(),
+        )
+        .expect("a conical gradient");
+        let identity = || {
+            image_filters::color_filter(
+                color_filters::matrix_row_major(&IDENTITY, None),
+                None,
+                None,
+            )
+            .expect("an identity filter")
+        };
+        fn with<'a>(
+            shader: &'a Shader,
+            change: &dyn Fn(&mut Paint),
+        ) -> (&'a Shader, Paint) {
+            let mut paint = Paint::default();
+            paint.set_shader(shader.inner.clone());
+            change(&mut paint);
+            (shader, paint)
+        }
+        let mut scaled = IDENTITY;
+        scaled[0] = 0.9;
+        let cases: Vec<(&str, (&Shader, Paint), Pipeline)> = vec![
+            ("sRGB ramp", with(&srgb, &|_| {}), Pipeline::Bytes),
+            (
+                "sRGB ramp at 0.6",
+                with(&srgb, &|paint| {
+                    paint.set_alpha_f(0.6);
+                }),
+                Pipeline::Bytes,
+            ),
+            (
+                "sRGB ramp, modulated",
+                with(&srgb, &|paint| {
+                    paint.set_color_filter(color_filters::blend(
+                        Color::from_rgb(30, 200, 90),
+                        BlendMode::Modulate,
+                    ));
+                }),
+                Pipeline::Bytes,
+            ),
+            ("Oklab ramp", with(&oklab, &|_| {}), Pipeline::Floats),
+            ("conical", with(&conical, &|_| {}), Pipeline::Floats),
+            (
+                "sRGB ramp, colour matrix",
+                with(&srgb, &|paint| {
+                    paint.set_color_filter(color_filters::matrix_row_major(
+                        &scaled, None,
+                    ));
+                }),
+                Pipeline::Floats,
+            ),
+            (
+                "sRGB ramp, identity image filter",
+                with(&srgb, &|paint| {
+                    paint.set_image_filter(identity());
+                }),
+                Pipeline::Floats,
+            ),
+            (
+                "sRGB ramp, dithered",
+                with(&srgb, &|paint| {
+                    paint.set_dither(true);
+                }),
+                Pipeline::Floats,
+            ),
+            (
+                "Oklab ramp, blurred",
+                with(&oklab, &|paint| {
+                    paint.set_image_filter(image_filters::blur(
+                        (0.5, 0.5),
+                        None,
+                        None,
+                        None,
+                    ));
+                }),
+                Pipeline::Bytes,
+            ),
+            (
+                "Oklab ramp, identity image filter and a mask filter",
+                with(&oklab, &|paint| {
+                    paint.set_image_filter(identity()).set_mask_filter(
+                        MaskFilter::blur(BlurStyle::Normal, 0.5, false),
+                    );
+                }),
+                Pipeline::Bytes,
+            ),
+        ];
+        for (name, (shader, paint), expected) in cases {
+            assert_eq!(cpu_pipeline(name, &paint), expected, "{name}: the CPU");
+            assert_eq!(
+                pipeline_of(
+                    shader.gradient.as_deref(),
+                    &page,
+                    &paint,
+                    BlendMode::SrcOver
+                ),
+                expected,
+                "{name}: pipeline_of"
+            );
+        }
     }
 }

@@ -521,8 +521,13 @@ export interface ImageDataExportSettings {
    */
   density?: number;
 
-  /** Number of samples used for antialiasing each pixel. `0` and `1` both
-   * mean one sample a pixel -- no multisampling. */
+  /** Number of samples used for antialiasing each pixel on a GPU canvas,
+   * 4 by default. `0` and `1` both mean one sample a pixel -- no
+   * multisampling. A multisampled edge covers a pixel in steps of one
+   * sample, where a CPU canvas computes coverage exactly, so the two
+   * engines' edges differ, most on sub-pixel geometry: over rectangles 0.05
+   * to 1 pixel wide, 4 samples stand 307 levels from exact in all against
+   * the CPU's 9.5 (docs/performance.md). */
   msaa?: number | boolean;
 
   /**
@@ -1346,8 +1351,13 @@ export interface RenderOptions {
    */
   density?: number;
 
-  /** Number of samples used for antialiasing each pixel. `0` and `1` both
-   * mean one sample a pixel -- no multisampling. */
+  /** Number of samples used for antialiasing each pixel on a GPU canvas,
+   * 4 by default. `0` and `1` both mean one sample a pixel -- no
+   * multisampling. A multisampled edge covers a pixel in steps of one
+   * sample, where a CPU canvas computes coverage exactly, so the two
+   * engines' edges differ, most on sub-pixel geometry: over rectangles 0.05
+   * to 1 pixel wide, 4 samples stand 307 levels from exact in all against
+   * the CPU's 9.5 (docs/performance.md). */
   msaa?: number | boolean;
 }
 

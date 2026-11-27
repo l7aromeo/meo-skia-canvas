@@ -315,6 +315,18 @@ impl GradientSpec {
         made
     }
 
+    /// Whether the CPU shades this gradient on its float pipeline (`highp`)
+    /// on an eight-bit page in `page`, for the gradient's own stages alone:
+    /// a paint's blend, dither or colour filter can move a draw of it there
+    /// as well -- see `layer::pipeline_of`. `None` where [`Layout`] or
+    /// [`Ramp`] does not know the stages the CPU takes, a degenerate
+    /// gradient's or a conversion they do not model.
+    pub(crate) fn shaded_in_floats(&self, page: &ColorSpace) -> Option<bool> {
+        let layout = Layout::of(self)?;
+        let ramp = Ramp::of(self, page)?;
+        Some(made_in_floats(&layout, &ramp))
+    }
+
     /// [`Self::exact`], made afresh.
     fn made(&self, page: &ColorSpace, alpha: f32) -> Option<Exact> {
         #[cfg(test)]
@@ -324,14 +336,13 @@ impl GradientSpec {
         // The `highp` pipeline premultiplies, scales and blends in floats
         // and rounds once, at the store; the effect hands the GPU whole
         // levels, which match it only where none of those happen.
-        // A conversion to the page runs on the float pipeline too, as
-        // does Lab's or Oklab's back to the space it was converted from.
-        let highp =
-            layout.highp || !ramp.toward.is_identity() || ramp.css != Css::None;
+        let highp = made_in_floats(&layout, &ramp);
         if highp && (!ramp.opaque || alpha < 1.0) {
             return None;
         }
         let converts = !ramp.toward.is_identity() || ramp.css != Css::None;
+        let opaque = alpha >= 1.0
+            && self.native().is_some_and(|native| native.is_opaque());
         EFFECTS.with(|effects| {
             let compiled = effects.as_ref()?.iter().find(|compiled| {
                 compiled.converts == converts && ramp.ts.len() <= compiled.size
@@ -350,6 +361,8 @@ impl GradientSpec {
                 .into(),
                 to_unit: layout.to_unit,
                 local: self.local,
+                highp,
+                opaque,
             })
         })
     }
@@ -428,6 +441,11 @@ pub(crate) struct Exact {
     to_unit: Matrix,
     /// The shader's local matrix -- see [`GradientSpec::local`].
     local: Option<Matrix>,
+    /// Whether the CPU draws it on its float pipeline.
+    highp: bool,
+    /// Whether the CPU's blitter takes its paint as opaque, and so draws
+    /// `source-over` as `src`: the native shader opaque and the alpha 1.
+    opaque: bool,
 }
 
 impl Exact {
@@ -473,6 +491,17 @@ impl Exact {
 }
 
 impl Exact {
+    /// Whether the CPU draws it on its float pipeline.
+    pub fn highp(&self) -> bool {
+        self.highp
+    }
+
+    /// Whether the CPU draws it `source-over` as `src` -- see
+    /// [`Self::opaque`](Exact).
+    pub fn opaque(&self) -> bool {
+        self.opaque
+    }
+
     /// Whether the effect can be placed under `matrix` -- see
     /// [`Self::placed`].
     pub fn places(&self, matrix: &Matrix) -> bool {
@@ -587,6 +616,15 @@ impl ExactKey {
             && self.spec.color_space == spec.color_space
             && self.page == *page
     }
+}
+
+/// Whether the CPU shades a gradient of `layout` and `ramp` on its float
+/// pipeline (`highp`): where `layout` computes `t` through a stage that has
+/// no eight-bit form, as a two-point conical one does, or the colours are
+/// converted to the page -- or out of Lab or Oklab back to the space they
+/// came from -- which runs on the float pipeline too.
+fn made_in_floats(layout: &Layout, ramp: &Ramp) -> bool {
+    layout.highp || !ramp.toward.is_identity() || ramp.css != Css::None
 }
 
 /// Where [`EXACTS`] files the key of `spec` on `page` at the alpha whose
@@ -2514,7 +2552,7 @@ const EXACT_SCALE: bool =
 /// NEON's `vcvtnq` and x86's `cvtps` do, or up, as `round` in
 /// `SkRasterPipeline_opts.h` does on 32-bit ARM, LoongArch and the scalar
 /// backend. Its `lowp` pipeline rounds a half up everywhere.
-const HIGHP_TIES_TO_EVEN: bool =
+pub(crate) const HIGHP_TIES_TO_EVEN: bool =
     cfg!(any(target_arch = "aarch64", target_arch = "x86_64"));
 
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
