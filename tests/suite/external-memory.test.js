@@ -297,6 +297,33 @@ describe("Native memory reported to V8", () => {
     },
   );
 
+  // `drawCanvas` of a canvas that holds a drawn canvas lands its pixels as
+  // `drawImage` does, and the destination counts that image as `drawImage`'s
+  // does: once however often it is drawn, on both canvases.
+  test(
+    "counts a canvas holding a canvas drawn in with drawCanvas once, on both canvases",
+    { skip: why ?? false },
+    async () => {
+      const source = drawn(1);
+      source.getContext("2d").drawImage(drawn(1), 0, 0);
+      source.getContext("2d").getImageData(0, 0, SIDE[0], SIDE[1]);
+      const before = await settled();
+      const dest = cpuCanvas();
+      const ctx = dest.getContext("2d");
+      for (let i = 0; i < DRAWS; i++) ctx.drawCanvas(source, 0, 0);
+      ctx.getImageData(0, 0, SIDE[0], SIDE[1]);
+      source.getContext("2d").getImageData(0, 0, 1, 1);
+      const held = (await settled()) - before - PAGE_BYTES - CONTEXT_BYTES;
+      assert.ok(
+        held >= 2 * PAGE_BYTES && held < 2 * PAGE_BYTES + PAGE_BYTES / 2,
+        `${DRAWS} draws of one canvas count its image on each canvas: ` +
+          `${held} bytes beside the destination's page, one image ` +
+          `${PAGE_BYTES}`,
+      );
+      assert.equal(dest.width, SIDE[0]);
+    },
+  );
+
   // A page never cleared, into which a changing canvas is drawn every frame,
   // holds an image of it for each frame until its entries hold more than a
   // few pages of them, and then lets go of them for one of its own: what is

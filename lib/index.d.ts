@@ -3809,12 +3809,15 @@ export interface CanvasDrawImage {
    *
    * {@link CanvasRenderingContext2D.drawImage} draws a canvas as an image of
    * its own pixels, which is what this canvas then holds. Here the canvas's
-   * draws are replayed instead. An SVG or PDF export keeps text as text and
-   * paths as paths either way, except that a `drawImage` whose replay would
-   * mean replaying more canvases than a document allows for one draw is
-   * written as its pixels. A page never cleared that comes to hold more of
-   * those images than four pages of its own pixels writes what it drew
-   * until then as those pixels too, and what it draws after as before.
+   * draws are replayed instead, unless it holds a drawn canvas or an image
+   * of an SVG itself: that one is drawn as `drawImage` draws it, so that a
+   * page copied back and forth is not replayed once more each round. An SVG
+   * or PDF export keeps text as text and paths as paths either way, except
+   * that a draw whose replay would mean replaying more canvases than a
+   * document allows for one draw is written as its pixels. A page never
+   * cleared that comes to hold more of those images than four pages of its
+   * own pixels writes what it drew until then as those pixels too, and what
+   * it draws after as before.
    *
    * The replay is clipped to the destination rectangle, so anything that
    * spreads -- an `imageFilter` blur, a shadow -- stops at its edge instead of

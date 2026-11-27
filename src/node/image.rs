@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use crate::{
     color::skia_color_to_rgba_linear,
-    context::{BoxedContext2D, CanvasDocument, Context2D},
+    context::{BoxedContext2D, CanvasDocument},
     image::{Svg, decode_frame, frame_delays},
     node::external::External,
     started,
@@ -218,16 +218,6 @@ impl Source {
 }
 
 impl Content {
-    pub fn from_context(ctx: &mut Context2D, use_vector: bool) -> Self {
-        match use_vector {
-            true => {
-                ctx.picture().map(|p| Content::Vector(p, ctx.bounds.size()))
-            }
-            false => ctx.source_image().map(Content::Bitmap),
-        }
-        .unwrap_or_default()
-    }
-
     pub fn from_image_data(image_data: ImageData) -> Self {
         let info = image_data.image_info();
         started::raster_from_data(

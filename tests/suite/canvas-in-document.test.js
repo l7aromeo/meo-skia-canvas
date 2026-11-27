@@ -3,7 +3,9 @@
 "use strict";
 
 // A canvas drawn into another with `drawImage` is its own pixels on the
-// page, and what it drew in a PDF or an SVG of the page.
+// page, and what it drew in a PDF or an SVG of the page. So is one drawn
+// with `drawCanvas` that itself holds a drawn canvas or an image of an SVG,
+// whose draws are not replayed into the page.
 
 const { assert, describe, test } = require("../runner"),
   { Canvas } = require("../../lib");
@@ -109,5 +111,44 @@ describe("A canvas drawn in with drawImage, in a PDF or an SVG", () => {
       images <= RECORDED_IMAGE_PAGES,
       `${images} images written for ${FRAMES} frames`,
     );
+  });
+});
+
+describe("A canvas holding a drawn canvas or an SVG, drawn in with drawCanvas, in a PDF or an SVG", () => {
+  /** An SVG of one rectangle, as `loadImage` reads one. */
+  const SVG = Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60">' +
+      '<rect x="10" y="10" width="80" height="40" fill="rgb(40,90,160)"/></svg>',
+  );
+
+  /** A CPU canvas with `drawn` drawn into it with `drawCanvas`. */
+  const drawnWithDrawCanvas = (/** @type {Canvas} */ drawn) => {
+    const canvas = new Canvas(SIDE[0] + 40, SIDE[1] + 40);
+    canvas.gpu = false;
+    canvas.getContext("2d").drawCanvas(drawn, 10, 10);
+    return canvas;
+  };
+
+  test("is written as what it drew, for a canvas holding a canvas", () => {
+    const page = drawnWithDrawCanvas(drawnInto(source()));
+    const svg = page.toBufferSync("svg").toString("utf8");
+    assert.equal(svg.match(/<image/g), null, "no image in the SVG");
+    assert.match(svg, /<text/, "the text as text");
+    const pdf = page.toBufferSync("pdf").toString("latin1");
+    assert.equal(pdf.match(/\/Subtype \/Image/g), null, "no image in the PDF");
+    assert.match(pdf, /\/Type \/Font/, "the text as text in the PDF");
+  });
+
+  test("is written as what it drew, for a canvas holding an SVG", async () => {
+    const { loadImage } = require("../../lib");
+    const drawn = new Canvas(SIDE[0], SIDE[1]);
+    drawn.gpu = false;
+    drawn.getContext("2d").drawImage(await loadImage(SVG), 0, 0);
+    const page = drawnWithDrawCanvas(drawn);
+    const svg = page.toBufferSync("svg").toString("utf8");
+    assert.equal(svg.match(/<image/g), null, "no image in the SVG");
+    assert.match(svg, /<rect fill="#285AA0"/, "the rectangle as a rect");
+    const pdf = page.toBufferSync("pdf").toString("latin1");
+    assert.equal(pdf.match(/\/Subtype \/Image/g), null, "no image in the PDF");
   });
 });
