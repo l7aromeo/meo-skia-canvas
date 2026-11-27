@@ -94,10 +94,11 @@ vulkan = ["skia-safe/ganesh", "skia-safe/vulkan", "winit/rwh_05", "dep:ash", "de
 # `raw-window-metal` and `objc2-quartz-core` make and drive the Metal
 # renderer's layer for the window, so they are needed only with `metal` as
 # well, which a feature cannot ask for. They hang on `window`, which builds
-# only beside a GPU backend, and only on Apple targets, whose backend is
-# Metal. A build there with `vulkan` and `window` and no `metal` turns them on
-# and names neither, and Cargo warns of both; vulkano compiles both there
-# anyway, through `raw-window-metal`.
+# only beside a GPU backend -- `gpu` stops a build without one at a
+# `compile_error!` -- and only on Apple targets, whose backend is Metal. A
+# build there with `vulkan` and `window` and no `metal` turns them on and names
+# neither; vulkano depends on both there itself, through `raw-window-metal`,
+# and Cargo's `unused_dependencies` lint reports neither in that build.
 window = [
     "dep:winit",
     "dep:spin_sleep",

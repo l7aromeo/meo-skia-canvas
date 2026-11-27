@@ -59,7 +59,8 @@ and without it those check out as pointer text rather than as images.
 The crate is the other half of this tree, and one feature set does not cover it. `just typecheck`
 checks the `vulkan,window,freetype` set on every host -- that one compiles on macOS too, against
 MoltenVK -- and `just lint-check` adds the backend and binding for the machine it runs on, `metal`
-on a Mac and `vulkan` elsewhere, and that backend alone, without `window`. What is left for CI is the other platform's GPU backend, which
+on a Mac and `vulkan` elsewhere, and that backend alone, without `window`; it also checks that `window` with no backend stops at the
+error naming the backend to add. What is left for CI is the other platform's GPU backend, which
 genuinely will not build here: `metal` needs macOS. The crate needs Rust 1.90 or newer, and versions
 independently of the npm package.
 
