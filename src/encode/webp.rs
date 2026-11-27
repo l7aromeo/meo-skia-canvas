@@ -70,6 +70,7 @@ use super::{
     Frame, FrameEncoder, FrameSink, Pixels, SequenceSpec, Sink, changed_region,
     crop_bytes,
 };
+use crate::unload::keep_loaded;
 
 /// A RIFF four-character code: `RIFF`, `WEBP`, `VP8X`, and every chunk tag.
 const TAG_LEN: usize = 4;
@@ -414,6 +415,7 @@ impl FrameSink for WebpSink<'_> {
     /// written by whichever frame turns out to be first, and each `ANMF`
     /// follows the last.
     fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
+        keep_loaded();
         // Narrowed once. This called `frame.eight()` three times a frame --
         // to compare against the previous frame, to crop the rectangle out,
         // and to keep as the next frame's predecessor -- and on a float

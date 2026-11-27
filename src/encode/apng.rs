@@ -21,7 +21,7 @@ use super::{
     Frame, FrameDepth, FrameEncoder, FrameSink, SequenceSpec, Sink,
     changed_region, color::ColorProfile, crop_bytes, rowfilter,
 };
-use crate::pixels::PixelColorSpace;
+use crate::{pixels::PixelColorSpace, unload::keep_loaded};
 use png::{
     BitDepth, BlendOp, ColorType, Compression, DisposeOp, Encoder, Filter,
     ScaledFloat, SourceChromaticities, Writer, chunk,
@@ -604,6 +604,7 @@ impl FrameSink for ApngSink<'_> {
     /// order is the container: every chunk carries a sequence number, and
     /// those are handed out as the chunks go out.
     fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
+        keep_loaded();
         if !self.animated {
             return frames.iter().try_for_each(|frame| self.write_still(frame));
         }

@@ -161,6 +161,22 @@ ends. A page read more than once counts against the budget but is never dropped,
 every frame never replay each other's pages however many there are, and a loop that reads each
 canvas twice and then leaves it keeps every page until the loop ends, as it did before the budget.
 
+**A page keeps every draw that can still show**, since it is a recording replayed at export — at
+any density, and as vectors in a PDF or SVG — rather than a bitmap. A canvas drawn on frame after
+frame without being cleared grows with every frame: one drawing two rectangles and a line of text
+a frame, and reading a pixel back each time, held 55.8 MiB more native heap after 20,000 frames
+than before the first. A draw that replaces the whole page releases everything before it:
+`clearRect` over all of it, a `putImageData` that covers it, or a single fill or `drawImage`
+that covers it opaquely — at full alpha, source-over or copy, through no filter — with no layer
+open. The same loop
+clearing the page first each frame held between 2.43 and 2.50 MiB from frame 2,500 to frame
+20,000. A background split into strips or tiles releases nothing, even where they meet without a
+gap: at an export density that puts a seam inside a device pixel, each covers that pixel only in
+part, and what lies under shows through by up to 63 levels at densities 1.5 and 0.5, so the
+earlier draws are still in the picture. Clear the page with one `clearRect`, or fill it with one
+rectangle, before drawing a frame. `drawImage` counts only for an image with no alpha channel,
+such as a JPEG; `putImageData` clears what it writes over, so its pixels' alpha does not matter.
+
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. A rectangle narrower than a pixel should darken it in proportion to how much of it the
 rectangle covers, which is arithmetic rather than taste, so each renderer can be scored against it.

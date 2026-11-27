@@ -5,6 +5,7 @@ use objc2::rc::autoreleasepool;
 use crate::{
     context::page::{ExportOptions, Page},
     start_skia, started,
+    unload::keep_loaded,
 };
 use serde_json::{Value, json};
 use skia_safe::{
@@ -589,6 +590,7 @@ impl RenderingEngine {
     /// rendering on the raster backend because their pixel format needed it,
     /// which is the one case where a caller most wants to know.
     pub fn status(&self, is_manually_disabled: bool) -> serde_json::Value {
+        keep_loaded();
         match (self, is_manually_disabled) {
             (Self::GPU, _) => Engine::status(),
             (Self::Graphite, _) => graphite::status(),

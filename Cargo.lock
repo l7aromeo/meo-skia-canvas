@@ -1244,6 +1244,7 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "vulkano",
+ "windows-sys 0.61.2",
  "winit",
 ]
 

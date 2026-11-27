@@ -871,6 +871,34 @@ Skia's own space gives. Pinned in
 `a_rec2020_gradient_mixes_by_the_css_gamma` in four geometries, on both
 engines, with translucent and out-of-gamut stops.
 
+**`color(prophoto-rgb ...)` decodes with a linear segment near black, and
+Chrome does not. Ours is the specification's answer.** CSS Color 4 section
+10.7 gives `prophoto-rgb` a 1.8 power with a linear segment: its sample
+code's `lin_ProPhoto` divides a component below 16/512 by 16. Chrome 159
+(159.0.8154.6) converts by a pure 1.8 power. Read back through
+`color-mix(in srgb-linear, color(prophoto-rgb 0.02 0.02 0.02) 100%, black
+0%)`, it gives 0.000874432 in each channel, which is 0.02^1.8; CSS Color 4 gives 0.02 / 16 = 0.00125. Every component under
+16/512 differs the same way, so a dark `prophoto-rgb` colour is drawn
+lighter here than in Chrome. Filled on an sRGB canvas:
+
+        color(prophoto-rgb 0.005 0.005 0.005)   Chrome 0,0,0   here 1,1,1
+        color(prophoto-rgb 0.02 0.02 0.02)      Chrome 3,3,3   here 4,4,4
+
+Each figure here is the standard's arithmetic: 1.03 and 4.12 before
+rounding. At 0.03 both give 6, and from 16/512 up the curves are one.
+Pinned in `prophoto_rgb_adapts_from_d50_and_keeps_its_linear_toe`.
+
+A gradient interpolated in `prophoto-rgb` mixes by the same curve. Skia's
+gradient interpolation space of that name is built from
+`SkNamedTransferFn::kProPhotoRGB`, the pure power, so the gradient is
+computed in a space this library builds with CSS's curve and Skia's
+ProPhoto gamut instead, as a `rec2020` gradient is. A ramp from
+`color(prophoto-rgb 0.01 0.01 0.01)` to `color(prophoto-rgb 0.5 0.4 0.3)`
+across 256 pixels reads 22,12,8 at pixel 24 here; mixed by Skia's own
+space it read 24,15,11. Pinned in
+`a_prophoto_gradient_mixes_by_the_css_curve`, on both engines, and in an
+SVG export in `a_prophoto_gradient_survives_an_svg_export`.
+
 **A colour is painted at the precision it names, whatever its spelling,
 and Chrome rounds some spellings to 8 bits. Ours is the specification's
 answer.** CSS Color 4 rounds `rgb()` channels to integers only when it
