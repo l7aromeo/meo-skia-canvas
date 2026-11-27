@@ -1769,17 +1769,22 @@ done in the shader, rounds once. Other NVIDIA parts and drivers were not
 measured, and Chrome was not compared.
 
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
-`luminosity` divide exactly on the CPU, the same bytes on every machine, and
-Chrome's CPU canvas divides through an estimate.** Skia's raster pipeline
+`luminosity` divide exactly on the CPU, the same bytes on every arm64 machine
+and every x86-64 one with AVX2, and Chrome's CPU canvas divides through an
+estimate.** Skia's raster pipeline
 divides in these stages through `rcp_fast`, the instruction's reciprocal
 estimate: `_mm256_rcp_ps` at the AVX2 level, `_mm512_rcp14_ps` at AVX-512,
 NEON's estimate and one refinement step on arm64. An x86 machine runs the
 widest level it has, so the same page drew a level apart in places on an AMD
 EPYC with AVX-512 and one without (#642).
 `containers/skia-exact-blend-division.patch` divides with `/`, which every
-level rounds correctly, and every other operation in these stages is already
-the same at each level, so a page draws the same bytes on all of them
-(`the_dividing_blend_modes_draw_their_formulas_with_exact_division`). A byte
+level rounds correctly. Every other operation in these stages is the same at
+the levels that fuse an explicit multiply-add -- arm64's, AVX2's and
+AVX-512's -- so a page draws the same bytes on all of them
+(`the_dividing_blend_modes_draw_their_formulas_with_exact_division`). The SSE
+level an x86 machine without AVX2 runs computes that multiply-add in two
+roundings, so such a machine is not held to those bytes; how far it lands
+from them has not been measured. A byte
 the patch moves moves by one level, to the formula's value in single
 precision with exact division. On an opaque 256 by 256 ramp of every source
 value over every backdrop value on an Apple M4 Pro, Chrome 158's CPU canvas
