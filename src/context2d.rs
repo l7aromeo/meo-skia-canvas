@@ -13917,7 +13917,7 @@ mod exact_composite_tests {
     use crate::{
         canvas::EngineKind,
         color::RgbaLinear,
-        context::exact_composite::SNAPSHOTS,
+        context::{exact_composite::SNAPSHOTS, exact_gradient::EXACT_SCALE},
         geometry::Point,
         shader::{GradientColorSpace, GradientInterpolation, GradientStop},
     };
@@ -14265,9 +14265,12 @@ mod exact_composite_tests {
 
     /// The CPU's eight-bit composite of `source`, unpremultiplied, at
     /// `alpha` and offset `at`, over [`UNDER`] -- see
-    /// `context::exact_composite`: premultiplied and scaled by the alpha's
-    /// byte with `div255`, then `s + div255_accurate(d * (255 - s.a))`. On
-    /// aarch64 the two divisions are the same, to the nearest level.
+    /// `context::exact_composite`: premultiplied by lowp's `premul` with
+    /// `div255_accurate`, scaled by the alpha's byte in `scale_1_float`
+    /// with `div255`, then `s + div255_accurate(d * (255 - s.a))`.
+    /// `div255_accurate` is the nearest level on every backend; `div255`
+    /// is too where [`EXACT_SCALE`] says so, and `(v + 255) >> 8` where
+    /// not.
     fn composited(
         source: &[u8],
         alpha: f32,
@@ -14275,6 +14278,10 @@ mod exact_composite_tests {
         clipped: bool,
     ) -> Vec<u8> {
         let nearest = |v: u32| (v + 128 + ((v + 128) >> 8)) >> 8;
+        let scale = |v: u32| match EXACT_SCALE {
+            true => nearest(v),
+            false => (v + 255) >> 8,
+        };
         let byte = (alpha * 255.0 + 0.5) as u32;
         let width = SOURCE_W as usize;
         (0..source.len())
@@ -14298,16 +14305,19 @@ mod exact_composite_tests {
                     3 => a,
                     k => nearest(u32::from(source[px + k]) * a),
                 };
-                let (s, sa) = (nearest(premul * byte), nearest(a * byte));
+                let (s, sa) = (scale(premul * byte), scale(a * byte));
                 (s + nearest(d * (255 - sa))) as u8
             })
             .collect()
     }
 
     /// A translucent image drawn `source-over` at a whole pixel stores on a
-    /// GPU page the bytes the CPU page stores -- at a `globalAlpha` of 1 and
-    /// of 0.5, at 0,0, at 3,3 and at 3,3 under a clip -- and those are the
-    /// CPU's eight-bit composite, which the test models. Through Ganesh's
+    /// GPU page the bytes the CPU page stores -- at a `globalAlpha` of 1, of
+    /// 0.5 and of 0.3, at 0,0, at 3,3 and at 3,3 under a clip -- and those
+    /// are the CPU's eight-bit composite, which the test models. 0.3's byte,
+    /// 77, is one at which `(v + 255) >> 8` parts from the nearest level, in
+    /// 89 of the 256 products, so off aarch64 the row tells the alpha's
+    /// division from the premultiply's. Through Ganesh's
     /// own blend, Metal parted from it by a level in 4,920 channels at 1 and
     /// 9,384 at 0.5, unclipped (#837).
     #[test]
@@ -14318,7 +14328,7 @@ mod exact_composite_tests {
         }
         let (source, image) = source_pixels();
         let mut apart = vec![];
-        for alpha in [1.0, 0.5] {
+        for alpha in [1.0, 0.5, 0.3] {
             for (at, clipped) in [(0.0, false), (3.0, false), (3.0, true)] {
                 let drawn = Drawn { alpha, at, clipped };
                 let cpu = drawn_over(false, drawn, &image);

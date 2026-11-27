@@ -149,20 +149,19 @@ half4 main(half4 src, half4 dst) {
 /// The SkSL handing on an image's texels as the bytes the CPU composites:
 /// read raw -- no colour conversion and no premultiplication of Skia's --
 /// and, where `straight` -- the image unpremultiplied -- premultiplied as the
-/// CPU's eight-bit `premul` stage does it, `div255(c * a)` -- see
-/// [`COMPOSITE`]'s `div255`. Skia premultiplies an unpremultiplied image on the
-/// GPU in floats, which rounds otherwise.
+/// CPU's eight-bit `premul` stage does it, `div255_accurate(c * a)`, to the
+/// nearest level on every backend. That is not the `div255` the paint's
+/// alpha scales by, which off aarch64 is `(v + 255) >> 8` -- see
+/// [`COMPOSITE`]. Skia premultiplies an unpremultiplied image on the GPU in
+/// floats, which rounds otherwise.
 const IMAGE_BYTES: &str = r#"
 uniform shader image;
-uniform int nearest;
 uniform int straight;
 half4 main(float2 p) {
     float4 c = floor(float4(image.eval(p)) * 255.0 + 0.5);
     if (straight != 0) {
         float3 v = c.rgb * c.a;
-        c.rgb = nearest != 0
-            ? floor((v + 128.0 + floor((v + 128.0) / 256.0)) / 256.0)
-            : floor((v + 255.0) / 256.0);
+        c.rgb = floor((v + 128.0 + floor((v + 128.0) / 256.0)) / 256.0);
     }
     return half4(c / 255.0);
 }
@@ -249,13 +248,10 @@ pub(crate) fn image_bytes(image: &Image, local: &Matrix) -> Option<Shader> {
         SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
         Some(local),
     )?;
-    let values: Vec<u8> = [i32::from(EXACT_SCALE), i32::from(unpremul)]
-        .iter()
-        .flat_map(|value| value.to_ne_bytes())
-        .collect();
+    let straight = i32::from(unpremul).to_ne_bytes();
     IMAGE.with(|compiled| {
         compiled.as_ref()?.make_shader(
-            Data::new_copy(&values),
+            Data::new_copy(&straight),
             &[ChildPtr::Shader(raw)],
             None,
         )
