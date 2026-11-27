@@ -1036,6 +1036,9 @@ fn parse_text_style<'a>(
             ));
         }
     }
+    // And each family narrowed to its faces of the width and slant asked
+    // for before its weight is weighed -- see `FontLibrary::styled_names`.
+    FontLibrary::with_shared(|lib| lib.style_names(&mut style));
 
     Ok((style, oblique, fraction, colours))
 }
@@ -1197,6 +1200,15 @@ fn parse_paragraph_style<'a>(
         strut.set_half_leading(
             bool_option(cx, &strut_obj, "halfLeading")?.unwrap_or(false),
         );
+        // The strut's face is matched in its own style, which is normal --
+        // see `FontLibrary::styled_names`.
+        let families: Vec<String> =
+            strut.font_families().iter().map(str::to_string).collect();
+        if let Some(names) = FontLibrary::with_shared(|lib| {
+            lib.styled_names(&families, strut.font_style())
+        }) {
+            strut.set_font_families(&names);
+        }
         style.set_strut_style(strut);
     }
 
@@ -1283,6 +1295,10 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let base_oblique = asked.and_then(|degrees| {
         match_oblique(&mut text_style, &mut collection, degrees)
     });
+    // An oblique laid out upright was named for the oblique.
+    if base_oblique.is_some() {
+        FontLibrary::with_shared(|lib| lib.style_names(&mut text_style));
+    }
     let mut para_style = para_style;
     // Only an oblique changes the style, and copying it back costs a copy
     // of every field it has.
@@ -1336,6 +1352,10 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let oblique = asked.and_then(|degrees| {
         match_oblique(&mut text_style, collection, degrees)
     });
+    // An oblique laid out upright was named for the oblique.
+    if oblique.is_some() {
+        FontLibrary::with_shared(|lib| lib.style_names(&mut text_style));
+    }
     let families = text_style.font_families();
     let families: Vec<&str> = families.iter().collect();
     let faces = collection.find_typefaces(&families, text_style.font_style());
