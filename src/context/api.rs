@@ -1401,6 +1401,7 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         this.borrow_mut().draw_picture_costing(
             &|| page.picture(None),
             Some(entries),
+            Rect::from_size(size),
             &src,
             &dst,
             source,
