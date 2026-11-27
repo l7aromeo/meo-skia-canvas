@@ -23,15 +23,21 @@ const COLR_V0: &str = "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf";
 /// colours on macOS's CoreText.
 const V1_GLYPH: &str = "\u{f0101}";
 
-/// How far a channel may stand between the document and the canvas. The two
-/// draw the same glyphs through the same painter onto the same eight-bit
-/// sRGB pixels, one of them by way of a picture, so they agree to rounding.
+/// How far a premultiplied channel may stand between the document and the
+/// canvas. The two draw the same glyphs through the same painter: the canvas
+/// onto its eight-bit sRGB bytes, the document into `Svg::rasterize`'s half
+/// floats, rounded to bytes once when the image is drawn, so a pixel, on a
+/// glyph's edge or inside it, can land a level apart.
+///
+/// Compared premultiplied, as the canvas stores them: read back
+/// unpremultiplied, a level is up to 255 levels of colour at an alpha of 1
+/// and up to 3 at an alpha of 102.
 const TOLERANCE: u8 = 1;
 
 /// How far a text composited as a group by its `opacity` may stand from the
-/// same glyph drawn under `globalAlpha`: the group is drawn into an eight-bit
-/// layer and the layer composited, which rounds once more than compositing
-/// the glyph does.
+/// same glyph drawn under `globalAlpha`: the group is drawn into a layer and
+/// the layer composited, which rounds once more than compositing the glyph
+/// does.
 const GROUP_TOLERANCE: u8 = 2;
 
 const WIDTH: u32 = 200;
@@ -53,8 +59,17 @@ fn page() -> Canvas {
     canvas
 }
 
-fn pixels(ctx: &mut Context2D) -> Vec<u8> {
-    ctx.get_image_data(0.0, 0.0, WIDTH as f32, HEIGHT as f32)
+/// `canvas`'s pixels, premultiplied -- see [`TOLERANCE`].
+fn pixels(canvas: &mut Canvas) -> Vec<u8> {
+    let premultiplied = ImageDataExport {
+        pixels: PixelExportOptions {
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        },
+        ..ImageDataExport::default()
+    };
+    canvas
+        .to_image_data(None, &premultiplied)
         .expect("read back")
         .pixels()
         .to_vec()
@@ -71,9 +86,8 @@ fn drawn(root: &str, body: &str) -> Vec<u8> {
         .rasterize(WIDTH, HEIGHT)
         .expect("rasterizes");
     let mut canvas = page();
-    let ctx = canvas.context();
-    ctx.draw_image(&image, 0.0, 0.0);
-    pixels(ctx)
+    canvas.context().draw_image(&image, 0.0, 0.0);
+    pixels(&mut canvas)
 }
 
 /// The pixels `draw` leaves on a canvas whose text is set unhinted.
@@ -82,7 +96,7 @@ fn painted(draw: impl FnOnce(&mut Context2D)) -> Vec<u8> {
     let ctx = canvas.context();
     ctx.set_text_rendering(TextRendering::GeometricPrecision);
     draw(ctx);
-    pixels(ctx)
+    pixels(&mut canvas)
 }
 
 /// Sets `css` as the font and `fill` as the fill style.
