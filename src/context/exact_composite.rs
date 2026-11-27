@@ -407,8 +407,8 @@ impl Held {
 /// The snapshot is what keeps the route cheap. Through the blender alone,
 /// which Metal runs by copying the destination for each draw, the route
 /// cost 3.5 times Ganesh's own composite over 200 conic triangles; with one
-/// snapshot for the run it costs 1.03 to 1.07 times for 60 to 200 draws,
-/// and 1.31 times for 2,000 small ones, each still a draw of its own.
+/// snapshot for the run it costs 1.06 to 1.10 times for 60 to 200 draws,
+/// and 1.05 times for 2,000 small ones, each still a draw of its own.
 ///
 /// Held only on the canvas's own surface, never inside a layer -- see
 /// `layer::drawn_with_effect` -- and flushed before anything else is drawn

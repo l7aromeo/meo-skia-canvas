@@ -1930,10 +1930,13 @@ off at any distance from one -- see the llvmpipe and NVIDIA entries
 (`exact_composite`, #783). On the canvas's own surface the draws that do
 not meet share one snapshot of the pixels they cover and are each drawn over
 it; inside a layer each reads its destination through a blender. Against
-Ganesh's own composite on Metal that costs 1.03 to 1.07 times for 60 to 200
-fills and 1.31 times for 2,000 small ones. Fills cast with a shadow share
+Ganesh's own composite on Metal that costs 1.06 to 1.10 times for 60 to 200
+fills and 1.05 times for 2,000 small ones. Fills cast with a shadow share
 the snapshot as well, wherever no shadow meets a fill drawn before it
-(#845). What stays apart: those ties; a byte
+(#845): 200 cast 42 pixels apart, where no shadow reaches another fill,
+cost 0.96 times, and 200 cast 29 apart, where each shadow reaches the fill
+before it and takes a snapshot of its own, 1.12 times. What stays apart:
+those ties; a byte
 along the edge of an opaque gradient the CPU makes on its float pipeline --
 one interpolated in a space other than the page's -- which keeps Ganesh's
 composite; a pixel whose coverage itself stands a level from
