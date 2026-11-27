@@ -1068,14 +1068,42 @@ written as `color(srgb ...)` in extended sRGB, which
 `SkColor4f`: `fill="color(display-p3 0 1 0)"` reads back 0, 255, 0 on a
 `display-p3` canvas, here and in Chrome 156, and on an sRGB canvas 0, 255, 0
 in both. Skia holds `color` as an eight-bit sRGB `SkColor`, through a reader
-the patch leaves alone, and its lighting filters take an `SkColor`, so those
-two are written as `rgba()` clipped to sRGB: `color="color(display-p3 0 1 0)"`
-under `fill="currentcolor"` reads sRGB green on a `display-p3` canvas, 117,
-251, 76. Chrome was measured only for `fill`; CSS Color 4 resolves
+the patch leaves alone, so it is written as `rgba()` clipped to sRGB:
+`color="color(display-p3 0 1 0)"` under `fill="currentcolor"` reads sRGB
+green on a `display-p3` canvas, 117, 251, 76. `lighting-color` is written as
+`color(srgb ...)` clipped to sRGB, because Skia's lighting filter applies no
+colour conversion to its light and lights in whatever space it draws into;
+the patch keeps it in float, as the next entry says. Chrome was measured only
+for `fill`; CSS Color 4 resolves
 `currentcolor` to the colour `color` computes, so it is expected to keep P3
 green there as it does for `fill`. `Svg::rasterize` draws into an
 eight-bit sRGB surface and clips every colour the document holds
 ([#816](https://github.com/l7aromeo/meo-skia-canvas/issues/816)).
+
+**An SVG light is lit in float, where Chrome 156 rounds it to a byte in
+linear light.** A lighting primitive in a linearRGB filter, which
+`color-interpolation-filters`' initial value makes it, lights in linear
+light, and Chrome rounds `lighting-color` to an eight-bit colour once it has
+taken it there. Linear light puts the dark levels close together, so the
+rounding moves them: #111111 is 0.0056 in linear light, 1.43 as a byte, and
+Chrome lights with 1. Here the light keeps its float value
+(`containers/skia-svg-wide-colour.patch`, `SkSVGLighting` beside Skia's
+lighting filter). Measured in Chrome Headless Shell 156.0.8078.47, a flat
+surface under `<feDiffuseLighting diffuseConstant="0.5">` lit from straight
+overhead, over the 256 grey levels: 56 differ, and of those this library is
+nearer the exact result on 47 and further on 9; the largest error is 6.4
+levels here and 9.2 in Chrome. #111111 should light at 9.2: Chrome lights it
+at half of byte 1, which its layer stores as 0, and draws 0, where this
+library draws 13. A model of each -- the light rounded to a byte or not, then
+the layer rounded half to even, as Skia's pipeline rounds -- predicts 252 of
+Chrome's 256 levels and 253 of this library's.
+
+Neither is exact, because the lit result is stored in the document's
+eight-bit layer, in linear light, before it is encoded back to sRGB. At
+`diffuseConstant="1"` that layer rounds exactly where Chrome's light does, so
+the two agree on all 256 levels and each is exact on 183; #3a7fd0 lights at
+59 rather than 58 in both. The 9 levels where Chrome is nearer are ones where
+the layer's rounding lands this library on the far side of the exact value.
 
 **`AccentColor` and `AccentColorText` are read; Chrome 156 refuses both.**
 CSS Color 4 section 6.2 lists them among the system colours, valued by the

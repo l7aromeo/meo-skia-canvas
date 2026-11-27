@@ -1504,10 +1504,16 @@ const COLOUR_PROPERTIES: [&str; 6] = [
 /// extended sRGB: the paints, a gradient's stops and `<feFlood>`'s colour.
 ///
 /// `color` is not among them, because Skia parses it as an `SkColor` through
-/// a reader the patch does not change, and neither is `lighting-color`,
-/// whose value Skia's lighting filters take as an `SkColor`.
+/// a reader the patch does not change, and neither is `lighting-color` --
+/// see [`FLOAT_SRGB_COLOUR_PROPERTIES`].
 const WIDE_COLOUR_PROPERTIES: [&str; 4] =
     ["fill", "stroke", "stop-color", "flood-color"];
+
+/// The colour properties the patched module keeps in float but that are
+/// clipped to sRGB here: `lighting-color`, because Skia's lighting filter
+/// applies no colour conversion to its light and lights in whatever space it
+/// draws into, so only a colour inside sRGB means the same everywhere.
+const FLOAT_SRGB_COLOUR_PROPERTIES: [&str; 1] = ["lighting-color"];
 
 /// The CSS named colours Skia's SVG module has no entry for, which it draws
 /// as the initial black.
@@ -1552,10 +1558,11 @@ const SKIA_CURRENT_COLOR: &str = "currentColor";
 /// (`cfg(meo_svg_wide_colour)`), a property of [`WIDE_COLOUR_PROPERTIES`] is
 /// written as `color(srgb r g b / a)` instead, its channels in extended sRGB
 /// and unclamped, so a colour outside sRGB reaches a wide canvas as it is.
-/// Every other property, and every property on an unpatched build, is
-/// clipped to sRGB here, as an eight-bit sRGB canvas clips a `fillStyle`,
-/// because `SkSVGColorType` is an eight-bit sRGB `SkColor` and holds nothing
-/// wider.
+/// A property of [`FLOAT_SRGB_COLOUR_PROPERTIES`] is written the same way
+/// with its channels clipped to sRGB. Every other property, and every
+/// property on an unpatched build, is clipped to sRGB here and rounded, as an
+/// eight-bit sRGB canvas clips a `fillStyle`, because `SkSVGColorType` is an
+/// eight-bit sRGB `SkColor` and holds nothing wider.
 ///
 /// UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
 /// Re-check: cargo test an_svg_paint_is_the_colour_it_names
@@ -1582,6 +1589,13 @@ fn colour_for_skia(property: &str, value: &str) -> Option<String> {
     let alpha = colour.a.clamp(0.0, 1.0);
     if cfg!(meo_svg_wide_colour) && WIDE_COLOUR_PROPERTIES.contains(&property) {
         let Color4f { r, g, b, .. } = colour;
+        return Some(format!("color(srgb {r} {g} {b} / {alpha})"));
+    }
+    if cfg!(meo_svg_wide_colour)
+        && FLOAT_SRGB_COLOUR_PROPERTIES.contains(&property)
+    {
+        let [r, g, b] = [colour.r, colour.g, colour.b]
+            .map(|channel| channel.clamp(0.0, 1.0));
         return Some(format!("color(srgb {r} {g} {b} / {alpha})"));
     }
     let [r, g, b] = [colour.r, colour.g, colour.b]
@@ -2989,6 +3003,64 @@ mod tests {
                 flood == fill,
                 cfg!(meo_svg_wide_colour),
                 "{colour}: the flood {flood:?}, the fill {fill:?}"
+            );
+        }
+    }
+
+    /// A 4x4 document lit by `<feDiffuseLighting>` in a linearRGB filter, a
+    /// flat surface under a light straight overhead, so every pixel is the
+    /// light's colour times `kd`.
+    fn lit_overhead(colour: &str, kd: f32) -> [u8; 3] {
+        drawn_at_centre(&format!(
+            r#"<defs><filter id="f" x="0" y="0" width="1" height="1"><feDiffuseLighting lighting-color="{colour}" diffuseConstant="{kd}" surfaceScale="0"><feDistantLight azimuth="0" elevation="90"/></feDiffuseLighting></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
+        ))
+    }
+
+    /// A light in a linearRGB filter is its own colour on the page, as
+    /// Chrome 156 lights it (#826): at `diffuseConstant="1"` the surface
+    /// is lit at the light's colour. Skia's module took `lighting-color`'s
+    /// sRGB value as linear and encoded it once more, so #808080 lit at 188;
+    /// the patched module (`cfg(meo_svg_wide_colour)`) takes it into linear
+    /// light, where the lit page is the fill.
+    #[test]
+    fn a_light_is_its_own_colour_in_a_linear_filter() {
+        for colour in ["#808080", "#00cc00"] {
+            let lit = lit_overhead(colour, 1.0);
+            let fill = drawn_at_centre(&format!(
+                r#"<rect width="4" height="4" fill="{colour}"/>"#
+            ));
+            assert_eq!(
+                lit == fill,
+                cfg!(meo_svg_wide_colour),
+                "{colour}: lit {lit:?}, the fill {fill:?}"
+            );
+        }
+    }
+
+    /// The patched module (`cfg(meo_svg_wide_colour)`) lights in float
+    /// rather than by a light rounded to a byte, as Chrome 156 rounds it.
+    /// #111111 is 0.0056 in linear light, byte 1 once rounded, and half of
+    /// that rounds to nothing: Chrome draws 0. Lit in float it is 0.0028,
+    /// which the eight-bit layer the document is drawn into holds as byte 1,
+    /// and the page reads that encoded back. `color(srgb 0.069 ...)` is
+    /// kept in float on its way to the module as well: as the byte 18 it
+    /// would light at 22, where in float it lights at 13, as Chrome draws
+    /// it.
+    #[test]
+    fn a_light_keeps_the_precision_of_its_colour() {
+        use crate::color::{linear_to_srgb_byte, srgb_to_linear};
+        for (colour, value, kd) in [
+            ("#111111", f32::from(0x11u8) / 255.0, 0.5),
+            ("color(srgb 0.069 0.069 0.069)", 0.069, 1.0),
+        ] {
+            let linear = srgb_to_linear(value) * kd;
+            let expected =
+                linear_to_srgb_byte((linear * 255.0).round() / 255.0);
+            let lit = lit_overhead(colour, kd);
+            assert_eq!(
+                lit == [expected; 3],
+                cfg!(meo_svg_wide_colour),
+                "{colour} at {kd}: lit {lit:?}, in float {expected}"
             );
         }
     }

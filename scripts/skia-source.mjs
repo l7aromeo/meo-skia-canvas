@@ -220,12 +220,20 @@ const SVG_SYNTHETIC_SLANT = join(
 // `SkSVGColorType`: skia-safe reads `SkSVGColor`'s eight-bit `fColor` field
 // by name, so the field stays, and the `color` property stays eight-bit.
 //
-// In a linearRGB primitive, the initial one, Skia took `flood-color` as a
-// linear value and encoded it once more, so #808080 flooded at 188 where
-// Chrome 156 draws 128 (#826). `SkSVGFe::resolvePrimitiveColor` takes it
-// into linear light. A flood is a colour filter on the source rather than a
-// shader, so it reaches the page in float rather than through an eight-bit
-// layer.
+// In a linearRGB primitive, the initial one, Skia took `flood-color` and
+// `lighting-color` as linear values and encoded them once more, so #808080
+// flooded and lit at 188 where Chrome 156 draws 128 (#826).
+// `SkSVGFe::resolvePrimitiveColor` takes both into linear light. A flood is
+// a colour filter on the source rather than a shader, so it reaches the page
+// in float rather than through an eight-bit layer. The lighting filter's
+// light is float, an `SkV3` on the 0-255 scale, so its `SkColor` entry
+// points -- the CanvasKit-parity filters in src/filter.rs -- light exactly as
+// before, and `SkSVGLighting` beside them takes an `SkColor4f` for the SVG
+// module, declared where it is called so that no public header changes.
+// `flatten` still writes the light as an `SkColor`, rounding a float one:
+// this library flattens no image filter -- it serialises a colour filter
+// alone, as a cache key -- and reads no flattened picture back, so only a
+// caller using skia-safe directly against these archives reaches it.
 const SVG_WIDE_COLOUR = join("containers", "skia-svg-wide-colour.patch");
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around

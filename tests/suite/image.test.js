@@ -1113,6 +1113,64 @@ describe("an SVG's paint", () => {
       }
     assert.deepEqual(off, []);
   });
+
+  test("of a light is its own colour in a linearRGB filter", async () => {
+    // A flat surface lit from straight overhead, so the diffuse result is
+    // the light's colour and the specular one too (N.H = 1). Skia's module
+    // took `lighting-color`'s sRGB value as linear and encoded it once more:
+    // diffuse #808080 read 188 where Chrome 156 reads 128. Each expected
+    // value is Chrome's; #3a7fd0 lights at 59 rather than 58 because the
+    // light is stored in an eight-bit layer in linear light, in both.
+    const lit = (space, primitive) =>
+      `<defs><filter id="f" x="0" y="0" width="1" height="1"${space}>` +
+      `${primitive}</filter></defs><rect width="4" height="4" filter="url(#f)"/>`;
+    const diffuse = (colour, kd = 1) =>
+      `<feDiffuseLighting lighting-color="${colour}" diffuseConstant="${kd}" surfaceScale="0">` +
+      `<feDistantLight azimuth="0" elevation="90"/></feDiffuseLighting>`;
+    const specular = (colour) =>
+      `<feSpecularLighting lighting-color="${colour}" specularConstant="1" specularExponent="1" surfaceScale="0">` +
+      `<feDistantLight azimuth="0" elevation="90"/></feSpecularLighting>`;
+    const linear = [
+      [diffuse("#0c0"), [0, 204, 0, 255]],
+      [specular("#0c0"), [0, 255, 0, 154]],
+      [diffuse("#808080"), [128, 128, 128, 255]],
+      [specular("#808080"), [255, 255, 255, 55]],
+      [diffuse("#3a7fd0"), [59, 127, 208, 255]],
+      [specular("#3a7fd0"), [74, 157, 255, 161]],
+      [diffuse("#070707"), [13, 13, 13, 255]],
+      // Lit in float, where Chrome rounds the light to a byte first: #111111
+      // is byte 1 in linear light, and half of it Chrome draws as 0. See
+      // docs/browser-differences.md.
+      [diffuse("#111111", 0.5), [13, 13, 13, 255]],
+      // A colour between two bytes reaches the light as it is, and Chrome
+      // agrees: as the byte 18 it would light at 22.
+      [diffuse("color(srgb 0.069 0.069 0.069)"), [13, 13, 13, 255]],
+    ];
+    const off = [];
+    for (const [space, rows] of [
+      ["", linear],
+      [` color-interpolation-filters="linearRGB"`, linear],
+      // The control: in sRGB the light was already its own colour.
+      [
+        ` color-interpolation-filters="sRGB"`,
+        [
+          [diffuse("#0c0"), [0, 204, 0, 255]],
+          [specular("#0c0"), [0, 255, 0, 204]],
+          [diffuse("#808080"), [128, 128, 128, 255]],
+          [specular("#808080"), [255, 255, 255, 128]],
+          [diffuse("#3a7fd0"), [58, 127, 208, 255]],
+          [specular("#3a7fd0"), [71, 156, 255, 208]],
+        ],
+      ],
+    ])
+      for (const [primitive, expected] of rows) {
+        const body = lit(space, primitive);
+        const got = await drawn(document(body));
+        if (got.some((channel, i) => channel !== expected[i]))
+          off.push(`${body}: ${got}, expected ${expected}`);
+      }
+    assert.deepEqual(off, []);
+  });
 });
 
 describe("a refusal takes the type the standard names", () => {
