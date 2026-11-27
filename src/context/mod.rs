@@ -66,7 +66,7 @@ use crate::{
         pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
         texture::{BoxedCanvasTexture, CanvasTexture},
-        typography::{WholeRuns, with_style_axes},
+        typography::{KEYS_OWN_COLOUR_BLOBS, WholeRuns, with_style_axes},
     },
     pixels::PixelColorSpace,
     started,
@@ -477,12 +477,14 @@ impl Default for State {
 /// font shorthand's parent is set in.
 pub(crate) fn initial_root_face() -> Option<Typeface> {
     FontLibrary::with_shared(|library| {
+        let names = [generic_name(ROOT_FONT_FAMILY)];
+        let style = FontStyle::normal();
+        let names = library
+            .styled_names(&names, style)
+            .unwrap_or_else(|| names.to_vec());
         let mut collection = library.face_collection();
         collection
-            .find_typefaces(
-                &[generic_name(ROOT_FONT_FAMILY)],
-                FontStyle::normal(),
-            )
+            .find_typefaces(&names, style)
             .into_iter()
             .next()
             .or_else(|| collection.default_fallback())
@@ -5069,21 +5071,34 @@ impl Context2D {
                 self.vector_features(&paint, Some(style)).with(colour);
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
+            // Whether the run holds a glyph the platform draws in its own
+            // colours -- see `typography::draws_own_colours`.
+            let own_colours = match &kept {
+                Some(kept) => kept.draws_own_colours(),
+                None => typesetter.draws_own_colours(),
+            };
             // The run kept whole, where it holds colour glyphs, to draw them
             // where the page is played back -- see `layer::ReplayedText`.
-            // Every colour glyph composites through a layer of its own.
-            let colour = colour.refused_by(VectorFeatures::LAYER).then(|| {
-                let (run, offset, condensation) =
-                    typesetter.replayed(kept.as_deref());
-                Replay::Text {
-                    run,
-                    at: origin,
-                    offset,
-                    condensation,
-                    global_alpha,
-                    faint,
-                }
-            });
+            // Every colour glyph this library draws composites through a
+            // layer of its own. On a build that keys them, one the platform
+            // draws is drawn there from blobs that Ganesh keys by the matrix
+            // they are drawn under -- see `typography::KEYS_OWN_COLOUR_BLOBS`
+            // -- which a recording holding one set of them for every matrix
+            // cannot be.
+            let colour = (colour.refused_by(VectorFeatures::LAYER)
+                || own_colours && KEYS_OWN_COLOUR_BLOBS)
+                .then(|| {
+                    let (run, offset, condensation) =
+                        typesetter.replayed(kept.as_deref());
+                    Replay::Text {
+                        run,
+                        at: origin,
+                        offset,
+                        condensation,
+                        global_alpha,
+                        faint,
+                    }
+                });
             // The run kept whole, where it is drawn in a blend that reads the
             // page in the shader, to draw its glyphs where the page is played
             // back as that canvas draws them -- see
@@ -5169,10 +5184,7 @@ impl Context2D {
                 reached.set(reach);
                 Some((drawn, reach))
             };
-            let own_colours = || match &kept {
-                Some(kept) => kept.draws_own_colours(),
-                None => typesetter.draws_own_colours(),
-            };
+            let own_colours = || own_colours;
             self.render_to_canvas(
                 &paint,
                 dyed,

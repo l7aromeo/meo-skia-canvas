@@ -24,7 +24,9 @@ use crate::{
     cache_map::{CacheMap, CacheSet},
     context2d::{FontSlant, FontStretch},
     error::Error,
-    node::font_library::{FontLibrary as SharedFontRegistry, oblique_alias},
+    node::font_library::{
+        Filing, FontLibrary as SharedFontRegistry, StyleGroups, oblique_alias,
+    },
 };
 
 pub(crate) mod caseless;
@@ -1066,6 +1068,9 @@ struct FontManagerInner {
     ///
     /// Used internally when building paragraphs.
     provider: TypefaceFontProvider,
+    /// What `provider` holds of families of more than one width and slant,
+    /// built with it -- see [`StyleGroups`].
+    groups: Rc<StyleGroups>,
     /// System `FontMgr` used to parse byte streams into `Typeface`s.
     font_mgr: FontMgr,
     /// Registered family names in registration order.
@@ -1163,26 +1168,25 @@ impl FontManagerInner {
             family: family.to_string(),
             bytes,
         });
-        let mut provider = TypefaceFontProvider::new();
+        let mut provider = Filing::new();
         let (upright, leaning): (Vec<_>, Vec<_>) = self
             .faces
             .iter()
             .partition(|known| !hides_its_lean(&known.face));
         for known in upright.into_iter().chain(leaning) {
-            provider.register_typeface(
-                known.face.clone(),
-                Some(known.family.as_str()),
-            );
+            provider.register(known.face.clone(), Some(known.family.as_str()));
         }
         for known in &self.faces {
             if designed_oblique_angle(&known.face).is_some() {
-                provider.register_typeface(
+                provider.register(
                     known.face.clone(),
                     Some(oblique_alias(&known.family).as_str()),
                 );
             }
         }
+        let (provider, groups) = provider.finish();
         self.provider = provider;
+        self.groups = Rc::new(groups);
         self.generation += 1;
     }
 }
@@ -1206,10 +1210,18 @@ impl FontRegistry {
         self.0.lock().generation
     }
 
-    /// The registry's provider, with the generation it stands at.
-    pub(crate) fn provider(&self) -> (u64, TypefaceFontProvider) {
+    /// The registry's provider, with the generation it stands at and what
+    /// it holds of families of more than one width and slant -- see
+    /// [`StyleGroups`].
+    pub(crate) fn provider(
+        &self,
+    ) -> (u64, TypefaceFontProvider, Rc<StyleGroups>) {
         let inner = self.0.lock();
-        (inner.generation, inner.provider.clone())
+        (
+            inner.generation,
+            inner.provider.clone(),
+            inner.groups.clone(),
+        )
     }
 }
 
@@ -1225,6 +1237,7 @@ impl FontLibrary {
         Self {
             inner: Rc::new(Mutex::new(FontManagerInner {
                 provider: TypefaceFontProvider::new(),
+                groups: Rc::default(),
                 font_mgr: SharedFontRegistry::with_shared(|library| {
                     library.system_font_mgr()
                 }),
@@ -1249,6 +1262,7 @@ impl FontLibrary {
     pub fn reset(&self) {
         let mut inner = self.inner.lock();
         inner.provider = TypefaceFontProvider::new();
+        inner.groups = Rc::default();
         inner.families.clear();
         inner.faces.clear();
         inner.generation += 1;

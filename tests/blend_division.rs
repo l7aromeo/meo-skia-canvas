@@ -1,7 +1,7 @@
 //! The CPU raster's blend modes that divide -- `color-dodge`, `color-burn`,
 //! `hue`, `saturation`, `color` and `luminosity` -- draw the bytes their
 //! formulas give in IEEE single precision with exact division, on every
-//! machine.
+//! machine whose SIMD level fuses the same multiply-adds.
 //!
 //! Skia's raster pipeline divides in these stages through `rcp_fast`, an
 //! estimate whose precision is that of the instruction a SIMD level has:
@@ -10,7 +10,11 @@
 //! its widest level, so the same page drew differently on an AMD EPYC with
 //! AVX-512 and one without (#642). `containers/skia-exact-blend-division.patch`
 //! divides with `/`, which IEEE 754 rounds correctly at every level, so each
-//! stage is the same sequence of correctly rounded operations everywhere.
+//! stage is the same sequence of correctly rounded operations at every level
+//! that fuses an explicit `mad` -- arm64's, AVX2's and AVX-512's. The SSE
+//! stages do not fuse it, so a machine without AVX2 is not held to the same
+//! bytes, and the reference fuses only where the stage does -- see
+//! [`fuses_mad`].
 //!
 //! The reference here is that sequence, written out: the pipeline's own load,
 //! formula and store, operation by operation in `f32`, a `mad` fused where the
@@ -483,4 +487,32 @@ fn the_reference_is_the_formula_within_a_level() {
     }
     assert!(worst <= 1, "a byte {worst} levels from the f64 formula");
     println!("{moved} bytes a level from the f64 formula");
+}
+
+#[test]
+fn a_runtime_blender_cannot_fuse_a_multiply_add() {
+    // Why the stages are patched rather than drawn by a blender of this
+    // crate's -- see the `UPSTREAM:` notes over `EXACT_BLEND_DIVISION` in
+    // scripts/skia-source.mjs. The stages fuse an explicit `mad` on arm64
+    // and at x86's AVX2 and AVX-512 levels, and a runtime blender cannot:
+    // SkSL declares `fma` in its GPU module alone, so a runtime effect that
+    // calls it does not compile. The control is the same effect unfused.
+    let compiles = |rgb: &str| {
+        skia_safe::RuntimeEffect::make_for_blender(
+            format!(
+                "half4 main(half4 s, half4 d) {{ return half4({rgb}, s.a); }}"
+            ),
+            None,
+        )
+        .is_ok()
+    };
+    assert!(
+        compiles("s.rgb * d.rgb + d.rgb"),
+        "the unfused control compiles"
+    );
+    assert!(
+        !compiles("fma(s.rgb, d.rgb, d.rgb)"),
+        "runtime SkSL compiles `fma`: a blender can now draw the stages' \
+         fused `mad`, so measure it against the patched stages again"
+    );
 }
