@@ -8,8 +8,9 @@
 //! the page less every region erased after it, and a put's own pixels are
 //! written over nothing in its place.
 //!
-//! Each SVG is rendered in sRGB by Skia's SVG DOM -- see
-//! [`common::svg_in_srgb`] -- and held to the canvas's own pixels.
+//! Each SVG is rendered by the crate's own `Svg::rasterize`, which
+//! composites in sRGB -- see [`common::rendered_svg`] -- and held to the
+//! canvas's own pixels.
 
 mod common;
 
@@ -130,7 +131,7 @@ fn apart(
 ) -> Vec<(usize, usize, [u8; 4], [u8; 4])> {
     let want = read(canvas);
     let svg = svg_of(canvas);
-    let got = common::svg_in_srgb(&svg, SIDE as i32, SIDE as i32, 1.0);
+    let got = common::rendered_svg(&svg, SIDE as u32, SIDE as u32);
     let side = SIDE as usize;
     (0..side * side)
         .map(|i| (i % side, i / side))
@@ -346,7 +347,7 @@ fn erasers_at_a_density_render_as_the_canvas_exported_there() {
         .to_buffer(ImageFormat::Svg, &options)
         .expect("an SVG");
     let svg = String::from_utf8(svg).expect("utf-8");
-    let got = common::svg_in_srgb(&svg, side as i32, side as i32, DENSITY);
+    let got = common::rendered_svg(&svg, side as u32, side as u32);
     let wrong = got
         .chunks(BYTES_PER_PIXEL)
         .zip(want.chunks(BYTES_PER_PIXEL))
@@ -385,7 +386,7 @@ fn skia_svg_writes_a_difference_clip_as_intersection() {
     canvas.draw_rect(bounds, &paint);
     let data = canvas.end();
     let svg = std::str::from_utf8(data.as_bytes()).expect("utf-8");
-    let rendered = common::svg_in_srgb(svg, side, side, 1.0);
+    let rendered = common::rendered_svg(svg, side as u32, side as u32);
     assert_eq!(
         at(&rendered, 16, 16),
         [0, 0, 255, 255],

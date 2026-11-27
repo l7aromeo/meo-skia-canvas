@@ -101,35 +101,33 @@ pub fn engines() -> Vec<bool> {
     [false, true].into_iter().filter(|&g| !g || gpu).collect()
 }
 
-/// `svg` rendered by Skia's SVG DOM at `scale` device pixels to a unit,
-/// onto a transparent eight-bit sRGB surface of `width` by `height`: its
-/// pixels, premultiplied RGBA.
+/// `svg` rasterized by [`Svg::rasterize`] at `width` by `height`, fitted
+/// as it fits a document, and drawn onto a transparent CPU canvas of that
+/// size: its pixels, premultiplied RGBA.
 ///
-/// Composited in sRGB, as a browser composites an SVG and as the canvas
-/// composites what the SVG was exported from. [`Svg::rasterize`] draws
-/// into a linear-light surface instead, where half-alpha red over blue
-/// lands 188, 0, 187 rather than 128, 0, 127, so it cannot tell an SVG
-/// that composites as the canvas does from one that does not.
-pub fn svg_in_srgb(svg: &str, width: i32, height: i32, scale: f32) -> Vec<u8> {
-    use skia_safe::{
-        AlphaType, ColorSpace, ColorType, FontMgr, ImageInfo, surfaces, svg,
-    };
-    let mut dom =
-        svg::Dom::from_str(svg, FontMgr::empty()).expect("the SVG parses");
-    dom.set_container_size((width as f32, height as f32));
-    let info = ImageInfo::new(
-        (width, height),
-        ColorType::RGBA8888,
-        AlphaType::Premul,
-        ColorSpace::new_srgb(),
-    );
-    let mut surface = surfaces::raster(&info, None, None).expect("a surface");
-    surface.canvas().scale((scale, scale));
-    dom.render(surface.canvas());
-    let mut pixels = vec![0; info.compute_min_byte_size()];
-    assert!(
-        surface.read_pixels(&info, &mut pixels, info.min_row_bytes(), (0, 0)),
-        "the render reads back"
-    );
-    pixels
+/// `rasterize` composites in sRGB, as a browser composites an SVG and as
+/// the canvas composites what the SVG was exported from, so a render that
+/// lands apart from the canvas is the SVG's doing.
+pub fn rendered_svg(svg: &str, width: u32, height: u32) -> Vec<u8> {
+    let image = Svg::parse(svg)
+        .expect("the SVG parses")
+        .rasterize(width, height)
+        .expect("rasterizes");
+    let mut canvas = Canvas::new(width as f32, height as f32);
+    canvas.set_gpu(false);
+    canvas.context().draw_image(&image, 0.0, 0.0);
+    canvas
+        .to_image_data(
+            None,
+            &ImageDataExport {
+                pixels: PixelExportOptions {
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+                ..ImageDataExport::default()
+            },
+        )
+        .expect("pixels")
+        .pixels()
+        .to_vec()
 }

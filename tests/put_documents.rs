@@ -243,7 +243,7 @@ fn an_svg_of_a_put_renders_as_the_canvas() {
         let (mut page, expected) = scene();
         let svg = export(&mut page, ImageFormat::Svg);
         let svg = String::from_utf8(svg).expect("utf-8");
-        let rendered = common::svg_in_srgb(&svg, SIDE as i32, SIDE as i32, 1.0);
+        let rendered = common::rendered_svg(&svg, SIDE as u32, SIDE as u32);
         let pixels = |bytes: &[u8]| -> Vec<[u8; 4]> {
             bytes.chunks(4).map(|p| [p[0], p[1], p[2], p[3]]).collect()
         };
