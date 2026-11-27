@@ -1,0 +1,22 @@
+--- a/skia-bindings/skia/modules/svg/src/SkSVGLine.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGLine.cpp
+@@ -8,6 +8,7 @@
+ #include "modules/svg/include/SkSVGLine.h"
+ 
+ #include "include/core/SkCanvas.h"
++#include "include/core/SkPaint.h"
+ #include "include/core/SkPathTypes.h"
+ #include "include/core/SkPoint.h"
+ #include "modules/svg/include/SkSVGAttributeParser.h"
+@@ -35,6 +36,11 @@ std::tuple<SkPoint, SkPoint> SkSVGLine::resolve(const SkSVGLengthContext& lctx)
+ 
+ void SkSVGLine::onDraw(SkCanvas* canvas, const SkSVGLengthContext& lctx,
+                        const SkPaint& paint, SkPathFillType) const {
++    // A line has no interior, so its fill paints nothing. `drawLine` strokes
++    // whatever paint it is given, and would draw a fill as a hairline.
++    if (paint.getStyle() == SkPaint::kFill_Style) {
++        return;
++    }
+     SkPoint p0, p1;
+     std::tie(p0, p1) = this->resolve(lctx);
+ 

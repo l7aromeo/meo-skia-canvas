@@ -224,6 +224,17 @@ const SVG_SYNTHETIC_SLANT = join(
 const SVG_WIDE_COLOUR = join("containers", "skia-svg-wide-colour.patch");
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
+// Re-check: cargo test a_line_paints_no_fill against a build from a tree prepared without this patch; it holds that build to the hairline, and fails there once Skia draws no fill
+//
+// Skia's SVG module draws a `<line>` with `SkCanvas::drawLine` for every
+// paint the shape takes, its fill included, and `drawLine` strokes whatever
+// paint it is given, so the initial black fill drew as a hairline along the
+// line: alone where there is no stroke, and through a translucent one
+// (#825). A line has no interior, and Chrome paints its fill nowhere. The
+// patch makes `SkSVGLine::onDraw` draw nothing for a fill paint.
+const SVG_LINE_FILL = join("containers", "skia-svg-line-fill.patch");
+
+// UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around
 // Re-check: node scripts/test.mjs tests/suite/text.test.js against a binary built from a tree prepared without this patch; "a family's italic face is drawn for italic whatever its weight" fails
 //
 // `SkFontStyleSet::matchStyleCSS3` (src/core/SkFontMgr.cpp) scores a
@@ -330,6 +341,7 @@ export const PATCHES = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -344,6 +356,7 @@ export const PATCHES = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -361,6 +374,7 @@ export const PATCHES = {
     DWRITE_OBLIQUE,
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,

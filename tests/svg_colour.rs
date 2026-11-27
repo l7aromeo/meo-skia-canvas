@@ -79,9 +79,11 @@ fn document(property: &str, value: &str) -> String {
         "style fill" => {
             format!(r#"<rect width="4" height="4" style="fill: {value}"/>"#)
         }
-        // `fill="none"`, because Skia fills a `<line>` with the initial
-        // black, which SVG says a line never is, and a translucent stroke
-        // over it reads that black through.
+        // `fill="none"`, because the Skia of a build without
+        // containers/skia-svg-line-fill.patch -- the stock crate-consumer leg
+        // runs this file against crates.io's -- fills a `<line>` with the
+        // initial black, which SVG says a line never is, and a translucent
+        // stroke over it reads that black through (#825).
         "stroke" => format!(
             r#"<line x1="0" y1="2" x2="4" y2="2" fill="none" stroke-width="4" stroke="{value}"/>"#
         ),

@@ -169,6 +169,12 @@ const SVG_WIDE_COLOUR = {
   ...buildRsPatch("meo_svg_wide_colour"),
 };
 
+/// containers/skia-svg-line-fill.patch, on every platform.
+const SVG_LINE_FILL = {
+  patch: "containers/skia-svg-line-fill.patch",
+  ...buildRsPatch("meo_svg_line_fill"),
+};
+
 /// containers/skia-freetype-advance.patch, on Linux, the one platform whose
 /// build compiles Skia's FreeType port.
 const FREETYPE_ADVANCE = {
@@ -198,6 +204,7 @@ export const PATCHED = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -210,6 +217,7 @@ export const PATCHED = {
     ASYNC_TRANSFER_REUSE,
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -227,6 +235,7 @@ export const PATCHED = {
     },
     SVG_SYNTHETIC_SLANT,
     SVG_WIDE_COLOUR,
+    SVG_LINE_FILL,
     FONT_MATCH_SLANT_FIRST,
     TEXT_DISTANCE_FIELDS_OFF,
     TRANSFORMED_MASK_REUSE,
@@ -470,6 +479,7 @@ const COMPILED_WITH = {
   "src/text/gpu/SubRunContainer.cpp": "gpu",
   "modules/svg/src/SkSVGText.cpp": null,
   "modules/svg/src/SkSVGAttributeParser.cpp": null,
+  "modules/svg/src/SkSVGLine.cpp": null,
   "src/core/SkFontMgr.cpp": null,
   "src/ports/SkTypeface_win_dw.cpp": null,
   "src/ports/SkFontHost_FreeType.cpp": null,

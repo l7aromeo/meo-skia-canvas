@@ -2922,6 +2922,26 @@ mod tests {
         assert!(off.is_empty(), "{off:#?}");
     }
 
+    /// What a 4x4 document whose body is `body` draws at (2, 2) over white,
+    /// through the module alone.
+    fn drawn_at_centre(body: &str) -> [u8; 3] {
+        use crate::started;
+        use skia_safe::Color;
+        let svg = Svg::parse(&format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
+        ))
+        .expect("parses");
+        let mut surface = started::raster_n32_premul((4, 4)).expect("surface");
+        surface.canvas().clear(Color::WHITE);
+        svg.dom.render(surface.canvas());
+        let colour = surface
+            .image_snapshot()
+            .peek_pixels()
+            .expect("raster pixels")
+            .get_color((2, 2));
+        [colour.r(), colour.g(), colour.b()]
+    }
+
     /// A translucent `flood-color` is drawn at its own alpha times
     /// `flood-opacity`, as Filter Effects 1 section 9.13.2 says: "If the
     /// flood-color value includes an alpha channel, the alpha channel gets
@@ -2931,39 +2951,48 @@ mod tests {
     /// multiplies.
     #[test]
     fn a_translucent_flood_keeps_its_alpha() {
-        use crate::started;
-        use skia_safe::Color;
-        let drawn = |body: &str| {
-            let svg = Svg::parse(&format!(
-                r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
-            ))
-            .expect("parses");
-            let mut surface =
-                started::raster_n32_premul((4, 4)).expect("surface");
-            surface.canvas().clear(Color::WHITE);
-            svg.dom.render(surface.canvas());
-            let colour = surface
-                .image_snapshot()
-                .peek_pixels()
-                .expect("raster pixels")
-                .get_color((2, 2));
-            [colour.r(), colour.g(), colour.b()]
-        };
         for (colour, opacity) in [
             ("rgba(0, 204, 0, 0.5)", "1"),
             ("rgba(0, 204, 0, 0.5)", "0.5"),
             ("color(srgb 0 0.8 0 / 0.25)", "1"),
         ] {
-            let flood = drawn(&format!(
+            let flood = drawn_at_centre(&format!(
                 r#"<defs><filter id="f" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB"><feFlood flood-color="{colour}" flood-opacity="{opacity}"/></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
             ));
-            let fill = drawn(&format!(
+            let fill = drawn_at_centre(&format!(
                 r#"<rect width="4" height="4" fill="{colour}" fill-opacity="{opacity}"/>"#
             ));
             assert_eq!(
                 flood == fill,
                 cfg!(meo_svg_wide_colour),
                 "{colour} at {opacity}: the flood {flood:?}, the fill {fill:?}"
+            );
+        }
+    }
+
+    /// A line has no interior, so its fill paints nothing, as Chrome 156
+    /// draws it (#825): Skia's module drew a line's fill as a hairline, the
+    /// initial black under a translucent stroke and alone where there is no
+    /// stroke. The patched module (`cfg(meo_svg_line_fill)`) draws a line's
+    /// stroke alone, as `fill="none"` does.
+    #[test]
+    fn a_line_paints_no_fill() {
+        let line = |paint: &str| {
+            drawn_at_centre(&format!(
+                r#"<line x1="0" y1="2" x2="4" y2="2" {paint}/>"#
+            ))
+        };
+        let stroke = r#"stroke-width="4" stroke="rgba(0, 204, 0, 0.5)""#;
+        for (paint, unfilled) in [
+            (String::new(), r#"fill="none""#.to_string()),
+            (r#"fill="red""#.into(), r#"fill="none""#.into()),
+            (stroke.into(), format!(r#"fill="none" {stroke}"#)),
+        ] {
+            let (filled, unfilled) = (line(&paint), line(&unfilled));
+            assert_eq!(
+                filled == unfilled,
+                cfg!(meo_svg_line_fill),
+                "{paint:?}: {filled:?}, with no fill {unfilled:?}"
             );
         }
     }

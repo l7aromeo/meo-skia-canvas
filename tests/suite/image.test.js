@@ -1056,6 +1056,35 @@ describe("an SVG's paint", () => {
     }
     assert.deepEqual(off, []);
   });
+
+  // A line has no interior, so its fill paints nothing, as Chrome 156 draws
+  // it: Skia's SVG module drew a line's fill as a hairline along it, so the
+  // initial black showed with no stroke and through a translucent one
+  // (#825).
+  test("of a <line> paints no fill", async () => {
+    const line = (paint) => `<line x1="0" y1="2" x2="4" y2="2" ${paint}/>`;
+    const stroke = `stroke-width="4" stroke="rgba(0, 204, 0, 0.5)"`;
+    const cases = [
+      [line(""), [0, 0, 0, 0]],
+      [line(`fill="red"`), [0, 0, 0, 0]],
+      [line(stroke), filled("rgba(0, 204, 0, 0.5)")],
+      // The control: with no fill it already draws its stroke alone.
+      [line(`fill="none" ${stroke}`), filled("rgba(0, 204, 0, 0.5)")],
+    ];
+    const off = [];
+    for (const [body, expected] of cases) {
+      const got = await drawn(document(body));
+      if (got.some((channel, i) => Math.abs(channel - expected[i]) > 1))
+        off.push(`${body}: ${got}, expected ${expected}`);
+    }
+    assert.deepEqual(off, []);
+  });
+
+  // A filter's colour is sRGB like any other and is taken into the filter's
+  // linear light for a linearRGB primitive, so a lone flood draws its own
+  // colour in either space, as Chrome 156 draws it: Skia's SVG module took
+  // the sRGB value as linear and encoded it once more, so #808080 drew 188
+  // (#826).
 });
 
 describe("a refusal takes the type the standard names", () => {

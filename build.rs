@@ -89,7 +89,7 @@ struct SkiaPatch {
 /// file and marker of each from here rather than keeping its own, so the
 /// check a release build runs and the cfg cannot disagree, and its self-test
 /// holds each marker to its patch.
-const SKIA_PATCHES: [SkiaPatch; 10] = [
+const SKIA_PATCHES: [SkiaPatch; 11] = [
     // `containers/skia-atlas-placement.patch`: a path drawn into Ganesh's
     // path atlas relative to its own device top-left, rounded to a grid, and
     // only then moved by its whole-pixel location, so its coverage does not
@@ -154,6 +154,14 @@ const SKIA_PATCHES: [SkiaPatch; 10] = [
         cfg: "meo_svg_wide_colour",
         file: "modules/svg/src/SkSVGAttributeParser.cpp",
         marker: "parseParenthesized(\"color\", [this](SkColor4f* c)",
+    },
+    // `containers/skia-svg-line-fill.patch`: an SVG `<line>`'s fill paints
+    // nothing, since a line has no interior, where Skia drew it as a
+    // hairline along the line.
+    SkiaPatch {
+        cfg: "meo_svg_line_fill",
+        file: "modules/svg/src/SkSVGLine.cpp",
+        marker: "// A line has no interior, so its fill paints nothing.",
     },
     // `containers/skia-freetype-advance.patch`: FreeType's unhinted advance
     // is the glyph's units times the face's size, rounded once to 16.16,
