@@ -54,7 +54,7 @@ use super::{
     widen_to_sixteen,
 };
 
-use crate::export::ChromaSampling as Requested;
+use crate::{export::ChromaSampling as Requested, unload::keep_loaded};
 
 /// How hard libaom looks for a smaller file, from 0 to 9, slowest first.
 ///
@@ -342,6 +342,7 @@ impl AvifSink<'_> {
 
     /// Codes one frame into the sequence, starting it if this is the first.
     fn code_frame(&mut self, frame: &Frame) -> Result<(), String> {
+        keep_loaded();
         let (width, height) = (self.width as usize, self.height as usize);
         let bits = self.bits;
         let sampling = sampling_of(self.chroma);
@@ -619,6 +620,7 @@ fn rgb_to_ycbcr(red: u16, green: u16, blue: u16, bits: u8) -> [u16; 3] {
 /// sequence that widened differently from a still would code the same drawing
 /// into different pixels.
 fn widened(frame: &Frame) -> Cow<'_, [u16]> {
+    keep_loaded();
     match &frame.pixels {
         Pixels::Sixteen(deep) => Cow::Borrowed(deep),
         Pixels::Eight(bytes) => Cow::Owned(
@@ -888,6 +890,7 @@ fn fill_ycbcr(
     bits: u8,
     sampling: Sampling,
 ) {
+    keep_loaded();
     let deep = bits > 8;
     let (shift_x, shift_y) = sampling.shifts();
 

@@ -35,6 +35,7 @@ use crate::{
     gpu::RenderingEngine,
     pixels::{ImageData, ImageDataExport, PixelColorSpace, PixelDepth},
     start_skia,
+    unload::keep_loaded,
 };
 
 /// What this build renders through, and what it found to render with.
@@ -74,6 +75,7 @@ impl BackendInfo {
     /// The strings come from the driver and are for logs, not for matching
     /// on: their wording is the platform's and changes with it.
     pub fn query() -> Self {
+        keep_loaded();
         let engine = RenderingEngine::default();
         let status = engine.status(false);
         // `status` is a JSON object because the Node binding hands it

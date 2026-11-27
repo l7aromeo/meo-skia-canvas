@@ -31,6 +31,7 @@ use crate::{
     context::{chain, page::ExportOptions},
     font::colr,
     gpu::ThreadBound,
+    unload::keep_loaded,
 };
 
 thread_local!(
@@ -367,6 +368,7 @@ impl VulkanEngine {
     /// -- `VK_STATUS` is a `OnceLock` nothing else touches -- so what it says
     /// holds for the process.
     fn probed() -> &'static Value {
+        keep_loaded();
         VK_STATUS.get_or_init(||{
             // test whether a context can be created and do some one-time init if so
             let context = VulkanContext::new()
@@ -413,6 +415,7 @@ impl VulkanEngine {
     }
 
     fn spawn_idle_watcher() {
+        keep_loaded();
         // use a non-rayon thread so as not to compete with the worker threads
         std::thread::spawn(move || {
             loop {

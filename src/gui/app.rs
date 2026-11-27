@@ -26,6 +26,7 @@ use super::{
 use crate::{
     context::{BoxedContext2D, page::Page},
     error::Error,
+    unload::keep_loaded,
 };
 
 /// Frames per second a window animates at until told otherwise.
@@ -478,6 +479,7 @@ impl App {
 
     #[allow(deprecated)]
     pub(crate) fn activate(channel: Channel, deferred: neon::types::Deferred) {
+        keep_loaded();
         std::thread::spawn(move || {
             // Why the loop stopped, when it stopped for a reason the caller
             // needs. `None` is an ordinary finish.
