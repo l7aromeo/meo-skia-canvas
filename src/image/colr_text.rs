@@ -46,6 +46,7 @@ use crate::{
     canvas::Canvas,
     color::RgbaLinear,
     context2d::{Context2D, TextRendering},
+    export::VectorFeatures,
     font_library::family_behind_alias,
     geometry::Affine,
     text::TextAlign,
@@ -277,7 +278,7 @@ struct Lists {
 
 /// An attribute or `style` declaration of `element`, the declaration
 /// winning, as CSS has a declaration win over a presentation attribute.
-fn property<'a>(
+pub(super) fn property<'a>(
     attributes: &'a [(&str, Cow<str>)],
     style: Option<&'a str>,
     name: &str,
@@ -291,7 +292,7 @@ fn property<'a>(
 }
 
 /// The attributes of `element`, unescaped, or `None` where one cannot be.
-fn attributes_of<'a>(
+pub(super) fn attributes_of<'a>(
     element: &'a BytesStart<'a>,
 ) -> Option<Vec<(&'a str, Cow<'a, str>)>> {
     element
@@ -867,7 +868,7 @@ fn predefined_or_char(reference: &str) -> Option<char> {
 }
 
 /// An opacity, as a number or a percentage, clamped as CSS clamps one.
-fn opacity(value: &str) -> Option<f32> {
+pub(super) fn opacity(value: &str) -> Option<f32> {
     let value = value.trim();
     let number = match value.strip_suffix('%') {
         Some(percent) => percent.trim().parse::<f32>().ok()? / 100.0,
@@ -1061,18 +1062,24 @@ fn root_matrix(root: &svg::Svg, container: SkSize) -> Matrix {
 
 impl TextDraw {
     /// Lays the text out and draws it onto `target`, under the matrix the
-    /// target holds now and the root's for a container of `container`.
-    /// `current` is the colour `currentcolor` resolves to at the root.
+    /// target holds now and the root's for a container of `container`, with
+    /// `currentcolor` resolving to `current` at the root.
+    ///
+    /// Says what the drawing asks of a vector backend: what `fill_text` asked
+    /// of the page it drew on -- the layer a colour glyph is composited
+    /// through -- and the layer `opacity` is drawn through, so that a
+    /// document a backend cannot write it into embeds it as pixels, as it
+    /// does the same text drawn by `fill_text` -- see `export::VectorFeatures`.
     pub(crate) fn draw(
         &self,
         target: &SkCanvas,
         root: &svg::Svg,
         container: SkSize,
         current: RgbaLinear,
-    ) {
+    ) -> VectorFeatures {
         let size = target.base_layer_size();
         if size.width <= 0 || size.height <= 0 {
-            return;
+            return VectorFeatures::PLAIN;
         }
         let mut device = target.local_to_device_as_3x3();
         device.pre_concat(&root_matrix(root, container));
@@ -1108,11 +1115,13 @@ impl TextDraw {
         }
 
         let Some(picture) = ctx.inner.picture() else {
-            return;
+            return VectorFeatures::PLAIN;
         };
+        let mut features = ctx.inner.page().vector_features();
         target.save();
         target.reset_matrix();
         if self.opacity < 1.0 {
+            features = features.with(VectorFeatures::LAYER);
             let alpha = skia_safe::Paint::default()
                 .set_alpha_f(self.opacity)
                 .clone();
@@ -1123,6 +1132,7 @@ impl TextDraw {
             target.draw_picture(&picture, None, None);
         }
         target.restore();
+        features
     }
 
     /// Each piece with the origin it is drawn from: SVG 2 section 11.8.3's

@@ -8480,7 +8480,7 @@ mod tests {
         let picture = inner.picture().expect("the page's picture");
         let size = inner.bounds.size();
         let recorded = CanvasPattern::from_parts(
-            Content::Vector(picture, size),
+            Content::Vector(picture, size, VectorFeatures::PLAIN),
             size,
             repeat,
             identity,

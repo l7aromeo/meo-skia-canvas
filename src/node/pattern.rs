@@ -80,7 +80,9 @@ impl CanvasPattern {
                 .unwrap_or_default(),
             false => ctx
                 .picture()
-                .map(|picture| Content::Vector(picture, dims))
+                .map(|picture| {
+                    Content::Vector(picture, dims, ctx.page().vector_features())
+                })
                 .unwrap_or_default(),
         };
         let (text_contrast, text_gamma) = ctx.canvas_text;

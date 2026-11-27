@@ -691,6 +691,13 @@ export class ImageData {
  * media block needs that block's own literal added. Measured against svgo
  * 4.1.0.
  *
+ * Drawn into a canvas exported as SVG, an SVG source is written as vectors,
+ * except a document holding what Skia's SVG writer drops or paints otherwise:
+ * an `opacity` on a group, on text or on a shape both filled and stroked, a
+ * `mask`, a `filter`, a `<pattern>`, a gradient whose `spreadMethod` repeats
+ * or reflects, or a `radialGradient` whose focus is off its centre. That
+ * document is embedded whole, as pixels at the export's density.
+ *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement)
  *
  * @category Images and Pixel Data

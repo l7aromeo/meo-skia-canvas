@@ -1369,4 +1369,145 @@ describe("an SVG's text in a colour face", () => {
     });
     agree(got, expected, "mixed");
   });
+
+  // A document is written as the canvas draws: the text reaches an SVG export
+  // as fillText's does rather than dropped with the layer its glyphs are
+  // composited through, which the SVG backend has no way to write.
+  test("reaches an SVG export as fillText's does", async () => {
+    const images = (svg) => (svg.match(/<image\b/g) ?? []).length;
+    for (const [family, entity, text, size] of [
+      ["SvgTextColrV1", "&#xf0100;", "\u{f0100}", 72],
+      ["SvgTextColrV0", "AB", "AB", 48],
+    ]) {
+      const fromImage = new Canvas(W, H);
+      const xml = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><text x="10" y="70" font-family="${family}" font-size="${size}" fill="rgb(40,90,160)">${entity}</text></svg>`;
+      fromImage
+        .getContext("2d")
+        .drawImage(await loadImage(Buffer.from(xml)), 0, 0);
+      const fromText = new Canvas(W, H);
+      const ctx = fromText.getContext("2d");
+      ctx.font = `${size}px ${family}`;
+      ctx.fillStyle = "rgb(40,90,160)";
+      ctx.fillText(text, 10, 70);
+      const [got, expected] = await Promise.all(
+        [fromImage, fromText].map(async (c) =>
+          (await c.toBuffer("svg")).toString(),
+        ),
+      );
+      assert.ok(images(expected) > 0, `${family}: fillText wrote no image`);
+      assert.equal(images(got), images(expected), `${family}: ${got}`);
+    }
+  });
+});
+
+// Skia's SVG module draws some of a document through a layer -- an opacity on
+// a group, a mask, a filter -- which Skia's SVG device drops whole, and paints
+// some of it in paint the device writes as other paint: a pattern, a repeating
+// gradient, a radial one whose focus is off its centre. A document holding any
+// is embedded in an SVG export as pixels, and the rest stays vectors.
+describe("an SVG image in an SVG export", () => {
+  const W = 200,
+    H = 80;
+  const R = `<rect x="20" y="10" width="120" height="60" fill="rgb(40,90,160)"/>`;
+  const C = `<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)"/>`;
+  const STOPS = `<stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/>`;
+  const F = `<defs><filter id="f"><feGaussianBlur stdDeviation="3"/></filter></defs>`;
+  const FILL = `<rect width="200" height="80" fill="url(#g)"/>`;
+  FontLibrary.use(
+    "SvgExportPlain",
+    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+  );
+
+  /** A white CPU canvas of this size and its context. */
+  const page = () => {
+    const canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, W, H);
+    return ctx;
+  };
+  /** A canvas holding `body` as a document of this size, and its export. */
+  const exported = async (body) => {
+    const ctx = page();
+    const xml = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">${body}</svg>`;
+    ctx.drawImage(await loadImage(Buffer.from(xml)), 0, 0);
+    return [ctx, (await ctx.canvas.toBuffer("svg")).toString()];
+  };
+  /** How many bytes of `svg` drawn back stand more than a level from `ctx`. */
+  const apart = async (svg, ctx) => {
+    const back = page();
+    back.drawImage(await loadImage(Buffer.from(svg)), 0, 0);
+    const [a, b] = [ctx, back].map((c) => c.getImageData(0, 0, W, H).data);
+    return a.filter((byte, i) => Math.abs(byte - b[i]) > 1).length;
+  };
+
+  test("embeds what the SVG device would drop or repaint", async () => {
+    for (const [kind, body] of [
+      ["a filter", `${F}<g filter="url(#f)">${R}</g>`],
+      ["a filter declared in style", `${F}<g style="filter:url(#f)">${R}</g>`],
+      [
+        "a mask",
+        `<defs><mask id="m"><rect width="100" height="80" fill="white"/></mask></defs><g mask="url(#m)">${R}</g>`,
+      ],
+      ["a group's opacity", `<g opacity="0.5">${R}${C}</g>`],
+      ["a nested svg's opacity", `<svg opacity="0.5">${R}${C}</svg>`],
+      [
+        "the opacity of a shape both filled and stroked",
+        `${R}<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)" stroke="black" stroke-width="6" opacity="0.5"/>`,
+      ],
+      [
+        "a text's opacity",
+        `<text x="10" y="60" font-family="SvgExportPlain" font-size="48" fill="rgb(40,90,160)" opacity="0.5">AB</text>`,
+      ],
+      [
+        "a pattern",
+        `<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="red"/></pattern></defs><rect width="200" height="80" fill="url(#p)"/>`,
+      ],
+      [
+        "a radial gradient's focus off its centre",
+        `<defs><radialGradient id="g" fx="0.7">${STOPS}</radialGradient></defs>${FILL}`,
+      ],
+      [
+        "a reflected gradient",
+        `<defs><linearGradient id="g" x2="0.2" spreadMethod="reflect">${STOPS}</linearGradient></defs>${FILL}`,
+      ],
+    ]) {
+      const [ctx, svg] = await exported(body);
+      assert.match(svg, /<image\b/, `${kind}: ${svg}`);
+      assert.equal(await apart(svg, ctx), 0, kind);
+    }
+  });
+
+  // The controls: what the device writes as drawn stays vectors.
+  test("writes the rest of a document as vectors", async () => {
+    for (const [kind, body] of [
+      ["shapes", `${R}${C}`],
+      [
+        "a clip-path",
+        `<defs><clipPath id="c"><circle cx="80" cy="40" r="30"/></clipPath></defs><g clip-path="url(#c)">${R}</g>`,
+      ],
+      [
+        "a mix-blend-mode, which the module does not apply",
+        `${R}<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)" style="mix-blend-mode:multiply"/>`,
+      ],
+      [
+        "the opacity of a shape only filled",
+        `${R}<circle cx="100" cy="40" r="30" fill="rgb(200,60,40)" opacity="0.5"/>`,
+      ],
+      [
+        "a padded gradient",
+        `<defs><linearGradient id="g">${STOPS}</linearGradient></defs>${FILL}`,
+      ],
+      [
+        "a radial gradient from its centre",
+        `<defs><radialGradient id="g">${STOPS}</radialGradient></defs>${FILL}`,
+      ],
+    ]) {
+      const [ctx, svg] = await exported(body);
+      assert.doesNotMatch(svg, /<image\b/, `${kind}: ${svg}`);
+      assert.match(svg, /<(path|rect)\b/, `${kind}: ${svg}`);
+      assert.equal(await apart(svg, ctx), 0, kind);
+    }
+  });
 });

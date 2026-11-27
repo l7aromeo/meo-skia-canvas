@@ -11,12 +11,14 @@ use skia_safe::{
 };
 
 mod colr_text;
+mod document_features;
 
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color, skia_color_to_rgba_linear},
     css,
     decode::bmp::space_of,
     error::Error,
+    export::VectorFeatures,
     font::caseless,
     font_library::{
         FontLibrary as SharedFonts, ObliqueFamily, StyleGroups, is_group_alias,
@@ -701,6 +703,9 @@ pub struct Svg {
     /// The document cut around its text in colour faces, in paint order, or
     /// `None` where it holds none -- see `colr_text`.
     layers: Option<Vec<Layer>>,
+    /// What the module's drawing of the document asks of a vector backend
+    /// -- see `document_features`.
+    features: VectorFeatures,
     intrinsic: Size,
     autosized: bool,
 }
@@ -717,6 +722,7 @@ enum Layer {
 pub(crate) struct ParsedSvg {
     dom: svg::Dom,
     layers: Option<Vec<Layer>>,
+    features: VectorFeatures,
 }
 
 /// An [`ImageData`] as an image to draw, which is how JavaScript's
@@ -837,7 +843,11 @@ impl Svg {
                     })
                     .collect()
             });
-        Ok(ParsedSvg { dom, layers })
+        Ok(ParsedSvg {
+            dom,
+            layers,
+            features: document_features::features_of(bytes),
+        })
     }
 
     /// `bytes` as Skia's module parses them.
@@ -856,6 +866,7 @@ impl Svg {
         let ParsedSvg {
             mut dom,
             mut layers,
+            features,
         } = parsed;
         let (intrinsic, autosized) = derive_intrinsic_size(&mut dom);
         descend(&dom.root());
@@ -868,6 +879,7 @@ impl Svg {
         Self {
             dom,
             layers,
+            features,
             intrinsic,
             autosized,
         }
@@ -1121,15 +1133,19 @@ impl Svg {
     ///
     /// The one way both doors draw a document, so that a text the canvas
     /// draws is drawn by each.
+    ///
+    /// Says what the drawing asks of a vector backend: what the module's
+    /// asks, judged from the document -- see `document_features` -- and what
+    /// the texts the canvas drew ask -- see `colr_text::TextDraw::draw`.
     pub(crate) fn render(
         &mut self,
         canvas: &skia_safe::Canvas,
         container: SkSize,
-    ) {
+    ) -> VectorFeatures {
         self.dom.set_container_size(container);
         let Some(layers) = self.layers.as_mut() else {
             self.dom.render(canvas);
-            return;
+            return self.features;
         };
         // What `currentcolor` resolves to at the root: the override where
         // one is set, which replaces the root's own `color`, and black, the
@@ -1142,17 +1158,18 @@ impl Svg {
                 skia_color_to_rgba_linear(*color)
             });
         let root = self.dom.root();
-        for layer in layers {
-            match layer {
+        layers
+            .iter_mut()
+            .fold(self.features, |features, layer| match layer {
                 Layer::Segment(segment) => {
                     segment.set_container_size(container);
                     segment.render(canvas);
+                    features
                 }
                 Layer::Text(text) => {
-                    text.draw(canvas, &root, container, current)
+                    features.with(text.draw(canvas, &root, container, current))
                 }
-            }
-        }
+            })
     }
 }
 
@@ -5534,7 +5551,7 @@ mod tests {
             .expect("valid SVG")
             .rasterize(width, height)
             .expect("rasterizes");
-        let Some((Content::Vector(picture, _), _)) =
+        let Some((Content::Vector(picture, ..), _)) =
             record_svg(&Data::new_copy(xml.as_bytes()), None)
         else {
             panic!("the binding records the document");

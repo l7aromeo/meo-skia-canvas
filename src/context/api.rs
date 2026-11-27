@@ -16,7 +16,6 @@ use crate::{
     color_filter::BoxedColorFilter,
     context2d::{FontKerning, TextRendering, decoration_from_css},
     css::parse_filter_named,
-    export::VectorFeatures,
     gpu::RenderingEngine,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
@@ -1294,7 +1293,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
             ctx.draw_source_image(image, &src, &dst, source.plays_apart_on_gpu);
         }
-        Content::Vector(picture, size) => {
+        Content::Vector(picture, size, features) => {
             // An SVG with no intrinsic size is scaled to the canvas instead,
             // except where the call gave a destination rect to scale to.
             if source.autosized && nums.len() != 4 {
@@ -1325,7 +1324,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
             // viewport reached the part of the destination the crop had
             // excluded, until this started taking the clipped pair.
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_picture(picture, &src, &dst, VectorFeatures::PLAIN);
+            ctx.draw_picture(picture, &src, &dst, *features);
         }
         Content::Loading | Content::Broken => (),
     }

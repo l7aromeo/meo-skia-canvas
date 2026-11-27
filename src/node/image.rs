@@ -3,6 +3,7 @@
 use crate::{
     color::skia_color_to_rgba_linear,
     context::{BoxedContext2D, Context2D, SourcePicture},
+    export::VectorFeatures,
     image::{Svg, decode_frame, frame_delays},
     node::external::External,
     started,
@@ -87,7 +88,7 @@ impl Image {
                 Some(data) if image.is_lazy_generated() => data.size(),
                 _ => image.image_info().compute_min_byte_size(),
             },
-            Content::Vector(picture, _) => picture.approximate_bytes_used(),
+            Content::Vector(picture, ..) => picture.approximate_bytes_used(),
             Content::Loading | Content::Broken => 0,
         };
         let sources = [&self.encoded, &self.svg_source]
@@ -124,7 +125,10 @@ impl Default for Image {
 #[derive(Default)]
 pub enum Content {
     Bitmap(SkImage),
-    Vector(Picture, Size),
+    /// A recording, its size, and what replaying it asks of a vector backend
+    /// -- see `export::VectorFeatures` -- which a page drawing it carries on
+    /// the draw, since the recording itself does not say.
+    Vector(Picture, Size, VectorFeatures),
     #[default]
     Loading,
     Broken,
@@ -135,7 +139,7 @@ impl std::fmt::Debug for Content {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Content::Bitmap(_) => write!(f, "Bitmap({:?})", self.size()),
-            Content::Vector(_, size) => write!(f, "Vector({size:?})"),
+            Content::Vector(_, size, _) => write!(f, "Vector({size:?})"),
             Content::Loading => f.write_str("Loading"),
             Content::Broken => f.write_str("Broken"),
         }
@@ -183,7 +187,9 @@ impl Clone for Content {
     fn clone(&self) -> Self {
         match self {
             Content::Bitmap(img) => Content::Bitmap(img.clone()),
-            Content::Vector(pict, size) => Content::Vector(pict.clone(), *size),
+            Content::Vector(pict, size, features) => {
+                Content::Vector(pict.clone(), *size, *features)
+            }
             _ => Content::default(),
         }
     }
@@ -251,9 +257,10 @@ impl Source {
 impl Content {
     pub fn from_context(ctx: &mut Context2D, use_vector: bool) -> Self {
         match use_vector {
-            true => {
-                ctx.picture().map(|p| Content::Vector(p, ctx.bounds.size()))
-            }
+            true => ctx.picture().map(|p| {
+                let features = ctx.page().vector_features();
+                Content::Vector(p, ctx.bounds.size(), features)
+            }),
             false => ctx.image().map(Content::Bitmap),
         }
         .unwrap_or_default()
@@ -273,7 +280,7 @@ impl Content {
     pub fn size(&self) -> Size {
         match &self {
             Content::Bitmap(img) => img.dimensions().into(),
-            Content::Vector(_, size) => *size,
+            Content::Vector(_, size, _) => *size,
             _ => Size::new_empty(),
         }
     }
@@ -413,9 +420,10 @@ pub(crate) fn record_svg(
     let size = Size::new(intrinsic.width, intrinsic.height);
     let bounds = Rect::from_size(size);
     let mut compositor = PictureRecorder::new();
-    parsed.render(compositor.begin_recording(bounds, true), bounds.size());
+    let features =
+        parsed.render(compositor.begin_recording(bounds, true), bounds.size());
     Some(match compositor.finish_recording_as_picture(None) {
-        Some(picture) => (Content::Vector(picture, size), autosized),
+        Some(picture) => (Content::Vector(picture, size, features), autosized),
         None => (Content::Broken, autosized),
     })
 }
