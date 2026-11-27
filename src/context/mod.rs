@@ -4739,8 +4739,12 @@ impl Context2D {
                     document.entries.all_features(),
                     document.cost,
                 ),
+                // Charged one, so that a draw of this page into another
+                // takes its pixels, as of any page holding a canvas -- see
+                // `PageRecorder::replay_cost`.
                 false => {
-                    ctx.draw_source_image(image, src_rect, dst_rect, apart)
+                    ctx.draw_source_image(image, src_rect, dst_rect, apart);
+                    ctx.recorder.borrow_mut().charge_replay(1);
                 }
             },
         );

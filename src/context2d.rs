@@ -11866,6 +11866,59 @@ mod document_route_tests {
         assert!(pdf_images(&pdf(&mut dest)) > 0, "an image in the PDF");
     }
 
+    /// A canvas erased and drawn into again, frame after frame, costs what
+    /// its page holds now and not what the erased frames held: so however
+    /// many frames past the budget it has been through, a canvas holding
+    /// one nested draw is written as what it drew. Both erasers are
+    /// taken, a whole-page `clear_rect` and an opaque fill covering it.
+    #[test]
+    fn a_canvas_erased_each_frame_costs_only_its_last() {
+        let mut inner = Canvas::new(8.0, 8.0);
+        inner.set_gpu(false);
+        inner.context().fill_rect(0.0, 0.0, 8.0, 8.0);
+        let mut source = source();
+        for n in 0..=DOCUMENT_REPLAY_BUDGET {
+            let ctx = source.context();
+            match n % 2 {
+                0 => ctx.clear_rect(0.0, 0.0, SIDE.0, SIDE.1),
+                _ => ctx.fill_rect(0.0, 0.0, SIDE.0, SIDE.1),
+            }
+            ctx.draw_canvas(&mut inner, 0.0, 0.0);
+        }
+        let mut alone = Canvas::new(SIDE.0, SIDE.1);
+        alone.set_gpu(false);
+        alone.context().draw_canvas(&mut inner, 0.0, 0.0);
+        assert_eq!(
+            source.context().inner.replay_cost(),
+            alone.context().inner.replay_cost(),
+            "the cost of one frame"
+        );
+        let mut dest = drawn_into(&mut source);
+        let svg = svg(&mut dest);
+        assert_eq!(svg.matches("<image").count(), 0, "no image: {svg}");
+    }
+
+    /// A canvas holding only a draw past the budget, written as an image,
+    /// is drawn into a third as its own pixels, as one holding any other
+    /// canvas is, and the third holds that one image.
+    #[test]
+    fn a_canvas_holding_a_draw_past_the_budget_is_drawn_as_its_pixels() {
+        let mut source = source();
+        source
+            .context()
+            .inner
+            .charge_replay(DOCUMENT_REPLAY_BUDGET + 1);
+        let mut middle = drawn_into(&mut source);
+        assert!(middle.context().inner.replay_cost() > 0, "a nesting cost");
+        let mut outer = drawn_into(&mut middle);
+        let mut held = 0;
+        outer.context().inner.with_recorder(|recorder| {
+            held = recorder.held_image_bytes();
+        });
+        let (w, h) = (SIDE.0 + 20.0, SIDE.1 + 20.0);
+        assert_eq!(held, (w * h) as usize * 4, "the middle's image alone");
+    }
+
     /// A canvas drawn into one that is then drawn into a third leaves the
     /// third's document no image of the first: what a document plays of the
     /// second holds the first's entries, not its draw for pixels. So the
@@ -12037,6 +12090,7 @@ mod flatten_tests {
     }
 
     /// A page flattened lands the bytes it would have kept every entry for,
+    /// and costs what they did to replay for a document,
     /// on the CPU and on the GPU.
     #[test]
     fn a_flattened_page_draws_as_it_did() {
@@ -12047,6 +12101,11 @@ mod flatten_tests {
             }
             let mut flat = drawn(gpu, FRAMES, true);
             assert!(held(&mut flat) < held(&mut kept), "gpu {gpu}: flattened");
+            assert_eq!(
+                flat.context().inner.replay_cost(),
+                kept.context().inner.replay_cost(),
+                "gpu {gpu}: what its document costs to replay"
+            );
             assert!(pixels(&mut flat) == pixels(&mut kept), "gpu {gpu}");
             let png = |canvas: &mut Canvas| {
                 canvas

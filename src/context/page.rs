@@ -510,11 +510,18 @@ pub struct PageRecorder {
     /// rasterization went 0.06, 0.27, 0.94, 1.78, 3.54 seconds -- which is
     /// why the size of the recording cannot be the trigger.
     ///
-    /// Any value above zero means this page already carries someone else's
-    /// picture, and `node::image::Source::of` rasterizes it rather than let a
-    /// second level of nesting form. The count is kept rather than a flag
-    /// because it says how much would be replayed, which is what the
-    /// measurement in that function is about.
+    /// Any value above zero means this page holds a draw of another canvas,
+    /// and a draw of this page into another takes its pixels rather than
+    /// its page, so that no second level of nesting forms -- see the
+    /// binding's `drawCanvas` and `context2d::capture`. A canvas drawn in
+    /// and written for a document as its image counts one, past
+    /// `DOCUMENT_REPLAY_BUDGET`: the page holds a draw of it still. The
+    /// count is kept rather than a flag because it says how much a document
+    /// would replay, which that budget bounds.
+    ///
+    /// It counts what the page holds now, so an erasure resets it with the
+    /// entries: a canvas cleared and drawn into again each frame costs one
+    /// frame's draws, not every frame's.
     replay_cost: usize,
     /// Whether an entry filed on this page, or in a layer open on it, draws
     /// other bytes on a GPU canvas replaying a recording of it than on a
@@ -1256,8 +1263,11 @@ impl PageRecorder {
             return;
         }
         let document = self.document_entries();
-        let (matrix, clip) = (self.matrix, self.clip.clone());
+        // The document is what it was, and costs what it did to replay.
+        let (matrix, clip, cost) =
+            (self.matrix, self.clip.clone(), self.replay_cost);
         self.set_bounds(self.bounds);
+        self.replay_cost = cost;
         let mut mark = self.begin_split();
         let put = base.clone();
         // Unframed, so under no transform or clip, onto the page just
@@ -1563,6 +1573,8 @@ impl PageRecorder {
         self.recorded = RecordedCount::default();
         self.held.clear();
         self.held_bytes = 0;
+        // What a replay walks is what the page holds, which is now nothing.
+        self.replay_cost = 0;
         self.changed = false;
         self.isolated = None;
         self.filtered = 0;
