@@ -4493,16 +4493,21 @@ impl Context2D {
             .with(source.nested())
             .with(carried);
 
-        // Drawn through its paint as a group of our own wherever the blend
-        // composites only where the source lands, which `render_to_canvas`
-        // draws as it is: its shadow first, as a group of its own offset
-        // from it, then the source. The group composites the source as its
-        // own pixels do -- its draws with one another on transparent black,
-        // then what they make onto this page, once -- through a layer that
-        // keeps the alpha exact on pixels and is an opacity in a document,
-        // which opens one at full alpha and writes its entries as they are,
-        // unless the source holds a blend -- a put's `Clear` among them --
-        // which a document keeps inside the layer -- see `LayerRec::open_on`
+        // Drawn through its paint as a group of our own, its shadow first, as
+        // a group of its own offset from it, then the source, wherever the
+        // blend composites only where the source lands. Under a blend that
+        // changes the page beyond what is drawn, a group's layer covers the
+        // clip as the blend does, so a source with no shadow and no filter is
+        // a group as well; one with either is drawn through
+        // `render_to_canvas`, which records the shadow and the source apart
+        // and composites each over the whole page. The group composites the
+        // source as its own pixels do -- its draws with one another on
+        // transparent black, then what they make onto this page, once
+        // -- through a layer that keeps the alpha exact on pixels and
+        // is an opacity in a document, which opens one at full alpha
+        // and writes its entries as they are, unless the source holds a
+        // blend -- a put's `Clear` among them -- which a document keeps
+        // inside the layer -- see `LayerRec::open_on`
         // and `Group::opacity`. Replayed straight
         // onto the page, a source's `put_image_data`, drawn under
         // `BlendMode::Clear`, erased what this page held beneath it, and its
@@ -4520,7 +4525,14 @@ impl Context2D {
         // destination crops by coverage rather than cutting its paths --
         // see `Group::confine`.
         let drawn = self.faint().drawable(&paint).into_owned();
-        if !covers_beyond_the_draw(self.state.global_composite_operation) {
+        let plain = || {
+            self.paint_for_shadow(&paint).is_none()
+                && paint.image_filter().is_none()
+                && self.exact_steps().is_none()
+        };
+        if !covers_beyond_the_draw(self.state.global_composite_operation)
+            || plain()
+        {
             let contents_matrix = Matrix::concat(&self.state.matrix, &matrix);
             let Some(contents) = entries.or_else(|| {
                 picture().map(|picture| {
@@ -4615,7 +4627,8 @@ impl Context2D {
             None,
             None,
             |canvas, paint, _| {
-                // Only a blend that covers beyond the draw comes here, and the
+                // Only a blend that covers beyond the draw, with a shadow or a
+                // filter, comes here, and the
                 // paint carrying it makes Skia draw the picture through a
                 // temporary layer, which keeps the source's own compositing to
                 // itself, as drawing the source's pixels -- which is what the

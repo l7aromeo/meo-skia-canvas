@@ -7622,14 +7622,21 @@ mod overlapping_glyph_tests {
     /// gradient interpolated in Oklab cast with a shadow, a canvas holding
     /// such a gradient drawn in with `drawCanvas`, or a run of text filled
     /// with it -- each of which a GPU canvas draws on the CPU over a read
-    /// back -- plays on a root of its own and
-    /// lands what the same draws land on the page without the layer, which
-    /// the layer, opaque, then composites unchanged. That is the CPU page's
-    /// bytes for the canvas drawn in. The shadow stands within a level of
-    /// the CPU's on the page itself, where Metal composites it at half
-    /// precision, as `docs/browser-differences.md` says, and the layer adds
-    /// nothing to that. Played inside the layer, both land apart from the
-    /// page.
+    /// back -- plays on a root of its own and lands what the same draws land
+    /// on the page without the layer, which the layer, opaque, then
+    /// composites unchanged. The canvas drawn in is a group whose own layer
+    /// takes a second root inside the first, where its gradient is drawn
+    /// over the transparent black of the source's own pixels. Those pixels
+    /// are then composited onto the page: the CPU page stores the exact
+    /// composite, and Metal blends them at half precision, a level from it
+    /// only within 0.18 of a tie, as it blends any image (#837). The shadow
+    /// stands within a level of the CPU's on the page itself, for the same
+    /// reason, as `docs/browser-differences.md` says, and the layer adds
+    /// nothing to that. Played inside the layer with no root, the shadowed
+    /// gradient and the text land apart from the page. The canvas drawn in
+    /// lands as it does on its roots, since its group's layer starts
+    /// transparent, as the source's own pixels do: the roots it takes cost a
+    /// surface and a copy each and change none of its bytes.
     #[test]
     fn a_layer_holding_a_gradient_drawn_over_a_read_back_lands_as_the_page() {
         use crate::{
@@ -7722,10 +7729,44 @@ mod overlapping_glyph_tests {
             assert_eq!(engine == EngineKind::Gpu, gpu, "read on {engine:?}");
             (bytes, ROOTS_PLAYED.get() - roots)
         };
+        // The exact `source-over` composite of the source's premultiplied
+        // bytes over the fill, and how far each lies from a tie.
+        let held = source()
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    density: 1,
+                    pixels: PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("the source reads back")
+            .pixels()
+            .to_vec();
+        let fill = [220u8, 180, 60, 255];
+        let exact: Vec<(u8, f64)> = held
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|px| {
+                let alpha = f64::from(255 - px[3]) / 255.0;
+                (0..4).map(move |c| {
+                    let v = f64::from(px[c]) + f64::from(fill[c]) * alpha;
+                    (v.round() as u8, (v - v.floor() - 0.5).abs())
+                })
+            })
+            .collect();
         for draw in [Draw::Shadowed, Draw::DrawnIn, Draw::Text] {
             let (direct, _) = page(true, false, draw);
             let (layered, roots) = page(true, true, draw);
-            assert_eq!(roots, 1, "{draw:?}: a root");
+            let expected = match draw {
+                Draw::DrawnIn => 2,
+                Draw::Shadowed | Draw::Text => 1,
+            };
+            assert_eq!(roots, expected, "{draw:?}: its roots");
             assert!(
                 layered == direct,
                 "{draw:?}: {} levels from the page without the layer",
@@ -7733,16 +7774,32 @@ mod overlapping_glyph_tests {
             );
             if draw == Draw::DrawnIn {
                 let (cpu, _) = page(false, true, draw);
-                assert!(
-                    layered == cpu,
-                    "{draw:?}: {} levels from the CPU",
-                    most_apart(&layered, &cpu)
+                let off = zip(&cpu, &exact).filter(|(b, (e, _))| *b != e);
+                assert_eq!(off.count(), 0, "the CPU off the exact composite");
+                let far = zip(&layered, &exact)
+                    .filter(|(b, (e, tie))| {
+                        b.abs_diff(*e) > 1 || (*b != e && *tie > 0.18)
+                    })
+                    .count();
+                assert_eq!(
+                    far, 0,
+                    "the GPU off the exact composite past a tie"
                 );
             }
             OWN_ROOTS.set(false);
             let (inside, _) = page(true, true, draw);
             OWN_ROOTS.set(true);
-            assert!(inside != direct, "{draw:?}: inside the layer lands apart");
+            match draw {
+                Draw::DrawnIn => assert!(
+                    inside == direct,
+                    "{draw:?}: {} levels from the page without a root",
+                    most_apart(&inside, &direct)
+                ),
+                Draw::Shadowed | Draw::Text => assert!(
+                    inside != direct,
+                    "{draw:?}: inside the layer lands apart"
+                ),
+            }
         }
     }
 
@@ -10504,20 +10561,15 @@ mod translucent_text_tests {
                             .draw_source_image(&image, &whole, &whole, false);
                     }),
                 )];
-                // `draw_canvas` replays the source's draws, which under
-                // source-over land on the destination's own pixels, glyph by
-                // glyph, rather than compositing the source's: its own
-                // contract, documented there, and off the bytes with or
-                // without the route. Under every other blend here they are
-                // composited as one first.
-                if blend != BlendMode::SourceOver {
-                    routes.push((
-                        "with draw_canvas",
-                        into(blend, &mut |ctx| {
-                            ctx.draw_canvas(&mut run, 0.0, 0.0);
-                        }),
-                    ));
-                }
+                // `draw_canvas` composites the source as its own pixels do,
+                // at a whole pixel landing them byte for byte, under every
+                // blend -- see `Context2D::draw_canvas`.
+                routes.push((
+                    "with draw_canvas",
+                    into(blend, &mut |ctx| {
+                        ctx.draw_canvas(&mut run, 0.0, 0.0);
+                    }),
+                ));
                 for (route, drawn) in routes {
                     let apart: Vec<u8> = zip(&drawn, &expected)
                         .filter(|(a, b)| a != b)
@@ -12428,15 +12480,172 @@ mod unlayered_tests {
         .to_vec()
     }
 
+    /// Under every blend that changes the page beyond what is drawn, a
+    /// canvas drawn in at a whole pixel, whole or cropped, lands the bytes
+    /// `drawImage` of its own pixels lands, beyond the destination as well
+    /// as within it: the group composites the source through the blend over
+    /// all the clip covers, as an image's draw does. On a CPU page that is
+    /// the whole page. On a GPU page it is the pixels beyond the
+    /// destination, which the blend clears or keeps and nothing rounds;
+    /// within it Metal composites the two at half precision by different
+    /// routes (#837).
+    #[test]
+    fn a_canvas_drawn_in_under_a_blend_beyond_it_lands_its_image() {
+        use std::ops::Range;
+        let held = source()
+            .to_image_data(
+                None,
+                &ImageDataExport {
+                    pixels: PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("the source reads back");
+        let image = crate::image::Image::from_pixels(
+            held.pixels(),
+            held.width(),
+            held.height(),
+            held.stride(),
+            PixelExportOptions {
+                premultiplied: true,
+                ..PixelExportOptions::default()
+            },
+        )
+        .expect("the bytes make an image");
+        let (width, height) = (200.0, 140.0);
+        let page = |gpu: bool, draw: &dyn Fn(&mut Context2D, &mut Canvas)| {
+            let mut page = Canvas::new(width, height);
+            page.set_gpu(gpu);
+            let ctx = page.context();
+            ctx.set_fill_style_css(PAGE).expect("a colour");
+            ctx.fill_rect(0.0, 0.0, width, height);
+            draw(ctx, &mut source());
+            page.to_image_data(
+                None,
+                &ImageDataExport {
+                    pixels: PixelExportOptions {
+                        premultiplied: true,
+                        ..PixelExportOptions::default()
+                    },
+                    ..ImageDataExport::default()
+                },
+            )
+            .expect("pixels")
+            .pixels()
+            .to_vec()
+        };
+        // Where each draw lands: the whole source at 40,20, and 50 by 40 of
+        // it from 10,8 at 40,20.
+        let whole = (40..120, 20..80);
+        let cropped = (40..90, 20..60);
+        let beyond = |(xs, ys): (Range<usize>, Range<usize>)| {
+            move |i: usize| {
+                let (x, y) =
+                    ((i / 4) % width as usize, (i / 4) / width as usize);
+                !(xs.contains(&x) && ys.contains(&y))
+            }
+        };
+        let blends = [
+            BlendMode::Copy,
+            BlendMode::SourceIn,
+            BlendMode::SourceOut,
+            BlendMode::DestinationIn,
+            BlendMode::DestinationOut,
+            BlendMode::DestinationAtop,
+        ];
+        let gpu = RenderingEngine::GPU.selectable();
+        let mut apart = vec![];
+        for blend in blends {
+            for (kind, dst) in
+                [("whole", whole.clone()), ("cropped", cropped.clone())]
+            {
+                let canvas_draw = |ctx: &mut Context2D, source: &mut Canvas| {
+                    ctx.set_global_composite_operation(blend);
+                    match kind {
+                        "whole" => ctx.draw_canvas(source, 40.0, 20.0),
+                        _ => ctx.draw_canvas_region(
+                            source, 10.0, 8.0, 50.0, 40.0, 40.0, 20.0, 50.0,
+                            40.0,
+                        ),
+                    }
+                };
+                let image_draw = |ctx: &mut Context2D, _: &mut Canvas| {
+                    ctx.set_global_composite_operation(blend);
+                    match kind {
+                        "whole" => ctx.draw_image(&image, 40.0, 20.0),
+                        _ => ctx.draw_image_region(
+                            &image, 10.0, 8.0, 50.0, 40.0, 40.0, 20.0, 50.0,
+                            40.0,
+                        ),
+                    }
+                };
+                let engines: &[bool] =
+                    if gpu { &[false, true] } else { &[false] };
+                for &on_gpu in engines {
+                    let a = page(on_gpu, &canvas_draw);
+                    let b = page(on_gpu, &image_draw);
+                    let counted = beyond(dst.clone());
+                    let bytes = (0..a.len())
+                        .filter(|&i| !on_gpu || counted(i))
+                        .filter(|&i| a[i] != b[i])
+                        .count();
+                    if bytes > 0 {
+                        apart.push((blend, kind, on_gpu, bytes));
+                    }
+                }
+            }
+        }
+        assert!(
+            apart.is_empty(),
+            "apart from the image (blend, draw, gpu, bytes): {apart:?}"
+        );
+    }
+
     /// A canvas drawn in with no layer around it lands what its layer
     /// landed, where the destination confines it as it confined the layer:
     /// under a fractional crop, a fractional or turned clip, and a turned
     /// transform, whose bounds Skia rounds out to the device rectangle
-    /// around them.
+    /// around them; and where the layer composited through a blend or an
+    /// alpha, among them blends that change the page beyond what the source
+    /// covers, which the layer composited over all it covered.
     #[test]
     fn a_canvas_drawn_in_unlayered_lands_what_its_layer_does() {
         type Case = (&'static str, fn(&mut Context2D, &mut Canvas));
-        let cases: [Case; 7] = [
+        let cases: [Case; 14] = [
+            ("under destination-atop", |ctx, source| {
+                ctx.set_global_composite_operation(BlendMode::DestinationAtop);
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("under source-in", |ctx, source| {
+                ctx.set_global_composite_operation(BlendMode::SourceIn);
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("under copy", |ctx, source| {
+                ctx.set_global_composite_operation(BlendMode::Copy);
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("under multiply", |ctx, source| {
+                ctx.set_global_composite_operation(BlendMode::Multiply);
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("at an alpha", |ctx, source| {
+                ctx.set_global_alpha(0.5);
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("at an alpha under xor", |ctx, source| {
+                ctx.set_global_alpha(0.5);
+                ctx.set_global_composite_operation(BlendMode::Xor);
+                ctx.draw_canvas(source, 40.0, 20.0);
+            }),
+            ("cropped under destination-atop", |ctx, source| {
+                ctx.set_global_composite_operation(BlendMode::DestinationAtop);
+                ctx.draw_canvas_region(
+                    source, 10.0, 8.0, 50.0, 40.0, 40.4, 20.7, 50.0, 40.0,
+                )
+            }),
             ("at a whole pixel", |ctx, source| {
                 ctx.draw_canvas(source, 40.0, 20.0)
             }),

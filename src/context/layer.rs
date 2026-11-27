@@ -3918,6 +3918,17 @@ pub struct LayerRec {
 }
 
 impl LayerRec {
+    /// Whether the layer composites through a blend that changes the page
+    /// beyond what it holds -- see `covers_beyond_the_draw` -- on either
+    /// target.
+    fn covers_beyond(&self) -> bool {
+        [&self.pixels_paint, &self.paint]
+            .into_iter()
+            .flatten()
+            .filter_map(Paint::as_blend_mode)
+            .any(covers_beyond_the_draw)
+    }
+
     /// Opens the layer on `canvas`, under whatever transform and clip it
     /// carries, compositing as `target` needs: on pixels through the paint
     /// [`composited`] hands over, which keeps the alpha exact; in a
@@ -4729,7 +4740,7 @@ impl Group {
         let outer = Matrix::concat(&layer.local_to_device_as_3x3(), back);
         self.draw_chained_as(layer, target, back, |layer| {
             if target == Target::Pixels
-                && self.played_at_source(layer, &outer, None)
+                && self.played_at_source(layer, &outer, None, None)
             {
                 return;
             }
@@ -4741,21 +4752,27 @@ impl Group {
 
     /// Draws the group onto `canvas` from a surface of its own -- see
     /// [`Self::played_at_source`] -- with no layer around it, where `rec`
-    /// composites nothing that surface's pixels do not already hold: at an
-    /// opacity of one, through no filter, over no backdrop and within no
-    /// bounds of its own. Whether it did; where it did not, nothing was
-    /// drawn.
+    /// does nothing to the surface's pixels but composite them through its
+    /// paint: over no backdrop, within no bounds of its own, and through a
+    /// paint that is a blend mode, an alpha and a colour filter at most,
+    /// with no image filter, shader or mask. Whether it did; where it did
+    /// not, nothing was drawn.
     ///
     /// The surface already composites the group's entries apart from what
-    /// lies beneath them, which is all such a layer does. Drawn into the
-    /// layer instead, its pixels landed through the layer's own restore,
-    /// which on a raster on the CPU takes Skia's `N32` sprite row whatever
-    /// the surface was made in -- see [`own_image_type`]: a canvas drawn in
-    /// at a whole pixel stood 415 bytes a level apart from its own pixels
-    /// drawn as an image on an x86-64 machine.
+    /// lies beneath them, which is what such a layer does before it
+    /// composites through its paint, so the surface is drawn through that
+    /// paint instead, as the layer would composite -- see [`composited`].
+    /// Drawn into the layer instead, its pixels landed through the layer's
+    /// own restore, which on a raster on the CPU takes Skia's `N32` sprite
+    /// row whatever the surface was made in -- see [`own_image_type`]: a
+    /// canvas drawn in at a whole pixel stood 415 bytes a level apart from
+    /// its own pixels drawn as an image on an x86-64 machine, and one drawn
+    /// in under `destination-atop` 1,567.
     ///
     /// The destination confines the surface as it confines the layer: as a
-    /// clip where it holds what the group draws, and where it cuts it, by
+    /// clip where it holds what the group draws -- none at all under a blend
+    /// that changes the page beyond what is drawn, which the clip would
+    /// confine and the draw needs no clip for -- and where it cuts it, by
     /// multiplying the surface by its coverage before it is drawn, as the
     /// layer is multiplied before it closes. Clipped by that coverage
     /// instead, a crop to a fractional destination stood a level from the
@@ -4768,9 +4785,18 @@ impl Group {
         rec: &LayerRec,
         base: &Matrix,
     ) -> bool {
-        let plain = rec.opacity() == Some(1.0)
+        // The paint a page's pixels composite the layer through, as
+        // `LayerRec::open_on` takes it.
+        let paint = rec.pixels_paint.as_ref().or(rec.paint.as_ref());
+        let through = paint.is_none_or(|paint| {
+            paint.as_blend_mode().is_some()
+                && paint.image_filter().is_none()
+                && paint.shader().is_none()
+                && paint.mask_filter().is_none()
+        });
+        let plain = through
+            && rec.backdrop.is_none()
             && rec.bounds.is_none()
-            && rec.pixels_paint.is_none()
             && rec.pixels_backdrop.is_none()
             && !rec.one_image;
         if !plain || !blur_mask::draws_on_cpu(canvas) {
@@ -4784,10 +4810,19 @@ impl Group {
         canvas.save();
         canvas.set_matrix(&to_device.into());
         let crop = self.crop(canvas, Target::Pixels, &to_device);
-        if crop.is_none() {
+        // With no crop the destination holds what the group draws, so its
+        // clip confines nothing of the draw, and under a blend that changes
+        // the page beyond what is drawn it would confine the blend.
+        if crop.is_none() && !rec.covers_beyond() {
             self.confine(canvas, Target::Pixels, &to_device);
         }
-        let drawn = self.played_at_source(canvas, base, crop.as_ref());
+        let paint = paint.map(composited);
+        let drawn = self.played_at_source(
+            canvas,
+            base,
+            crop.as_ref(),
+            paint.as_deref(),
+        );
         canvas.restore();
         drawn
     }
@@ -4804,7 +4839,11 @@ impl Group {
     /// pixels are then drawn at the origin, under whatever clip `canvas`
     /// holds, and the destination, a crop of the source, among it -- or,
     /// where `crop` is given, the surface is multiplied by that coverage
-    /// first. Skia's analytic anti-aliasing covers a curve by where it lies on
+    /// first. They are drawn through `paint` where it is given: as an image,
+    /// or, where its blend changes what lies beyond what is drawn -- see
+    /// `covers_beyond_the_draw` -- as a shader of the image, transparent
+    /// past its edges, filling the clip, as a layer composites over all it
+    /// covers. Skia's analytic anti-aliasing covers a curve by where it lies on
     /// the raster it fills and cuts the coverage of a path its clip cuts --
     /// see `skia_covers_a_curve_by_where_it_lies` and [`CutOp`] -- so drawn
     /// straight into a layer, the source's curves were covered by where the
@@ -4833,6 +4872,7 @@ impl Group {
         canvas: &SkCanvas,
         outer: &Matrix,
         crop: Option<&Coverage>,
+        paint: Option<&Paint>,
     ) -> bool {
         let Some(source) = self.source else {
             return false;
@@ -4888,7 +4928,23 @@ impl Group {
             .unwrap_or_else(|| surface.image_snapshot());
         canvas.save();
         canvas.reset_matrix();
-        canvas.draw_image(&played, origin, None);
+        let beyond = paint
+            .and_then(Paint::as_blend_mode)
+            .is_some_and(covers_beyond_the_draw);
+        match (paint, beyond) {
+            (Some(paint), true) => {
+                let mut fill = paint.clone();
+                fill.set_shader(played.to_shader(
+                    (TileMode::Decal, TileMode::Decal),
+                    SamplingOptions::default(),
+                    &Matrix::translate(origin),
+                ));
+                canvas.draw_paint(&fill);
+            }
+            (paint, _) => {
+                canvas.draw_image(&played, origin, paint);
+            }
+        }
         canvas.restore();
         drop(played);
         if let Some(key) = key {
@@ -5207,22 +5263,25 @@ impl Group {
                 let to_device = Matrix::concat(&base, &self.matrix);
                 canvas.set_matrix(&to_device.into());
                 // The destination confines what is drawn and not what the
-                // layer's filter makes of it, so under a filter it is a clip
-                // inside the layer, where a shadow can still be cast past it.
-                // Where it cuts what is drawn, the layer is multiplied by it
-                // before it closes, which is as much inside the layer, and
-                // leaves both the draws and the layer's composite whole --
-                // see `Self::crop`.
+                // layer's filter makes of it, nor what its blend does to the
+                // page beyond what is drawn, so under a filter or such a
+                // blend it is a clip inside the layer, where a shadow can
+                // still be cast past it and the layer still composites over
+                // all the clip covers. Where it cuts what is drawn, the layer
+                // is multiplied by it before it closes, which is as much
+                // inside the layer, and leaves both the draws and the
+                // layer's composite whole -- see `Self::crop`.
                 let filtered = rec
                     .paint
                     .as_ref()
                     .is_some_and(|paint| paint.image_filter().is_some());
+                let inside = filtered || rec.covers_beyond();
                 let crop = self.crop(canvas, target, &to_device);
-                if crop.is_none() && !filtered {
+                if crop.is_none() && !inside {
                     self.confine(canvas, target, &to_device);
                 }
                 rec.open_on(canvas, target, within);
-                if crop.is_none() && filtered {
+                if crop.is_none() && inside {
                     self.confine(canvas, target, &to_device);
                 }
                 canvas.set_matrix(&entries.into());
@@ -5238,7 +5297,7 @@ impl Group {
                 // `Self::played_at_source`.
                 let placed = !rooted
                     && target == Target::Pixels
-                    && self.played_at_source(canvas, &base, None);
+                    && self.played_at_source(canvas, &base, None, None);
                 if !rooted && !placed {
                     let in_layer = InLayer::enter();
                     play_entries(
