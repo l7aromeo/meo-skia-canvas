@@ -12,8 +12,7 @@
 
 use meo_skia_canvas::prelude::*;
 
-/// Both engines.
-const ENGINES: [bool; 2] = [false, true];
+mod common;
 
 /// How far off the byte grid a channel and the alpha are named: far enough
 /// from a byte that rounding first moves the product, and apart from each
@@ -222,7 +221,7 @@ fn a_colour_s_fraction_of_a_level_reaches_the_page() {
 #[test]
 fn a_translucent_draw_stores_its_exact_product() {
     let mut failures = vec![];
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for draw in DRAWS {
             for off in [(0.0, 0.0), OFF_GRID] {
                 let missed = misses(draw, gpu, off);
@@ -275,7 +274,7 @@ fn edges(grey: f64, alpha: f64, gpu: bool) -> Vec<u8> {
 /// coverage grey 112 at the same alpha does.
 #[test]
 fn text_in_its_buckets_exact_colour_keeps_its_edges() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         assert_eq!(
             edges(127.37, 151.61, gpu),
             edges(112.0, 151.61, gpu),
@@ -291,7 +290,7 @@ fn text_in_its_buckets_exact_colour_keeps_its_edges() {
 /// does.
 #[test]
 fn text_with_no_exact_colour_in_its_bucket_stores_the_product_inside() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let pixels = row(Draw::Text, gpu, 151, OFF_GRID);
         assert_eq!(&pixels[31 * 4..32 * 4], [19, 19, 19, 152], "gpu {gpu}");
     }
@@ -304,7 +303,7 @@ fn text_with_no_exact_colour_in_its_bucket_stores_the_product_inside() {
 /// product 43 a colour of their own bucket stores.
 #[test]
 fn text_with_no_exact_colour_in_its_bucket_keeps_its_edges() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         assert_eq!(
             edges(128.0, 76.5, gpu),
             edges(144.0, 76.5, gpu),
@@ -330,7 +329,7 @@ fn filled_middle(gpu: bool, css: &str, rect: [f32; 4]) -> Option<u8> {
         },
     )
     .expect("a canvas");
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();

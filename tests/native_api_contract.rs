@@ -487,6 +487,8 @@ fn a_canvas_renders_at_every_sample_count_the_backend_offers() -> Result<()> {
         24.0,
         24.0,
         CanvasOptions {
+            // GPU allowed on purpose: a build with no device is the
+            // CPU-only case this covers -- see above.
             gpu: true,
             ..CanvasOptions::default()
         },

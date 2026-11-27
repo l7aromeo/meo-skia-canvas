@@ -12,9 +12,9 @@
 //! The scenes are drawn twice, once read after every step and once read only
 //! at the end, and the two final reads have to be the same bytes.
 
-use std::env;
-
 use meo_skia_canvas::prelude::*;
+
+mod common;
 
 /// The page, in pixels.
 const WIDTH: f32 = 600.0;
@@ -22,10 +22,6 @@ const HEIGHT: f32 = 400.0;
 
 /// How many times each scene is drawn over itself.
 const STEPS: usize = 4;
-
-/// The same text tests/gpu_path_coverage.rs reads, for the same reason: CI's
-/// Linux runner sets it so that a green run has drawn on lavapipe.
-const REQUIRE_GPU: &str = "MEO_SKIA_CANVAS_REQUIRE_GPU";
 
 /// One step of a scene: draws onto `ctx`, the `step`-th time.
 type Scene = fn(&mut Context2D, usize) -> Result<(), Error>;
@@ -73,7 +69,7 @@ fn drawn(
 ) -> Result<Option<ImageData>, Error> {
     let mut canvas = Canvas::with_options(WIDTH, HEIGHT, options.clone())?;
     canvas.set_gpu(true);
-    if canvas.engine_kind() != EngineKind::Gpu {
+    if !common::on_gpu(&canvas) {
         return Ok(None);
     }
     let ctx = canvas.context();
@@ -88,27 +84,11 @@ fn drawn(
     ctx.get_image_data(0.0, 0.0, WIDTH, HEIGHT).map(Some)
 }
 
-/// Skips where there is no GPU, unless [`REQUIRE_GPU`] asks for one.
+/// Skips where there is no GPU, and fails where one is required -- see
+/// `common::on_gpu`.
 #[test]
 fn a_read_between_draws_changes_no_later_pixel() -> Result<(), Error> {
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    if let Ok(required) = env::var(REQUIRE_GPU) {
-        let backend = BackendInfo::query();
-        assert!(
-            probe.engine_kind() == EngineKind::Gpu
-                && backend
-                    .device
-                    .as_deref()
-                    .is_some_and(|device| device.contains(&required)),
-            "{REQUIRE_GPU} asks for a GPU named {required:?}; the engine is \
-             {:?} on {:?}, error {:?}",
-            probe.engine_kind(),
-            backend.device,
-            backend.error,
-        );
-    }
-    if probe.engine_kind() != EngineKind::Gpu {
+    if !common::has_gpu() {
         return Ok(());
     }
 

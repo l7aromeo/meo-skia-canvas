@@ -287,6 +287,8 @@ pub mod pixels;
 pub mod shader;
 /// Text layout and styling.
 pub mod text;
+// Keeping the module this code is in mapped while a thread it started lives.
+pub(crate) mod unload;
 
 pub mod texture;
 
@@ -462,6 +464,8 @@ pub(crate) fn start_skia() {
 #[cfg(feature = "node-addon")]
 use context::api as ctx;
 #[cfg(feature = "node-addon")]
+use unload::keep_loaded;
+#[cfg(feature = "node-addon")]
 use {css::parse_transform_list, std::iter};
 
 /// Module-level function to get backend status without creating a canvas.
@@ -470,6 +474,7 @@ use {css::parse_transform_list, std::iter};
 /// gpuAvailable fields.
 #[cfg(feature = "node-addon")]
 fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
+    keep_loaded();
     // `RenderingEngine::status` rather than the free `get_backend_status`
     // that used to live in `gpu`: that one was deleted with the render-target
     // layer, and nothing noticed because a stale `lib/skia.node` kept the
@@ -644,6 +649,10 @@ fn transform_list(mut cx: FunctionContext) -> JsResult<JsValue> {
 #[cfg(feature = "node-addon")]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
+    // First, so that no thread this addon starts can outlive its code: Node
+    // unloads an addon when the last environment that loaded it, a worker's
+    // included, is torn down -- see `unload`.
+    keep_loaded();
     start_skia();
 
     // Once per JavaScript thread, as this runs on each that loads the addon:

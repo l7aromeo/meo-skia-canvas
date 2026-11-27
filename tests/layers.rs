@@ -5,6 +5,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 /// The page every case draws on: 60 by 20, white.
 const WIDTH: f32 = 60.0;
 const HEIGHT: f32 = 20.0;
@@ -27,9 +29,6 @@ const QUARTER_RED: [f32; 4] = [255.0, 191.25, 191.25, 255.0];
 
 /// Red on white through three layers at 0.5, an eighth of the red.
 const EIGHTH_RED: [f32; 4] = [255.0, 223.125, 223.125, 255.0];
-
-/// Both engines, each held to the exact value.
-const ENGINES: [bool; 2] = [false, true];
 
 /// How far a pixel may be from the exact value it stands for: half a level,
 /// the most that rounding to a byte can account for. At 127.5 both 127 and
@@ -77,7 +76,7 @@ fn pixel(canvas: &mut Canvas, n: usize) -> Vec<u8> {
 
 #[test]
 fn a_read_inside_a_layer_leaves_it_open() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         let ctx = canvas.context();
         ctx.save_layer_with(0.5, None, None);
@@ -104,7 +103,7 @@ fn a_read_inside_a_layer_leaves_it_open() {
 /// there, then every square read again once all three are closed.
 #[test]
 fn nested_layers_survive_a_read_at_each_depth() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         let inside: Vec<_> = (0..3)
             .map(|depth| {
@@ -136,7 +135,7 @@ fn nested_layers_survive_a_read_at_each_depth() {
 /// the reads once all three are closed, find the same.
 #[test]
 fn nested_layers_read_from_the_innermost_show_every_depth() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         for depth in 0..3 {
             canvas.context().save_layer_with(0.5, None, None);
@@ -191,7 +190,7 @@ fn a_layer_keeps_what_its_shadows_and_blurs_spread() {
             (41.0, 10.0),
         ),
     ];
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for (name, draw, (x, y)) in cases {
             let mut canvas = white_page(gpu);
             canvas.context().save_layer_with(0.5, None, None);
@@ -221,7 +220,7 @@ fn a_layer_keeps_what_its_shadows_and_blurs_spread() {
 /// the middle and last thirds, and the clip leaves only the middle.
 #[test]
 fn a_read_inside_a_layer_keeps_its_transform_clip_and_bounds() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         let ctx = canvas.context();
         ctx.translate(20.0, 0.0);
@@ -255,7 +254,7 @@ fn a_read_inside_a_layer_keeps_its_transform_clip_and_bounds() {
 /// one holding red there reads the same inside as after.
 #[test]
 fn a_copy_layer_replaces_what_its_clip_covers() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for draws in [false, true] {
             let mut canvas = white_page(gpu);
             let ctx = canvas.context();
@@ -287,7 +286,7 @@ fn a_copy_layer_replaces_what_its_clip_covers() {
 /// so far, as a read does, and leaves the layer open for what follows.
 #[test]
 fn an_export_inside_a_layer_leaves_it_open() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for format in [ImageFormat::Png, ImageFormat::Pdf, ImageFormat::Svg] {
             let mut canvas = white_page(gpu);
             let ctx = canvas.context();
@@ -312,7 +311,7 @@ fn an_export_inside_a_layer_leaves_it_open() {
 /// composites it, the same pixel the page reads once the layer is closed.
 #[test]
 fn a_png_inside_a_layer_shows_it_composited() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         let ctx = canvas.context();
         ctx.save_layer_with(0.5, None, None);
@@ -332,7 +331,7 @@ fn a_png_inside_a_layer_shows_it_composited() {
 /// composited as it stands, and keeps it open.
 #[test]
 fn a_canvas_drawn_in_while_its_layer_is_open_brings_it_composited() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut source = white_page(gpu);
         let ctx = source.context();
         ctx.save_layer_with(0.5, None, None);
@@ -442,7 +441,7 @@ const COMPOSITES: [(&str, Composite); 5] = [
 #[test]
 fn a_layer_composites_at_its_alpha() {
     let mut wrong = Vec::new();
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for (name, composite) in COMPOSITES {
             let missed: Vec<_> = (1..255u8)
                 .filter_map(|byte| {
@@ -480,7 +479,7 @@ fn a_layer_composites_at_its_alpha() {
 #[test]
 fn a_shadowed_canvas_composites_at_its_alpha() {
     let mut wrong = Vec::new();
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let missed: Vec<_> = (1..255u8)
             .filter_map(|byte| {
                 let alpha = f32::from(byte) / 255.0;
@@ -546,7 +545,7 @@ fn a_region_blend_composites_at_its_alpha() {
         }),
     ];
     let mut wrong = Vec::new();
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for (blend, exact) in BLENDS {
             let missed: Vec<_> = (1..255u8)
                 .filter_map(|byte| {
@@ -595,7 +594,7 @@ fn a_pdf_keeps_a_translucent_group_vector() {
 /// picture holds the form for pixels -- see `Page::picture`.
 #[test]
 fn a_pattern_of_a_translucent_layer_composites_at_its_alpha() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut source = white_page(gpu);
         let ctx = source.context();
         ctx.save_layer_with(0.5, None, None);
@@ -617,7 +616,7 @@ fn a_pattern_of_a_translucent_layer_composites_at_its_alpha() {
 /// tile away from the page's origin.
 #[test]
 fn a_group_lands_where_it_was_drawn() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         let ctx = canvas.context();
         ctx.save_layer_with(0.5, None, None);
@@ -687,7 +686,7 @@ fn a_group_lands_where_it_was_drawn() {
 /// the destination asked for.
 #[test]
 fn a_canvas_drawn_in_shows_only_its_region() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut source = white_page(gpu);
         let ctx = source.context();
         ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
@@ -726,7 +725,7 @@ fn png_pixel(png: &[u8], gpu: bool, n: usize) -> Vec<u8> {
 /// the unfinished one, and must not be taken for it.
 #[test]
 fn an_export_taken_inside_a_layer_keeps_the_layer_as_it_stood() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         let options = EncodeOptions::default();
         let _ = canvas.to_buffer(ImageFormat::Png, &options).expect("a png");
@@ -796,7 +795,7 @@ fn slice(
 /// so composes the page.
 #[test]
 fn a_read_inside_a_layer_reads_what_the_page_does() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for content in ["plain", "blurred", "shadowed", "backdrop"] {
             let mut canvas = white_page(gpu);
             let ctx = canvas.context();
@@ -845,7 +844,7 @@ fn a_read_inside_a_layer_reads_what_the_page_does() {
 /// it gives.
 #[test]
 fn an_export_inside_a_layer_is_the_export_it_was() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for format in [ImageFormat::Png, ImageFormat::Raw] {
             let options = EncodeOptions::default();
             let draw = |canvas: &mut Canvas,
@@ -918,7 +917,7 @@ fn an_svg_writes_a_translucent_layer_as_a_group() {
 /// recording optimizer folds the layer into the draw.
 #[test]
 fn a_layer_of_one_draw_composites_as_a_layer() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let mut canvas = white_page(gpu);
         let ctx = canvas.context();
         ctx.save_layer_with(0.5, None, None);
@@ -939,7 +938,7 @@ const LAYER_ROUNDING: u8 = 1;
 /// composited through the layer.
 #[test]
 fn a_blur_inside_a_layer_is_the_blur_outside_one() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         let draw = |in_layer: bool| {
             let mut canvas = white_page(gpu);
             let ctx = canvas.context();
@@ -1044,7 +1043,7 @@ fn page_bytes(canvas: &mut Canvas, depth: PixelDepth) -> Vec<u8> {
 /// engines, at eight bits and in F16 and F32.
 #[test]
 fn reads_between_draws_read_what_layers_close_to() {
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for depth in [PixelDepth::Uint8, PixelDepth::F16, PixelDepth::F32] {
             for round in [false, true] {
                 let mut canvas = Canvas::with_options(

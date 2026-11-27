@@ -16,6 +16,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const SIZE: (f32, f32) = (300.0, 220.0);
 
 /// The turn the text is drawn under in issue #511: about 17 degrees.
@@ -54,10 +56,7 @@ fn exported(canvas: &mut Canvas, density: u32) -> Vec<u8> {
 /// density 1 again: the first and last should be the same pixels. `None`
 /// where this machine has no GPU engine.
 fn before_and_after(mut canvas: Canvas) -> Option<(Vec<u8>, Vec<u8>)> {
-    let mut probe = Canvas::new(1.0, 1.0);
-    probe.set_gpu(true);
-    if probe.engine_kind() != EngineKind::Gpu {
-        eprintln!("skipped: no GPU engine");
+    if !common::has_gpu() {
         return None;
     }
     let first = exported(&mut canvas, 1);

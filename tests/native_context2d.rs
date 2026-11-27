@@ -7926,6 +7926,8 @@ fn set_gpu_keeps_rendering_correct() {
         "and refusing the GPU always resolves to the raster backend"
     );
 
+    // GPU allowed on purpose: the claim is that it lands where a fresh
+    // canvas does, on either engine.
     canvas.set_gpu(true);
     assert!(canvas.gpu(), "and back again");
     assert_eq!(

@@ -9,15 +9,16 @@
 //! `page::Recorders` -- once for pixels, painting a flat colour through a
 //! shader that holds it in the canvas's own space, or text through a colour
 //! filter that does, and once for documents, painting it plain.
+//!
+//! Both engines draw each case. A float canvas asking for the GPU is drawn
+//! on the raster backend where the GPU cannot composite in float -- see
+//! `Canvas::engine_kind` -- which on Metal and Vulkan is every float canvas
+//! today, so there the two draw alike; the GPU case holds for a backend that
+//! can.
 
 use meo_skia_canvas::prelude::*;
 
-/// Both engines. A float canvas asking for the GPU is drawn on the raster
-/// backend where the GPU cannot composite in float -- see
-/// `Canvas::engine_kind` -- which on Metal and Vulkan is every float canvas
-/// today, so there the two draw alike; the GPU case holds for a backend
-/// that can.
-const ENGINES: [bool; 2] = [false, true];
+mod common;
 
 /// The canvas spaces, each with the CSS function naming a colour in it, so
 /// that the exact value read back is the colour's own components.
@@ -138,7 +139,7 @@ const DRAWS: [(&str, Draw); 6] = [
 #[test]
 fn a_flat_colour_lands_exactly_on_a_float_page() {
     let mut wrong = Vec::new();
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for (space, function) in SPACES {
             for depth in [PixelDepth::F32, PixelDepth::F16] {
                 for (name, draw) in DRAWS {
@@ -199,7 +200,7 @@ fn a_flat_colour_lands_exactly_on_a_float_page() {
 fn a_drop_shadow_lands_exactly_on_a_float_page() {
     let spaces = [(PixelColorSpace::Srgb, "srgb")].into_iter().chain(SPACES);
     let mut wrong = Vec::new();
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for (space, function) in spaces.clone() {
             for depth in [PixelDepth::F32, PixelDepth::F16] {
                 let missed: Vec<_> = (0..=400)
@@ -244,7 +245,7 @@ fn a_drop_shadow_lands_exactly_on_a_float_page() {
 #[test]
 fn a_drop_shadow_in_another_space_is_its_fill_on_a_float_page() {
     let mut wrong = Vec::new();
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for (space, _) in SPACES {
             for depth in [PixelDepth::F32, PixelDepth::F16] {
                 for i in (0..=400).step_by(40) {
@@ -396,7 +397,7 @@ fn text_on(
 #[test]
 fn a_float_page_covers_text_as_srgb_does() {
     let mut wrong = Vec::new();
-    for gpu in ENGINES {
+    for gpu in common::engines() {
         for space in [PixelColorSpace::DisplayP3, PixelColorSpace::Rec2020] {
             for depth in [PixelDepth::F32, PixelDepth::F16] {
                 for css in TEXT_COLOURS {

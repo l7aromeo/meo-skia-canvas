@@ -169,6 +169,7 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 - `new_page` / `new_page_with` start another, and `page_count` / `page` select among them.
 - `EncodeOptions::page` picks which one an export encodes; PDF encodes all of them.
 - `EncodeOptions::page_range` picks a span of them, as `Option<Range<usize>>` -- zero-based and end-excluded, as a Rust range is, where `page` is zero-based too and the JavaScript `pageRange` counts from one and includes both ends. Each side counts the way its own language does. Naming it alongside `page` is an `Error::InvalidExportOption`, as is an empty range, a range past the last page, and a range on a format that encodes a single page.
+- A page keeps every draw that can still show, so one drawn over frame after frame without being cleared grows with each. `clear_rect` over the whole page, or a single opaque fill, `draw_image` or `put_image_data` covering it, releases everything drawn before; a background drawn in pieces does not. [Performance and memory](performance.md) has the conditions and the figures.
 - `Canvas::set_size(width, height)` resizes and **clears** the current page, which is what assigning `canvas.width` does in a browser -- the drawing is discarded rather than rescaled or cropped. Pages added earlier keep the size they had.
 
 ## Exports
@@ -261,7 +262,7 @@ On Windows, the same Skia takes a face's slant from DirectWrite alone, and Direc
 
 An SVG document's `italic` and `oblique` text in a family with no slanted face draws upright in a crate build. CSS Fonts 4 section 5.2 synthesises the slant, and the npm package's binaries do -- a quarter for `italic`, `tan(angle)` for `oblique <angle>` -- through `containers/skia-svg-synthetic-slant.patch`; crates.io's Skia never sets a skew on SVG text, and reads `oblique <angle>` as an unparseable `font-style`.
 
-A crate build can draw a family's upright face, or its face of another slant, for `italic` or `oblique` where the family has a face of the slant asked for but far from the weight asked for. CSS Fonts 4 section 5.2 narrows a family's faces by style before weight, and the npm package's binaries do through `containers/skia-font-match-slant-first.patch`; crates.io's Skia scores a face's weight so that it can outrank its slant, so `italic` in a family of an upright 400 face and an italic 900 one draws the upright face, skewed.
+A crate build draws a family's face of the slant asked for, however far it is from the weight asked for, as CSS Fonts 4 section 5.2 narrows a family's faces by style before weight. The npm package's binaries do it in Skia's matcher, through `containers/skia-font-match-slant-first.patch`. crates.io's Skia scores a face's weight so that it can outrank its slant, so the crate asks for such a family by a private name that holds only the faces of the slant asked for. One thing differs: a glyph those faces lack is sought by the platform's character fallback without the family's own name as its hint, so where a system family has that name too, it can be drawn from a different system face than the npm package's.
 
 ### Drawing what the npm package draws
 

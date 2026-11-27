@@ -54,7 +54,9 @@
 //! engines differ" is a reason that expires the moment they stop, and would
 //! then argue for deleting the pinning and quietly making the table
 //! hardware-dependent again.
-use meo_skia_canvas::{canvas::EngineKind, prelude::*};
+use meo_skia_canvas::prelude::*;
+
+mod common;
 
 /// Renders and returns unencoded RGBA.
 fn pixels(canvas: &mut Canvas) -> Vec<u8> {
@@ -712,9 +714,7 @@ fn hsl_and_hwb_are_different_spaces() {
 /// CPU and report a pass it had not earned.
 #[test]
 fn the_gpu_path_keeps_the_spaces_apart() {
-    let mut probe = Canvas::new(WIDTH, 4.0);
-    probe.set_gpu(true);
-    if probe.engine_kind() != EngineKind::Gpu {
+    if !common::has_gpu() {
         return;
     }
 
@@ -974,7 +974,7 @@ fn rec2020_sample(
         },
     )
     .expect("canvas");
-    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+    if gpu && !common::on_gpu(&canvas) {
         return None;
     }
     let ctx = canvas.context();
@@ -1146,4 +1146,216 @@ fn a_rec2020_gradient_survives_an_svg_export() {
     ctx.draw_image(&image, 0.0, 0.0);
     let data = ctx.get_image_data(50.0, 2.0, 1.0, 1.0).expect("read back");
     assert_eq!(&data.pixels()[..3], &[157, 18, 143], "the SVG's midpoint");
+}
+
+/// Width of the ProPhoto RGB ramps: the issue's, so pixel `x` is the ramp at
+/// `(x + 0.5) / 256`.
+const PROPHOTO_WIDTH: f32 = 256.0;
+
+/// A ramp's name, its two stops as CSS, and two pixels it is read at, each
+/// with the encoded sRGB floats and bytes CSS Color 4 gives there.
+type ProphotoRamp = (
+    &'static str,
+    &'static str,
+    &'static str,
+    [(f32, [f32; 3], [u8; 3]); 2],
+);
+
+/// The three ProPhoto RGB ramps, each with the pixels it is read at and what
+/// CSS Color 4 makes of them there: the encoded sRGB the canvas stores, as
+/// floats, and its eight-bit rounding.
+///
+/// Every value is CSS Color 4's arithmetic worked in `f64` from its sample
+/// code -- `lin_ProPhoto`, a 1.8 power with `v / 16` below 16/512, its
+/// ProPhoto, Bradford and sRGB matrices, and `gam_sRGB` -- by a script that
+/// reads nothing from this library. The same script, decoding the stops by
+/// CSS's curve and mixing them by a pure 1.8 power, as Skia's
+/// `kProPhotoRGB` does, reproduces the bytes the issue measured, and puts
+/// every float below 0.0042 to 0.0100 away: eight times the tolerance
+/// asserted at the least. The bytes are 0.12 of a level or more from a tie.
+fn prophoto_ramps() -> [ProphotoRamp; 3] {
+    [
+        (
+            "grey from black",
+            "color(prophoto-rgb 0 0 0)",
+            "color(prophoto-rgb 0.06 0.06 0.06)",
+            [
+                (40.0, [0.007_665; 3], [2, 2, 2]),
+                (64.0, [0.012_207; 3], [3, 3, 3]),
+            ],
+        ),
+        (
+            "dark blue to dark red",
+            "color(prophoto-rgb 0 0.02 0.05)",
+            "color(prophoto-rgb 0.06 0 0.01)",
+            [
+                (64.0, [0.004_015, 0.011_973, 0.043_483], [1, 3, 11]),
+                (128.0, [0.036_211, 0.004_272, 0.026_631], [9, 1, 7]),
+            ],
+        ),
+        (
+            "near black to mid",
+            "color(prophoto-rgb 0.01 0.01 0.01)",
+            "color(prophoto-rgb 0.5 0.4 0.3)",
+            [
+                (24.0, [0.084_933, 0.047_968, 0.032_405], [22, 12, 8]),
+                (128.0, [0.384_112, 0.252_182, 0.193_630], [98, 64, 49]),
+            ],
+        ),
+    ]
+}
+
+/// A linear gradient across [`PROPHOTO_WIDTH`] from `from` to `to`, mixed in
+/// ProPhoto RGB.
+fn prophoto_ramp(from: &str, to: &str) -> Shader {
+    let stop = |position, css: &str| GradientStop {
+        position,
+        color: RgbaLinear::from_css(css).expect("a CSS colour"),
+    };
+    Shader::linear_gradient(
+        Point { x: 0.0, y: 0.0 },
+        Point {
+            x: PROPHOTO_WIDTH,
+            y: 0.0,
+        },
+        &[stop(0.0, from), stop(1.0, to)],
+        GradientColorSpace::ProphotoRgb,
+    )
+    .expect("gradient")
+}
+
+/// Every pixel of `shader` drawn over a [`PROPHOTO_WIDTH`]-wide canvas of
+/// `depth`, as unpremultiplied floats in sRGB's encoding. `None` where a GPU
+/// canvas was asked for and there is none.
+fn prophoto_row(
+    shader: &Shader,
+    depth: PixelDepth,
+    gpu: bool,
+) -> Option<Vec<[f32; 4]>> {
+    let mut canvas = Canvas::with_options(
+        PROPHOTO_WIDTH,
+        1.0,
+        CanvasOptions {
+            color_type: depth,
+            gpu,
+            ..Default::default()
+        },
+    )
+    .expect("canvas");
+    if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        return None;
+    }
+    let ctx = canvas.context();
+    ctx.set_fill_shader(shader);
+    ctx.fill_rect(0.0, 0.0, PROPHOTO_WIDTH, 1.0);
+    let data = ctx
+        .get_image_data_as(
+            0.0,
+            0.0,
+            PROPHOTO_WIDTH,
+            1.0,
+            PixelExportOptions {
+                depth: PixelDepth::F32,
+                ..PixelExportOptions::default()
+            },
+        )
+        .expect("read back");
+    let channel = |b: &[u8]| f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    Some(
+        data.pixels()
+            .chunks(16)
+            .map(|p| {
+                [
+                    channel(&p[0..]),
+                    channel(&p[4..]),
+                    channel(&p[8..]),
+                    channel(&p[12..]),
+                ]
+            })
+            .collect(),
+    )
+}
+
+/// `ProphotoRgb` mixes by CSS Color 4's ProPhoto curve -- a 1.8 power with
+/// a linear segment below 16/512 -- not by Skia's pure 1.8 power, on a float
+/// canvas, an eight-bit one, and an eight-bit GPU one. See
+/// [`prophoto_ramps`] for where the values are from and how far Skia's own
+/// curve puts each of them.
+#[test]
+fn a_prophoto_gradient_mixes_by_the_css_curve() {
+    for (what, from, to, points) in prophoto_ramps() {
+        let shader = prophoto_ramp(from, to);
+        let float = prophoto_row(&shader, PixelDepth::F32, false)
+            .expect("the raster engine is always there");
+        let bytes = prophoto_row(&shader, PixelDepth::Uint8, false)
+            .expect("the raster engine is always there");
+        let gpu = prophoto_row(&shader, PixelDepth::Uint8, true);
+        for (x, css, css_bytes) in points {
+            let at = x as usize;
+            let off = (0..3)
+                .map(|i| (float[at][i] - css[i]).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                off < 5e-4,
+                "{what} at x = {x}, float raster: got {:?}, CSS Color 4 says {css:?}",
+                float[at]
+            );
+            let stored = |p: [f32; 4]| p.map(|c| (c * 255.0).round() as u8);
+            assert_eq!(
+                &stored(bytes[at])[..3],
+                &css_bytes,
+                "{what} at x = {x}, eight-bit raster"
+            );
+            if let Some(gpu) = &gpu {
+                assert_eq!(
+                    &stored(gpu[at])[..3],
+                    &css_bytes,
+                    "{what} at x = {x}, eight-bit GPU"
+                );
+            }
+        }
+    }
+}
+
+/// An SVG of a `ProphotoRgb` gradient carries it in CSS's curve.
+///
+/// SVG's own gradient mixes in sRGB, so the vector form was never this
+/// gradient. The working space that gives `ProphotoRgb` its curve wraps the
+/// gradient in a shader the SVG backend writes no fill for, so it is
+/// rasterized into the document, as a `Rec2020` gradient is -- see
+/// `a_rec2020_gradient_survives_an_svg_export`.
+#[test]
+fn a_prophoto_gradient_survives_an_svg_export() {
+    let (what, from, to, points) = prophoto_ramps()[2];
+    let mut canvas = Canvas::new(PROPHOTO_WIDTH, 1.0);
+    canvas.set_gpu(false);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_shader(&prophoto_ramp(from, to));
+        ctx.fill_rect(0.0, 0.0, PROPHOTO_WIDTH, 1.0);
+    }
+    let svg = String::from_utf8(
+        canvas
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("encodes"),
+    )
+    .expect("utf-8");
+    assert!(svg.contains("<image"), "the gradient is rasterized: {svg}");
+
+    let image = Svg::parse(&svg)
+        .expect("parses")
+        .rasterize(PROPHOTO_WIDTH as u32, 1)
+        .expect("rasterizes");
+    let mut back = Canvas::new(PROPHOTO_WIDTH, 1.0);
+    back.set_gpu(false);
+    let ctx = back.context();
+    ctx.draw_image(&image, 0.0, 0.0);
+    for (x, _, css_bytes) in points {
+        let data = ctx.get_image_data(x, 0.0, 1.0, 1.0).expect("read back");
+        assert_eq!(
+            &data.pixels()[..3],
+            &css_bytes,
+            "{what} at x = {x}, from the SVG"
+        );
+    }
 }

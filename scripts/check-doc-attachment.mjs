@@ -42,11 +42,15 @@
 //         --range a...b the merge base of a and b against b (a pull
 //                       request), or a..b, a against b (a push); both
 //                       versions are read from git, not the work tree
+//         --worktree a  the merge base of a and HEAD against the work tree:
+//                       what is committed since, staged and not yet staged
+//                       (`just prepush`, which runs before a commit as
+//                       often as after one)
 //         --self-test   check the rule on built cases; runs nothing else
 //
 
 import { execFileSync } from "child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -55,8 +59,11 @@ const mode = args.includes("--self-test")
   ? "self-test"
   : args.includes("--range")
     ? "range"
-    : "cached";
+    : args.includes("--worktree")
+      ? "worktree"
+      : "cached";
 const range = args[args.indexOf("--range") + 1];
+const worktreeBase = args[args.indexOf("--worktree") + 1];
 
 const git = (...a) =>
   execFileSync("git", a, { encoding: "utf8", maxBuffer: 1 << 28 });
@@ -353,7 +360,8 @@ if (mode === "self-test") {
 }
 
 // The two versions compared, as revisions `git show` can read: the merge base
-// and the range's head, or HEAD and the index.
+// and the range's head, or HEAD and the index. The work tree is no revision:
+// its head is read from the files themselves, `headRev` left `null`.
 let baseRev, headRev, scope;
 if (mode === "range") {
   // `a...b` compares b with its merge base with a, as a pull request is
@@ -363,12 +371,22 @@ if (mode === "range") {
   headRev = b || "HEAD";
   baseRev = three ? git("merge-base", a, headRev).trim() : a;
   scope = range;
+} else if (mode === "worktree") {
+  baseRev = git("merge-base", worktreeBase, "HEAD").trim();
+  headRev = null;
+  scope = `${worktreeBase} to the work tree`;
 } else {
   baseRev = "HEAD";
   headRev = ""; // the index: `git show :path`
   scope = "staged changes";
 }
-const diffArgs = mode === "range" ? [baseRev, headRev] : ["--cached"];
+// `git diff <rev>` compares a revision with the work tree.
+const diffArgs =
+  mode === "range"
+    ? [baseRev, headRev]
+    : mode === "worktree"
+      ? [baseRev]
+      : ["--cached"];
 const files = git(
   "diff",
   "--name-only",
@@ -385,7 +403,10 @@ const findings = [];
 let kept = 0;
 for (const file of files) {
   const baseText = git("show", `${baseRev}:${file}`);
-  const headText = git("show", `${headRev}:${file}`);
+  const headText =
+    headRev === null
+      ? readFileSync(file, "utf8")
+      : git("show", `${headRev}:${file}`);
   const diff = git("diff", "-U0", ...diffArgs, "--", file);
   for (const r of reattached(baseText, headText, diff))
     findings.push({ ...r, file });

@@ -66,7 +66,7 @@ use crate::{
         pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
         texture::{BoxedCanvasTexture, CanvasTexture},
-        typography::{WholeRuns, with_style_axes},
+        typography::{KEYS_OWN_COLOUR_BLOBS, WholeRuns, with_style_axes},
     },
     pixels::PixelColorSpace,
     started,
@@ -440,12 +440,14 @@ impl Default for State {
 /// font shorthand's parent is set in.
 pub(crate) fn initial_root_face() -> Option<Typeface> {
     FontLibrary::with_shared(|library| {
+        let names = [generic_name(ROOT_FONT_FAMILY)];
+        let style = FontStyle::normal();
+        let names = library
+            .styled_names(&names, style)
+            .unwrap_or_else(|| names.to_vec());
         let mut collection = library.face_collection();
         collection
-            .find_typefaces(
-                &[generic_name(ROOT_FONT_FAMILY)],
-                FontStyle::normal(),
-            )
+            .find_typefaces(&names, style)
             .into_iter()
             .next()
             .or_else(|| collection.default_fallback())
@@ -3374,8 +3376,9 @@ impl Context2D {
     ///
     /// A blurred shadow is its own group, whose chain blurs the shadow drawn
     /// sharp on pixels by the exact Gaussian -- see `context::chain` -- so
-    /// that a run of text casts the blur of the whole run. What it blurs is
-    /// confined to its cast's `bounds`, which the blur spreads past. A
+    /// that a run of text casts the blur of the whole run. Its cast's
+    /// `bounds` bound the layer the chain blurs in, which the blur spreads
+    /// past, and do not crop what it blurs. A
     /// document draws the shadow as Skia's mask filter draws it, glyph by
     /// glyph, which a PDF holds as an image mask and an SVG, which has no
     /// mask filter to write, embeds as pixels. An unblurred shadow is drawn
@@ -3547,16 +3550,22 @@ impl Context2D {
         let drawn = record(ShadowPart::Sharp(index), pixels)
             .zip(record(ShadowPart::Masked(index), document))?;
         Some(Group {
+            // The cast's bounds are what its sharp shadow can ink, which
+            // bounds the chain's layer -- see `layer::Group::chain_reach_under`
+            // -- and not a crop: confined to them as `within`, the pixels
+            // its glyphs ink past their fractional edges were cut by
+            // coverage, as a mask's ink fills each pixel its outline
+            // touches, and the blur lost what they spread.
             composite: Composite::Chain {
                 steps: Arc::from([Step::Blur(cast.sigma)]),
                 rec: LayerRec::default(),
-                reach: None,
+                reach: Some(self.state.matrix.map_rect(cast.bounds).0),
                 coverage: None,
             },
             matrix: Matrix::new_identity(),
             clip: None,
             entries_clipped: false,
-            within: Some(self.state.matrix.map_rect(cast.bounds).0),
+            within: None,
             contents_matrix: Matrix::new_identity(),
             // What a document plays of it is the shadow Skia's mask filter
             // draws.
@@ -3816,46 +3825,16 @@ impl Context2D {
             return;
         }
 
-        // if path will fill the whole canvas and paint/blend are fully
-        // opaque...
+        // A fill that covers the page opaquely replaces everything drawn
+        // before it -- see `Self::covers_the_page`.
         if matches!(style, PaintStyle::Fill | PaintStyle::StrokeAndFill)
-            && matches!(
-                &self.state.global_composite_operation,
-                BlendMode::SrcOver | BlendMode::Src | BlendMode::Clear
+            && self.covers_the_page(
+                self.state.fill_style.is_opaque(),
+                &path,
+                &self.state.matrix,
             )
-            && self.state.fill_style.is_opaque()
-            && self.state.global_alpha == 1.0
-            && self.state.clip.is_none()
-            // ...and nothing is waiting to composite it. Resetting the
-            // recorder below discards its save stack, and an open layer
-            // lives on that stack, so an opaque full-page fill inside one
-            // threw the layer away wholesale -- not merely its alpha. A
-            // 20x20 fill on a 20x20 page came out at 255 for *every* layer
-            // alpha, while 19.5 was correct, since only the full-page fill
-            // reached here. `global_alpha` above cannot stand in for this:
-            // a layer carries its own alpha, and the state inside it is
-            // usually 1.0.
-            && !self.layers.iter().any(|owns_layer| *owns_layer)
-            // ...and nothing stands between the fill and the page. A filter
-            // decides what the draw finally puts down, and it may put down
-            // less than the path covers -- or nothing at all. `MakeEmpty`
-            // produces no output, so a full-page fill through it erased the
-            // page and drew nothing in its place, while the same fill one
-            // pixel smaller left the page alone. A colour filter can take the
-            // alpha to zero, an offset can move the fill off the page, and a
-            // mask filter can eat its edges.
-            && self.state.skia_image_filter.is_none()
-            && self.state.skia_color_filter.is_none()
-            && self.state.skia_mask_filter.is_none()
-            && self.state.filter.is_none()
-            && holds(&path, self.bounds)
         {
-            // ...erase existing vector content layers (but preserve CTM & clip
-            // path)
-            self.with_recorder(|mut recorder| {
-                recorder.set_bounds(self.bounds);
-                recorder.set_state(self.state.matrix, &self.state.clip);
-            });
+            self.erase_the_page();
         }
 
         // A draw under a sole `blur()` may become a `BlurOp`, which reads
@@ -4285,6 +4264,73 @@ impl Context2D {
         is_in
     }
 
+    /// Whether a draw makes every pixel of the page its own, so that nothing
+    /// drawn before it can show through: `opaque` where what it paints has
+    /// no translucent pixel, and `path`, under `matrix`, the area it covers.
+    /// The area is asked of the device, where the transform puts it: a
+    /// full-size fill under `scale(0.5)` covers a quarter of the page.
+    ///
+    /// It must also composite source-over, copy or clear at full alpha,
+    /// under no clip -- one that holds the page is none -- and with no
+    /// layer open. Erasing the page discards the recorder's save stack, and
+    /// an open layer lives on it, so a full-page opaque fill inside one
+    /// threw the layer away wholesale: a 20x20 fill on a 20x20 page came out
+    /// at 255 for every layer alpha, where 19.5 was right. A layer carries
+    /// its own alpha, which `global_alpha` inside it does not show.
+    ///
+    /// And through no filter, which decides what the draw finally puts
+    /// down: `MakeEmpty` puts down nothing, so a full-page fill through it
+    /// erased the page and drew nothing in its place. A colour filter can
+    /// take the alpha to zero, an offset can move the draw off the page,
+    /// and a mask filter can eat its edges.
+    ///
+    /// One draw, and not several that cover the page between them. At an
+    /// export density that puts their seam inside a device pixel, each
+    /// covers that pixel in part and what lies under them shows through:
+    /// red under two blue fills meeting at x = 301 shows by up to 63 levels
+    /// along the seam at densities 1.5 and 0.5, and not at all at 1 or 2.
+    /// The page's own edges are a device's at every density, so a draw
+    /// holding the page covers each of its pixels whole.
+    fn covers_the_page(
+        &self,
+        opaque: bool,
+        path: &Path,
+        matrix: &Matrix,
+    ) -> bool {
+        opaque
+            && matches!(
+                &self.state.global_composite_operation,
+                BlendMode::SrcOver | BlendMode::Src | BlendMode::Clear
+            )
+            && self.state.global_alpha == 1.0
+            && self.state.clip.is_none()
+            && !self.layers.iter().any(|owns_layer| *owns_layer)
+            && self.state.skia_image_filter.is_none()
+            && self.state.skia_color_filter.is_none()
+            && self.state.skia_mask_filter.is_none()
+            && self.state.filter.is_none()
+            && holds_on_the_device(path, matrix, self.bounds)
+    }
+
+    /// Drops everything drawn on the page so far, keeping the transform
+    /// and the clip, for a draw that is about to cover all of it.
+    fn erase_the_page(&self) {
+        self.with_recorder(|mut recorder| {
+            recorder.set_bounds(self.bounds);
+            recorder.set_state(self.state.matrix, &self.state.clip);
+        });
+    }
+
+    /// Clears `rect` to transparent black through the clip and into an open
+    /// layer, as `clearRect` does, whatever the alpha, composite operation,
+    /// filter or shadow.
+    ///
+    /// Where that clears the whole page -- no clip, no layer open, and the
+    /// rectangle holding the page where the transform puts it -- everything
+    /// drawn before is dropped rather than recorded under a clear. Only
+    /// then: a clip keeps what lies outside it, a layer what lies beneath
+    /// it, and a turned rectangle whose bounding box holds the page leaves
+    /// its corners.
     pub fn clear_rect(&mut self, rect: &Rect) {
         // A rectangle under a scale and a translation, made pixel by pixel
         // -- see `tile_cuts`.
@@ -4299,13 +4345,15 @@ impl Context2D {
 
     /// [`Self::clear_rect`], declared.
     fn clear_rect_declared(&mut self, rect: &Rect) {
-        match self.state.matrix.map_rect(rect).0.contains(self.bounds) {
-            // if rect fully encloses canvas, erase existing content (but
-            // preserve CTM & clip path)
-            true => self.with_recorder(|mut recorder| {
-                recorder.set_bounds(self.bounds);
-                recorder.set_state(self.state.matrix, &self.state.clip);
-            }),
+        let whole = self.state.clip.is_none()
+            && !self.layers.iter().any(|owns_layer| *owns_layer)
+            && holds_on_the_device(
+                &Path::rect(*rect, None),
+                &self.state.matrix,
+                self.bounds,
+            );
+        match whole {
+            true => self.erase_the_page(),
 
             // otherwise, paint over the specified region but preserve overdrawn
             // vectors
@@ -4779,6 +4827,20 @@ impl Context2D {
             return;
         }
 
+        // An opaque image covering the page replaces everything drawn
+        // before it -- see `Self::covers_the_page` -- where its source lies
+        // inside it: past its edges a source rectangle samples nothing.
+        if image.is_opaque()
+            && lies_within(src_rect, image.width(), image.height())
+            && self.covers_the_page(
+                true,
+                &Path::rect(*dst_rect, None),
+                &self.state.matrix,
+            )
+        {
+            self.erase_the_page();
+        }
+
         // Under a filter the crate runs itself, the image is drawn unfiltered
         // and opaque as a group of its own, which runs the filter on its
         // pixels exactly and composites the result through the alpha and the
@@ -5085,6 +5147,16 @@ impl Context2D {
         if let Some(bitmap) =
             started::raster_from_data(&info, buffer, info.min_row_bytes())
         {
+            // Pixels put over the whole page replace everything drawn before
+            // them, whatever their alpha: the destination is cleared first.
+            // Not with a layer open, whose contents they go into -- see
+            // `Self::covers_the_page`.
+            if lies_within(src_rect, info.width(), info.height())
+                && !self.layers.iter().any(|owns_layer| *owns_layer)
+                && holds(&Path::rect(*dst_rect, None), self.bounds)
+            {
+                self.erase_the_page();
+            }
             self.push(); // cache matrix & clip in self.state
             self.with_recorder(|mut recorder| {
                 recorder.append_unframed(|canvas, _| {
@@ -5392,21 +5464,34 @@ impl Context2D {
                 self.vector_features(&paint, Some(style)).with(colour);
             let global_alpha = self.state.global_alpha as f32;
             let faint = self.faint();
+            // Whether the run holds a glyph the platform draws in its own
+            // colours -- see `typography::draws_own_colours`.
+            let own_colours = match &kept {
+                Some(kept) => kept.draws_own_colours(),
+                None => typesetter.draws_own_colours(),
+            };
             // The run kept whole, where it holds colour glyphs, to draw them
             // where the page is played back -- see `layer::ReplayedText`.
-            // Every colour glyph composites through a layer of its own.
-            let colour = colour.refused_by(VectorFeatures::LAYER).then(|| {
-                let (run, offset, condensation) =
-                    typesetter.replayed(kept.as_deref());
-                Replay::Text {
-                    run,
-                    at: origin,
-                    offset,
-                    condensation,
-                    global_alpha,
-                    faint,
-                }
-            });
+            // Every colour glyph this library draws composites through a
+            // layer of its own. On a build that keys them, one the platform
+            // draws is drawn there from blobs that Ganesh keys by the matrix
+            // they are drawn under -- see `typography::KEYS_OWN_COLOUR_BLOBS`
+            // -- which a recording holding one set of them for every matrix
+            // cannot be.
+            let colour = (colour.refused_by(VectorFeatures::LAYER)
+                || own_colours && KEYS_OWN_COLOUR_BLOBS)
+                .then(|| {
+                    let (run, offset, condensation) =
+                        typesetter.replayed(kept.as_deref());
+                    Replay::Text {
+                        run,
+                        at: origin,
+                        offset,
+                        condensation,
+                        global_alpha,
+                        faint,
+                    }
+                });
             // The run kept whole, where it is drawn in a blend that reads the
             // page in the shader, to draw its glyphs where the page is played
             // back as that canvas draws them -- see
@@ -5501,10 +5586,7 @@ impl Context2D {
                 reached.set(reach);
                 Some((drawn, reach))
             };
-            let own_colours = || match &kept {
-                Some(kept) => kept.draws_own_colours(),
-                None => typesetter.draws_own_colours(),
-            };
+            let own_colours = || own_colours;
             self.render_to_canvas(
                 &paint,
                 dyed,
@@ -6777,6 +6859,30 @@ fn holds(path: &Path, rect: Rect) -> bool {
         && reach.right >= rect.right
         && reach.bottom >= rect.bottom
         && path.conservatively_contains_rect(rect)
+}
+
+/// Whether `rect` lies inside an image `width` by `height`.
+fn lies_within(rect: &Rect, width: i32, height: i32) -> bool {
+    rect.left >= 0.0
+        && rect.top >= 0.0
+        && rect.right <= width as f32
+        && rect.bottom <= height as f32
+}
+
+/// Whether `path`, put on the device by `matrix`, holds `rect` -- see
+/// [`holds`]. The path is transformed only where its bounds, mapped, reach
+/// past `rect` on every side: a fill that does not reach the page's edges
+/// pays for no path.
+fn holds_on_the_device(path: &Path, matrix: &Matrix, rect: Rect) -> bool {
+    if matrix.is_identity() {
+        return holds(path, rect);
+    }
+    let reach = matrix.map_rect(path.bounds()).0;
+    reach.left <= rect.left
+        && reach.top <= rect.top
+        && reach.right >= rect.right
+        && reach.bottom >= rect.bottom
+        && holds(&path.make_transform(matrix), rect)
 }
 
 /// What `path` covers once `matrix` puts it on the device, for choosing how

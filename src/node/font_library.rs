@@ -2,6 +2,8 @@
 // Font collection management
 //
 #![allow(non_snake_case)]
+
+mod style_groups;
 use neon::{prelude::*, types::buffer::TypedArray};
 use std::{
     borrow::Borrow,
@@ -23,6 +25,8 @@ use skia_safe::{
     textlayout::{FontCollection, TextStyle, TypefaceFontProvider},
     typeface::TypefaceId,
 };
+
+pub(crate) use style_groups::{Fallback, Filing, StyleGroups, is_group_alias};
 
 use crate::{
     cache_map::{CacheMap, CacheSet},
@@ -805,6 +809,9 @@ pub struct FontLibrary {
     /// What every collection is built over, from
     /// [`collection_parts`](Self::collection_parts).
     collection_parts: Option<(FontMgr, Option<String>)>,
+    /// What the provider in `collection_parts` holds of families of more
+    /// than one width and slant, built with it -- see [`StyleGroups`].
+    style_groups: Rc<StyleGroups>,
     fonts: Vec<(Typeface, Option<String>)>,
     /// The bytes each face in `fonts` registered from data was made from, by
     /// the face's unique id: where [`face_from_data`](Self::face_from_data)
@@ -929,18 +936,11 @@ pub(crate) fn generic_name(generic: GenericFamily) -> String {
 /// without one -- and, where the alias is a generic keyword, under
 /// [`generic_name`] too: a claim on a generic sets the generic's faces,
 /// which are asked for by that name.
-fn register_under(
-    provider: &mut TypefaceFontProvider,
-    face: Typeface,
-    alias: Option<&str>,
-) {
+fn register_under(provider: &mut Filing, face: Typeface, alias: Option<&str>) {
     if let Some(generic) = alias.and_then(GenericFamily::from_css) {
-        provider.register_typeface(
-            face.clone(),
-            Some(generic_name(generic).as_str()),
-        );
+        provider.register(face.clone(), Some(generic_name(generic).as_str()));
     }
-    provider.register_typeface(face, alias);
+    provider.register(face, alias);
 }
 
 /// The name a family that spells a generic keyword is asked for by where no
@@ -988,6 +988,7 @@ impl FontLibrary {
             made_from: HashMap::new(),
             collections: [None, None],
             collection_parts: None,
+            style_groups: Rc::default(),
             collection_cache: CollectionCache::default(),
             instances: InstanceCache::default(),
             resolved_fonts: ResolvedFontCache::default(),
@@ -1142,7 +1143,7 @@ impl FontLibrary {
         if let Some(parts) = &self.collection_parts {
             return parts.clone();
         }
-        let mut assets = TypefaceFontProvider::new();
+        let mut assets = Filing::new();
         let claimed = self.claimed_aliases();
         // Under `generic_name` rather than the keyword, so that a family
         // named after the keyword is not taken for the generic.
@@ -1154,7 +1155,7 @@ impl FontLibrary {
                 .as_deref()
                 .and_then(GenericFamily::from_css)
                 .map(generic_name);
-            assets.register_typeface(font.clone(), name.as_deref());
+            assets.register(font.clone(), name.as_deref());
         }
         // No private alias for a claimed name here, deliberately -- only the
         // generic names above, which no caller types -- and this is the one
@@ -1179,9 +1180,13 @@ impl FontLibrary {
             register_under(&mut assets, font.clone(), alias.as_deref());
         }
         for (font, family) in self.oblique_faces() {
-            assets
-                .register_typeface(font, Some(oblique_alias(&family).as_str()));
+            assets.register(font, Some(oblique_alias(&family).as_str()));
         }
+        // And each family of more than one width and slant a group at a
+        // time, which `styled_names` sends a style to where Skia's matcher
+        // would let a weight outrank a slant -- see `StyleGroups`.
+        let (assets, groups) = assets.finish();
+        self.style_groups = Rc::new(groups);
 
         let mut style_set =
             assets.match_family(generic_name(GenericFamily::SystemUi));
@@ -1220,6 +1225,27 @@ impl FontLibrary {
         self.fonts
             .iter()
             .filter_map(|(_, alias)| alias.clone())
+            .collect()
+    }
+
+    /// The [`generic_name`] of each generic whose curated stack holds
+    /// `font`, a generic the caller has claimed aside: the names
+    /// [`collection_parts`](Self::collection_parts) files it under, and the
+    /// only ones a list asking for the generic reaches it by. An instance of
+    /// it is filed under them too, or the list is answered with the face at
+    /// its default position.
+    fn curated_names(&mut self, font: &Typeface) -> Vec<String> {
+        let claimed = self.claimed_aliases();
+        self.generics()
+            .iter()
+            .filter(|(curated, alias)| {
+                Typeface::equal(font, curated)
+                    && !claims(&claimed, alias.as_deref())
+            })
+            .filter_map(|(_, alias)| {
+                alias.as_deref().and_then(GenericFamily::from_css)
+            })
+            .map(generic_name)
             .collect()
     }
 
@@ -1380,6 +1406,16 @@ impl FontLibrary {
     }
 
     pub fn font_mgr(&mut self, wanted: &[String]) -> FontMgr {
+        self.svg_fonts(wanted).0
+    }
+
+    /// The manager an SVG document naming `wanted` is parsed against, with
+    /// what it holds of families of more than one width and slant: what the
+    /// document's families are rewritten by -- see [`StyleGroups`].
+    pub(crate) fn svg_fonts(
+        &mut self,
+        wanted: &[String],
+    ) -> (FontMgr, StyleGroups) {
         let system = self.mgr.clone();
         self.svg_font_mgr(&system, wanted)
     }
@@ -1402,9 +1438,13 @@ impl FontLibrary {
     /// one passes whatever this function does. `FontMgr::empty()` here stands
     /// in for the backend that declines, which is what glibc and Windows have,
     /// and makes the difference reproducible anywhere.
-    fn svg_font_mgr(&mut self, system: &FontMgr, wanted: &[String]) -> FontMgr {
+    fn svg_font_mgr(
+        &mut self,
+        system: &FontMgr,
+        wanted: &[String],
+    ) -> (FontMgr, StyleGroups) {
         // collect non-system fonts in a provider
-        let mut dyn_mgr = TypefaceFontProvider::new();
+        let mut dyn_mgr = Filing::new();
 
         // A fallback first, so the family a null name resolves to is the
         // standard font, serif first, as Chrome draws a document naming no
@@ -1496,7 +1536,7 @@ impl FontLibrary {
             })
             .cloned();
         if let Some(fallback) = fallback {
-            dyn_mgr.register_typeface(fallback, None);
+            dyn_mgr.register(fallback, None);
         }
 
         // add generic mappings & user-loaded fonts
@@ -1505,7 +1545,7 @@ impl FontLibrary {
             if claims(&claimed, alias.as_deref()) {
                 continue;
             }
-            dyn_mgr.register_typeface(font.clone(), alias.as_deref());
+            dyn_mgr.register(font.clone(), alias.as_deref());
         }
         // A claimed face goes in under its private alias and NOT under the
         // name the caller claimed. The document is rewritten to that alias
@@ -1520,13 +1560,10 @@ impl FontLibrary {
             match alias {
                 Some(name) => {
                     let private = private_alias(name);
-                    dyn_mgr.register_typeface(
-                        font.clone(),
-                        Some(private.as_str()),
-                    );
+                    dyn_mgr.register(font.clone(), Some(private.as_str()));
                 }
                 None => {
-                    dyn_mgr.register_typeface(font.clone(), None);
+                    dyn_mgr.register(font.clone(), None);
                 }
             }
         }
@@ -1534,8 +1571,7 @@ impl FontLibrary {
         // `oblique_alias`, which the document is rewritten to where a slanted
         // `font-style` needs it -- see `oblique_families`.
         for (font, family) in self.oblique_faces() {
-            dyn_mgr
-                .register_typeface(font, Some(oblique_alias(&family).as_str()));
+            dyn_mgr.register(font, Some(oblique_alias(&family).as_str()));
         }
 
         // Every family the document names, resolved through the system
@@ -1563,7 +1599,7 @@ impl FontLibrary {
             let mut set = system.match_family(name.as_str());
             for i in 0..set.count() {
                 if let Some(face) = set.new_typeface(i) {
-                    dyn_mgr.register_typeface(face, Some(name.as_str()));
+                    dyn_mgr.register(face, Some(name.as_str()));
                 }
             }
         }
@@ -1619,7 +1655,12 @@ impl FontLibrary {
         // declined one, which macOS and musl do not and glibc and Windows do.
         // That is why this crashed on four of seven release legs and passed
         // on the rest.
-        dyn_mgr.into()
+        //
+        // And each family of more than one width and slant a group at a
+        // time, which the document is rewritten to where Skia's matcher
+        // would let a weight outrank a slant -- see `StyleGroups`.
+        let (provider, groups) = dyn_mgr.finish();
+        (provider.into(), groups)
     }
 
     pub(crate) fn families(&self) -> Vec<String> {
@@ -2074,6 +2115,65 @@ impl FontLibrary {
         Some(Slanted { names, as_oblique })
     }
 
+    /// The names to ask this library's collections for `names` by in
+    /// `style`, where they differ from `names` -- `names` being a family
+    /// list as [`collection_names`](Self::collection_names) and
+    /// [`slanted`](Self::slanted) gave it.
+    ///
+    /// Each family whose faces fall into more than one group of width and
+    /// slant goes to the group CSS Fonts 4 section 5.2 narrows it to, where
+    /// Skia's matcher would let a weight outrank the slant -- see
+    /// [`StyleGroups`]. And a list naming no family the collection has gets
+    /// the group of the faces it falls back to, the curated `sans-serif`,
+    /// at its end, so that the fallback is narrowed the same way.
+    ///
+    /// The style is the one the collection is searched in, so a caller that
+    /// changes a style's slant or weight after setting its families asks
+    /// again: a name given here is read back to its family first.
+    pub(crate) fn styled_names<S: AsRef<str>>(
+        &mut self,
+        names: &[S],
+        style: FontStyle,
+    ) -> Option<Vec<String>> {
+        self.with_fallback(|groups, fallback| {
+            groups.styled(names, style, Some(fallback))
+        })
+        .flatten()
+    }
+
+    /// Sets `style`'s families to the names
+    /// [`styled_names`](Self::styled_names) gives them in its own font
+    /// style, where those differ.
+    pub(crate) fn style_names(&mut self, style: &mut TextStyle) {
+        self.with_fallback(|groups, fallback| {
+            groups.restyle(style, Some(fallback));
+        });
+    }
+
+    /// `then` given the current collection's groups and the fallback a
+    /// list naming no family it holds is matched against: the curated
+    /// `sans-serif`, a name being held elsewhere where the system manager
+    /// knows it. `None`, without calling `then`, where the collection has
+    /// no groups, which is every collection on a patched Skia -- see
+    /// [`Filing::finish`].
+    fn with_fallback<R>(
+        &mut self,
+        then: impl FnOnce(&StyleGroups, &Fallback) -> R,
+    ) -> Option<R> {
+        self.collection_parts();
+        if self.style_groups.is_empty() {
+            return None;
+        }
+        let family = generic_name(GenericFamily::SansSerif);
+        let system = &self.mgr;
+        let resolves = |name: &str| system.match_family(name).count() > 0;
+        let fallback = Fallback {
+            family: &family,
+            resolves: &resolves,
+        };
+        Some(then(&self.style_groups, &fallback))
+    }
+
     /// Each registered family whose slanted styles [`slanted`](Self::slanted)
     /// sends to its [`oblique_alias`], with the slants it does it for: the
     /// table an SVG document's `font-style` is rewritten against, where a
@@ -2151,6 +2251,11 @@ impl FontLibrary {
         {
             spec.collection_names = names;
         }
+        if let Some(names) =
+            self.styled_names(&spec.collection_names, spec.style())
+        {
+            spec.collection_names = names;
+        }
         let typeface = self
             .face_collection()
             .find_typefaces(&spec.collection_names, spec.style())
@@ -2208,6 +2313,7 @@ impl FontLibrary {
         colr::forget();
         self.collections = [None, None];
         self.collection_parts = None;
+        self.style_groups = Rc::default();
         self.collection_cache.clear();
         self.resolved_fonts.clear();
         self.fonts_by_value.clear();
@@ -2403,12 +2509,13 @@ impl FontLibrary {
             // collect any instantiated variable fonts in a TFP to be used as
             // the 'dynamic' font mgr (which is searched before the
             // 'asset' or the 'default' mgr)
-            let mut dynamic = TypefaceFontProvider::new();
+            let mut dynamic = Filing::new();
             let matches = self
                 .font_collection()
                 .find_typefaces(&families, style.font_style());
 
             for font in matches.into_iter() {
+                let curated = self.curated_names(&font);
                 if let Some(params) = self.known_axes.of(&font) {
                     let coords =
                         instance_coordinates(&params, style, variations);
@@ -2425,13 +2532,35 @@ impl FontLibrary {
                                     None
                                 }
                             });
+                        // Under the name of each generic it is curated for
+                        // -- see `curated_names` -- and under the group
+                        // alias its family or such a generic is asked for by
+                        // too, where it has one -- see `styled_names`.
+                        let family =
+                            alias.clone().unwrap_or_else(|| font.family_name());
+                        let filed = iter::once(family.clone())
+                            .chain(
+                                GenericFamily::from_css(&family)
+                                    .map(generic_name),
+                            )
+                            .chain(curated.iter().cloned());
+                        let groups: Vec<String> = filed
+                            .filter_map(|name| {
+                                self.style_groups
+                                    .alias_of(&name, font.font_style())
+                            })
+                            .collect();
+                        for name in curated.iter().chain(&groups) {
+                            dynamic.register(face.clone(), Some(name));
+                        }
                         register_under(&mut dynamic, face, alias.as_deref());
                     }
                 }
             }
 
             let mut collection = self.new_font_collection();
-            collection.set_dynamic_font_manager(Some(dynamic.into()));
+            collection
+                .set_dynamic_font_manager(Some(dynamic.into_provider().into()));
             // Searched here, in the collection being handed back, because an
             // instanced face reports the weight it was pinned to rather than
             // the one the family declares -- which is the whole point of
@@ -2788,7 +2917,7 @@ mod tests {
     #[test]
     fn the_provider_alone_answers_a_null_family() {
         let mgr = FontLibrary::with_shared(|lib| {
-            lib.svg_font_mgr(&FontMgr::empty(), &[])
+            lib.svg_font_mgr(&FontMgr::empty(), &[]).0
         });
         assert!(
             mgr.legacy_make_typeface(None, FontStyle::default())
@@ -3010,8 +3139,12 @@ mod tests {
                 let names = FontLibrary::with_shared(|lib| {
                     lib.engine_names(&named(families))
                 });
-                let answered =
-                    ids(&remembered.of(&mut collection, &names, *style));
+                let answered = ids(&remembered.of(
+                    &mut collection,
+                    &names,
+                    *style,
+                    &StyleGroups::default(),
+                ));
                 assert_eq!(answered, searched, "{families:?} {style:?}");
                 FontLibrary::with_shared(|lib| {
                     let facts = lib.match_facts(families, *style);
@@ -3051,9 +3184,9 @@ mod tests {
         let mut remembered = FaceMatches::default();
         let before =
             FontLibrary::with_shared(|lib| lib.engine_names(&families));
-        remembered.of(&mut collection, &before, style);
+        remembered.of(&mut collection, &before, style, &StyleGroups::default());
         let searched = SEARCHES.get();
-        remembered.of(&mut collection, &before, style);
+        remembered.of(&mut collection, &before, style, &StyleGroups::default());
         assert_eq!(
             SEARCHES.get(),
             searched,
@@ -3072,7 +3205,12 @@ mod tests {
             .expect("Oswald registers");
         let after = FontLibrary::with_shared(|lib| lib.engine_names(&families));
         assert_eq!(after[0], "hashoncefamily", "spelled as registered");
-        let answered = remembered.of(&mut collection, &after, style);
+        let answered = remembered.of(
+            &mut collection,
+            &after,
+            style,
+            &StyleGroups::default(),
+        );
         assert_eq!(SEARCHES.get(), searched + 1, "the new list is searched");
         let names: Vec<&str> = after.iter().map(String::as_str).collect();
         assert_eq!(
@@ -3825,5 +3963,105 @@ mod tests {
             "{WIDTH_CLASS_PERCENT:?} is not strictly increasing"
         );
         assert_eq!(WIDTH_CLASS_PERCENT[4], 100.0, "the middle class is normal");
+    }
+    /// A bundled variable face, `wght` 400 at its default position.
+    fn amstelvar() -> Typeface {
+        variable_face("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+    }
+
+    /// A bundled face with no variation axes, so that no instance of it is
+    /// filed beside the one under test.
+    fn recursive() -> Typeface {
+        bundled_face(
+            "tests/assets/fonts/Recursive/Recursive-upright-subset.ttf",
+        )
+    }
+
+    fn variable_face(file: &str) -> Typeface {
+        bundled_face(file)
+    }
+
+    fn bundled_face(file: &str) -> Typeface {
+        let path = format!("{}/{file}", env!("CARGO_MANIFEST_DIR"));
+        let bytes = std::fs::read(path).expect("a bundled face");
+        FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("the face loads")
+    }
+
+    /// The family and `wght` of the face `families`' collection for weight
+    /// 550 answers `asked` with.
+    fn answer_at_550(
+        lib: &mut FontLibrary,
+        families: &[&str],
+        asked: &str,
+    ) -> (String, Option<f32>) {
+        let wght = FourByteTag::from_chars('w', 'g', 'h', 't');
+        let mut style = TextStyle::new();
+        style.set_font_families(families);
+        style.set_font_style(FontStyle::new(
+            Weight::from(550),
+            Width::NORMAL,
+            skia_safe::font_style::Slant::Upright,
+        ));
+        let (mut collection, _) = lib.fonts_for_style(&style, &[]);
+        let found = collection.find_typefaces(&[asked], style.font_style());
+        let face = found.first().expect("a face answers");
+        let weight = face.variation_design_position().and_then(|position| {
+            position
+                .iter()
+                .find(|coordinate| coordinate.axis == wght)
+                .map(|coordinate| coordinate.value)
+        });
+        (face.family_name(), weight)
+    }
+
+    #[test]
+    fn a_variable_face_behind_a_generic_draws_the_weight_asked_for() {
+        // #818: a curated generic's variable face, asked for by the generic,
+        // answered at its default 400 whatever the weight.
+        let sans = generic_name(GenericFamily::SansSerif);
+        let mut curated = FontLibrary::with_fonts(vec![]);
+        curated.generics_cache = vec![(amstelvar(), Some("sans-serif".into()))];
+        assert_eq!(
+            answer_at_550(&mut curated, &[&sans], &sans),
+            ("AmstelvarAlpha".into(), Some(550.0)),
+        );
+        // The same face registered by name, which was always instanced.
+        let mut registered =
+            FontLibrary::with_fonts(vec![(amstelvar(), Some("Named".into()))]);
+        assert_eq!(
+            answer_at_550(&mut registered, &["Named"], "Named"),
+            ("AmstelvarAlpha".into(), Some(550.0)),
+        );
+    }
+
+    #[test]
+    fn a_claimed_generic_is_not_answered_by_its_curated_face() {
+        // The curated face reached under its own name while the caller has
+        // claimed the generic with another: the generic is still the claim's.
+        // The claim's face is static, so the dynamic manager holds no
+        // instance under the generic's name but the curated one, were it
+        // filed there.
+        // One face in both places: `Typeface::equal` compares unique IDs, so
+        // the same file loaded twice would be two faces.
+        let sans = generic_name(GenericFamily::SansSerif);
+        let face = amstelvar();
+        let mut lib = FontLibrary::with_fonts(vec![
+            (face.clone(), None),
+            (recursive(), Some("sans-serif".into())),
+        ]);
+        lib.generics_cache = vec![(face, Some("sans-serif".into()))];
+        let families = ["AmstelvarAlpha", sans.as_str()];
+        assert_eq!(
+            answer_at_550(&mut lib, &families, "AmstelvarAlpha"),
+            ("AmstelvarAlpha".into(), Some(550.0)),
+            "the curated face answers its own name",
+        );
+        assert_eq!(
+            answer_at_550(&mut lib, &families, &sans).0,
+            recursive().family_name(),
+            "the claimed generic answers with the claim's face",
+        );
     }
 }

@@ -927,6 +927,34 @@ Skia's own space gives. Pinned in
 `a_rec2020_gradient_mixes_by_the_css_gamma` in four geometries, on both
 engines, with translucent and out-of-gamut stops.
 
+**`color(prophoto-rgb ...)` decodes with a linear segment near black, and
+Chrome does not. Ours is the specification's answer.** CSS Color 4 section
+10.7 gives `prophoto-rgb` a 1.8 power with a linear segment: its sample
+code's `lin_ProPhoto` divides a component below 16/512 by 16. Chrome 159
+(159.0.8154.6) converts by a pure 1.8 power. Read back through
+`color-mix(in srgb-linear, color(prophoto-rgb 0.02 0.02 0.02) 100%, black
+0%)`, it gives 0.000874432 in each channel, which is 0.02^1.8; CSS Color 4 gives 0.02 / 16 = 0.00125. Every component under
+16/512 differs the same way, so a dark `prophoto-rgb` colour is drawn
+lighter here than in Chrome. Filled on an sRGB canvas:
+
+        color(prophoto-rgb 0.005 0.005 0.005)   Chrome 0,0,0   here 1,1,1
+        color(prophoto-rgb 0.02 0.02 0.02)      Chrome 3,3,3   here 4,4,4
+
+Each figure here is the standard's arithmetic: 1.03 and 4.12 before
+rounding. At 0.03 both give 6, and from 16/512 up the curves are one.
+Pinned in `prophoto_rgb_adapts_from_d50_and_keeps_its_linear_toe`.
+
+A gradient interpolated in `prophoto-rgb` mixes by the same curve. Skia's
+gradient interpolation space of that name is built from
+`SkNamedTransferFn::kProPhotoRGB`, the pure power, so the gradient is
+computed in a space this library builds with CSS's curve and Skia's
+ProPhoto gamut instead, as a `rec2020` gradient is. A ramp from
+`color(prophoto-rgb 0.01 0.01 0.01)` to `color(prophoto-rgb 0.5 0.4 0.3)`
+across 256 pixels reads 22,12,8 at pixel 24 here; mixed by Skia's own
+space it read 24,15,11. Pinned in
+`a_prophoto_gradient_mixes_by_the_css_curve`, on both engines, and in an
+SVG export in `a_prophoto_gradient_survives_an_svg_export`.
+
 **A colour is painted at the precision it names, whatever its spelling,
 and Chrome rounds some spellings to 8 bits. Ours is the specification's
 answer.** CSS Color 4 rounds `rgb()` channels to integers only when it
@@ -1793,17 +1821,22 @@ done in the shader, rounds once. Other NVIDIA parts and drivers were not
 measured, and Chrome was not compared.
 
 **`color-dodge`, `color-burn`, `hue`, `saturation`, `color` and
-`luminosity` divide exactly on the CPU, the same bytes on every machine, and
-Chrome's CPU canvas divides through an estimate.** Skia's raster pipeline
+`luminosity` divide exactly on the CPU, the same bytes on every arm64 machine
+and every x86-64 one with AVX2, and Chrome's CPU canvas divides through an
+estimate.** Skia's raster pipeline
 divides in these stages through `rcp_fast`, the instruction's reciprocal
 estimate: `_mm256_rcp_ps` at the AVX2 level, `_mm512_rcp14_ps` at AVX-512,
 NEON's estimate and one refinement step on arm64. An x86 machine runs the
 widest level it has, so the same page drew a level apart in places on an AMD
 EPYC with AVX-512 and one without (#642).
 `containers/skia-exact-blend-division.patch` divides with `/`, which every
-level rounds correctly, and every other operation in these stages is already
-the same at each level, so a page draws the same bytes on all of them
-(`the_dividing_blend_modes_draw_their_formulas_with_exact_division`). A byte
+level rounds correctly. Every other operation in these stages is the same at
+the levels that fuse an explicit multiply-add -- arm64's, AVX2's and
+AVX-512's -- so a page draws the same bytes on all of them
+(`the_dividing_blend_modes_draw_their_formulas_with_exact_division`). The SSE
+level an x86 machine without AVX2 runs computes that multiply-add in two
+roundings, so such a machine is not held to those bytes; how far it lands
+from them has not been measured. A byte
 the patch moves moves by one level, to the formula's value in single
 precision with exact division. On an opaque 256 by 256 ramp of every source
 value over every backdrop value on an Apple M4 Pro, Chrome 158's CPU canvas

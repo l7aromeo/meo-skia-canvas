@@ -1229,7 +1229,6 @@ dependencies = [
  "png",
  "quantette",
  "quick-xml 0.42.0",
- "raw-window-handle 0.6.2",
  "raw-window-metal",
  "rayon",
  "rustfft",
@@ -1245,6 +1244,7 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "vulkano",
+ "windows-sys 0.61.2",
  "winit",
 ]
 

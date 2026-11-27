@@ -102,13 +102,13 @@ use skia_safe::{
 };
 use skia_safe::{ImageInfo, Surface};
 
-use crate::Error;
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::gpu::graphite::{self, GraphiteRead};
 #[cfg(feature = "metal")]
 use crate::gpu::metal::{self, Mark};
 #[cfg(any(feature = "metal", feature = "vulkan"))]
 use crate::gpu::pacing;
+use crate::{Error, unload::keep_loaded};
 
 /// How many times a page's draw is attempted before its failure is reported:
 /// the draw, and one retry on a fresh surface. A GPU recovery discards the
@@ -513,6 +513,7 @@ impl Rows {
         width: usize,
         height: usize,
     ) {
+        keep_loaded();
         let in_place = self.in_place;
         match self.parallel {
             true => pixels
@@ -746,6 +747,7 @@ fn copy_rows(
     row_bytes: usize,
     rows: Option<Rows>,
 ) -> bool {
+    keep_loaded();
     let width = info.min_row_bytes();
     let height = info.height() as usize;
     if height == 0 {

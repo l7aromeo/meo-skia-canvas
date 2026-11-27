@@ -5870,6 +5870,56 @@ describe("gradient interpolation", () => {
     );
   });
 
+  test("prophoto-rgb mixes by CSS Color 4's curve, linear near black", () => {
+    // CSS Color 4 gives prophoto-rgb a 1.8 power with a linear segment,
+    // v / 16, below 16/512. Each expected byte is its arithmetic worked in
+    // f64 from its sample code by a script that reads nothing from this
+    // library, as in `a_prophoto_gradient_mixes_by_the_css_curve` in
+    // `tests/gradient_interpolation.rs`, which shares these ramps. A pure
+    // 1.8 power, the curve Skia names ProPhoto RGB by, draws 2, 2, 2 for the
+    // first, 0, 3, 12 for the second and 24, 15, 11 for the third.
+    const ramps = [
+      [
+        "color(prophoto-rgb 0 0 0)",
+        "color(prophoto-rgb 0.06 0.06 0.06)",
+        64,
+        [3, 3, 3],
+      ],
+      [
+        "color(prophoto-rgb 0 0.02 0.05)",
+        "color(prophoto-rgb 0.06 0 0.01)",
+        64,
+        [1, 3, 11],
+      ],
+      [
+        "color(prophoto-rgb 0.01 0.01 0.01)",
+        "color(prophoto-rgb 0.5 0.4 0.3)",
+        24,
+        [22, 12, 8],
+      ],
+    ];
+    for (const gpu of [false, true]) {
+      for (const [from, to, x, want] of ramps) {
+        const canvas = new Canvas(256, 1);
+        canvas.gpu = gpu;
+        // Assigning `true` falls back to raster where there is no GPU.
+        if (gpu && !canvas.gpu) continue;
+        const ctx = canvas.getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 256, 0);
+        gradient.colorInterpolationSpace = "prophoto-rgb";
+        gradient.addColorStop(0, from);
+        gradient.addColorStop(1, to);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 256, 1);
+        assert.deepEqual(
+          [...ctx.getImageData(x, 0, 1, 1).data].slice(0, 3),
+          want,
+          `${from} to ${to} at x = ${x}, ${gpu ? "GPU" : "CPU"}`,
+        );
+      }
+    }
+  });
+
   test("the XYZ spaces are linear sRGB, and cannot be otherwise", () => {
     // Not a coincidence to be pinned at one pair and not an implementation
     // detail that might change: interpolation is a linear operation and the
@@ -6542,4 +6592,75 @@ describe("fontKerning and textRendering", () => {
       assert.deepEqual(wrong, []);
     },
   );
+});
+
+describe("a draw covering the page replaces what lies under it", () => {
+  test("a full-size fill shrunk by the transform keeps what lies outside it", () => {
+    // Whether the fill covers the page is asked where the transform puts it:
+    // scaled by 0.5, a 64-unit square covers a quarter of the page, and the
+    // black square drawn before it at x = 40 still shows.
+    const canvas = new Canvas(64, 64);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillRect(40, 4, 2, 2);
+    ctx.scale(0.5, 0.5);
+    ctx.fillStyle = "blue";
+    ctx.fillRect(0, 0, 64, 64);
+    assert.deepEqual([...ctx.getImageData(40, 4, 1, 1).data], BLACK);
+    assert.deepEqual([...ctx.getImageData(4, 4, 1, 1).data], [0, 0, 255, 255]);
+  });
+
+  test("clearRect over the page keeps what its clip, layer or turn spares", () => {
+    // A clip lets the clear through only inside it, a layer takes it in
+    // place of the page beneath, and a square turned by 45 degrees whose
+    // bounding box holds the page leaves its corners: in each, the black
+    // square drawn first at the left edge still shows.
+    const cases = {
+      clip: (ctx) => {
+        ctx.beginPath();
+        ctx.rect(16, 16, 32, 32);
+        ctx.clip();
+        ctx.clearRect(0, 0, 64, 64);
+      },
+      layer: (ctx) => {
+        ctx.saveLayer();
+        ctx.clearRect(0, 0, 64, 64);
+        ctx.restore();
+      },
+      turn: (ctx) => {
+        ctx.translate(32, 32);
+        ctx.rotate(Math.PI / 4);
+        ctx.clearRect(-32, -32, 64, 64);
+      },
+    };
+    for (const [name, clear] of Object.entries(cases)) {
+      const canvas = new Canvas(64, 64);
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      ctx.fillRect(0, 4, 2, 2);
+      clear(ctx);
+      ctx.resetTransform();
+      assert.deepEqual([...ctx.getImageData(0, 4, 1, 1).data], BLACK, name);
+    }
+  });
+
+  test("two fills covering the page only together keep what lies under", () => {
+    // At density 1.5 the seam at x = 21 falls inside a device pixel, which
+    // each fill covers only in part, so the red drawn first shows there:
+    // the export with red under the fills differs from the one without.
+    const pixels = (under) => {
+      const canvas = new Canvas(64, 8);
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      if (under) {
+        ctx.fillStyle = "red";
+        ctx.fillRect(0, 0, 64, 8);
+      }
+      ctx.fillStyle = "blue";
+      ctx.fillRect(0, 0, 21, 8);
+      ctx.fillRect(21, 0, 43, 8);
+      return canvas.toBufferSync("raw", { density: 1.5 });
+    };
+    assert.notDeepEqual(pixels(true), pixels(false));
+  });
 });

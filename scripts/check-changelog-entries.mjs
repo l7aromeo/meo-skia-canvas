@@ -13,9 +13,10 @@
 // Markdown renders as paragraphs spaced apart.
 //
 // The shape is what this checks, not the words. A title that says nothing,
-// or links the wrong pull request, passes; both need reading. What it
-// removes is the drift back to paragraphs, which every fix that adds an
-// entry is one keystroke from.
+// or links the wrong pull request, passes; both need reading. A link whose
+// `#N` text names another number than its URL is refused, in any position
+// in the entry. What it removes is the drift back to paragraphs, which every
+// fix that adds an entry is one keystroke from.
 //
 // Sections before those releases are history and keep the form they shipped
 // in.
@@ -32,6 +33,14 @@ const FIRST = {
 /** A link to an issue or pull request of this repository, as `[#N](url)`. */
 const LINK =
   /\[#(\d+)\]\(https:\/\/github\.com\/l7aromeo\/meo-skia-canvas\/(?:issues|pull)\/\1\)/;
+
+/**
+ * Every `[#N](url)` link to this repository's issues or pulls, whatever the
+ * URL's number: [`LINK`] says an entry links something, this finds a link
+ * whose text names another number than its URL.
+ */
+const ANY_LINK =
+  /\[#(\d+)\]\(https:\/\/github\.com\/l7aromeo\/meo-skia-canvas\/(?:issues|pull)\/(\d+)\)/g;
 
 /** A release heading: `## 📦 ⟩ [v7.0.0] (npm) ⟩ Unreleased`. */
 const RELEASE = /^## .*\[v(\d+)\.(\d+)\.(\d+)[^\]]*\]/;
@@ -61,6 +70,15 @@ export function check(text, floor) {
     const { line, title, extra, breaking } = entry;
     if (![title, ...extra].some((text) => LINK.test(text))) {
       problems.push(`line ${line}: links no issue or pull request`);
+    }
+    for (const [, text, target] of [title, ...extra].flatMap((text) => [
+      ...text.matchAll(ANY_LINK),
+    ])) {
+      if (text !== target) {
+        problems.push(
+          `line ${line}: a link reads #${text} and goes to #${target}`,
+        );
+      }
     }
     if (breaking && extra.length !== 1) {
       problems.push(
@@ -157,6 +175,20 @@ function selfTest() {
       "a link whose number and URL disagree",
       page(
         `### Fixed\n\n- **A fill is exact.** ([#440](https://github.com/l7aromeo/meo-skia-canvas/pull/441))`,
+      ),
+      2,
+    ],
+    [
+      "a right link beside one whose number and URL disagree",
+      page(
+        `### Fixed\n\n- **A fill is exact.** (${url(690)}, [#689](https://github.com/l7aromeo/meo-skia-canvas/pull/690))`,
+      ),
+      1,
+    ],
+    [
+      "a disagreeing link before a right one",
+      page(
+        `### Fixed\n\n- **A fill is exact.** ([#689](https://github.com/l7aromeo/meo-skia-canvas/issues/690), ${url(690)})`,
       ),
       1,
     ],

@@ -350,16 +350,16 @@ export function skiaTreeOf(outDir) {
 /**
  * The projects a Skia build in `outDir` compiled, from the record of the
  * ninja that built it -- `SKIA_NINJA_COMMAND` where skia-bindings is told to
- * use one, and `ninja` otherwise. Samurai, which the musl image's
- * `/usr/bin/ninja` is, keeps no record it can print: it has no `deps` tool
- * and answers `unknown tool 'deps'`. For a build it ran, gn describes the
- * build directory instead -- `describe`, by default `gnProjects`.
+ * use one, and `ninja` otherwise. Samurai, which Alpine installs as
+ * `/usr/bin/ninja`, keeps no record it can print: it has no `deps` tool and
+ * answers `unknown tool 'deps'`. For a build it ran, gn describes the build
+ * directory instead -- `describe`, by default `gnProjects`.
  *
  * Where ninja does print its record, gn describes the directory too, and a
  * difference between the two stops the notices: every build whose ninja
- * keeps a record -- the glibc, macOS and Windows legs -- checks that the
- * description samurai's builds rely on is the record, for the arguments it
- * was built with.
+ * keeps a record -- every release leg -- checks that the description a
+ * samurai build and a cached build rely on is the record, for the arguments
+ * it was built with.
  */
 export function compiledProjects(
   outDir,

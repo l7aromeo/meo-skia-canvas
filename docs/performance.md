@@ -17,6 +17,13 @@ cases whose id starts with it. Figures are one machine — an Apple M4 Pro on Me
 macOS 27.2. Down to [What a release changed](#what-a-release-changed), which says where its own figures are from, the npm figures are the medians of five `just bench-npm` passes on c54ae873 (2026-11-06), binary md5 `8819fb77523b31a3df6639012d83f4f2`, and the crate's are one `just bench` pass on 22737b25, whose source is c54ae873's.
 **Treat the ratios as the transferable part and the milliseconds as local colour.**
 
+A drawing, `pixels/put` or `decode/` row ends by reading the whole page back, which composites all
+of it and adds the read's own cost to the row, the same for every scene on a page of one size and
+format. Those rows' figures here, and the drawing one in the README, were timed when a row read one
+pixel, which composites only the 256-pixel tile holding it -- about a sixteenth of the page -- and
+are re-timed when the next release is prepared. A still image was decoded whole either way; what
+moves is its draw onto the page.
+
 Both build release first, which matters: run the script directly and it measures whatever
 `lib/skia.node` happens to be, and `just ci` ends by leaving a dev build there. The two differ by
 more than a little — AVIF is 748 ms against 87 — and the report names the binary it measured.
@@ -153,6 +160,22 @@ the event loop after a collection finds it, so each would otherwise keep its pag
 ends. A page read more than once counts against the budget but is never dropped, so canvases read
 every frame never replay each other's pages however many there are, and a loop that reads each
 canvas twice and then leaves it keeps every page until the loop ends, as it did before the budget.
+
+**A page keeps every draw that can still show**, since it is a recording replayed at export — at
+any density, and as vectors in a PDF or SVG — rather than a bitmap. A canvas drawn on frame after
+frame without being cleared grows with every frame: one drawing two rectangles and a line of text
+a frame, and reading a pixel back each time, held 55.8 MiB more native heap after 20,000 frames
+than before the first. A draw that replaces the whole page releases everything before it:
+`clearRect` over all of it, a `putImageData` that covers it, or a single fill or `drawImage`
+that covers it opaquely — at full alpha, source-over or copy, through no filter — with no layer
+open. The same loop
+clearing the page first each frame held between 2.43 and 2.50 MiB from frame 2,500 to frame
+20,000. A background split into strips or tiles releases nothing, even where they meet without a
+gap: at an export density that puts a seam inside a device pixel, each covers that pixel only in
+part, and what lies under shows through by up to 63 levels at densities 1.5 and 0.5, so the
+earlier draws are still in the picture. Clear the page with one `clearRect`, or fill it with one
+rectangle, before drawing a frame. `drawImage` counts only for an image with no alpha channel,
+such as a JPEG; `putImageData` clears what it writes over, so its pixels' alpha does not matter.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. A rectangle narrower than a pixel should darken it in proportion to how much of it the

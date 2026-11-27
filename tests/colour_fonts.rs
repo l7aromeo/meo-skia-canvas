@@ -5,6 +5,8 @@
 
 use meo_skia_canvas::prelude::*;
 
+mod common;
+
 const COLR_V1: &str =
     "tests/assets/fonts/color-fonts/test_glyphs-glyf_colr_1_variable.ttf";
 const COLR_V0: &str = "tests/assets/fonts/colr-v0/COLR-palettes-test-font.ttf";
@@ -527,17 +529,6 @@ mod against_chrome {
         assert_eq!(largest, 0);
     }
 
-    /// Whether this machine has a GPU engine, saying so where it has not.
-    fn has_gpu() -> bool {
-        let mut probe = Canvas::new(1.0, 1.0);
-        probe.set_gpu(true);
-        let gpu = probe.engine_kind() == EngineKind::Gpu;
-        if !gpu {
-            eprintln!("no GPU engine here: the GPU comparison is not run");
-        }
-        gpu
-    }
-
     #[test]
     fn a_gpu_canvas_draws_colour_glyphs_as_the_cpu_canvas_does() {
         // A GPU canvas gives the CPU canvas's output: every colour glyph of
@@ -545,7 +536,7 @@ mod against_chrome {
         // overlaps another, which holds the glyph route alone: where one
         // translucent glyph lands on another, the GPU composites the two as
         // it composites any image -- see the test below.
-        if !has_gpu() {
+        if !crate::common::has_gpu() {
             return;
         }
         register();
@@ -589,7 +580,7 @@ mod against_chrome {
         // nearest on the CPU, and on the GPU a level from that only within
         // `GPU_COMPOSITE_TIE_LEVELS` of a tie -- on llvmpipe, which blends at
         // eight bits, a level from it anywhere.
-        if !has_gpu() {
+        if !crate::common::has_gpu() {
             return;
         }
         register();
@@ -605,7 +596,7 @@ mod against_chrome {
         .draw(&spec);
         let mut near_ties = 0;
         let mut composited = 0;
-        for gpu in [false, true] {
+        for gpu in crate::common::engines() {
             let page = Sheet {
                 gpu,
                 cells: Some(&neighbours),
@@ -694,7 +685,7 @@ mod played_back {
     fn canvas(scale: f32, gpu: bool) -> Option<Canvas> {
         let mut canvas = Canvas::new(SIDE.0 * scale, SIDE.1 * scale);
         canvas.set_gpu(gpu);
-        (!gpu || canvas.engine_kind() == EngineKind::Gpu).then_some(canvas)
+        (!gpu || common::on_gpu(&canvas)).then_some(canvas)
     }
 
     /// [`scene`] drawn straight onto a canvas `scale` times the size.
@@ -731,7 +722,7 @@ mod played_back {
     #[test]
     fn a_page_exported_at_density_2_draws_its_colour_glyphs_at_2x() {
         register();
-        for gpu in [false, true] {
+        for gpu in crate::common::engines() {
             let Some(mut canvas) = canvas(1.0, gpu) else {
                 continue;
             };
@@ -755,7 +746,7 @@ mod played_back {
     #[test]
     fn a_canvas_drawn_in_under_a_scale_draws_its_colour_glyphs_at_that_scale() {
         register();
-        for gpu in [false, true] {
+        for gpu in crate::common::engines() {
             let mut source = source();
             let Some(mut into) = canvas(2.0, gpu) else {
                 continue;
@@ -774,7 +765,7 @@ mod played_back {
         // played: drawn half a pixel across, a canvas places its glyphs as
         // text drawn half a pixel across places them.
         register();
-        for gpu in [false, true] {
+        for gpu in crate::common::engines() {
             let mut source = source();
             let Some(mut into) = canvas(1.0, gpu) else {
                 continue;
@@ -789,7 +780,7 @@ mod played_back {
     fn a_pattern_of_a_canvas_draws_its_colour_glyphs_at_the_scale_it_is_drawn()
     {
         register();
-        for gpu in [false, true] {
+        for gpu in crate::common::engines() {
             let mut source = source();
             let Some(mut into) = canvas(2.0, gpu) else {
                 continue;
@@ -837,7 +828,7 @@ mod on_the_gpu {
     fn drawn(gpu: bool, set_up: &SetUp) -> Option<Vec<u8>> {
         let mut canvas = Canvas::new(360.0, 180.0);
         canvas.set_gpu(gpu);
-        if gpu && canvas.engine_kind() != EngineKind::Gpu {
+        if gpu && !common::on_gpu(&canvas) {
             return None;
         }
         let ctx = canvas.context();
@@ -1059,7 +1050,7 @@ mod on_the_gpu {
         let draw = |gpu: bool| {
             let mut canvas = Canvas::new(360.0, 110.0);
             canvas.set_gpu(gpu);
-            if gpu && canvas.engine_kind() != EngineKind::Gpu {
+            if gpu && !common::on_gpu(&canvas) {
                 return None;
             }
             let ctx = canvas.context();

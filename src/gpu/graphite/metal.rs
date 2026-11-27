@@ -29,6 +29,7 @@ use crate::{
         ThreadBound,
         metal::{self, MTL_CONTEXT_LIFESPAN, RecordingQueue, device_name},
     },
+    unload::keep_loaded,
 };
 
 /// The bytes of uploaded images a context's provider keeps for the raster
@@ -68,6 +69,7 @@ pub(super) fn status() -> Value {
 /// Whether a context can be made, asked the first time anything wants to
 /// know and held for the process.
 fn probed() -> &'static Value {
+    keep_loaded();
     STATUS.get_or_init(|| match GraphiteContext::new() {
         Some(made) => json!({
             "renderer": "GPU",

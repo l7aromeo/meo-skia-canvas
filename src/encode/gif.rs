@@ -17,6 +17,7 @@ use super::{
     Frame, FrameEncoder, FrameSink, SequenceSpec, Sink, changed_region,
     crop_bytes,
 };
+use crate::unload::keep_loaded;
 
 /// Alpha at or above which a pixel is drawn rather than left transparent.
 ///
@@ -66,6 +67,7 @@ static PALETTE_POOL: OnceLock<Result<ThreadPool, String>> = OnceLock::new();
 
 /// [`PALETTE_POOL`], started on first use.
 fn palette_pool() -> Result<&'static ThreadPool, String> {
+    keep_loaded();
     PALETTE_POOL
         .get_or_init(|| {
             ThreadPoolBuilder::new()
@@ -232,6 +234,7 @@ impl GifSink<'_> {
     /// pixels and of [`PALETTE_THREADS`] alone, so the file is the same
     /// whatever the batch size or the caller's thread count.
     fn write_settled(&mut self, settled: Vec<Settled>) -> Result<(), String> {
+        keep_loaded();
         let quantized = settled
             .par_iter()
             .map(|frame| {
@@ -303,6 +306,7 @@ impl FrameSink for GifSink<'_> {
     /// to the frame after it, and the last frame of a batch has not met its
     /// successor yet. It waits for the next batch, or for `finish`.
     fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
+        keep_loaded();
         // Narrowed once. This reached `frame.eight()` four times a frame --
         // twice inside `quantize`, once for the transparent index, and once
         // more in the rewrite loop -- and on a float canvas each one converts
