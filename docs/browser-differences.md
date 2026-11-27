@@ -82,6 +82,43 @@ composite, a CPU image or layer 27.1%, and Chrome's rule 40.0%. On the GPU
 the misses of an image or layer are all within 0.18 of a level of a tie, from
 the half-precision arithmetic: 3.3% of the sweep, against 21.4% for a fill.
 
+**A decoded image drawn at a `globalAlpha` below 1 lands the composite with
+each step rounded, on every platform, and Chrome's CPU canvas lands up to two
+levels from it.** The Canvas compositing model scales each premultiplied
+channel by the global alpha and rounds it to a byte, then composites
+`source-over` and rounds again: `round(s * A / 255) + round(d * (255 - A') /
+255)`, `A` the alpha byte and `A'` the source's scaled alpha. A decoded image
+lands exactly that (#828), where Skia's sprite rows, which an unscaled image
+in the page's own byte order at a whole-pixel offset would otherwise take,
+divide by 256. `tests/decoded_image_composite.rs` holds it at every alpha
+wherever Skia scales a paint's alpha exactly: on arm64, and on x86-64 with
+this repository's patched Skia.
+
+Measured with a 256 by 256 baseline JPEG, `tests/assets/images/halved-1.jpeg`,
+drawn at the origin over an opaque ramp on a CPU canvas at every alpha byte
+from 1 to 255, against that formula over the image's own decoded bytes:
+
+|                                    | alphas apart | bytes apart, of 66,846,720 | most |
+| ---------------------------------- | ------------ | -------------------------- | ---- |
+| here, x86-64 Linux and macOS arm64 | 0            | 0                          | 0    |
+| Chrome 156, x86-64 Linux           | 254          | 23,602,378                 | 2    |
+| Chrome 159, macOS arm64            | 254          | 23,602,378                 | 2    |
+
+Both engines decode the JPEG to the same bytes, read at full alpha onto a
+transparent canvas, so the difference is the composite and not the decoder,
+and at full alpha they agree. Chrome 156 on x86-64 Linux and Chrome 159 on
+macOS arm64 land the same bytes at all 255 alphas, so Chrome's rule does not
+depend on the processor's division. At an alpha byte of 1, a source of 226,
+231, 237 over a backdrop of 0, 255, 40 composites to 1, 255, 41; Chrome stores
+1, 254, 41.
+
+Chrome's rule was not identified. Over the same bytes it matches none of
+Skia's sprite rows (`SkBlendARGB32`), the eight-bit raster pipeline with
+x86's `div255`, the legacy blitter's backdrop term `(d * (256 - A)) >> 8`
+under four roundings of the source, a single lerp `s * A + d * (255 - A)`
+divided exactly or through x86's `div255`, or float `source-over` rounded
+once. The nearest misses 15,680,940 bytes.
+
 **An SVG group over overlapping shapes composites exactly through
 `Svg::rasterize`, where Chrome takes the backdrop's share with the legacy
 blitter's divide.** A group's `opacity` over more than one draw is a layer in
