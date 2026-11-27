@@ -155,6 +155,11 @@ impl External {
         }
     }
 
+    // UPSTREAM: neon 1.1.2 -- #840 -- not worked around
+    // Re-check: grep -n InvokeFinalizerFromGC node/src/js_native_api_v8.cc
+    // and grep -n CannotRunJs neon/src/sys/bindings/types.rs
+    // Node runs a finalizer inside GC only at the experimental Node-API
+    // version, which returns status 23; Neon's `Status` ends at 21.
     /// Releases everything this object reported, for its finalizer.
     pub fn release<'a, C: Context<'a>>(&mut self, cx: &mut C) {
         self.hold(cx, 0);
