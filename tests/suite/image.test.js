@@ -1085,6 +1085,34 @@ describe("an SVG's paint", () => {
   // colour in either space, as Chrome 156 draws it: Skia's SVG module took
   // the sRGB value as linear and encoded it once more, so #808080 drew 188
   // (#826).
+  test("of an <feFlood> is its own colour in a linearRGB filter", async () => {
+    const flood = (space, colour, opacity = "") =>
+      `<defs><filter id="f" x="0" y="0" width="1" height="1"${space}>` +
+      `<feFlood flood-color="${colour}"${opacity}/></filter></defs>` +
+      `<rect width="4" height="4" filter="url(#f)"/>`;
+    const off = [];
+    for (const space of [
+      "",
+      ` color-interpolation-filters="linearRGB"`,
+      // The control: in sRGB the colour already reaches the page unchanged.
+      ` color-interpolation-filters="sRGB"`,
+    ])
+      for (const [colour, opacity, expected] of [
+        ["#808080", "", filled("#808080")],
+        ["#0c0", "", filled("#0c0")],
+        ["#3a7fd0", "", filled("#3a7fd0")],
+        ["#070707", "", filled("#070707")],
+        ["rgba(0, 204, 0, 0.5)", "", filled("rgba(0, 204, 0, 0.5)")],
+        ["#808080", ` flood-opacity="0.5"`, filled("rgb(128 128 128 / 0.5)")],
+      ]) {
+        const body = flood(space, colour, opacity);
+        const allowed = expected[3] === 255 ? 0 : 1;
+        const got = await drawn(document(body));
+        if (got.some((channel, i) => Math.abs(channel - expected[i]) > allowed))
+          off.push(`${body}: ${got}, expected ${expected}`);
+      }
+    assert.deepEqual(off, []);
+  });
 });
 
 describe("a refusal takes the type the standard names", () => {

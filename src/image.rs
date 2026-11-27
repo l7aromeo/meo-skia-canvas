@@ -2970,6 +2970,29 @@ mod tests {
         }
     }
 
+    /// A flood in a linearRGB filter, `color-interpolation-filters`'
+    /// initial value, is its own colour on the page, as Chrome 156 draws it
+    /// (#826). Skia took the sRGB value as linear and encoded it once more,
+    /// so #808080 drew 188; the patched module (`cfg(meo_svg_wide_colour)`)
+    /// takes it into linear light and keeps it in float, where an eight-bit
+    /// layer in linear light would round #070707 to 13.
+    #[test]
+    fn a_flood_is_its_own_colour_in_a_linear_filter() {
+        for colour in ["#808080", "#3a7fd0", "#070707"] {
+            let flood = drawn_at_centre(&format!(
+                r#"<defs><filter id="f" x="0" y="0" width="1" height="1"><feFlood flood-color="{colour}"/></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
+            ));
+            let fill = drawn_at_centre(&format!(
+                r#"<rect width="4" height="4" fill="{colour}"/>"#
+            ));
+            assert_eq!(
+                flood == fill,
+                cfg!(meo_svg_wide_colour),
+                "{colour}: the flood {flood:?}, the fill {fill:?}"
+            );
+        }
+    }
+
     /// A line has no interior, so its fill paints nothing, as Chrome 156
     /// draws it (#825): Skia's module drew a line's fill as a hairline, the
     /// initial black under a translucent stroke and alone where there is no

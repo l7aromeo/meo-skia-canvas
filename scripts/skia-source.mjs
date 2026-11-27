@@ -218,9 +218,14 @@ const SVG_SYNTHETIC_SLANT = join(
 // `feFlood` multiplies the colour's alpha by `flood-opacity`, as Filter
 // Effects 1 section 9.13.2 says, where Skia replaced it. It does not change
 // `SkSVGColorType`: skia-safe reads `SkSVGColor`'s eight-bit `fColor` field
-// by name, so the field stays, and the `color` property and
-// `lighting-color`, which Skia keeps as an `SkColor` through
-// `SkSVGFeLighting`'s eight-bit lights, stay eight-bit.
+// by name, so the field stays, and the `color` property stays eight-bit.
+//
+// In a linearRGB primitive, the initial one, Skia took `flood-color` as a
+// linear value and encoded it once more, so #808080 flooded at 188 where
+// Chrome 156 draws 128 (#826). `SkSVGFe::resolvePrimitiveColor` takes it
+// into linear light. A flood is a colour filter on the source rather than a
+// shader, so it reaches the page in float rather than through an eight-bit
+// layer.
 const SVG_WIDE_COLOUR = join("containers", "skia-svg-wide-colour.patch");
 
 // UPSTREAM: skia-bindings 0.156.0 -- unfiled -- worked around

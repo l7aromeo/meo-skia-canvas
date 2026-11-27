@@ -1,3 +1,21 @@
+--- a/skia-bindings/skia/modules/svg/include/SkSVGFe.h
++++ b/skia-bindings/skia/modules/svg/include/SkSVGFe.h
+@@ -79,6 +79,15 @@
+ 
+     bool parseAndSetAttribute(const char*, const char*) override;
+ 
++    /**
++     * An sRGB colour, such as 'flood-color' or 'lighting-color', in the space this primitive
++     * works in: unchanged in sRGB, and in linear light in linearRGB, by the curve
++     * `SkColorFilters::SRGBToLinearGamma` applies to a primitive's input. Alpha is not encoded.
++     */
++    SkColor4f resolvePrimitiveColor(const SkSVGRenderContext&,
++                                    const SkSVGFilterContext&,
++                                    SkColor4f) const;
++
+ private:
+     /**
+      * Resolves the rect specified by the x, y, width and height attributes (if specified) on this
 --- a/skia-bindings/skia/modules/svg/include/SkSVGFeFlood.h
 +++ b/skia-bindings/skia/modules/svg/include/SkSVGFeFlood.h
 @@ -34,7 +34,7 @@
@@ -108,9 +126,48 @@
      if (this->parseExpectedStringToken("currentColor")) {
          *color = SkSVGColor(SkSVGColor::Type::kCurrentColor, std::move(vars));
          return true;
+--- a/skia-bindings/skia/modules/svg/src/SkSVGFe.cpp
++++ b/skia-bindings/skia/modules/svg/src/SkSVGFe.cpp
+@@ -7,6 +7,9 @@
+ 
+ #include "modules/svg/include/SkSVGFe.h"
+ 
++#include "include/core/SkColorSpace.h"
++#include "modules/skcms/skcms.h"
++
+ #include "modules/svg/include/SkSVGAttribute.h"
+ #include "modules/svg/include/SkSVGAttributeParser.h"
+ #include "modules/svg/include/SkSVGFilterContext.h"
+@@ -92,6 +95,17 @@
+     return cs == SkSVGColorspace::kAuto ? kDefaultCS : cs;
+ }
+ 
++SkColor4f SkSVGFe::resolvePrimitiveColor(const SkSVGRenderContext& ctx,
++                                         const SkSVGFilterContext& fctx,
++                                         SkColor4f color) const {
++    if (this->resolveColorspace(ctx, fctx) == SkSVGColorspace::kLinearRGB) {
++        for (float* channel : {&color.fR, &color.fG, &color.fB}) {
++            *channel = skcms_TransferFunction_eval(&SkNamedTransferFn::kSRGB, *channel);
++        }
++    }
++    return color;
++}
++
+ void SkSVGFe::applyProperties(SkSVGRenderContext* ctx) const { this->onPrepareToRender(ctx); }
+ 
+ bool SkSVGFe::parseAndSetAttribute(const char* name, const char* value) {
 --- a/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
 +++ b/skia-bindings/skia/modules/svg/src/SkSVGFeFlood.cpp
-@@ -16,21 +16,22 @@
+@@ -7,6 +7,8 @@
+ 
+ #include "modules/svg/include/SkSVGFeFlood.h"
+ 
++#include "include/core/SkBlendMode.h"
++#include "include/core/SkColorFilter.h"
+ #include "include/core/SkScalar.h"
+ #include "include/core/SkShader.h"
+ #include "include/effects/SkImageFilters.h"
+@@ -16,21 +18,32 @@
  class SkImageFilter;
  class SkSVGFilterContext;
  
@@ -135,8 +192,19 @@
  sk_sp<SkImageFilter> SkSVGFeFlood::onMakeImageFilter(const SkSVGRenderContext& ctx,
                                                       const SkSVGFilterContext& fctx) const {
 -    return SkImageFilters::Shader(SkShaders::Color(resolveFloodColor(ctx)),
-+    return SkImageFilters::Shader(SkShaders::Color(resolveFloodColor(ctx), nullptr),
-                                   this->resolveFilterSubregion(ctx, fctx));
+-                                  this->resolveFilterSubregion(ctx, fctx));
++    // A linearRGB primitive works in linear light, and its result is encoded
++    // back to sRGB when the filter is drawn.
++    const SkColor4f color = this->resolvePrimitiveColor(ctx, fctx, resolveFloodColor(ctx));
++    // A colour filter rather than a shader. A shader is drawn into a layer
++    // of the page's eight bits, which in linear light rounds sRGB #070707 to
++    // 13; a colour filter on the source graphic stays one the conversion back
++    // to sRGB composes with, so a flood reaches the page in float. `kSrc`
++    // replaces what the source holds, so the source does not show; an empty
++    // input in its place is drawn into a layer as a shader is.
++    return SkImageFilters::ColorFilter(SkColorFilters::Blend(color, nullptr, SkBlendMode::kSrc),
++                                       nullptr,
++                                       this->resolveFilterSubregion(ctx, fctx));
  }
 --- a/skia-bindings/skia/modules/svg/src/SkSVGGradient.cpp
 +++ b/skia-bindings/skia/modules/svg/src/SkSVGGradient.cpp

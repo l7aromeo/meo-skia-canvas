@@ -93,9 +93,6 @@ fn document(property: &str, value: &str) -> String {
         "stop-color" => format!(
             r#"<defs><linearGradient id="g"><stop offset="0" stop-color="{value}"/><stop offset="1" stop-color="{value}"/></linearGradient></defs><rect width="4" height="4" fill="url(#g)"/>"#
         ),
-        "flood-color" => format!(
-            r#"<defs><filter id="f" x="0" y="0" width="1" height="1"><feFlood flood-color="{value}"/></filter></defs><rect width="4" height="4" filter="url(#f)"/>"#
-        ),
         _ => unreachable!("{property}"),
     };
     format!(
