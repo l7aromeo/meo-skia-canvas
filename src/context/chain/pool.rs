@@ -1,5 +1,5 @@
 //! GPU chain layers kept for the next run rather than made again, and CPU
-//! coverage planes kept for the rest of a playback.
+//! coverage planes and working surfaces kept for the rest of a playback.
 //!
 //! A chain on the GPU draws into a layer the page's size -- see
 //! [`placed`](super::placed) -- and Skia makes it unbudgeted
@@ -53,6 +53,13 @@
 //! outermost open plane scope and let go when it closes, so a thread holds
 //! none between playbacks; a draw that takes it clears what it reads, then
 //! cuts what it draws where its own plane would have ended.
+//!
+//! A shadow's working surfaces on the CPU -- the floats a drop shadow is
+//! composed in, see `chain::Working` -- are kept for the open plane scope in
+//! the same way: the newest [`WORKING_KEPT`], each taken back only by a draw
+//! wanting exactly its size and kind. A page of 40 shadowed runs made 80 of
+//! them, about 450 by 90 and 652 KB each, in six to eight sizes; replaying
+//! their allocations, two kept took back 219 of 240.
 
 use std::{
     cell::RefCell,
@@ -80,6 +87,12 @@ const ALWAYS_KEPT: usize = 2;
 /// cache no more than the cache itself holds unless set. A layer's bytes are
 /// [`Key::bytes`].
 const KEPT_BYTES: usize = 256 << 20;
+
+/// How many working surfaces a thread keeps for an open plane scope: two, the
+/// most one shadow holds at once -- the source in floats, while it is drawn
+/// over its shadow into the second -- so that keeping them holds at most what
+/// the largest shadow of the playback held anyway, whatever its size.
+const WORKING_KEPT: usize = 2;
 
 /// How long a kept layer outlives its last use: the span a thread's GPU
 /// context is kept unused for (`MTL_CONTEXT_LIFESPAN`,
@@ -131,6 +144,8 @@ struct Pool {
     plane_scopes: usize,
     /// The coverage planes kept for the open plane scopes, one of each kind.
     planes: Vec<(Plane, Surface)>,
+    /// The working surfaces kept for the open plane scopes, oldest first.
+    working: Vec<Surface>,
 }
 
 thread_local! {
@@ -179,15 +194,18 @@ impl PlaneScope {
 
 impl Drop for PlaneScope {
     fn drop(&mut self) {
-        let planes = POOL.with_borrow_mut(|pool| {
+        let kept = POOL.with_borrow_mut(|pool| {
             pool.plane_scopes -= 1;
             match pool.plane_scopes {
-                0 => std::mem::take(&mut pool.planes),
-                _ => Vec::new(),
+                0 => (
+                    std::mem::take(&mut pool.planes),
+                    std::mem::take(&mut pool.working),
+                ),
+                _ => Default::default(),
             }
         });
         // Let go outside the borrow, which a surface's release does not need.
-        drop(planes);
+        drop(kept);
     }
 }
 
@@ -270,6 +288,7 @@ pub(crate) fn release() {
     POOL.with_borrow_mut(|pool| {
         pool.kept.clear();
         pool.planes.clear();
+        pool.working.clear();
     });
 }
 
@@ -330,6 +349,63 @@ pub(crate) fn keep_plane(plane: Plane, mut surface: Surface) {
         before
     });
     drop(before);
+}
+
+/// A working surface of exactly `info` this thread keeps, taken out of the
+/// pool, or `None` where none is. Only one in main memory is kept.
+///
+/// What it held is still in it, and so is the image it last answered, if
+/// that is held anywhere else: the caller tells it the content will change
+/// before drawing -- see `chain::Working`.
+pub(crate) fn take_working(info: &ImageInfo) -> Option<Surface> {
+    if !keeps_working() {
+        return None;
+    }
+    POOL.with_borrow_mut(|pool| {
+        let at = pool
+            .working
+            .iter()
+            .rposition(|surface| surface.image_info() == *info)?;
+        #[cfg(test)]
+        WORKING_TAKEN.set(WORKING_TAKEN.get() + 1);
+        Some(pool.working.remove(at))
+    })
+}
+
+/// Keeps `surface`, a working surface in main memory whose image is let go,
+/// for the rest of the outermost open [`PlaneScope`], letting the oldest go
+/// past [`WORKING_KEPT`]. Let go at once where no plane scope is open.
+pub(crate) fn keep_working(mut surface: Surface) {
+    debug_assert!(
+        surface.peek_pixels().is_some(),
+        "a working surface not in main memory"
+    );
+    if !keeps_working() {
+        return;
+    }
+    let gone = POOL.with_borrow_mut(|pool| {
+        if pool.plane_scopes == 0 {
+            return vec![surface];
+        }
+        pool.working.push(surface);
+        let past = pool.working.len().saturating_sub(WORKING_KEPT);
+        pool.working.drain(..past).collect()
+    });
+    // Let go outside the borrow, which a surface's release does not need.
+    drop(gone);
+}
+
+/// Whether this thread keeps working surfaces: [`KEEP_WORKING`] in a test,
+/// always otherwise.
+#[cfg(test)]
+pub(crate) fn keeps_working() -> bool {
+    KEEP_WORKING.get()
+}
+
+/// Whether this thread keeps working surfaces: always outside a test.
+#[cfg(not(test))]
+pub(crate) fn keeps_working() -> bool {
+    true
 }
 
 /// Whether this thread keeps coverage planes: [`KEEP_PLANES`] in a test,
@@ -409,17 +485,26 @@ thread_local! {
     /// How many kept coverage planes draws on this thread have taken.
     pub(crate) static PLANES_TAKEN: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+
+    /// Whether working surfaces are kept on this thread, so that a test can
+    /// draw the same page with every one made afresh.
+    pub(crate) static KEEP_WORKING: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(true) };
+
+    /// How many kept working surfaces draws on this thread have taken.
+    pub(crate) static WORKING_TAKEN: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
-    use skia_safe::{AlphaType, ColorType, ImageInfo};
+    use skia_safe::{AlphaType, ColorType, ImageInfo, Surface};
 
     use super::{
-        ALWAYS_KEPT, KEEP, KEPT_BYTES, KEPT_FOR, KEPT_FOR_HERE, LayerScope,
-        Pool,
+        ALWAYS_KEPT, KEEP, KEEP_WORKING, KEPT_BYTES, KEPT_FOR, KEPT_FOR_HERE,
+        LayerScope, PlaneScope, Pool, WORKING_TAKEN,
     };
     use crate::{
         context::{
@@ -718,6 +803,171 @@ mod tests {
         pool.kept.push(entry(key((3531, 3521)), 200));
         pool.fit();
         assert_eq!(left(&pool), [100, 200], "two large layers");
+    }
+
+    /// What `image`, a raster image of floats, holds, byte for byte.
+    fn floats_of(image: &skia_safe::Image) -> Vec<u8> {
+        image
+            .peek_pixels()
+            .and_then(|pixmap| pixmap.bytes().map(<[u8]>::to_vec))
+            .expect("a raster image")
+    }
+
+    /// An image cloned out of a working surface's and still held when the
+    /// surface is taken back keeps its pixels while the surface is drawn
+    /// over -- see `chain::Working` -- and the surface taken back is drawn
+    /// on as a fresh one is, transparent wherever the new draw leaves it:
+    /// copied away from while that image is held, and drawn on in place
+    /// once it has gone.
+    #[test]
+    fn a_working_surface_taken_back_leaves_a_held_image_as_it_was() {
+        use super::super::Working;
+        use skia_safe::{Color, Color4f, Paint, Rect};
+        let _scope = PlaneScope::open();
+        let info = ImageInfo::new(
+            (16, 8),
+            ColorType::RGBAF32,
+            AlphaType::Premul,
+            None,
+        );
+        let first = Working::drawn(&info, false, |canvas| {
+            canvas.clear(Color::RED);
+        })
+        .expect("a working surface");
+        let held = (*first).clone();
+        let before = floats_of(&held);
+        drop(first);
+        let taken = WORKING_TAKEN.get();
+        let blue = Paint::new(Color4f::new(0.0, 0.0, 1.0, 1.0), None);
+        let second = Working::drawn(&info, false, |canvas| {
+            canvas.draw_rect(Rect::from_xywh(4.0, 2.0, 4.0, 4.0), &blue);
+        })
+        .expect("a working surface");
+        assert_eq!(WORKING_TAKEN.get(), taken + 1, "the surface was taken");
+        assert!(floats_of(&held) == before, "the held image changed");
+        let fresh = |rect: Rect| {
+            let mut surface =
+                started::raster(&info, None, None).expect("a surface");
+            surface.canvas().draw_rect(rect, &blue);
+            floats_of(&surface.image_snapshot())
+        };
+        let (here, elsewhere) = (
+            Rect::from_xywh(4.0, 2.0, 4.0, 4.0),
+            Rect::from_xywh(10.0, 1.0, 3.0, 3.0),
+        );
+        assert!(
+            floats_of(&second) == fresh(here),
+            "drawn unlike a fresh surface"
+        );
+        // Taken back again with no image held anywhere, it is drawn on as it
+        // stands, its bytes zeroed, rather than copied away from: drawn
+        // elsewhere, so that what the second draw left would show.
+        drop((held, second));
+        let third = Working::drawn(&info, false, |canvas| {
+            canvas.draw_rect(elsewhere, &blue);
+        })
+        .expect("a working surface");
+        assert_eq!(WORKING_TAKEN.get(), taken + 2, "taken again");
+        assert!(
+            floats_of(&third) == fresh(elsewhere),
+            "drawn on what it held before"
+        );
+    }
+
+    /// A plane scope keeps the newest two working surfaces, and none once it
+    /// closes; with no scope open, none is kept.
+    #[test]
+    fn the_newest_two_working_surfaces_are_kept_for_the_scope() {
+        let kept = || {
+            super::POOL.with_borrow(|pool| {
+                pool.working.iter().map(Surface::width).collect::<Vec<_>>()
+            })
+        };
+        let stand_in = |width: i32| {
+            started::raster_n32_premul((width, 1)).expect("a stand-in")
+        };
+        super::keep_working(stand_in(1));
+        assert_eq!(kept(), Vec::<i32>::new(), "kept with no scope open");
+        {
+            let _scope = PlaneScope::open();
+            for width in 1..=3 {
+                super::keep_working(stand_in(width));
+            }
+            assert_eq!(kept(), [2, 3], "the newest two kept");
+        }
+        assert_eq!(kept(), Vec::<i32>::new(), "kept past the scope");
+    }
+
+    /// A CPU page of drop shadows and a canvas shadow reads the bytes it
+    /// reads with every working surface made afresh, and takes them back.
+    /// Each size of shape is drawn first opaque and large in its layer, so
+    /// that a surface taken back by the translucent draws of that size after
+    /// holds what would show through them; the offsets are fractional, so
+    /// that a shadow does not cover its surface.
+    #[test]
+    fn a_page_of_shadows_reads_alike_with_working_surfaces_kept() {
+        use crate::context::{
+            kept::release_kept_results, run_mask::release_cached_runs,
+        };
+        let page = |keep: bool| {
+            release_cached_runs();
+            release_kept_results();
+            KEEP_WORKING.set(keep);
+            let mut canvas = Canvas::with_options(
+                320.0,
+                240.0,
+                CanvasOptions {
+                    gpu: false,
+                    ..CanvasOptions::default()
+                },
+            )
+            .expect("a canvas");
+            let ctx = canvas.context();
+            ctx.set_fill_style_css("rgb(240 230 200)")
+                .expect("a colour");
+            ctx.fill_rect(0.0, 0.0, 320.0, 240.0);
+            let fills = [
+                "rgb(200 40 20)",
+                "rgb(20 60 200 / 0.4)",
+                "rgb(20 160 60 / 0.7)",
+                "rgb(120 20 160 / 0.25)",
+            ];
+            for (row, (w, h)) in [(60.0, 30.0), (44.0, 44.0)].iter().enumerate()
+            {
+                for (at, fill) in fills.iter().enumerate() {
+                    let (x, y) =
+                        (12.3 + at as f32 * 74.0, 20.6 + row as f32 * 96.0);
+                    ctx.set_filter_css(
+                        "drop-shadow(3.5px 2.25px 2px rgb(0 0 0 / 0.6))",
+                    )
+                    .expect("a filter");
+                    ctx.set_fill_style_css(fill).expect("a colour");
+                    ctx.fill_rect(x, y, *w, *h);
+                }
+            }
+            ctx.set_filter_css("none").expect("no filter");
+            ctx.set_shadow_color_css("rgb(0 0 120 / 0.5)")
+                .expect("a colour");
+            ctx.set_shadow_blur(3.0);
+            ctx.set_shadow_offset(2.5, -1.75);
+            ctx.set_fill_style_css("rgb(250 200 30 / 0.5)")
+                .expect("a colour");
+            ctx.fill_rect(40.2, 190.4, 60.0, 30.0);
+            let before = WORKING_TAKEN.get();
+            let pixels = canvas
+                .to_image_data(None, &ImageDataExport::default())
+                .expect("pixels")
+                .pixels()
+                .to_vec();
+            KEEP_WORKING.set(true);
+            (pixels, WORKING_TAKEN.get() - before)
+        };
+        let (afresh, none) = page(false);
+        let (kept, taken) = page(true);
+        assert_eq!(none, 0, "a page without kept surfaces took some");
+        assert!(taken > 0, "the page took no working surface back");
+        let differ = afresh.iter().zip(&kept).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "the page changed with working surfaces kept");
     }
 
     /// Each export that composites a page on this thread keeps its layers for
