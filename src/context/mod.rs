@@ -51,7 +51,7 @@ use crate::{
     cache_map::{GOLDEN_RATIO_64, KeptSets},
     context2d::{FontKerning, TextRendering, font_spec_from_css},
     css::{FontUnits, NamedColour, ROOT_FONT_PX},
-    export::{VectorFeatures, blend_features},
+    export::{VectorFeatures, blend_features, eraser_features},
     filter::onto::{Onto, PageFilter},
     font::{GenericFamily, colr::blends_by_coefficients},
     font_library::{FontLibrary, ResolvedFont, generic_name, text_hinting},
@@ -84,7 +84,7 @@ use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
     DrawnIn, Entries, ExactColour, Group, HeldImage, Layer, LayerRec,
-    LazyPicture, Replay, Target, coverage_files, reach_the_clip,
+    LazyPicture, PutPixels, Replay, Target, coverage_files, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
@@ -170,13 +170,15 @@ pub(crate) const CONTEXT_BYTES: usize = 4_800;
 pub(crate) const DOCUMENT_REPLAY_BUDGET: usize = 64;
 
 /// How many pages of its own pixels a page's entries may hold in images of
-/// other canvases, and in the rasters of the patterns of them they draw
-/// from, before the page lets go of them -- see `PageRecorder::flatten`.
+/// other canvases, in the rasters of the patterns of them they draw from,
+/// and in the pixels put into it, before the page lets go of them -- see
+/// `PageRecorder::flatten`.
 ///
 /// Chosen rather than derived: past it a page holds one page of pixels for
 /// what it drew, so a page never cleared that keeps drawing changing
-/// canvases in, or filling with patterns of them, levels off at a few
-/// pages, where it held a page for every draw. Below it what the page drew
+/// canvases in, filling with patterns of them, or putting `ImageData`,
+/// levels off at a few pages, where it held a page for every draw and a
+/// copy of every put. Below it what the page drew
 /// itself stays entries, which a read at another density draws at that
 /// density; past it they are the base's pixels, scaled there. The images a
 /// document of the page holds count too -- canvases drawn in past
@@ -4381,25 +4383,58 @@ impl Context2D {
         match whole {
             true => self.erase_the_page(),
 
-            // otherwise, paint over the specified region but preserve overdrawn
-            // vectors
-            // `Clear` is a blend mode, and Skia's SVG backend writes none
-            // of those, so this lands as an opaque black rectangle unless
-            // the draw is kept for rasterizing.
+            // Otherwise the rectangle is cleared under `BlendMode::Clear`,
+            // an eraser a document writes as it is told to -- see
+            // `PageRecorder::begin_erase` -- or, where its region cannot be
+            // made, a blend it composites as pixels.
             // The same in each recording: a clear knows no colour.
-            false => self.append_draw(
-                blend_features(BlendMode::Clear, true),
-                true,
-                |canvas, _| {
-                    let mut paint = Paint::default();
-                    paint
-                        .set_anti_alias(true)
-                        .set_style(PaintStyle::Fill)
-                        .set_blend_mode(BlendMode::Clear);
-                    canvas.draw_rect(rect, &paint);
-                },
-            ),
+            false => {
+                let region = self.cleared_by(rect);
+                self.erasing(region.as_ref(), None, |this, features| {
+                    this.append_draw(features, true, |canvas, _| {
+                        let mut paint = Paint::default();
+                        paint
+                            .set_anti_alias(true)
+                            .set_style(PaintStyle::Fill)
+                            .set_blend_mode(BlendMode::Clear);
+                        canvas.draw_rect(rect, &paint);
+                    })
+                });
+            }
         }
+    }
+
+    /// What `clearRect(rect)` erases, in device space: the rectangle where
+    /// the transform puts it, within the clip -- the path of the clip, not
+    /// its bounds. `None` where the intersection cannot be made.
+    fn cleared_by(&self, rect: &Rect) -> Option<Path> {
+        let placed = Path::rect(*rect, None).make_transform(&self.state.matrix);
+        match &self.state.clip {
+            Some(clip) => placed.op(clip, PathOp::Intersect),
+            None => Some(placed),
+        }
+    }
+
+    /// Runs `draw`, which records an eraser -- a `clearRect` or a
+    /// `putImageData` -- with the features it is to ask for: as an eraser
+    /// of `region`, writing `written` in an SVG -- see
+    /// [`PageRecorder::begin_erase`](page::PageRecorder::begin_erase) --
+    /// where `region` is given, and otherwise as the `BlendMode::Clear` it
+    /// draws with, which a vector backend that cannot write it rasterizes.
+    fn erasing(
+        &mut self,
+        region: Option<&Path>,
+        written: Option<PutPixels>,
+        draw: impl FnOnce(&mut Self, VectorFeatures),
+    ) {
+        let Some(region) = region else {
+            return draw(self, blend_features(BlendMode::Clear, true));
+        };
+        self.with_recorder(|mut recorder| {
+            recorder.begin_erase(region, written)
+        });
+        draw(self, eraser_features());
+        self.with_recorder(|mut recorder| recorder.end_erase());
     }
 
     pub fn draw_picture(
@@ -5338,11 +5373,18 @@ impl Context2D {
             }
             self.push(); // cache matrix & clip in self.state
             // `Clear` erases the destination beneath the put, which a
-            // document has to know of to write -- see `blend_features`.
-            self.with_recorder(|mut recorder| {
-                recorder.append_unframed(
-                    blend_features(BlendMode::Clear, true),
-                    |canvas, _| {
+            // document has to know of to write: the put is an eraser of its
+            // destination, untransformed and unclipped, which an SVG writes
+            // as the pixels drawn over nothing -- see `Self::erasing`.
+            let region = Path::rect(*dst_rect, None);
+            let written = PutPixels {
+                image: bitmap.clone(),
+                src: *src_rect,
+                dst: *dst_rect,
+            };
+            self.erasing(Some(&region), Some(written), |this, features| {
+                this.with_recorder(|mut recorder| {
+                    recorder.append_unframed(features, |canvas, _| {
                         let paint = Paint::default();
                         let mut eraser = Paint::default();
                         eraser.set_blend_mode(BlendMode::Clear);
@@ -5358,10 +5400,12 @@ impl Context2D {
                             dst_rect,
                             &paint,
                         );
-                    },
-                );
+                    });
+                })
             });
             self.pop(); // restore discarded matrix & clip
+            // The put's pixels, a copy of what was put, the page now holds.
+            self.flatten_past_budget();
             return true;
         }
         false

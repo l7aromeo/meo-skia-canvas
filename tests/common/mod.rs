@@ -100,3 +100,34 @@ pub fn engines() -> Vec<bool> {
     let gpu = has_gpu();
     [false, true].into_iter().filter(|&g| !g || gpu).collect()
 }
+
+/// `svg` rasterized by [`Svg::rasterize`] at `width` by `height`, fitted
+/// as it fits a document, and drawn onto a transparent CPU canvas of that
+/// size: its pixels, premultiplied RGBA.
+///
+/// `rasterize` composites in sRGB, as a browser composites an SVG and as
+/// the canvas composites what the SVG was exported from, so a render that
+/// lands apart from the canvas is the SVG's doing.
+pub fn rendered_svg(svg: &str, width: u32, height: u32) -> Vec<u8> {
+    let image = Svg::parse(svg)
+        .expect("the SVG parses")
+        .rasterize(width, height)
+        .expect("rasterizes");
+    let mut canvas = Canvas::new(width as f32, height as f32);
+    canvas.set_gpu(false);
+    canvas.context().draw_image(&image, 0.0, 0.0);
+    canvas
+        .to_image_data(
+            None,
+            &ImageDataExport {
+                pixels: PixelExportOptions {
+                    premultiplied: true,
+                    ..PixelExportOptions::default()
+                },
+                ..ImageDataExport::default()
+            },
+        )
+        .expect("pixels")
+        .pixels()
+        .to_vec()
+}

@@ -6,6 +6,8 @@
 //! page beneath a transparent put showing; the PDF device writes the Clear,
 //! so a canvas drawn in holding a put erased the page beneath the canvas.
 
+mod common;
+
 use meo_skia_canvas::{
     export::{EncodeOptions, ImageFormat},
     prelude::*,
@@ -241,13 +243,7 @@ fn an_svg_of_a_put_renders_as_the_canvas() {
         let (mut page, expected) = scene();
         let svg = export(&mut page, ImageFormat::Svg);
         let svg = String::from_utf8(svg).expect("utf-8");
-        let image = Svg::parse(&svg)
-            .expect("parses")
-            .rasterize(SIDE as u32, SIDE as u32)
-            .expect("rasterizes");
-        let mut back = canvas(SIDE, SIDE);
-        back.context().draw_image(&image, 0.0, 0.0);
-        let rendered = read(&mut back);
+        let rendered = common::rendered_svg(&svg, SIDE as u32, SIDE as u32);
         let pixels = |bytes: &[u8]| -> Vec<[u8; 4]> {
             bytes.chunks(4).map(|p| [p[0], p[1], p[2], p[3]]).collect()
         };

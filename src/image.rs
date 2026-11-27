@@ -954,10 +954,13 @@ impl Svg {
     /// Rasterizes the document into an [`Image`] of the given dimensions.
     ///
     /// The document is fitted to those dimensions, then drawn into a
-    /// transparent linear-light sRGB surface and snapshotted. The fit is
-    /// uniform and centred -- `preserveAspectRatio`'s own `xMidYMid meet` --
-    /// so a 3-by-2 document in a 2-by-1 box inks 150 by 100 of it and is
-    /// never distorted.
+    /// transparent surface of half floats in sRGB and snapshotted, so its
+    /// translucent draws composite in sRGB, as a browser composites them,
+    /// and an image it embeds keeps colours outside sRGB, such as a Display
+    /// P3 PNG's, for a wide-gamut canvas it is drawn onto. The fit is uniform
+    /// and centred -- `preserveAspectRatio`'s own `xMidYMid meet` -- so a
+    /// 3-by-2 document in a 2-by-1 box inks 150 by 100 of it and is never
+    /// distorted.
     ///
     /// **This is not `object-fit`.** `contain` is what this gives; `cover`
     /// and `fill` mean scaling the returned [`Image`], which is an operation
@@ -1003,12 +1006,7 @@ impl Svg {
         self.dom
             .set_container_size(SkSize::new(width as f32, height as f32));
 
-        let info = ImageInfo::new(
-            (width as i32, height as i32),
-            ColorType::RGBAF16,
-            AlphaType::Premul,
-            ColorSpace::new_srgb_linear(),
-        );
+        let info = render_info(width, height);
         let mut surface =
             started::raster(&info, None, None).ok_or_else(|| {
                 Error::DecodeImage {
@@ -1062,6 +1060,29 @@ impl Svg {
     pub(crate) fn dom_mut(&mut self) -> &mut svg::Dom {
         &mut self.dom
     }
+}
+
+/// The surface [`Svg::rasterize`] draws a document of `width` by `height`
+/// into: half floats, premultiplied, in sRGB.
+///
+/// sRGB because a document's colours are sRGB and a browser composites
+/// them there, as this crate's canvas does: red at a `fill-opacity` of 0.6
+/// over blue lands 153, 0, 102 in Chrome 159's headless shell and on the
+/// canvas. A linear-light surface composited the same draw to 203, 0, 170.
+///
+/// Half floats because an image the document embeds may hold colours
+/// outside sRGB -- a Display P3 PNG -- and a half float stores sRGB past 0
+/// and 1, so those colours reach the canvas the image is drawn onto, where
+/// eight bits would clamp them to sRGB's gamut. The space stays sRGB
+/// rather than the embedded image's own, since everything else the
+/// document draws is in sRGB and composites there.
+pub(crate) fn render_info(width: u32, height: u32) -> ImageInfo {
+    ImageInfo::new(
+        (width as i32, height as i32),
+        ColorType::RGBAF16,
+        AlphaType::Premul,
+        ColorSpace::new_srgb(),
+    )
 }
 
 /// The font size a document inherits where it states none.
@@ -4679,12 +4700,7 @@ mod tests {
         else {
             panic!("the binding records the document");
         };
-        let info = ImageInfo::new(
-            (width as i32, height as i32),
-            ColorType::RGBAF16,
-            AlphaType::Premul,
-            ColorSpace::new_srgb_linear(),
-        );
+        let info = render_info(width, height);
         let mut surface =
             started::raster(&info, None, None).expect("a surface");
         surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
