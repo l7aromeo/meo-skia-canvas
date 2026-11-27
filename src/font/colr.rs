@@ -37,6 +37,7 @@ use parking_lot::Mutex;
 
 use crate::{
     cache_map::{CacheMap, CacheSet},
+    context::exact_gradient::Geometry,
     export::{VectorFeatures, blend_features},
     started,
 };
@@ -2355,9 +2356,16 @@ fn svg_writes_otherwise(brush: &Brush<'_>) -> bool {
             extend,
             ..
         } => {
+            let circles = Geometry::Conical {
+                start: Point::new(c0.x, c0.y),
+                start_radius: *r0,
+                end: Point::new(c1.x, c1.y),
+                end_radius: *r1,
+            };
             // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
-            // Re-check: cargo test skia_svg_swaps_two_point_circles
-            *extend != Extend::Pad || *r0 != 0.0 || c0 != c1 || *r1 <= 0.0
+            // Re-check: cargo test skia_svg_writes_no_spread_method
+            *extend != Extend::Pad
+                || circles.vector_features() != VectorFeatures::PLAIN
         }
         Brush::Solid { .. } => false,
     }

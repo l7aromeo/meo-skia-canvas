@@ -163,15 +163,29 @@ impl CanvasGradient {
     /// SVG writes `linearGradient` and `radialGradient` and has nothing to
     /// say for a sweep, so a conic gradient's draws are rasterized into the
     /// document rather than emitted with no fill at all -- and so are a
+    /// radial one's between two circles, which Skia's SVG device writes
+    /// with the circles swapped (see `Geometry::vector_features`), and a
     /// linear or radial one's in a space with a working space of its own,
     /// which the backend no longer recognises as a gradient.
     pub fn vector_features(&self) -> VectorFeatures {
-        match &*self.gradient.borrow() {
-            Gradient::Conic { .. } => VectorFeatures::EXOTIC_SHADER,
-            Gradient::Linear { .. } | Gradient::Radial { .. } => {
-                self.mixing.get().color_space.vector_features()
+        let geometry = match &*self.gradient.borrow() {
+            Gradient::Conic { .. } => return VectorFeatures::EXOTIC_SHADER,
+            Gradient::Linear { .. } => VectorFeatures::PLAIN,
+            Gradient::Radial {
+                start_point,
+                start_radius,
+                end_point,
+                end_radius,
+                ..
+            } => Geometry::Conical {
+                start: *start_point,
+                start_radius: *start_radius,
+                end: *end_point,
+                end_radius: *end_radius,
             }
-        }
+            .vector_features(),
+        };
+        geometry.with(self.mixing.get().color_space.vector_features())
     }
 
     /// What a gradient the standard says paints nothing paints.

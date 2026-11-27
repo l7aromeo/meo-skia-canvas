@@ -84,6 +84,7 @@ use skia_safe::{
 
 use crate::{
     cache_map::{GOLDEN_RATIO_64, KeptSets},
+    export::VectorFeatures,
     pixels::PixelColorSpace,
     shader::GradientColorSpace,
     started,
@@ -107,6 +108,38 @@ pub(crate) enum Geometry {
     },
     /// Around `center`, from `start` to `end` degrees clockwise from +x.
     Sweep { center: Point, start: f32, end: f32 },
+}
+
+impl Geometry {
+    /// What a vector backend has to reckon with to write a gradient on this
+    /// geometry, before the space it is mixed in.
+    ///
+    /// SVG names no paint server for a sweep. A two-point conical gradient
+    /// Skia's SVG device writes with its circles swapped, so that it reads
+    /// back up to 255 levels off; only one from a point at its end circle's
+    /// centre, which Skia makes a plain radial gradient and the device
+    /// writes as `cx`, `cy` and `r` alone, is written as itself.
+    pub(crate) fn vector_features(&self) -> VectorFeatures {
+        match self {
+            Self::Linear { .. } | Self::Radial { .. } => VectorFeatures::PLAIN,
+            Self::Conical {
+                start,
+                start_radius,
+                end,
+                end_radius,
+            } => {
+                // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+                // Re-check: cargo test skia_svg_swaps_two_point_circles
+                let centred =
+                    start == end && *start_radius == 0.0 && *end_radius > 0.0;
+                match centred {
+                    true => VectorFeatures::PLAIN,
+                    false => VectorFeatures::EXOTIC_SHADER,
+                }
+            }
+            Self::Sweep { .. } => VectorFeatures::EXOTIC_SHADER,
+        }
+    }
 }
 
 /// Everything a gradient is made from, kept so that the shader the CPU draws
