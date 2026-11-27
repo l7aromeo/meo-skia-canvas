@@ -84,7 +84,7 @@ use faint::Faint;
 use layer::{
     BlurDraw, Composite, CoveragePicture, CoverageRun, DeferredPicture,
     Entries, ExactColour, Group, HeldImage, Layer, LayerRec, LazyPicture,
-    Replay, coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
+    Replay, Target, coverage_files, holds_a_cut, holds_a_pair, reach_the_clip,
 };
 use page::{ExportOptions, Page, PageRecorder, Recording, text_surface_props};
 use run_mask::Kept;
@@ -150,6 +150,38 @@ const TRANSPARENT: Color = Color::TRANSPARENT;
 /// 0.95 of the other. `tests/suite/external-memory.test.js` holds it to
 /// that count within a tenth.
 pub(crate) const CONTEXT_BYTES: usize = 4_800;
+
+/// The most a canvas's entries may cost to replay -- see
+/// `PageRecorder::replay_cost` -- for a document to write a draw of the
+/// canvas from them rather than from its image.
+///
+/// A canvas drawn into a copy of itself and the copy drawn back holds its
+/// entries twice for each round, so a document written from them replays
+/// twice as much each round. Past this, the draw is written as its pixels,
+/// and what the page holds from earlier rounds stays as it was, so the
+/// document stops doubling. A canvas nested in a chain, or drawn into
+/// another many times, costs one replay for each, and stays vector up to
+/// this many.
+///
+/// One replay is a whole page, so the bound is on pages replayed, not on
+/// what each holds. For a page holding one rectangle and one line of text,
+/// in a debug build: an SVG of 154 KB written in 34 ms at the last round
+/// this lets through, and 1.3 MB in 278 ms where it was 1,024.
+pub(crate) const DOCUMENT_REPLAY_BUDGET: usize = 64;
+
+/// What a document plays of a canvas drawn into another -- see
+/// `Context2D::draw_canvas_image`.
+#[derive(Clone, Debug)]
+pub(crate) struct CanvasDocument {
+    /// The canvas's entries as a document plays them -- see
+    /// `layer::Entries::projected`.
+    pub(crate) entries: Entries,
+    /// The canvas's bounds, which a picture of the entries records within.
+    pub(crate) bounds: Rect,
+    /// What replaying the entries costs -- see
+    /// `PageRecorder::replay_cost`.
+    pub(crate) cost: usize,
+}
 
 /// A colour matrix making a colour opaque and leaving its red, green and
 /// blue alone: Skia's 4x5 row-major layout (`SkColorMatrix`), one row per
@@ -4613,6 +4645,56 @@ impl Context2D {
         self.recorder
             .borrow_mut()
             .end_split(mark, drawn, HeldImage::of(image));
+    }
+
+    /// Draws a canvas, given as `image`, its own pixels -- see
+    /// `PageRecorder::image` -- and `document`, what a document plays of it:
+    /// the image for pixels and the canvas's own entries for a document,
+    /// one draw for each kind of target -- see [`Self::draw_split`] -- so
+    /// that a PDF or an SVG writes what the canvas drew as vectors and text.
+    ///
+    /// A canvas whose entries cost more than [`DOCUMENT_REPLAY_BUDGET`] to
+    /// replay is drawn as its image for a document too, as a raster.
+    pub(crate) fn draw_canvas_image(
+        &mut self,
+        image: &Image,
+        document: &CanvasDocument,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        apart: bool,
+    ) {
+        self.draw_split(
+            image,
+            |ctx| ctx.draw_source_image(image, src_rect, dst_rect, apart),
+            |ctx| match document.cost <= DOCUMENT_REPLAY_BUDGET {
+                true => ctx.draw_picture_costing(
+                    &|| {
+                        document
+                            .entries
+                            .picture(document.bounds, Target::Document)
+                    },
+                    Some(document.entries.clone()),
+                    src_rect,
+                    dst_rect,
+                    document.entries.all_features(),
+                    document.cost,
+                ),
+                false => {
+                    ctx.draw_source_image(image, src_rect, dst_rect, apart)
+                }
+            },
+        );
+    }
+
+    /// What a document plays of this canvas, for another canvas to draw
+    /// it -- see [`Self::draw_canvas_image`].
+    pub(crate) fn document(&self) -> CanvasDocument {
+        let mut recorder = self.recorder.borrow_mut();
+        CanvasDocument {
+            entries: recorder.document_entries(),
+            bounds: self.bounds,
+            cost: recorder.replay_cost(),
+        }
     }
 
     /// [`Self::draw_source_image`], declared.

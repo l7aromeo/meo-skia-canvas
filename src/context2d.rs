@@ -43,7 +43,7 @@ use crate::{
         unpremul_color4f_to_rgba_linear,
     },
     context::{
-        Context2D as Inner, Dye, initial_root_face,
+        CanvasDocument, Context2D as Inner, Dye, initial_root_face,
         layer::{Entries, reach_the_clip},
         page::{ExportOptions, Matte, Page},
     },
@@ -4446,8 +4446,10 @@ struct Captured {
 enum Captive {
     /// The source's own pixels -- see `Inner::source_image` -- for a page
     /// carrying someone else's picture, or one whose text the destination
-    /// would rasterize under a contrast or gamma other than the source's.
-    Pixels(SkImage),
+    /// would rasterize under a contrast or gamma other than the source's;
+    /// with what a document plays of the page, which a document writes the
+    /// draw from -- see `Inner::draw_canvas_image`.
+    Pixels(SkImage, CanvasDocument),
     /// A page played into the destination as itself, its text rasterized
     /// under the destination's contrast and gamma, which are the source's.
     Page(Page),
@@ -4477,12 +4479,14 @@ fn capture(source: &mut Canvas, text: (f32, f32)) -> Option<Captured> {
     // drawn into a canvas and that canvas drawn back, round after round,
     // doubles the eventual rasterization. A source already carrying someone
     // else's page is handed over as its pixels instead, which the
-    // destination holds as any image's.
+    // destination holds as any image's, with what a document plays of it,
+    // which a document replays as long as that stays within a budget -- see
+    // `Inner::draw_canvas_image`.
     let cost = context.inner.replay_cost();
 
     match cost == 0 && context.inner.canvas_text == text {
         false => context.inner.source_image().map(|image| Captured {
-            content: Captive::Pixels(image),
+            content: Captive::Pixels(image, context.inner.document()),
             size,
             features,
             cost,
@@ -4526,13 +4530,11 @@ fn place_capture(
             *features,
             (*cost).max(1),
         ),
-        // Pixels replay nothing, so the destination is charged nothing for
-        // them: they draw as any image's.
-        Captive::Pixels(image) => ctx.draw_split(
-            image,
-            |ctx| ctx.draw_source_image(image, src, dst, *apart),
-            |ctx| ctx.draw_source_image(image, src, dst, *apart),
-        ),
+        // Pixels replay nothing and draw as any image's; a document replays
+        // the page's entries, which the destination is charged for.
+        Captive::Pixels(image, document) => {
+            ctx.draw_canvas_image(image, document, src, dst, *apart)
+        }
     }
 }
 
@@ -11727,5 +11729,194 @@ mod held_image_tests {
         assert_eq!(held(&mut source), IMAGE_BYTES, "the image it made");
         dest.context().draw_canvas(&mut source, 0.0, 0.0);
         assert_eq!(held(&mut source), IMAGE_BYTES, "made once");
+    }
+}
+
+#[cfg(test)]
+mod document_route_tests {
+    //! A canvas drawn into another as its own pixels is written by a
+    //! document from what it drew: its entries, as vectors and text, and
+    //! not its image -- see `context::Context2D::draw_canvas_image`.
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        context::DOCUMENT_REPLAY_BUDGET,
+        export::{EncodeOptions, ImageFormat},
+    };
+
+    /// The source's side.
+    const SIDE: (f32, f32) = (160.0, 90.0);
+
+    /// A CPU canvas with a canvas nested in it -- so that it is drawn into
+    /// another as its own pixels, see `capture` -- an ellipse and a line of
+    /// text.
+    fn source() -> Canvas {
+        let mut inner = Canvas::new(8.0, 8.0);
+        inner.set_gpu(false);
+        inner.context().fill_rect(0.0, 0.0, 8.0, 8.0);
+        let mut source = Canvas::new(SIDE.0, SIDE.1);
+        source.set_gpu(false);
+        let ctx = source.context();
+        ctx.draw_canvas(&mut inner, 0.0, 0.0);
+        ctx.set_fill_style_css("rgb(40,90,160)").expect("a colour");
+        ctx.begin_path();
+        ctx.ellipse(
+            80.0,
+            45.0,
+            60.0,
+            25.0,
+            0.0,
+            0.0,
+            std::f32::consts::TAU,
+            false,
+        )
+        .expect("an ellipse");
+        ctx.fill(FillRule::NonZero);
+        ctx.set_fill_style_css("rgb(200,40,30)").expect("a colour");
+        assert!(ctx.set_font_css("18px sans-serif"));
+        ctx.fill_text("Vector", 40.0, 52.0, None);
+        source
+    }
+
+    /// A CPU canvas with `source` drawn into it.
+    fn drawn_into(source: &mut Canvas) -> Canvas {
+        let mut dest = Canvas::new(SIDE.0 + 20.0, SIDE.1 + 20.0);
+        dest.set_gpu(false);
+        dest.context().draw_canvas(source, 10.0, 10.0);
+        dest
+    }
+
+    fn svg(canvas: &mut Canvas) -> String {
+        let bytes = canvas
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("an SVG");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn pdf(canvas: &mut Canvas) -> String {
+        let bytes = canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("a PDF");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// How many image XObjects a PDF holds.
+    fn pdf_images(pdf: &str) -> usize {
+        pdf.matches("/Subtype /Image").count()
+    }
+
+    /// The SVG and PDF of a page a canvas carrying nesting was drawn into
+    /// hold its ellipse as a path and its text as text, and no image.
+    #[test]
+    fn a_canvas_drawn_in_is_written_as_what_it_drew() {
+        let mut source = source();
+        let mut dest = drawn_into(&mut source);
+        let svg = svg(&mut dest);
+        assert_eq!(svg.matches("<image").count(), 0, "no image: {svg}");
+        assert!(svg.contains("<path"), "the ellipse as a path: {svg}");
+        assert!(svg.contains("<text"), "the text as text: {svg}");
+        let pdf = pdf(&mut dest);
+        assert_eq!(pdf_images(&pdf), 0, "no image XObject in the PDF");
+        assert!(pdf.contains("/Type /Font"), "the text as text in the PDF");
+    }
+
+    /// A page's pixels are the source's image drawn into it, whatever its
+    /// document is written from.
+    #[test]
+    fn a_canvas_drawn_in_lands_its_image_in_the_pixels() {
+        let mut source = source();
+        let image = source
+            .context()
+            .inner
+            .source_image()
+            .expect("the source's image");
+        let mut dest = drawn_into(&mut source);
+        let mut alone = Canvas::new(SIDE.0 + 20.0, SIDE.1 + 20.0);
+        alone.set_gpu(false);
+        let whole = SkRect::from_wh(SIDE.0, SIDE.1);
+        alone.context().inner.draw_source_image(
+            &image,
+            &whole,
+            &whole.with_offset((10.0, 10.0)),
+            false,
+        );
+        let pixels = |canvas: &mut Canvas| {
+            canvas
+                .to_image_data(None, &crate::pixels::ImageDataExport::default())
+                .expect("pixels")
+                .pixels()
+                .to_vec()
+        };
+        assert!(pixels(&mut dest) == pixels(&mut alone));
+    }
+
+    /// A canvas past the replay budget is written as its image.
+    #[test]
+    fn a_canvas_past_the_budget_is_written_as_its_image() {
+        let mut source = source();
+        source
+            .context()
+            .inner
+            .charge_replay(DOCUMENT_REPLAY_BUDGET + 1);
+        let mut dest = drawn_into(&mut source);
+        assert!(svg(&mut dest).contains("<image"), "an image in the SVG");
+        // The image and its alpha, a soft mask written as an image of its
+        // own.
+        assert!(pdf_images(&pdf(&mut dest)) > 0, "an image in the PDF");
+    }
+
+    /// A canvas drawn into one that is then drawn into a third leaves the
+    /// third's document no image of the first: what a document plays of the
+    /// second holds the first's entries, not its draw for pixels. So the
+    /// third holds one image, the second's.
+    #[test]
+    fn a_canvas_drawn_in_twice_over_is_held_once() {
+        let mut source = source();
+        let mut middle = drawn_into(&mut source);
+        let mut outer = drawn_into(&mut middle);
+        let mut held = 0;
+        outer.context().inner.with_recorder(|recorder| {
+            held = recorder.held_image_bytes();
+        });
+        let (w, h) = (SIDE.0 + 20.0, SIDE.1 + 20.0);
+        assert_eq!(held, (w * h) as usize * 4, "the middle's image alone");
+        assert_eq!(svg(&mut outer).matches("<image").count(), 0);
+    }
+
+    /// The same, the canvas drawn into the second inside a layer, whose
+    /// group a document plays of the second as a group of what its
+    /// contents project to.
+    #[test]
+    fn a_canvas_drawn_in_through_a_layer_is_held_once() {
+        let mut source = source();
+        let mut middle = Canvas::new(SIDE.0 + 20.0, SIDE.1 + 20.0);
+        middle.set_gpu(false);
+        let ctx = middle.context();
+        ctx.save_layer_with(0.5, None, None);
+        ctx.draw_canvas(&mut source, 10.0, 10.0);
+        ctx.restore();
+        let mut outer = drawn_into(&mut middle);
+        let mut held = 0;
+        outer.context().inner.with_recorder(|recorder| {
+            held = recorder.held_image_bytes();
+        });
+        let (w, h) = (SIDE.0 + 20.0, SIDE.1 + 20.0);
+        assert_eq!(held, (w * h) as usize * 4, "the middle's image alone");
+    }
+
+    /// What a document plays of a canvas is made once for each state of
+    /// its page: here a canvas holding another drawn into it, which a
+    /// document plays as entries of its own, made rather than shared.
+    #[test]
+    fn a_canvas_projects_once_for_each_state_of_its_page() {
+        let mut source = drawn_into(&mut source());
+        let entries =
+            |source: &mut Canvas| source.context().inner.document().entries;
+        let (first, again) = (entries(&mut source), entries(&mut source));
+        assert!(Arc::ptr_eq(&first.layers, &again.layers), "served again");
+        source.context().fill_rect(0.0, 0.0, 1.0, 1.0);
+        let changed = entries(&mut source);
+        assert!(!Arc::ptr_eq(&first.layers, &changed.layers), "made again");
     }
 }

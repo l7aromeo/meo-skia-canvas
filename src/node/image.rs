@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use crate::{
     color::skia_color_to_rgba_linear,
-    context::{BoxedContext2D, Context2D},
+    context::{BoxedContext2D, CanvasDocument, Context2D},
     image::{Svg, decode_frame, frame_delays},
     node::external::External,
     started,
@@ -158,9 +158,10 @@ pub struct Source {
     /// composites through a route of its own -- see
     /// `Context2D::draw_source_image`. `false` for every other source.
     pub plays_apart_on_gpu: bool,
-    /// Whether the source is a canvas, which is drawn as one draw for each
-    /// kind of target -- see `Context2D::draw_split`.
-    pub canvas: bool,
+    /// What a document plays of the source where it is a canvas, which is
+    /// drawn as one draw for each kind of target -- see
+    /// `Context2D::draw_canvas_image`. `None` for every other source.
+    pub(crate) document: Option<CanvasDocument>,
 }
 
 impl Clone for Content {
@@ -191,14 +192,15 @@ impl Source {
                 content: image.content.clone(),
                 autosized: image.autosized,
                 plays_apart_on_gpu: false,
-                canvas: false,
+                document: None,
             });
         }
         if let Ok(context) = value.downcast::<BoxedContext2D, _>(cx) {
             // A canvas answers with its own pixels, the bitmap a browser
-            // draws for one -- see `PageRecorder::image`. The destination
-            // holds them as it holds any image's, so nothing of the source's
-            // recording travels with the draw.
+            // draws for one -- see `PageRecorder::image` -- which the
+            // destination holds as it holds any image's, and with what a
+            // document plays of it, which a PDF or an SVG writes the draw
+            // from -- see `Context2D::draw_canvas_image`.
             let ctx = context.borrow();
             return Some(Self {
                 content: ctx
@@ -208,7 +210,7 @@ impl Source {
                 autosized: false,
                 // Asked after the image, whose page files what was drawn.
                 plays_apart_on_gpu: ctx.plays_apart_on_gpu(),
-                canvas: true,
+                document: Some(ctx.document()),
             });
         }
         None

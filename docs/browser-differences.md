@@ -1327,15 +1327,15 @@ either way a triangle cut at x 82 moved 57 pixels inside the clip.
 
 A canvas drawn into another, used as a pattern or drawn as an image, draws its
 cut draws on the CPU as it draws them itself, at densities 1 to 3 -- an image
-at density 1, where its pixels are the canvas's own. The recording Skia
-rasterizes for an image applies the clip as a clip shader, a pattern
-rasterizes the canvas as the canvas composites itself, and `drawCanvas` keeps
-a canvas holding a cut draw as its entries, which each target clips its own
-way. A PDF or SVG export keeps such a canvas drawn in with `drawCanvas` as
-vectors clipped by the path, as before: Skia's SVG device cannot write a clip
-shader and writes an empty clip in its place, which hides the draw. The raster
-a PDF embeds for an image or a pattern of the canvas, and an SVG for an image,
-is exact at the cut. On the GPU engine an image of such a canvas is rasterized
+at density 1, where its pixels are the canvas's own. A pattern rasterizes the
+canvas as the canvas composites itself, and `drawCanvas` keeps a canvas
+holding a cut draw as its entries, which each target clips its own way. A PDF
+or SVG export keeps such a canvas drawn in with `drawCanvas`, or drawn as an
+image, as vectors clipped by the path, as before: Skia's SVG device cannot
+write a clip shader and writes an empty clip in its place, which hides the
+draw. The raster a PDF embeds for a pattern of the canvas, or for an image of
+one too costly to replay -- see `DOCUMENT_REPLAY_BUDGET` -- is exact at the
+cut. On the GPU engine an image of such a canvas is rasterized
 with the clip shader too: under the circle above, with a stroke beside the
 triangle, 50 pixels change, 288 differ from the GPU's own draw of the page
 where 244 did, and their mean distance from the CPU's exact draw falls from

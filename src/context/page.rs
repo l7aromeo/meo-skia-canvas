@@ -525,6 +525,9 @@ pub struct PageRecorder {
     /// The image of the page made last, served again while the page is as
     /// it was -- see [`Self::image`].
     own_image: Option<OwnImage>,
+    /// What a document plays of the page as it was last asked, by the
+    /// page's identity and depth -- see [`Self::document_entries`].
+    projection: Option<((usize, usize), Entries)>,
     /// How many times the page has been erased -- see [`Self::set_bounds`]
     /// -- so that a split can tell its draw erased what lay beneath it --
     /// see [`SplitMark`].
@@ -1302,6 +1305,7 @@ impl PageRecorder {
             replay_cost: 0,
             plays_apart_on_gpu: false,
             own_image: None,
+            projection: None,
             clears: 0,
             documenting: false,
             held: HashMap::new(),
@@ -3224,6 +3228,27 @@ impl PageRecorder {
         }
         drop(surface);
         self.page()
+    }
+
+    /// This page's entries as a document plays them, for another canvas to
+    /// draw as its document's half of a draw of this one -- see
+    /// [`Entries::projected`] -- made once for each state of the page, as
+    /// its image is.
+    pub(crate) fn document_entries(&mut self) -> Entries {
+        let page = self.page();
+        let key = (page.id, page.layers.len());
+        if let Some((held, entries)) = &self.projection
+            && *held == key
+        {
+            return entries.clone();
+        }
+        let entries = Entries {
+            apart: self.dual(),
+            ..Entries::shared(page.layers, page.features)
+        };
+        let entries = entries.projected().unwrap_or(entries);
+        self.projection = Some((key, entries.clone()));
+        entries
     }
 
     /// This page as an image for another canvas to draw: its own pixels, as

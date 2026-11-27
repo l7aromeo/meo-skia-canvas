@@ -4244,6 +4244,68 @@ impl Entries {
             .iter()
             .fold(VectorFeatures::PLAIN, |all, features| all.with(*features))
     }
+
+    /// What a document plays of these entries, as entries of its own: each
+    /// [`Split`] stands in its place as its document's entries, and each
+    /// group holding one as a group of what its contents project to. `None`
+    /// where nothing would change, so that entries holding no split are
+    /// played as they are and shared rather than copied.
+    ///
+    /// A page drawn into another as an image of its own pixels is written
+    /// by a document from these: what the page drew, as vectors and text,
+    /// and none of the pixels a split plays for a raster.
+    pub(crate) fn projected(&self) -> Option<Entries> {
+        let mut changed = false;
+        let mut layers = Vec::with_capacity(self.layers.len());
+        let mut features = Vec::with_capacity(self.features.len());
+        for (layer, asks) in self.iter() {
+            match layer {
+                // A split's document holds none of its own: it is drawn from
+                // what another page projected, or from an image.
+                Layer::Split(split) => {
+                    changed = true;
+                    layers.extend(split.document.layers.iter().cloned());
+                    features.extend(split.document.features.iter().copied());
+                }
+                Layer::Group(group) => match group.contents.projected() {
+                    Some(contents) => {
+                        changed = true;
+                        layers.push(Layer::Group(Arc::new(Group {
+                            contents,
+                            ..Group::clone(group)
+                        })));
+                        features.push(asks);
+                    }
+                    None => {
+                        layers.push(layer.clone());
+                        features.push(asks);
+                    }
+                },
+                _ => {
+                    layers.push(layer.clone());
+                    features.push(asks);
+                }
+            }
+        }
+        changed.then(|| Entries {
+            apart: self.apart,
+            ..Entries::new(layers, features)
+        })
+    }
+
+    /// The entries recorded as one picture of `bounds`, as `target` plays
+    /// them: what a draw of them needs where it is not drawn entry by entry
+    /// -- see `Context2D::draw_picture_costing`.
+    pub(crate) fn picture(
+        &self,
+        bounds: Rect,
+        target: Target,
+    ) -> Option<Picture> {
+        let mut recorder = PictureRecorder::new();
+        let canvas = recorder.begin_recording(bounds, true);
+        play_entries(&self.layers, &self.features, canvas, target);
+        recorder.finish_recording_as_picture(None)
+    }
 }
 
 /// One draw filed as entries of its own for each kind of target: what a
