@@ -50,8 +50,8 @@ use skia_safe::Canvas as SkCanvas;
 ///
 /// Counted in ops, a playback of filtered draws flushes more often than once
 /// every this many draws -- five times as often under a shadow, and more
-/// where each draw is an entry of its own -- and counts every group as one,
-/// a plain one that opens no layer on the GPU included. Each overcounts by a
+/// where each draw is an entry of its own -- and counts every group as one.
+/// Each overcounts by a
 /// fixed number a draw or a group, so a playback flushes more often than the
 /// layers it renders call for, and its time stays linear in them.
 ///

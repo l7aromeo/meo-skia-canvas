@@ -1282,6 +1282,28 @@ describe("Canvas", () => {
       }
     });
 
+    test("SVGs show a putImageData() as the canvas holds it", async () => {
+      // A put replaces what lay beneath it, transparent pixels included.
+      // Written as vectors, the page beneath a transparent put still showed:
+      // the SVG backend writes no blend, so the put's erasing was lost.
+      let page = new Canvas(24, 24),
+        ctx = page.getContext("2d");
+      ctx.fillStyle = "blue";
+      ctx.fillRect(0, 0, 24, 24);
+      ctx.putImageData(ctx.createImageData(6, 6), 4, 4);
+      let back = new Canvas(24, 24),
+        read = back.getContext("2d");
+      read.drawImage(await loadImage(page.toBufferSync("svg")), 0, 0);
+      let at = (x, y) => [...read.getImageData(x, y, 1, 1).data];
+      assert.deepEqual(at(6, 6), [0, 0, 0, 0], "the put");
+      assert.deepEqual(at(1, 1), [0, 0, 255, 255], "the page beside it");
+
+      // What is drawn after the put stays vector.
+      ctx.fillStyle = "orange";
+      ctx.fillRect(0, 20, 4, 4);
+      assert.match(page.toBufferSync("svg").toString("utf-8"), /<path/);
+    });
+
     test("PDFs", () => {
       canvas.toFileSync(`${TMP}/output1.pdf`);
       canvas.toFileSync(`${TMP}/output2.PDF`);

@@ -1341,6 +1341,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
                         document.clone(),
                         *features,
                     )),
+                    picture.cull_rect(),
                     &src,
                     &dst,
                     *features,
@@ -1438,6 +1439,7 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         this.borrow_mut().draw_picture_costing(
             &|| page.picture(None),
             Some(entries),
+            Rect::from_size(size),
             &src,
             &dst,
             source,

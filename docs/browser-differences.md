@@ -1372,17 +1372,39 @@ coverage on pixels, on both engines, rather than clipped by it, which on
 the CPU moved its paths' edges as any clip does: a triangle by up to 28
 levels at 156 pixels more than two inside the crop. On the GPU the clip moved
 no edge, but bounded what a blur in the canvas read: a pixel four inside the
-crop parted by 63 at density 3. On the CPU a canvas composited plainly is
-drawn into a layer, which the crop multiplies before it closes. That keeps
-every draw on Skia's legacy blitter -- a clip shader would put each through
-its raster pipeline, a level off for each draw a pixel lies under -- and
-composites the canvas as one image, as `drawImage` does. Over what the page already holds it lands
-within two levels of the same canvas drawn in uncropped, which blends each
-of its draws onto the page in turn: 72 pixels at density 1 over a band of
-colour. On an empty page, through a layer -- at an alpha, under a blend --
-and on the GPU it is that canvas's draw to the byte.
-`a_page_drawn_in_cropped_draws_its_own_pixels_inside_the_crop` holds it. A
-PDF or SVG writes the crop as a clip, as before.
+crop parted by 63 at density 3. The canvas is drawn into a layer, which the
+crop multiplies before it closes. That keeps every draw on Skia's legacy
+blitter -- a clip shader would put each through its raster pipeline, a level
+off for each draw a pixel lies under -- and composites the canvas as one
+image, as `drawImage` does and as the same canvas drawn in uncropped is
+composited, so inside the crop the two land the same bytes.
+`a_page_drawn_in_cropped_draws_its_own_pixels_inside_the_crop` holds it on an
+empty page, and `a_canvas_drawn_in_at_a_whole_pixel_lands_its_own_pixels`
+over a coloured one. A PDF or SVG writes the crop as a clip, as before.
+
+**A canvas drawn in with `drawCanvas` lands its own pixels at a whole-pixel
+offset, and its vectors drawn sharp under any other transform.** At a
+translation by whole device pixels, `drawCanvas` lands the bytes `drawImage`
+lands from the same canvas's bitmap, on both engines, wherever a clip, a crop
+or the page's edge cuts it. On the CPU that takes a surface of the canvas's
+own: Skia's analytic anti-aliasing covers a curve by where it lies on the
+raster it fills and by what cuts it, so the canvas is played on a surface
+placed at its corner and cut by nothing but its own edges, and that surface
+is drawn in (`Group::played_at_source`). Played straight into a layer the
+clip and the page's edge bounded, an ellipse stood up to 27 levels from the
+canvas's own pixels where the page's edge cut it and up to 17 where a clip
+did. A shadow or a filter is made from the same surface, so it is cast from
+the coverage the draw lands. Under any other transform -- a fractional
+offset, a scale, a turn -- `drawCanvas` plays the canvas's vectors at the
+destination's resolution, where `drawImage` resamples its bitmap, as a
+browser does: an 80 by 60 canvas holding an ellipse and two translucent
+rectangles, on the CPU, drawn at (40.25, 20.5) stands 1,565 bytes from
+`drawImage`'s draw of it, by up to 52 levels; under a scale of 1.7, 5,670 by
+up to 73; turned by 0.3 radians, 1,677 by up to 56. The GPU's figures are
+within 15% of these. A canvas whose surface would be larger than the page --
+one drawn in under a large scale -- is played into the layer as before, where
+on the CPU a clip or the page's edge that cuts it moves its curves' edge
+pixels.
 
 A draw the page's edge also cuts is not exact here either. The route plays the
 draw back on a raster of the page, whose edge cuts it as the next entry
