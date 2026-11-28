@@ -13911,12 +13911,12 @@ mod exact_composite_tests {
     //! arithmetic, held for one snapshot of what they cover -- see
     //! `context::exact_composite` (#783).
     use super::*;
-    use std::f32::consts::TAU;
+    use std::{f32::consts::TAU, iter::zip};
 
     use crate::{
         canvas::EngineKind,
         color::RgbaLinear,
-        context::exact_composite::SNAPSHOTS,
+        context::{exact_composite::SNAPSHOTS, layer::PAGE_BATCH},
         geometry::Point,
         shader::{GradientColorSpace, GradientInterpolation, GradientStop},
     };
@@ -13959,6 +13959,20 @@ mod exact_composite_tests {
             GradientInterpolation::new(GradientColorSpace::Oklab),
         )
         .expect("a ramp in Oklab")
+    }
+
+    /// An opaque sweep around the page's centre, which the CPU makes in
+    /// eight bits and a page files in a run of its own -- see
+    /// `export::VectorFeatures::EXOTIC_SHADER`.
+    fn sweep() -> Shader {
+        Shader::sweep_gradient(
+            Point::new(SIDE / 2.0, SIDE / 2.0),
+            0.0,
+            360.0,
+            &[stop(0.0, (250, 200, 0), 1.0), stop(1.0, (0, 60, 200), 1.0)],
+            GradientInterpolation::default(),
+        )
+        .expect("a sweep")
     }
 
     fn disc(ctx: &mut Context2D, (x, y, radius): (f32, f32, f32)) {
@@ -14095,6 +14109,379 @@ mod exact_composite_tests {
                 assert_eq!(snapshots, 1, "{name}: snapshots");
             }
         }
+    }
+
+    /// The bytes a GPU page over a fill holds for `scene`, and the
+    /// snapshots it took: with the draws held for one snapshot across the
+    /// page's runs -- see `layer::play_entries` -- and then held run by
+    /// run, each run's flushed as it ends, the reference a page-long batch
+    /// must land byte for byte.
+    fn held_and_by_run(
+        scene: &dyn Fn(&mut Context2D),
+    ) -> ((Vec<u8>, usize), (Vec<u8>, usize)) {
+        let held = page(true, true, scene);
+        PAGE_BATCH.set(false);
+        let by_run = page(true, true, scene);
+        PAGE_BATCH.set(true);
+        (held, by_run)
+    }
+
+    /// The bytes `held` and `by_run` hold apart.
+    fn bytes_apart(held: &[u8], by_run: &[u8]) -> usize {
+        zip(held, by_run).filter(|(a, b)| a != b).count()
+    }
+
+    /// A shadow drawn over a page of the eight-bit ramp at 0.6.
+    fn shadowed(ctx: &mut Context2D, blur: f32, (x, y): (f32, f32)) {
+        ctx.set_shadow_color_css("rgb(0 0 0 / 0.5)")
+            .expect("a colour");
+        ctx.set_shadow_blur(blur);
+        ctx.set_shadow_offset(x, y);
+        ctx.set_global_alpha(0.6);
+        ctx.set_fill_shader(&ramp());
+    }
+
+    /// A flush forgets the draws it drew: a disc, a second meeting it, which
+    /// draws the first, and a third meeting where the first lay but not the
+    /// second take two snapshots -- the first disc alone, then the other two
+    /// together -- and land the bytes they do held run by run.
+    #[test]
+    fn a_flush_forgets_the_draws_it_drew() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            for at in
+                [(30.3, 64.7, 10.2), (48.4, 64.6, 10.1), (22.6, 64.3, 6.1)]
+            {
+                disc(ctx, at);
+                ctx.fill(FillRule::NonZero);
+            }
+        };
+        let ((held, snapshots), (by_run, _)) = held_and_by_run(&scene);
+        assert_eq!(snapshots, 2, "snapshots");
+        assert_eq!(bytes_apart(&held, &by_run), 0, "bytes apart");
+    }
+
+    /// Discs on a grid 32 pixels apart, none meeting another or another's
+    /// shadow, each casting a shadow, take one snapshot between them, as
+    /// they do casting none, where held run by run they took one each
+    /// (#845); and they land the bytes they land that way.
+    #[test]
+    fn shadowed_fills_that_do_not_meet_share_one_snapshot() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for (blur, offset) in [(4.0, (2.0, 2.0)), (2.0, (1.0, 1.0))] {
+            let scene = |ctx: &mut Context2D| {
+                shadowed(ctx, blur, offset);
+                for k in 0..16 {
+                    let (x, y) = ((k % 4) as f32, (k / 4) as f32);
+                    disc(ctx, (16.4 + 32.0 * x, 16.7 + 32.0 * y, 8.3));
+                    ctx.fill(FillRule::NonZero);
+                }
+            };
+            let ((held, snapshots), (by_run, by_run_snapshots)) =
+                held_and_by_run(&scene);
+            let name = format!("blur {blur}");
+            assert_eq!(by_run_snapshots, 16, "{name}: run by run");
+            assert_eq!(snapshots, 1, "{name}: held across the page");
+            assert_eq!(bytes_apart(&held, &by_run), 0, "{name}: bytes apart");
+        }
+    }
+
+    /// A shadow meeting a fill held before it is drawn over it, as the
+    /// page draws it: rows of discs 20 to 26 pixels apart, each one's
+    /// shadow cast 3 pixels left over the disc before it, the further apart
+    /// the less of the shadow's tail it reaches, and a row 30 apart whose
+    /// shadows are cast 14 pixels onto the disc before, which the disc
+    /// casting each does not meet, land the bytes they do held run by run,
+    /// each shadow drawing what it meets first.
+    #[test]
+    fn a_shadow_meeting_a_held_fill_draws_it_first() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for (step, offset) in [
+            (20.0, -3.0),
+            (22.0, -3.0),
+            (24.0, -3.0),
+            (26.0, -3.0),
+            (30.0, -14.0),
+        ] {
+            let scene = |ctx: &mut Context2D| {
+                shadowed(ctx, 4.0, (offset, 0.0));
+                for k in 0..4 {
+                    disc(ctx, (12.4 + step * k as f32, 40.7, 8.3));
+                    ctx.fill(FillRule::NonZero);
+                }
+            };
+            let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+            assert_eq!(
+                bytes_apart(&held, &by_run),
+                0,
+                "{step} apart: bytes apart"
+            );
+        }
+    }
+
+    /// A shadow draws a fill held before it first as far as its tail
+    /// carries a byte: a disc held at 0.6, then a ramp filling all of the
+    /// page from a gap of 0 to 40 pixels right of it, casting an opaque
+    /// shadow blurred by 20 -- a sigma of 10, whose tail over the disc is
+    /// the Gaussian's beyond the gap, still half a level at 2.8 sigmas --
+    /// lands the bytes it does held run by run.
+    #[test]
+    fn a_shadow_draws_a_held_fill_first_as_far_as_its_tail_reaches() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for gap in (0..=40).step_by(2).map(|gap| gap as f32) {
+            let scene = |ctx: &mut Context2D| {
+                ctx.set_global_alpha(0.6);
+                ctx.set_fill_shader(&ramp());
+                disc(ctx, (24.4, 64.7, 20.3));
+                ctx.fill(FillRule::NonZero);
+                ctx.set_global_alpha(1.0);
+                ctx.set_shadow_color_css("rgb(0 0 0)").expect("a colour");
+                ctx.set_shadow_blur(20.0);
+                ctx.begin_path();
+                ctx.rect(44.7 + gap, -200.0, 400.0, 528.0);
+                ctx.fill(FillRule::NonZero);
+            };
+            let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+            assert_eq!(
+                bytes_apart(&held, &by_run),
+                0,
+                "{gap} apart: bytes apart"
+            );
+        }
+    }
+
+    /// Chains played together draw the held fills first: a disc held, then
+    /// shadowed discs in a flat colour -- each a chain casting its shadow
+    /// alone and the fill after it, which play as one run of chains, see
+    /// `layer::play_shared_chains` -- the second of which meets the held
+    /// disc where the first does not.
+    #[test]
+    fn a_run_of_chains_draws_the_held_fills_first() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            disc(ctx, (40.3, 40.6, 25.2));
+            ctx.fill(FillRule::NonZero);
+            shadowed(ctx, 4.0, (2.0, 2.0));
+            ctx.set_fill_style_css("rgb(20 120 60)").expect("a colour");
+            disc(ctx, (104.2, 104.5, 10.3));
+            ctx.fill(FillRule::NonZero);
+            disc(ctx, (60.7, 55.1, 10.4));
+            ctx.fill(FillRule::NonZero);
+        };
+        let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+        assert_eq!(bytes_apart(&held, &by_run), 0, "bytes apart");
+    }
+
+    /// A draw of another kind over a held fill draws it first: a translucent
+    /// rectangle across the first of two discs, then a disc past both, lands
+    /// the bytes it does held run by run.
+    #[test]
+    fn another_draw_over_a_held_fill_draws_it_first() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            disc(ctx, (40.3, 40.6, 25.2));
+            ctx.fill(FillRule::NonZero);
+            ctx.set_fill_style_css("rgb(20 120 60)").expect("a colour");
+            ctx.fill_rect(30.0, 20.0, 50.0, 40.0);
+            ctx.set_fill_shader(&ramp());
+            disc(ctx, (100.2, 100.5, 16.3));
+            ctx.fill(FillRule::NonZero);
+        };
+        let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+        assert_eq!(bytes_apart(&held, &by_run), 0, "bytes apart");
+    }
+
+    /// A run under a clip of its own draws the held fills it would meet
+    /// first, before its clip applies: a disc held, then one meeting it
+    /// under a clip, then a third held past both. The discs are dyed by a
+    /// sweep, which a page keeps in a run of its own under its clip -- see
+    /// `PageRecorder::append_gradient` -- where a linear ramp under a clip
+    /// is a piece of the clip's run, which plays as another entry.
+    #[test]
+    fn a_clipped_run_draws_the_held_fills_first() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&sweep());
+            disc(ctx, (40.3, 40.6, 25.2));
+            ctx.fill(FillRule::NonZero);
+            ctx.save();
+            ctx.begin_path();
+            ctx.rect(45.0, 10.0, 60.0, 60.0);
+            ctx.clip(FillRule::NonZero);
+            disc(ctx, (60.7, 45.1, 25.4));
+            ctx.fill(FillRule::NonZero);
+            ctx.restore();
+            disc(ctx, (100.2, 100.5, 16.3));
+            ctx.fill(FillRule::NonZero);
+        };
+        let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+        assert_eq!(bytes_apart(&held, &by_run), 0, "bytes apart");
+    }
+
+    /// A run under a clip of its own draws the fills held before it first,
+    /// before its clip applies: a disc held, then under a clip across it a
+    /// disc dyed by the ramp through `multiply`, or by a sweep, which the
+    /// page files apart with the clip it was drawn under -- see
+    /// `PageRecorder::append_gradient` -- lands the bytes it does held run
+    /// by run, the held disc drawn whole and the clipped one over it.
+    #[test]
+    fn an_isolated_run_under_a_clip_draws_the_held_fills_first() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        for (name, blend, dye) in [
+            ("multiply", BlendMode::Multiply, ramp()),
+            ("a sweep", BlendMode::SourceOver, sweep()),
+        ] {
+            let scene = |ctx: &mut Context2D| {
+                ctx.set_global_alpha(0.6);
+                ctx.set_fill_shader(&ramp());
+                disc(ctx, (40.3, 40.6, 25.2));
+                ctx.fill(FillRule::NonZero);
+                ctx.save();
+                ctx.begin_path();
+                ctx.rect(30.0, 20.0, 60.0, 60.0);
+                ctx.clip(FillRule::NonZero);
+                ctx.set_global_composite_operation(blend);
+                ctx.set_fill_shader(&dye);
+                disc(ctx, (55.7, 45.1, 20.4));
+                ctx.fill(FillRule::NonZero);
+                ctx.restore();
+            };
+            let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+            assert_eq!(bytes_apart(&held, &by_run), 0, "{name}: bytes apart");
+        }
+    }
+
+    /// A layer opened over a held fill draws it first: a disc held, then a
+    /// blurred rectangle across it, then a disc past both.
+    #[test]
+    fn a_layer_over_a_held_fill_draws_it_first() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            disc(ctx, (40.3, 40.6, 25.2));
+            ctx.fill(FillRule::NonZero);
+            ctx.set_filter_css("blur(2px)").expect("a filter");
+            ctx.set_fill_style_css("rgb(20 120 60)").expect("a colour");
+            ctx.fill_rect(30.0, 20.0, 50.0, 40.0);
+            ctx.set_filter_css("none").expect("no filter");
+            ctx.set_fill_shader(&ramp());
+            disc(ctx, (100.2, 100.5, 16.3));
+            ctx.fill(FillRule::NonZero);
+        };
+        let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+        assert_eq!(bytes_apart(&held, &by_run), 0, "bytes apart");
+    }
+
+    /// A run read back on the CPU over the page -- text under `multiply`,
+    /// see `layer::replayed_on_their_backdrop` -- reads the held fills it
+    /// lies over drawn.
+    #[test]
+    fn a_run_read_over_the_page_reads_the_held_fills_drawn() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        thread_local! {
+            static REGISTERED: std::cell::Cell<bool> =
+                const { std::cell::Cell::new(false) };
+        }
+        if !REGISTERED.replace(true) {
+            crate::font::FontLibrary::new()
+                .register_font_from_path(
+                    "HeldOswald",
+                    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+                )
+                .expect("a bundled face registers");
+        }
+        let scene = |ctx: &mut Context2D| {
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            disc(ctx, (40.3, 40.6, 25.2));
+            ctx.fill(FillRule::NonZero);
+            ctx.set_global_alpha(1.0);
+            ctx.set_global_composite_operation(BlendMode::Multiply);
+            ctx.set_fill_style_css("rgb(20 120 60)").expect("a colour");
+            assert!(ctx.set_font_css("40px HeldOswald"));
+            ctx.fill_text("Wq", 20.0, 60.0, None);
+            ctx.set_global_composite_operation(BlendMode::SourceOver);
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            disc(ctx, (100.2, 100.5, 16.3));
+            ctx.fill(FillRule::NonZero);
+        };
+        let ((held, _), (by_run, _)) = held_and_by_run(&scene);
+        assert_eq!(bytes_apart(&held, &by_run), 0, "bytes apart");
+    }
+
+    /// A page read, drawn on and read again, reads the fills held before
+    /// each read drawn: the playback draws what it holds as it ends.
+    #[test]
+    fn each_read_of_the_page_reads_the_held_fills_drawn() {
+        if !RenderingEngine::GPU.selectable() {
+            eprintln!("skipped: no GPU");
+            return;
+        }
+        let reads = |by_run: bool| {
+            PAGE_BATCH.set(!by_run);
+            let mut canvas = Canvas::new(SIDE, SIDE);
+            canvas.set_gpu(true);
+            let ctx = canvas.context();
+            ctx.set_global_alpha(0.6);
+            ctx.set_fill_shader(&ramp());
+            let read = |ctx: &mut Context2D| {
+                ctx.get_image_data(0.0, 0.0, SIDE, SIDE)
+                    .expect("pixels")
+                    .pixels()
+                    .to_vec()
+            };
+            disc(ctx, (40.3, 40.6, 25.2));
+            ctx.fill(FillRule::NonZero);
+            let first = read(ctx);
+            disc(ctx, (60.7, 55.1, 25.4));
+            ctx.fill(FillRule::NonZero);
+            let second = read(ctx);
+            PAGE_BATCH.set(true);
+            (first, second)
+        };
+        let ((first, second), (first_by_run, second_by_run)) =
+            (reads(false), reads(true));
+        assert_eq!(bytes_apart(&first, &first_by_run), 0, "the first read");
+        assert_eq!(bytes_apart(&second, &second_by_run), 0, "the second");
     }
 
     /// A draw meeting one held is drawn after it, over what it drew: two

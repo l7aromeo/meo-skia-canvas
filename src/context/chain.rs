@@ -17,7 +17,7 @@
 //! a density, a tile -- the layer is the device's own pixels and the result
 //! lands on them unresampled.
 
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, Color, Color4f, ColorFilter,
@@ -29,6 +29,7 @@ use skia_safe::{
     image::{CachingHint, RequiredProperties},
     image_filter::MapDirection,
     image_filters,
+    surface::ContentChangeMode,
 };
 
 #[cfg(any(feature = "metal", feature = "vulkan"))]
@@ -2703,29 +2704,26 @@ fn shadow_composed(
     sigma: (f32, f32),
     (colour, space): (Color4f, &ColorSpace),
     shadow_only: bool,
-) -> Option<Image> {
+) -> Option<Working> {
     let raster = to_raster(context, image)?;
     let floats = raster.image_info().with_color_type(ColorType::RGBAF32);
-    let on_floats = |draw: &dyn Fn(&SkCanvas)| {
-        let mut surface = started::raster(&floats, None, None)?;
-        clear_unless_zeroed(&mut surface);
-        draw(surface.canvas());
-        Some(surface.image_snapshot())
-    };
     // An image in floats: the raster itself where it already is them,
     // premultiplied, as an F32 page's layer is -- drawn onto a cleared
     // surface of its own kind it would come back as itself, each value
-    // plus nothing -- and drawn into floats otherwise.
-    let in_floats = |raster: &Image| match raster.color_type()
-        == ColorType::RGBAF32
+    // plus nothing -- and drawn into floats otherwise. Drawn with `Src`,
+    // which writes each pixel as the raster's own and so leaves nothing of
+    // a working surface's last use: onto a cleared one, `SrcOver` writes
+    // the same floats, each value plus zero.
+    let source = match raster.color_type() == ColorType::RGBAF32
         && raster.alpha_type() == AlphaType::Premul
     {
-        true => Some(raster.clone()),
-        false => on_floats(&|canvas| {
-            canvas.draw_image(raster, (0, 0), None);
-        }),
+        true => Floats::Own(raster.clone()),
+        false => Floats::Working(Working::drawn(&floats, true, |canvas| {
+            let mut whole = Paint::default();
+            whole.set_blend_mode(BlendMode::Src);
+            canvas.draw_image(&raster, (0, 0), Some(&whole));
+        })?),
     };
-    let source = in_floats(&raster)?;
     // What the shadow is cast from, in floats, for the tints and blurs
     // that read an image: the cast's alpha, black, or the source.
     let from = || match &cast {
@@ -2782,7 +2780,7 @@ fn shadow_composed(
     // 49,152 values and `s + d * (1 - sa)` missed 4,966; on x86 Skia picks
     // its stages at run time, fused or not as the processor allows, so no
     // one formula matches it there.
-    let composed = on_floats(&|canvas| {
+    Working::drawn(&floats, false, |canvas| {
         canvas.draw_image_with_sampling_options(
             &shadow,
             (offset.x, offset.y),
@@ -2790,10 +2788,100 @@ fn shadow_composed(
             None,
         );
         if !shadow_only {
-            canvas.draw_image(&source, (0, 0), None);
+            canvas.draw_image(&*source, (0, 0), None);
         }
-    })?;
-    Some(composed)
+    })
+}
+
+/// An image in floats a shadow is composed from: one it was handed, or one
+/// drawn on a working surface.
+enum Floats {
+    Own(Image),
+    Working(Working),
+}
+
+impl Deref for Floats {
+    type Target = Image;
+
+    fn deref(&self) -> &Image {
+        match self {
+            Self::Own(image) => image,
+            Self::Working(working) => working,
+        }
+    }
+}
+
+/// An image drawn on one of a shadow's working surfaces on the CPU -- see
+/// [`shadow_composed`] -- with the surface it was drawn on, which goes back
+/// to the playback's pool once the image has gone, for the next draw of its
+/// size and kind to take rather than make one -- see
+/// [`pool::keep_working`].
+///
+/// The image is let go before its surface is kept. Skia copies a raster
+/// surface's pixels before drawing on it again only while the image it last
+/// answered is held anywhere else (`SkSurface_Base::aboutToDraw`), so a
+/// surface taken back with none is drawn on as it stands, and an image
+/// cloned out of this one and still held when the surface is taken keeps
+/// its pixels, copied away from at that cost.
+struct Working {
+    /// `Some` until the drop takes it.
+    image: Option<Image>,
+    /// `Some` until the drop takes it.
+    surface: Option<Surface>,
+}
+
+impl Working {
+    /// What `draw` draws onto a working surface of `info`: one the open plane
+    /// scope keeps, what it held discarded, or one made afresh, which is
+    /// zeroed -- see [`clear_unless_zeroed`]. Where `covers`, `draw` writes
+    /// every pixel with `BlendMode::Src`, which leaves nothing of what a
+    /// kept one held; otherwise a kept one's bytes are zeroed first, so that
+    /// `draw` lands on what a fresh one holds.
+    fn drawn(
+        info: &ImageInfo,
+        covers: bool,
+        draw: impl FnOnce(&SkCanvas),
+    ) -> Option<Self> {
+        let mut surface = match pool::take_working(info) {
+            Some(mut kept) => {
+                kept.notify_content_will_change(ContentChangeMode::Discard);
+                if !covers {
+                    kept.peek_pixels()?.bytes_mut()?.fill(0);
+                }
+                kept
+            }
+            None => started::raster(info, None, None)?,
+        };
+        draw(surface.canvas());
+        debug_assert_eq!(
+            surface.canvas().save_count(),
+            1,
+            "a working surface's canvas left saved"
+        );
+        Some(Self {
+            image: Some(surface.image_snapshot()),
+            surface: Some(surface),
+        })
+    }
+}
+
+impl Deref for Working {
+    type Target = Image;
+
+    fn deref(&self) -> &Image {
+        // SAFETY: `image` is `Some` from `Working::drawn` until `drop` takes
+        // it, and nothing derefs a value being dropped.
+        self.image.as_ref().expect("a working surface's image")
+    }
+}
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        drop(self.image.take());
+        if let Some(surface) = self.surface.take() {
+            pool::keep_working(surface);
+        }
+    }
 }
 
 /// [`blurred_alpha_of`] `source`'s alpha, as [`alpha_floats`] reads it:

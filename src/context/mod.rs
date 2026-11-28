@@ -10229,8 +10229,8 @@ mod text_reach_tests {
     use super::{TEXT_REACHED, layer::KEEPS_TEXT_REACH};
     use crate::{
         node::typography::{
-            FONT_BOX_FLOOR, MATCH_IGNORES_STROKE, REACH_BOUND, REACH_INSET,
-            REACHED_FAMILIES, ReachBound, forget_laid_out,
+            FONT_BOX_FLOOR, HANDS_OVER, MATCH_IGNORES_STROKE, REACH_BOUND,
+            REACH_INSET, REACHED_FAMILIES, ReachBound, forget_laid_out,
         },
         prelude::*,
     };
@@ -10480,19 +10480,30 @@ mod text_reach_tests {
     }
 
     /// [`reached`] in each state a run is drawn in: laid out afresh for the
-    /// draw, as the first draw of it lays it out, and kept from draws before
-    /// -- see `Typesetter::laid_out` -- which lays it out with no paint:
-    /// `(state, reach)`.
+    /// draw, as its first draw lays it out; kept from the layout that draw
+    /// handed over; and kept from a layout of its own, made with no paint, as
+    /// a run is whose first draw's layout has gone -- see
+    /// `Typesetter::laid_out`: `(state, reach)`.
     fn reached_in_each_state(scene: &Scene) -> Vec<(&'static str, Rect)> {
-        crate::node::typography::forget_laid_out();
-        let fresh = reached(scene);
-        // Seen once, then kept: the third draw takes the kept run.
-        let _ = reached(scene);
-        let kept = reached(scene);
-        [("laid out afresh", fresh), ("kept", kept)]
-            .into_iter()
-            .filter_map(|(state, reach)| Some((state, reach?)))
-            .collect()
+        let drawn_thrice = || {
+            crate::node::typography::forget_laid_out();
+            let fresh = reached(scene);
+            // Seen once, then kept: the third draw takes the kept run.
+            let _ = reached(scene);
+            (fresh, reached(scene))
+        };
+        let (fresh, kept) = drawn_thrice();
+        HANDS_OVER.set(false);
+        let (_, own) = drawn_thrice();
+        HANDS_OVER.set(true);
+        [
+            ("laid out afresh", fresh),
+            ("kept from the first draw's layout", kept),
+            ("kept from a layout of its own", own),
+        ]
+        .into_iter()
+        .filter_map(|(state, reach)| Some((state, reach?)))
+        .collect()
     }
 
     /// How many device pixels the scene's text, drawn without its filter,
@@ -10991,21 +11002,100 @@ mod text_reach_tests {
         assert!(checked > 0, "Oswald is registered, so a font was checked");
     }
 
-    /// The reach of each of `scenes`, drawn in turn on fresh canvases that
-    /// share the runs they lay out -- see `Typesetting::typography` -- once
-    /// each pass: the first pass lays each run out afresh, the second keeps
-    /// it, and the third draws it from what the second kept. Bits, so that
-    /// equal means the same answer.
+    /// The reach of each of `scenes`, worked out afresh -- each drawn with
+    /// nothing kept or handed over before it -- then drawn in turn on fresh
+    /// canvases that share the runs they lay out -- see
+    /// `Typesetting::typography` -- once each pass: the first pass hands
+    /// each run's layout over, the second keeps it, and the third draws it
+    /// from what the second kept. Bits, so that equal means the same answer.
+    ///
+    /// Afresh one scene at a time, because a run kept from a layout handed
+    /// over keeps the blobs its first draw built -- see `FirstDraw` -- so a
+    /// pass of scenes sharing a run would answer from another scene's.
     fn reaches_over_passes(scenes: &[Scene]) -> [Vec<Option<[u32; 4]>>; 3] {
         let bits =
             |r: Rect| [r.left, r.top, r.right, r.bottom].map(f32::to_bits);
+        let fresh = scenes
+            .iter()
+            .map(|scene| {
+                forget_laid_out();
+                reached(scene).map(bits)
+            })
+            .collect();
         forget_laid_out();
-        [0, 1, 2].map(|_| {
+        let [_, kept, again] = [0, 1, 2].map(|_| {
             scenes
                 .iter()
                 .map(|scene| reached(scene).map(bits))
                 .collect()
-        })
+        });
+        [fresh, kept, again]
+    }
+
+    /// A run kept from the layout a draw in another stroke handed over
+    /// answers the reach of its own draw's stroke, and draws as a fresh
+    /// context draws it: what a run can ink is kept beside the blobs of
+    /// each paint -- see `PaintedBlobs::inks` -- which are found by the
+    /// whole paint, its stroke width with it. Through the public path: a
+    /// `strokeText` at a line width of 1 under a blur, then the same run
+    /// stroked at 12.
+    #[test]
+    fn a_run_kept_from_a_draw_in_another_stroke_answers_its_own_reach() {
+        const FAMILY: &str = "ReachHandedStroke";
+        const OSWALD: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf"
+        );
+        crate::FontLibrary::new()
+            .register_font_from_path(FAMILY, OSWALD)
+            .expect("a bundled face registers");
+        let bits =
+            |r: Rect| [r.left, r.top, r.right, r.bottom].map(f32::to_bits);
+        let blurred = || {
+            let mut canvas = Canvas::new(420.0, 140.0);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+            ctx.set_filter_css("blur(3px)").expect("a filter");
+            canvas
+        };
+        let stroked = |canvas: &mut Canvas, width: f32| {
+            let ctx = canvas.context();
+            ctx.clear_rect(0.0, 0.0, 420.0, 140.0);
+            ctx.set_line_width(width);
+            TEXT_REACHED.set(None);
+            ctx.stroke_text("Hamburgefonstiv AV", 20.0, 80.0, None);
+            let reach = TEXT_REACHED.get().map(bits);
+            let pixels = ctx
+                .get_image_data(0.0, 0.0, 420.0, 140.0)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec();
+            (reach, pixels)
+        };
+        forget_laid_out();
+        let wanted = stroked(&mut blurred(), 12.0);
+        let after_a_thin_stroke = |ignores_stroke: bool| {
+            forget_laid_out();
+            let mut canvas = blurred();
+            stroked(&mut canvas, 1.0);
+            MATCH_IGNORES_STROKE.set(ignores_stroke);
+            let kept = stroked(&mut canvas, 12.0);
+            MATCH_IGNORES_STROKE.set(false);
+            forget_laid_out();
+            kept
+        };
+        let kept = after_a_thin_stroke(false);
+        assert!(wanted.0.is_some(), "the draw answers a reach");
+        assert_eq!(
+            kept.0, wanted.0,
+            "the reach a fresh context's draw answers"
+        );
+        assert!(kept.1 == wanted.1, "and the pixels it draws");
+        // Found by the thin stroke's blobs, which only a layout handed over
+        // from the first draw holds, the reach is that stroke's.
+        let crossed = after_a_thin_stroke(true);
+        assert_ne!(crossed.0, wanted.0, "a reach for another stroke is caught");
+        assert!(crossed.1 != wanted.1, "and draws otherwise");
     }
 
     #[test]

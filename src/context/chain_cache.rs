@@ -32,7 +32,10 @@ use std::{
 };
 
 #[cfg(test)]
-use std::{cell::RefCell, sync::atomic::Ordering};
+use std::{
+    cell::{Cell, RefCell},
+    sync::atomic::Ordering,
+};
 
 use parking_lot::Mutex;
 use skia_safe::{Canvas as SkCanvas, IRect};
@@ -156,6 +159,11 @@ thread_local! {
     /// A cache of this thread's own, which [`get`] and [`put`] use in place
     /// of [`CHAINS`] while an [`OwnChainCache`] lives.
     static OWN: RefCell<Option<ChainCache>> = const { RefCell::new(None) };
+
+    /// How many results this thread has handed [`CHAINS`], filed or turned
+    /// away: a full cache turns a newcomer away -- see `Store::put` -- so
+    /// whether one is found there afterwards does not say where it went.
+    static SHARED_PUTS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// A cache of the calling thread's own for as long as the guard lives: for
@@ -206,6 +214,8 @@ pub(crate) fn put(key: Key, outcome: Outcome) {
     }) else {
         return;
     };
+    #[cfg(test)]
+    SHARED_PUTS.set(SHARED_PUTS.get() + 1);
     CHAINS.lock().put(key, outcome);
 }
 
@@ -451,13 +461,12 @@ mod tests {
             get(&key(&mine, &n32(), &identity, clip())).is_none(),
             "kept past its guard"
         );
+        let handed = SHARED_PUTS.get();
         put(key(&shared, &n32(), &identity, clip()), Outcome::blank(8));
-        assert!(
-            CHAINS
-                .lock()
-                .get(&key(&shared, &n32(), &identity, clip()))
-                .is_some(),
-            "not filed in the shared cache once the guard is gone"
+        assert_eq!(
+            SHARED_PUTS.get(),
+            handed + 1,
+            "not handed to the shared cache once the guard is gone"
         );
     }
 

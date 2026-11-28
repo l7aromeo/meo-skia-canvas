@@ -1894,10 +1894,13 @@ Over 600 generated gradients drawn as a rectangle, a rectangle off whole
 pixels, a triangle and a polygon, the GPU canvas parted from the CPU on 582
 pixels, every one within float noise of a half level or a stop. A path's
 anti-aliased edge is the CPU's too: the effect is masked by the CPU's coverage
-of the path, made for the draws that follow one another in one image at the
-same places as the effect's, so that a gradient fill's shadow and blur, which
-a chain makes from the CPU's edge, are those of the edge the canvas draws
-(#766). That coverage is cut where the page ends, as the CPU canvas's is, so
+of the path, drawn at the page's own pixels and copied for the draws that
+follow one another into one image at the same places as the effect's, so that
+a gradient fill's shadow and blur, which a chain makes from the CPU's edge,
+are those of the edge the canvas draws (#766). Drawn into that image moved by
+whole pixels, a disc's edge stood up to 8 levels from the CPU canvas's by
+where the image placed it, since Skia covers a curved edge by where it lies
+(#813). That coverage is cut where the page ends, as the CPU canvas's is, so
 a gradient path the page's edge cuts moves inside the page as it does on the
 CPU engine -- see the entry on a fill the page's edge cuts. Through
 Ganesh's coverage, a hard stop's edge stood up to 125 levels from the CPU
@@ -1927,9 +1930,13 @@ off at any distance from one -- see the llvmpipe and NVIDIA entries
 (`exact_composite`, #783). On the canvas's own surface the draws that do
 not meet share one snapshot of the pixels they cover and are each drawn over
 it; inside a layer each reads its destination through a blender. Against
-Ganesh's own composite on Metal that costs 1.03 to 1.07 times for 60 to 200
-fills, 1.31 times for 2,000 small ones, and 1.13 times for 200 cast with a
-shadow, which take a snapshot each. What stays apart: those ties; a byte
+Ganesh's own composite on Metal that costs 1.06 to 1.10 times for 60 to 200
+fills and 1.05 times for 2,000 small ones. Fills cast with a shadow share
+the snapshot as well, wherever no shadow meets a fill drawn before it
+(#845): 200 cast 42 pixels apart, where no shadow reaches another fill,
+cost 0.96 times, and 200 cast 29 apart, where each shadow reaches the fill
+before it and takes a snapshot of its own, 1.12 times. What stays apart:
+those ties; a byte
 along the edge of an opaque gradient the CPU makes on its float pipeline --
 one interpolated in a space other than the page's -- which keeps Ganesh's
 composite; a pixel whose coverage itself stands a level from
@@ -1958,6 +1965,18 @@ surface of its own, where the gradient is drawn as on the page
 (`layer::played_on_a_root`); and what a GPU canvas does with any colour -- `multiply` a level apart on 97 of 4,096
 pixels of the sweep, as for an image of the same pixels. Chrome's GPU canvas
 was not measured: headless Chrome drew it on SwiftShader.
+
+**A shadow a GPU canvas casts from a fill in a flat colour is made from the
+edge the GPU draws, not the CPU canvas's.** A gradient fill's shadow is made
+from the CPU's coverage of its path (#766, above). A fill in a colour has no
+such coverage, so its shadow takes Ganesh's edge, which covers a pixel in
+steps of one sample -- see the `msaa` option. Sixteen discs of radius 8.3,
+32 pixels apart on a 128 by 128 page over a fill, filled `rgb(250 200 0)`
+at a `globalAlpha` of 0.6 off the page and casting `rgb(0 0 0 / 0.5)` onto
+it, stood apart from the CPU canvas on Metal at 4 samples in 848 pixels by
+up to 27 levels with no blur, and in 5,360 by up to 3 under a `shadowBlur`
+of 4. Dyed by an eight-bit ramp instead, the same shadows stood apart in
+1,344 pixels by a level, from the half-precision composite above.
 
 **On a CPU canvas a COLR colour glyph's image composites at full alpha as
 the exact source-over rounded to nearest, on every architecture; Chrome's

@@ -3,7 +3,7 @@
 #[cfg(all(feature = "node-addon", debug_assertions))]
 use crate::context::typesetting::BUILDS;
 use crate::{
-    cache_map::{CacheMap, CacheSet},
+    cache_map::CacheMap,
     context::{
         State,
         blur_mask::{draws_on_cpu, on_gpu},
@@ -56,7 +56,7 @@ use std::{
     fmt,
     hash::{BuildHasher, RandomState},
     iter::{successors, zip},
-    ops::Range,
+    ops::{Deref, Range},
     rc::Rc,
     sync::{Arc, OnceLock},
 };
@@ -1173,15 +1173,85 @@ impl RunPaint {
     }
 }
 
-/// A run as one draw paints it: kept, or laid out for that draw alone --
-/// see [`Typesetter::laid_out`].
+/// A run as one draw paints it: kept, or laid out for that draw alone and
+/// handed over to the draw that keeps it -- see [`Typesetter::laid_out`].
 pub enum DrawnRun {
     /// Kept across draws -- see [`LaidOut`].
     Kept(Rc<LaidOut>),
     /// Laid out for the draw's paint and drawn by `Paragraph::paint`.
-    Plain(TextLayout),
+    Plain(FirstDraw<TextLayout>),
     /// Laid out for the draw's paint and drawn from its runs.
-    Runs(Box<LaidOut>),
+    Runs(FirstDraw<Box<LaidOut>>),
+}
+
+/// What a run's first draw laid out, handed over to the draw that keeps the
+/// run -- see [`Typesetter::laid_out`].
+pub enum Handed {
+    /// Laid out and drawn by `Paragraph::paint`, its runs not read yet.
+    Layout(TextLayout),
+    /// Laid out and drawn from its runs, as a kept run is.
+    Run(Box<LaidOut>),
+}
+
+impl From<TextLayout> for Handed {
+    fn from(layout: TextLayout) -> Self {
+        Self::Layout(layout)
+    }
+}
+
+impl From<Box<LaidOut>> for Handed {
+    fn from(run: Box<LaidOut>) -> Self {
+        Self::Run(run)
+    }
+}
+
+/// A run laid out for one draw, which hands its layout over to the thread's
+/// kept runs when the draw lets it go -- see [`LaidOutCache::hand_over`] --
+/// while the layouts handed over are being taken -- see [`Handing`].
+///
+/// A layout made for one paint serves every draw of the run: the paint is
+/// the paragraph's foreground and nothing its shaping reads -- see
+/// `Typesetter::layout_style` -- and a kept run is drawn from its runs in
+/// each draw's own paint, never by the paragraph's.
+pub struct FirstDraw<T: Into<Handed>> {
+    /// The layout: `Some` from [`FirstDraw::new`] until the drop takes it.
+    run: Option<T>,
+    /// What the run was laid out for, where its layout is to be handed
+    /// over: `None` while the thread hands nothing over, so that the layout
+    /// goes with its draw.
+    key: Option<LaidOutKey>,
+}
+
+impl<T: Into<Handed>> FirstDraw<T> {
+    fn new(typesetter: &Typesetter<'_>, run: T) -> Self {
+        let hands_over = LAID_OUT
+            .try_with(|cache| {
+                cache.try_borrow().is_ok_and(|cache| cache.handing.on())
+            })
+            .unwrap_or(false);
+        Self {
+            run: Some(run),
+            key: hands_over.then(|| LaidOutKey::of(typesetter)),
+        }
+    }
+}
+
+impl<T: Into<Handed>> Deref for FirstDraw<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: `run` is `Some` from `FirstDraw::new` until `drop` takes
+        // it, and nothing derefs a value being dropped.
+        self.run.as_ref().expect("a first draw's layout")
+    }
+}
+
+impl<T: Into<Handed>> Drop for FirstDraw<T> {
+    fn drop(&mut self) {
+        if let (Some(key), Some(run)) = (self.key.take(), self.run.take()) {
+            hand_over(key, run.into());
+        }
+    }
 }
 
 impl DrawnRun {
@@ -1362,6 +1432,20 @@ const LAID_OUT_BYTES: usize = 8 * 1024 * 1024;
 /// of tiny ones cannot grow the table without end.
 const LAID_OUT_COUNT: usize = 512;
 
+/// The most the layouts first draws hand over are estimated to hold
+/// together -- see [`LaidOutCache::hand_over`] -- past which the least
+/// recently handed over go.
+///
+/// As much as the kept runs may hold, so that a frame of new labels as many
+/// as the cache can keep is handed over whole, and each is kept on its
+/// second draw without being laid out again. A run drawn again after more
+/// first draws than that is laid out again, with no paint, to be kept. A
+/// layout is estimated as a kept run of as many glyphs as its text has
+/// characters, which one not yet read holds less than: no runs read back
+/// and no blobs. Nothing is held while the layouts handed over are not being
+/// taken -- see [`Handing`].
+const HANDED_OVER_BYTES: usize = LAID_OUT_BYTES;
+
 /// What a kept run was laid out from, compared against a typesetter: the
 /// context's typography as the context keeps it, not the copy an `oblique`
 /// lays out in -- see `Typesetter::kept` -- shared rather than copied and
@@ -1413,6 +1497,22 @@ impl LaidOutKey {
         )
     }
 
+    /// The bucket the run this key was taken for is filed under, in the
+    /// cache whose hash keys are `keys`: [`LaidOutKey::hash`] of its
+    /// typesetter.
+    fn hashed(&self, keys: &RandomState) -> u64 {
+        #[cfg(test)]
+        if COLLIDING.get() {
+            return 0;
+        }
+        Self::digest(
+            keys,
+            Rc::as_ptr(&self.typography),
+            &self.text,
+            f32::from_bits(self.width),
+        )
+    }
+
     /// The hash of a run's typography, text and width under `keys`.
     fn digest(
         keys: &RandomState,
@@ -1435,8 +1535,16 @@ struct LaidOutEntry {
     next: Option<LruId>,
 }
 
+/// A layout a first draw handed over, filed under its key's hash.
+struct HandedEntry {
+    key: LaidOutKey,
+    hash: u64,
+    handed: Handed,
+}
+
 /// The kept runs, the least recently drawn going first past
-/// [`LAID_OUT_BYTES`] or [`LAID_OUT_COUNT`].
+/// [`LAID_OUT_BYTES`] or [`LAID_OUT_COUNT`], and the layouts first draws
+/// handed over for keeping them.
 ///
 /// The runs are in an [`Lru`], so that drawing one, keeping one and letting
 /// the oldest go are each a constant amount of work and the bytes held are a
@@ -1459,11 +1567,143 @@ struct LaidOutCache {
     /// at most [`SEEN_ONCE`].
     by_hash: CacheMap<u64, LruId>,
     /// The hashes of runs drawn once and not kept, so that the second draw
-    /// of one keeps it -- see [`Typesetter::laid_out`].
-    seen: CacheSet<u64>,
+    /// of one keeps it -- see [`Typesetter::laid_out`] -- each with the
+    /// number of the first draw that drew it, so that the second can tell how
+    /// many first draws came between -- see [`Handing`].
+    seen: CacheMap<u64, u64>,
     /// [`LaidOutCache::seen`] in the order the hashes came, for letting the
     /// oldest go past [`SEEN_ONCE`].
     seen_order: VecDeque<u64>,
+    /// How many runs have been drawn once since the kept runs were last let
+    /// go, which numbers them in [`LaidOutCache::seen`].
+    first_draws: u64,
+    /// The layouts of runs drawn once, for the draw that keeps one to take
+    /// -- see [`LaidOutCache::hand_over`].
+    handed: Lru<HandedEntry>,
+    /// The layout handed over under each hash. One a hash: a layout handed
+    /// over under a hash another holds lets that one go, which costs the
+    /// run it was for only a layout when it is kept.
+    handed_by_hash: CacheMap<u64, LruId>,
+    /// Whether first draws hand their layouts over at all.
+    handing: Handing,
+}
+
+/// Whether the thread's first draws hand their layouts over, decided by
+/// whether the layouts handed over are being taken.
+///
+/// A layout never taken is let go when it leaves the table, long after its
+/// draw, and a paragraph freed then costs about twice what it costs freed at
+/// the end of its own draw. On a page of 3,000 strings each drawn once,
+/// sampled for 10 s at 1 ms on an Apple M4 Pro, the layouts handed over and
+/// freed as they left the table took 438 of the 6,961 samples, where the same
+/// paragraphs freed by their draws took 199, and the page was 7.5% slower
+/// with every layout handed over. A layout taken saves the draw that keeps
+/// its run a layout. So the hand-over runs only while at least
+/// [`HANDING_FLOOR`] in [`HANDING_WINDOW`] layouts leaving the table are
+/// taken.
+///
+/// While it is off, a first draw holds nothing and its layout goes with the
+/// draw. A draw that then keeps a run lays it out again, which a layout
+/// handed over would have spared it where the table could still have held
+/// that layout: where no more first draws came between than the table held
+/// when it last let one go. That is a miss, and [`HANDING_FLOOR`] misses in
+/// a window of first draws turn the hand-over back on. A run drawn again
+/// further apart than the table holds is no miss, since its layout would
+/// have gone untaken either way, and so a page of those leaves the hand-over
+/// off rather than turning it on and off again. It is on again whenever the
+/// kept runs are let go.
+struct Handing {
+    /// Whether first draws hand nothing over.
+    off: bool,
+    /// While on, the layouts that left the table taken since the last
+    /// decision; while off, the misses.
+    hits: usize,
+    /// While on, the layouts that left the table untaken since the last
+    /// decision; while off, the first draws.
+    passes: usize,
+    /// How many layouts the table held when it last let one go untaken, or
+    /// [`LAID_OUT_COUNT`] before it has: how many first draws apart a run's
+    /// two draws can be for its layout to be taken.
+    reach: usize,
+}
+
+impl Default for Handing {
+    fn default() -> Self {
+        Self {
+            off: false,
+            hits: 0,
+            passes: 0,
+            reach: LAID_OUT_COUNT,
+        }
+    }
+}
+
+/// How many layouts leave the table while the hand-over is on, or how many
+/// first draws pass while it is off, between decisions on whether it runs --
+/// see [`Handing`].
+///
+/// Large enough that the floor, one in eight, is eight takes, so that a few
+/// strings that happen to be drawn twice among many drawn once do not hold
+/// the hand-over on; small enough that finding a window of layouts untaken
+/// costs little: 64 freed cold, about 58 microseconds at the 0.9 each
+/// [`HANDING_FLOOR`] measures.
+const HANDING_WINDOW: usize = 64;
+
+/// The fewest layouts taken in a [`HANDING_WINDOW`] that keep the hand-over
+/// on, and the fewest misses in one that turn it back on: one in eight.
+///
+/// A layout never taken cost its first draw 0.9 microseconds, the 2.69 ms a
+/// page of 3,000 strings each drawn once lost with every layout handed over
+/// (36.47 ms a page against 33.78, release builds, Apple M4 Pro, 7 rounds).
+/// One taken saved the draw that kept its run 9.2 microseconds, kept-second's
+/// 11.29 against 2.06. The hand-over pays where more than 0.9 in 10.1 layouts
+/// are taken, about one in eleven, and one in eight is above that.
+const HANDING_FLOOR: usize = HANDING_WINDOW / 8;
+
+impl Handing {
+    fn on(&self) -> bool {
+        !self.off
+    }
+
+    /// A layout handed over has left the table, `taken` by the draw that
+    /// kept its run or let go untaken while the table held `held`. Whether
+    /// that turns the hand-over off.
+    fn left(&mut self, taken: bool, held: usize) -> bool {
+        match taken {
+            true => self.hits += 1,
+            false => {
+                self.passes += 1;
+                self.reach = held;
+            }
+        }
+        self.decided(self.hits + self.passes, false)
+    }
+
+    /// While the hand-over is off, a run has been drawn once, or kept from a
+    /// layout of its own: a `missed` hand-over.
+    fn passed(&mut self, missed: bool) {
+        match missed {
+            true => self.hits += 1,
+            false => self.passes += 1,
+        }
+        self.decided(self.passes, true);
+    }
+
+    /// Decides, once `counted` reaches [`HANDING_WINDOW`], whether the
+    /// hand-over runs: on where at least [`HANDING_FLOOR`] hits were
+    /// counted. Whether that turned it from on to off.
+    fn decided(&mut self, counted: usize, was_off: bool) -> bool {
+        if counted < HANDING_WINDOW {
+            return false;
+        }
+        let off = self.hits < HANDING_FLOOR;
+        *self = Self {
+            off,
+            reach: self.reach,
+            ..Self::default()
+        };
+        off && !was_off
+    }
 }
 
 /// How many runs drawn once a thread remembers, so that the next draw of
@@ -1541,25 +1781,109 @@ impl LaidOutCache {
         }
     }
 
-    /// Whether the run `typesetter` lays out has been drawn since the
-    /// thread's fonts last changed, and so is worth keeping; where not,
-    /// records that it has been now.
+    /// How many first draws ago, itself included, the run `typesetter` lays
+    /// out was first drawn, where it has been since the thread's fonts last
+    /// changed and so is worth keeping; where not, `None`, recording that it
+    /// has been drawn now.
     ///
     /// By hash alone: two runs whose hashes collide only mean the second is
     /// kept a draw early, since a kept run is found by its whole key.
-    fn admits(&mut self, typesetter: &Typesetter<'_>) -> bool {
+    fn admits(&mut self, typesetter: &Typesetter<'_>) -> Option<u64> {
         let hash = LaidOutKey::hash(typesetter, &self.keys);
-        if self.seen.contains(&hash) {
-            return true;
+        if let Some(at) = self.seen.get(&hash) {
+            return Some(self.first_draws - at);
         }
-        self.seen.insert(hash);
+        self.seen.insert(hash, self.first_draws);
+        self.first_draws += 1;
         self.seen_order.push_back(hash);
         if self.seen_order.len() > SEEN_ONCE
             && let Some(oldest) = self.seen_order.pop_front()
         {
             self.seen.remove(&oldest);
         }
-        false
+        if self.handing.off {
+            self.handing.passed(false);
+        }
+        None
+    }
+
+    /// Holds the layout a run's first draw made, for the draw that keeps
+    /// the run to take -- see [`Typesetter::laid_out`] -- letting a layout
+    /// handed over before it under the same hash go, and the least recently
+    /// handed over past [`HANDED_OVER_BYTES`] or [`LAID_OUT_COUNT`].
+    ///
+    /// Only for a run [`Self::admits`] keeps on its next draw, one drawn
+    /// since the fonts last changed: any other's would be held for a draw
+    /// that does not take it. Nothing while the hand-over is off -- see
+    /// [`Handing`].
+    fn hand_over(&mut self, key: LaidOutKey, handed: Handed) {
+        let hash = key.hashed(&self.keys);
+        if self.handing.off || !self.seen.contains_key(&hash) {
+            return;
+        }
+        if let Some(before) = self.handed_by_hash.remove(&hash) {
+            self.handed.remove(before);
+            self.left_handed(false, self.handing.reach);
+        }
+        let bytes = match &handed {
+            Handed::Layout(_) => laid_out_bytes(key.text.chars().count()),
+            Handed::Run(run) => run.bytes,
+        };
+        let id = self.handed.insert(HandedEntry { key, hash, handed }, bytes);
+        self.handed_by_hash.insert(hash, id);
+        while self.handed.len() > LAID_OUT_COUNT
+            || self.handed.bytes() > HANDED_OVER_BYTES
+        {
+            let Some(oldest) = self.handed.oldest() else {
+                break;
+            };
+            if let Some(gone) = self.handed.remove(oldest)
+                && self.handed_by_hash.get(&gone.hash) == Some(&oldest)
+            {
+                self.handed_by_hash.remove(&gone.hash);
+            }
+            self.left_handed(false, self.handed.len());
+        }
+    }
+
+    /// Counts a layout leaving the table, `taken` or not, with the table
+    /// holding `held` -- see [`Handing::left`] -- and lets every layout
+    /// still held go where that turns the hand-over off, since nothing takes
+    /// them while it is.
+    fn left_handed(&mut self, taken: bool, held: usize) {
+        if self.handing.left(taken, held) {
+            self.handed.clear();
+            self.handed_by_hash.clear();
+        }
+    }
+
+    /// The layout a first draw handed over for the run `typesetter` lays
+    /// out, first drawn `since` first draws ago, taken out; or `None` where
+    /// none was or it has gone, which, while nothing is handed over and the
+    /// table could have held it, counts as a miss -- see [`Handing`].
+    fn take_handed(
+        &mut self,
+        typesetter: &Typesetter<'_>,
+        since: u64,
+    ) -> Option<Handed> {
+        let taken = self.handed_for(typesetter);
+        let reachable = since <= self.handing.reach as u64;
+        match (&taken, self.handing.off) {
+            (Some(_), _) => self.left_handed(true, self.handing.reach),
+            (None, true) if reachable => self.handing.passed(true),
+            (None, _) => {}
+        }
+        taken
+    }
+
+    fn handed_for(&mut self, typesetter: &Typesetter<'_>) -> Option<Handed> {
+        let hash = LaidOutKey::hash(typesetter, &self.keys);
+        let id = *self.handed_by_hash.get(&hash)?;
+        if !self.handed.get(id)?.key.matches(typesetter) {
+            return None;
+        }
+        self.handed_by_hash.remove(&hash);
+        Some(self.handed.remove(id)?.handed)
     }
 
     fn clear(&mut self) {
@@ -1567,7 +1891,27 @@ impl LaidOutCache {
         self.by_hash.clear();
         self.seen.clear();
         self.seen_order.clear();
+        self.first_draws = 0;
+        self.handed.clear();
+        self.handed_by_hash.clear();
+        self.handing = Handing::default();
     }
+}
+
+/// Hands the layout a run's first draw made over to the thread's kept runs
+/// -- see [`LaidOutCache::hand_over`]. Nothing where they are gone, as they
+/// are while the thread's locals are torn down, or borrowed: a draw that
+/// lets its run go then only costs the keeping draw a layout.
+fn hand_over(key: LaidOutKey, handed: Handed) {
+    #[cfg(test)]
+    if !HANDS_OVER.get() {
+        return;
+    }
+    let _ = LAID_OUT.try_with(|cache| {
+        if let Ok(mut cache) = cache.try_borrow_mut() {
+            cache.hand_over(key, handed);
+        }
+    });
 }
 
 thread_local! {
@@ -1655,6 +1999,13 @@ thread_local! {
     /// Test-only: files every run under one hash, so that the chains a
     /// collision makes are walked and cut as a real one's would be.
     static COLLIDING: Cell<bool> = const { Cell::new(false) };
+    /// How many times [`Typesetter::layout`] has laid a run out on this
+    /// thread.
+    pub(crate) static LAYOUTS: Cell<usize> = const { Cell::new(0) };
+    /// Test-only: `false` keeps first draws from handing their layouts
+    /// over, so that a run is kept from a layout of its own, as the oracle
+    /// a handed-over one is held to.
+    pub(crate) static HANDS_OVER: Cell<bool> = const { Cell::new(true) };
     /// The family of each run the last [`RunPaint::reach`] on this thread
     /// measured, in order: which fonts a run of text resolved to.
     pub(crate) static REACHED_FAMILIES: RefCell<Vec<String>> =
@@ -1802,6 +2153,20 @@ pub(crate) fn laid_out_held() -> (usize, usize) {
         let cache = cache.borrow();
         (cache.runs.len(), cache.runs.bytes())
     })
+}
+
+/// How many layouts first draws have handed over on this thread and not yet
+/// had taken or let go -- see [`LaidOutCache::hand_over`].
+#[cfg(test)]
+pub(crate) fn handed_over_held() -> usize {
+    LAID_OUT.with(|cache| cache.borrow().handed.len())
+}
+
+/// Whether first draws on this thread hand their layouts over -- see
+/// [`Handing`].
+#[cfg(test)]
+fn handing_over() -> bool {
+    LAID_OUT.with(|cache| cache.borrow().handing.on())
 }
 
 /// One glyph run of a laid-out paragraph: the glyphs one font draws, where
@@ -3477,6 +3842,8 @@ impl<'a> Typesetter<'a> {
 
     /// Lays the run out, and works out how far it has to be squeezed.
     pub fn layout(&self, paint: &Paint) -> TextLayout {
+        #[cfg(test)]
+        LAYOUTS.set(LAYOUTS.get() + 1);
         let (paragraph, restyled) = self.restyled(&self.layout_style(paint));
 
         let offset = Point::new(
@@ -3630,24 +3997,46 @@ impl<'a> Typesetter<'a> {
     /// [`Typesetter::drawn_once`].
     ///
     /// Not on the first draw, because keeping a run costs more than drawing
-    /// it once: laid out with no paint, its runs read back and its blobs
-    /// built. A page of strings each drawn once took a fifth longer kept
-    /// than drawn plainly, and holds nothing anyone draws again.
+    /// it once: its runs read back and its blobs built. A page of strings
+    /// each drawn once took a fifth longer kept than drawn plainly, and
+    /// holds nothing anyone draws again.
+    ///
+    /// The draw that keeps a run keeps the layout its first draw made,
+    /// handed over when that draw let it go -- see [`FirstDraw`] -- and lays
+    /// the run out with no paint only where none was, because it has gone
+    /// past [`HANDED_OVER_BYTES`] or the thread hands nothing over -- see
+    /// [`Handing`].
     pub fn laid_out(&self) -> Option<Rc<LaidOut>> {
+        enum Found {
+            Kept(Rc<LaidOut>),
+            Once,
+            Keep(Option<Handed>),
+        }
         let found = LAID_OUT.with(|cache| {
             let mut cache = cache.borrow_mut();
-            let kept = cache.get(self);
-            kept.ok_or_else(|| cache.admits(self))
+            if let Some(kept) = cache.get(self) {
+                return Found::Kept(kept);
+            }
+            match cache.admits(self) {
+                Some(since) => Found::Keep(cache.take_handed(self, since)),
+                None => Found::Once,
+            }
         });
         match found {
-            Ok(kept) => Some(kept),
-            Err(false) => None,
-            Err(true) => {
+            Found::Kept(kept) => Some(kept),
+            Found::Once => None,
+            Found::Keep(handed) => {
                 // The opacity is the draw's, put in by `LaidOut::paint`.
-                let laid_out = Rc::new(LaidOut::new(
-                    self.layout(&Paint::default()),
-                    self.decoration(1.0),
-                ));
+                let laid_out = Rc::new(match handed {
+                    Some(Handed::Run(run)) => *run,
+                    Some(Handed::Layout(layout)) => {
+                        LaidOut::new(layout, self.decoration(1.0))
+                    }
+                    None => LaidOut::new(
+                        self.layout(&Paint::default()),
+                        self.decoration(1.0),
+                    ),
+                });
                 LAID_OUT.with(|cache| {
                     cache.borrow_mut().insert(self, laid_out.clone())
                 });
@@ -3679,7 +4068,8 @@ impl<'a> Typesetter<'a> {
     }
 
     /// The run laid out for one draw in `paint` on `canvas` and not kept, as
-    /// a run is drawn the first time: by `Paragraph::paint` where nothing
+    /// a run is drawn the first time, handing its layout over to the draw
+    /// that keeps it -- see [`FirstDraw`]: by `Paragraph::paint` where nothing
     /// needs its runs, and from its runs, lines between them, where it is
     /// decorated or `oblique`, where `canvas` may shear a run past what
     /// FreeType draws -- see [`may_draw_outlines`] -- or where `paint` draws
@@ -3690,21 +4080,25 @@ impl<'a> Typesetter<'a> {
             && !holds_colour_runs(&layout.paragraph)
             && glyph_draws(paint, canvas) == GlyphDraws::Whole;
         match (self.decoration(1.0), self.oblique) {
-            (None, None) if plain => DrawnRun::Plain(layout),
-            (decoration, _) => {
-                DrawnRun::Runs(Box::new(LaidOut::new(layout, decoration)))
+            (None, None) if plain => {
+                DrawnRun::Plain(FirstDraw::new(self, layout))
             }
+            (decoration, _) => DrawnRun::Runs(FirstDraw::new(
+                self,
+                Box::new(LaidOut::new(layout, decoration)),
+            )),
         }
     }
 
     /// The run laid out for one draw in `paint` and not kept, drawn from its
     /// runs whatever it is, which draws what `Paragraph::paint` does and
-    /// answers what it can ink -- see [`DrawnRun::paint`].
+    /// answers what it can ink -- see [`DrawnRun::paint`] -- and handed over
+    /// to the draw that keeps it, as [`Self::drawn_once`]'s is.
     pub fn drawn_as_runs(&self, paint: &Paint) -> DrawnRun {
-        DrawnRun::Runs(Box::new(LaidOut::new(
-            self.layout(paint),
-            self.decoration(1.0),
-        )))
+        DrawnRun::Runs(FirstDraw::new(
+            self,
+            Box::new(LaidOut::new(self.layout(paint), self.decoration(1.0))),
+        ))
     }
 
     /// The run's advance -- every glyph and space, with the letter spacing
@@ -6693,15 +7087,18 @@ mod hinting {
 #[cfg(test)]
 mod laid_out {
     use super::{
-        COLLIDING, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, LaidOutCache,
-        LaidOutKey, SEEN_ONCE, forget_laid_out, laid_out_bytes, laid_out_held,
+        COLLIDING, DrawnRun, HANDED_OVER_BYTES, HANDING_FLOOR, HANDING_WINDOW,
+        HANDS_OVER, Handing, LAID_OUT, LAID_OUT_BYTES, LAID_OUT_COUNT, LAYOUTS,
+        LaidOutCache, LaidOutKey, SEEN_ONCE, Typesetter, forget_laid_out,
+        handed_over_held, handing_over, laid_out_bytes, laid_out_held,
     };
     use crate::{
         Canvas, Context2D, FontLibrary as Library, GradientInterpolation,
-        GradientStop, RgbaLinear, Shader, geometry::Point,
-        node::font_library::FontLibrary,
+        GradientStop, RgbaLinear, Shader, TextDirection, geometry::Point,
+        node::font_library::FontLibrary, started,
     };
-    use std::ptr;
+    use skia_safe::Paint;
+    use std::{cell::RefCell, ptr, sync::mpsc, thread};
 
     const OSWALD: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -7225,6 +7622,599 @@ mod laid_out {
         let again = drawn_once(&mut canvas, fill(TEXT, None));
         assert_eq!(laid_out_held().0, 1, "and is kept when drawn again");
         assert!(again == wanted, "drawn the same either way");
+    }
+
+    /// How many times `draw` lays a run out.
+    fn layouts(draw: impl FnOnce()) -> usize {
+        let before = LAYOUTS.get();
+        draw();
+        LAYOUTS.get() - before
+    }
+
+    /// What `second` draws on a canvas given `setup` after `first`, each
+    /// once, with first draws handing their layouts over where `hands_over`
+    /// says, and how many times the second lays a run out.
+    fn second_draw(
+        family: &str,
+        setup: impl Fn(&mut Context2D),
+        first: impl Fn(&mut Context2D),
+        second: impl Fn(&mut Context2D),
+        hands_over: bool,
+    ) -> (Vec<u8>, usize) {
+        forget_laid_out();
+        HANDS_OVER.set(hands_over);
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&format!("40px {family}")));
+        setup(canvas.context());
+        drawn_once(&mut canvas, first);
+        let mut pixels = vec![];
+        let laid = layouts(|| pixels = drawn_once(&mut canvas, second));
+        HANDS_OVER.set(true);
+        (pixels, laid)
+    }
+
+    /// A run kept on its second draw from the layout its first draw handed
+    /// over draws what one kept from a layout of its own draws, and what a
+    /// fresh context draws, across what decides how a first draw lays a run
+    /// out: by `Paragraph::paint` or from its runs, lines, an `oblique`
+    /// shear, the direction, a shadow pass, a filter chain, a stroke, a
+    /// squeeze, and another paint on the first draw.
+    #[test]
+    fn a_run_kept_from_a_handed_over_layout_draws_as_one_laid_out_again() {
+        const FAMILY: &str = "LaidOutHandedIdentity";
+        register(FAMILY, OSWALD);
+        let fills: Setup =
+            Box::new(|ctx| ctx.set_fill_style_css("#203040").expect("c"));
+        let cases: [(&str, Setup); 9] = [
+            ("plain", Box::new(|_| {})),
+            (
+                "underlined",
+                Box::new(|ctx| {
+                    ctx.set_text_decoration_css("underline").expect("d")
+                }),
+            ),
+            (
+                "oblique",
+                Box::new(move |ctx| {
+                    assert!(
+                        ctx.set_font_css(&format!(
+                            "oblique 10deg 40px {FAMILY}"
+                        ))
+                    )
+                }),
+            ),
+            (
+                "right to left",
+                Box::new(|ctx| ctx.set_direction(TextDirection::RightToLeft)),
+            ),
+            (
+                "shadowed",
+                Box::new(|ctx| {
+                    ctx.set_shadow_color_css("rgba(200, 0, 0, 0.7)")
+                        .expect("s");
+                    ctx.set_shadow_blur(4.0);
+                    ctx.set_shadow_offset(3.0, 5.0);
+                }),
+            ),
+            (
+                "through a filter chain",
+                Box::new(|ctx| {
+                    ctx.set_filter_css("drop-shadow(2px 3px 2px blue)")
+                        .expect("f")
+                }),
+            ),
+            (
+                "letter spaced",
+                Box::new(|ctx| ctx.set_letter_spacing_css("3px").expect("l")),
+            ),
+            ("squeezed", Box::new(|_| {})),
+            ("another paint first", Box::new(|_| {})),
+        ];
+        for (name, setup) in &cases {
+            let setup = |ctx: &mut Context2D| {
+                fills(ctx);
+                setup(ctx);
+            };
+            let width = (*name == "squeezed").then_some(200.0);
+            let draw = fill(TEXT, width);
+            let first = |ctx: &mut Context2D| {
+                if *name == "another paint first" {
+                    ctx.set_fill_style_css("orange").expect("c");
+                    draw(ctx);
+                    fills(ctx);
+                } else {
+                    draw(ctx);
+                }
+            };
+            let (handed, handed_layouts) =
+                second_draw(FAMILY, setup, first, draw, true);
+            let (own, own_layouts) =
+                second_draw(FAMILY, setup, first, draw, false);
+            let wanted = fresh(
+                |ctx| {
+                    assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+                    setup(ctx);
+                },
+                draw,
+            );
+            assert!(own_layouts > 0, "{name}: kept from a layout of its own");
+            assert_eq!(
+                handed_layouts, 0,
+                "{name}: kept from the one handed over"
+            );
+            assert!(handed == own, "{name}: drawn alike either way");
+            assert!(handed == wanted, "{name}: as a fresh context draws it");
+        }
+        let stroked =
+            |ctx: &mut Context2D| ctx.stroke_text(TEXT, 10.0, 70.0, None);
+        let (handed, handed_layouts) =
+            second_draw(FAMILY, |_| {}, stroked, stroked, true);
+        let (own, _) = second_draw(FAMILY, |_| {}, stroked, stroked, false);
+        assert_eq!(handed_layouts, 0, "stroked: kept from the one handed over");
+        assert!(handed == own, "stroked: drawn alike either way");
+    }
+
+    /// A layout is handed over only to a draw of the run it was laid out
+    /// for: a font, a setting or the text changed between the first draw
+    /// and the next is another run, laid out for itself, and a font
+    /// registered between them lets every layout handed over go.
+    #[test]
+    fn a_handed_over_layout_is_not_taken_by_another_run() {
+        const FAMILY: &str = "LaidOutHandedChange";
+        register(FAMILY, OSWALD);
+        let changes: [(&str, Setup); 4] = [
+            (
+                "font",
+                Box::new(|ctx| {
+                    assert!(ctx.set_font_css(&format!("bold 44px {FAMILY}")))
+                }),
+            ),
+            (
+                "setting",
+                Box::new(|ctx| ctx.set_letter_spacing_css("4px").expect("l")),
+            ),
+            (
+                "decoration",
+                Box::new(|ctx| {
+                    ctx.set_text_decoration_css("line-through").expect("d")
+                }),
+            ),
+            ("registered face", Box::new(|_| register(FAMILY, AMSTELVAR))),
+        ];
+        // Again with every run filed under one hash, so that the layout is
+        // found by its whole key and not by its hash alone.
+        for (colliding, (name, change)) in
+            [false, true].into_iter().flat_map(|colliding| {
+                changes.iter().map(move |case| (colliding, case))
+            })
+        {
+            COLLIDING.set(colliding);
+            register(FAMILY, OSWALD);
+            forget_laid_out();
+            let mut canvas = Canvas::new(400.0, 120.0);
+            assert!(canvas.context().set_font_css(&format!("40px {FAMILY}")));
+            let before = drawn_once(&mut canvas, fill(TEXT, None));
+            assert_eq!(
+                handed_over_held(),
+                1,
+                "{name}, colliding {colliding}: the first draw hands over"
+            );
+            change(canvas.context());
+            let mut after = vec![];
+            let laid =
+                layouts(|| after = drawn_once(&mut canvas, fill(TEXT, None)));
+            assert!(
+                laid > 0,
+                "{name}, colliding {colliding}: laid out for itself"
+            );
+            // A run whose hash collides with one drawn before is kept a draw
+            // early -- see `LaidOutCache::admits` -- from a layout of its own,
+            // unless a face registered between them let every run drawn once
+            // go.
+            assert_eq!(
+                kept(TEXT),
+                colliding && *name != "registered face",
+                "{name}, colliding {colliding}: drawn once, or kept early"
+            );
+            let wanted = fresh(
+                |ctx| {
+                    assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+                    change(ctx);
+                },
+                fill(TEXT, None),
+            );
+            assert_ne!(
+                after, before,
+                "{name}, colliding {colliding}: the change shows"
+            );
+            assert!(
+                after == wanted,
+                "{name}, colliding {colliding}: drawn as a fresh context draws it"
+            );
+        }
+        COLLIDING.set(false);
+        register(FAMILY, OSWALD);
+    }
+
+    /// Past the count, the layouts handed over least recently go, and a run
+    /// whose layout has gone is laid out again to be kept.
+    #[test]
+    fn past_the_count_the_layouts_handed_over_least_recently_go() {
+        const FAMILY: &str = "LaidOutHandedCount";
+        register(FAMILY, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&format!("10px {FAMILY}")));
+        let texts: Vec<&'static str> = (0..=LAID_OUT_COUNT)
+            .map(|at| &*format!("{at}").leak())
+            .collect();
+        for text in &texts {
+            canvas.context().fill_text(text, 0.0, 20.0, None);
+        }
+        assert_eq!(handed_over_held(), LAID_OUT_COUNT, "held to the count");
+        let oldest =
+            layouts(|| canvas.context().fill_text(texts[0], 0.0, 20.0, None));
+        assert!(
+            oldest > 0,
+            "the first handed over has gone, and is laid out"
+        );
+        let newest = layouts(|| {
+            canvas
+                .context()
+                .fill_text(texts[LAID_OUT_COUNT], 0.0, 20.0, None)
+        });
+        assert_eq!(newest, 0, "the last is kept from its layout");
+    }
+
+    /// A run laid out for a draw that did not ask the kept runs for it first
+    /// is one they would not keep on its next draw, and hands nothing over.
+    #[test]
+    fn a_run_the_kept_runs_were_not_asked_for_hands_nothing_over() {
+        const FAMILY: &str = "LaidOutHandedUnasked";
+        register(FAMILY, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        let ctx = canvas.context();
+        assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+        let typesetter = Typesetter::new(&ctx.inner.state, TEXT, None);
+        let mut surface =
+            started::raster_n32_premul((400, 120)).expect("a surface");
+        drop(typesetter.drawn_once(&Paint::default(), surface.canvas()));
+        assert_eq!(handed_over_held(), 0, "nothing handed over");
+        assert!(typesetter.laid_out().is_none(), "and the run drawn once");
+        drop(typesetter.drawn_once(&Paint::default(), surface.canvas()));
+        assert_eq!(handed_over_held(), 1, "which hands over");
+    }
+
+    thread_local! {
+        /// A first draw's run, held to be let go as the thread ends.
+        static HELD: RefCell<Option<HeldToTheEnd>> = const { RefCell::new(None) };
+    }
+
+    /// A canvas and a first draw's run let go as their thread's locals are
+    /// torn down, saying whether the kept runs had gone by then.
+    struct HeldToTheEnd {
+        canvas: Option<Canvas>,
+        run: Option<DrawnRun>,
+        gone: mpsc::Sender<bool>,
+    }
+
+    impl Drop for HeldToTheEnd {
+        fn drop(&mut self) {
+            let _ = self.gone.send(LAID_OUT.try_with(|_| ()).is_err());
+            self.run.take();
+            self.canvas.take();
+        }
+    }
+
+    /// A run laid out for one draw and let go after the thread's kept runs
+    /// are torn down hands nothing over, and the thread ends as it would.
+    #[test]
+    fn a_first_draw_let_go_as_its_thread_ends_hands_nothing_over() {
+        const FAMILY: &str = "LaidOutHandedThread";
+        register(FAMILY, OSWALD);
+        let (gone, went) = mpsc::channel();
+        let ended = thread::spawn(move || {
+            // Held first, so that its locals are torn down after the kept
+            // runs': they go in the reverse of the order they were made.
+            HELD.with(|_| {});
+            let mut canvas = Canvas::new(400.0, 120.0);
+            let ctx = canvas.context();
+            assert!(ctx.set_font_css(&format!("40px {FAMILY}")));
+            ctx.fill_text(TEXT, 10.0, 70.0, None);
+            let typesetter =
+                Typesetter::new(&ctx.inner.state, "Handgloves", None);
+            assert!(typesetter.laid_out().is_none(), "a run drawn once");
+            let mut surface =
+                started::raster_n32_premul((400, 120)).expect("a surface");
+            let run =
+                typesetter.drawn_once(&Paint::default(), surface.canvas());
+            HELD.with(|held| {
+                *held.borrow_mut() = Some(HeldToTheEnd {
+                    canvas: Some(canvas),
+                    run: Some(run),
+                    gone,
+                })
+            });
+        })
+        .join();
+        assert!(ended.is_ok(), "the thread ends without a panic");
+        assert_eq!(
+            went.recv().ok(),
+            Some(true),
+            "after the kept runs had gone"
+        );
+    }
+
+    /// The draw that keeps a run builds it from the layout its first draw
+    /// made, for that draw's paint, rather than laying the text out again.
+    #[test]
+    fn the_draw_that_keeps_a_run_lays_out_nothing() {
+        const FAMILY: &str = "LaidOutHandedOver";
+        register(FAMILY, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&format!("40px {FAMILY}")));
+        let first = layouts(|| {
+            drawn_once(&mut canvas, fill(TEXT, None));
+        });
+        assert!(
+            first > 0,
+            "a first draw lays the run out, or this counts nothing"
+        );
+        let second = layouts(|| {
+            drawn_once(&mut canvas, fill(TEXT, None));
+        });
+        assert!(kept(TEXT), "the second draw keeps the run");
+        assert_eq!(second, 0, "and lays nothing out to keep it");
+    }
+
+    /// A canvas in a family of its own, for drawing many strings small, on a
+    /// thread whose kept runs have just been let go.
+    fn small_canvas(family: &str) -> Canvas {
+        register(family, OSWALD);
+        forget_laid_out();
+        let mut canvas = Canvas::new(400.0, 120.0);
+        assert!(canvas.context().set_font_css(&format!("10px {family}")));
+        canvas
+    }
+
+    /// Draws each of `texts` once.
+    fn each_once<'a>(
+        canvas: &mut Canvas,
+        texts: impl IntoIterator<Item = &'a String>,
+    ) {
+        for text in texts {
+            canvas.context().fill_text(text, 0.0, 20.0, None);
+        }
+    }
+
+    /// `count` strings no draw since the kept runs were let go has drawn,
+    /// told apart by `tag`. Short, at most six characters, so that the
+    /// table of layouts handed over is held to [`LAID_OUT_COUNT`] rather
+    /// than to its bytes.
+    fn never_drawn(tag: char, count: usize) -> Vec<String> {
+        assert!(count <= 100_000, "five digits at most");
+        (0..count).map(|at| format!("{tag}{at}")).collect()
+    }
+
+    /// A thread drawing strings once and never again stops handing their
+    /// layouts over once a window of them has left the table untaken, and
+    /// lets go of the layouts it held.
+    #[test]
+    fn a_thread_drawing_strings_only_once_stops_handing_layouts_over() {
+        let mut canvas = small_canvas("LaidOutHandingOff");
+        let texts = never_drawn('o', LAID_OUT_COUNT + HANDING_WINDOW + 1);
+        let (last, rest) = texts.split_last().expect("strings");
+        let (closing, before) = rest.split_last().expect("strings");
+        each_once(&mut canvas, before);
+        assert!(handing_over(), "a window short of one: still handing over");
+        assert_eq!(handed_over_held(), LAID_OUT_COUNT, "and held to the count");
+        each_once(&mut canvas, [closing]);
+        assert!(!handing_over(), "a window untaken: off");
+        assert_eq!(handed_over_held(), 0, "and what was held is let go");
+        each_once(&mut canvas, [last]);
+        assert_eq!(
+            handed_over_held(),
+            0,
+            "a first draw then hands nothing over"
+        );
+    }
+
+    /// Strings drawn once until the hand-over is off, on `canvas`.
+    fn handing_off(canvas: &mut Canvas) {
+        each_once(canvas, &never_drawn('o', LAID_OUT_COUNT + HANDING_WINDOW));
+        assert!(!handing_over(), "off, as strings drawn only once turn it");
+    }
+
+    /// A first draw's run let go after the hand-over went off hands nothing
+    /// over, though the hand-over was on when the run was laid out.
+    #[test]
+    fn a_first_draw_let_go_after_the_hand_over_went_off_hands_nothing_over() {
+        let mut canvas = small_canvas("LaidOutHandingLate");
+        let ctx = canvas.context();
+        let typesetter = Typesetter::new(&ctx.inner.state, "held", None);
+        assert!(typesetter.laid_out().is_none(), "a run drawn once");
+        let mut surface =
+            started::raster_n32_premul((400, 120)).expect("a surface");
+        let held = typesetter.drawn_once(&Paint::default(), surface.canvas());
+        drop(typesetter);
+        handing_off(&mut canvas);
+        drop(held);
+        assert_eq!(handed_over_held(), 0, "nothing handed over");
+    }
+
+    /// With the hand-over off, a run drawn twice is laid out again to be
+    /// kept, and once that has happened to enough runs in a window of first
+    /// draws the hand-over is on again.
+    #[test]
+    fn the_hand_over_resumes_once_runs_are_laid_out_again_to_be_kept() {
+        let mut canvas = small_canvas("LaidOutHandingBack");
+        handing_off(&mut canvas);
+        let twice = never_drawn('t', HANDING_FLOOR);
+        each_once(&mut canvas, &twice);
+        let again = layouts(|| each_once(&mut canvas, &twice));
+        assert_eq!(again, HANDING_FLOOR, "each laid out again to be kept");
+        let filler = never_drawn('f', HANDING_WINDOW - HANDING_FLOOR);
+        let (closing, before) = filler.split_last().expect("strings");
+        each_once(&mut canvas, before);
+        assert!(
+            !handing_over(),
+            "a first draw short of the window: still off"
+        );
+        each_once(&mut canvas, [closing]);
+        assert!(handing_over(), "the window's misses turn it back on");
+        let after = vec!["after".to_string()];
+        each_once(&mut canvas, &after);
+        let kept_again = layouts(|| each_once(&mut canvas, &after));
+        assert_eq!(kept_again, 0, "and a run is kept from its first layout");
+    }
+
+    /// Runs drawn twice further apart than the table can hold are no
+    /// misses: a page of them turns the hand-over off once and leaves it
+    /// off, rather than turning it on and off again. Once for strings short
+    /// enough that the table is held to its count, and once for strings long
+    /// enough that it is held to its bytes, below the count.
+    #[test]
+    fn runs_drawn_again_beyond_the_table_leave_the_hand_over_off() {
+        fn short(at: usize) -> String {
+            format!("s{at}")
+        }
+        fn long(at: usize) -> String {
+            format!("{at:05} with enough after it")
+        }
+        let held = HANDED_OVER_BYTES / laid_out_bytes(long(0).chars().count());
+        assert!(held < LAID_OUT_COUNT, "the long strings are held to bytes");
+        let cases = [
+            ("short", short as fn(usize) -> String, LAID_OUT_COUNT),
+            ("long", long, held),
+        ];
+        for (name, text, held) in cases {
+            let apart = held + 1;
+            let mut canvas = small_canvas("LaidOutHandingSettles");
+            let texts: Vec<String> =
+                (0..6 * HANDING_WINDOW + apart).map(text).collect();
+            let mut states = Vec::new();
+            for (at, text) in texts.iter().enumerate() {
+                each_once(&mut canvas, [text]);
+                if let Some(earlier) = at.checked_sub(apart) {
+                    each_once(&mut canvas, [&texts[earlier]]);
+                }
+                states.push(handing_over());
+            }
+            let turns =
+                states.windows(2).filter(|pair| pair[0] != pair[1]).count();
+            assert_eq!(turns, 1, "{name}: turned off once and never on again");
+            assert!(!handing_over(), "{name}: and off at the end");
+        }
+    }
+
+    /// A thread drawing each string twice keeps handing layouts over through
+    /// many windows of them, each second draw laying nothing out.
+    #[test]
+    fn a_thread_drawing_each_string_twice_keeps_handing_layouts_over() {
+        const PAGE: usize = 200;
+        let mut canvas = small_canvas("LaidOutHandingOn");
+        for (page, tag) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
+            let texts = never_drawn(tag, PAGE);
+            each_once(&mut canvas, &texts);
+            let second = layouts(|| each_once(&mut canvas, &texts));
+            assert_eq!(second, 0, "page {page}: kept from the first layouts");
+        }
+        assert!(handing_over(), "still on after {} first draws", 4 * PAGE);
+    }
+
+    /// Half the strings drawn a second time soon after the first, the rest
+    /// once: past the table filling, half the layouts leave it taken, which
+    /// is above the floor, and the hand-over stays on.
+    #[test]
+    fn a_thread_drawing_half_its_strings_twice_keeps_handing_layouts_over() {
+        const CHUNK: usize = 100;
+        let mut canvas = small_canvas("LaidOutHandingHalf");
+        let texts = never_drawn('h', 20 * CHUNK);
+        let mut laid_again = 0;
+        for chunk in texts.chunks(CHUNK) {
+            each_once(&mut canvas, chunk);
+            laid_again +=
+                layouts(|| each_once(&mut canvas, &chunk[..CHUNK / 2]));
+        }
+        assert!(handing_over(), "on after {} first draws", texts.len());
+        assert_eq!(
+            laid_again, 0,
+            "every second draw kept from its first layout"
+        );
+    }
+
+    /// A page drawn with the hand-over off reads as the same page drawn
+    /// with it on: what a thread hands over decides what is laid out, never
+    /// what is drawn.
+    #[test]
+    fn a_page_reads_alike_with_layouts_handed_over_or_not() {
+        let page = |canvas: &mut Canvas| {
+            let ctx = canvas.context();
+            ctx.clear_rect(0.0, 0.0, 400.0, 120.0);
+            for (at, text) in [
+                "Hamburgefonstiv",
+                "AV Wa",
+                "fifty",
+                "AV Wa",
+                "fifty",
+                "office",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                ctx.fill_text(
+                    text,
+                    3.25 + 31.5 * at as f32,
+                    20.0 + 15.5 * at as f32,
+                    None,
+                );
+            }
+            ctx.get_image_data(0.0, 0.0, 400.0, 120.0)
+                .expect("the canvas reads back")
+                .pixels()
+                .to_vec()
+        };
+        let mut canvas = small_canvas("LaidOutHandingAlike");
+        assert!(handing_over());
+        let (on_first, on_again) = (page(&mut canvas), page(&mut canvas));
+        let mut canvas = small_canvas("LaidOutHandingAlike");
+        handing_off(&mut canvas);
+        assert_eq!(handed_over_held(), 0);
+        let (off_first, off_again) = (page(&mut canvas), page(&mut canvas));
+        assert!(off_first == on_first, "a first page alike");
+        assert!(off_again == on_again, "a page of kept runs alike");
+        assert!(on_again == on_first, "and kept runs draw as first draws do");
+    }
+
+    /// The hand-over stays on through a window with at least the floor of
+    /// layouts taken and goes off with one fewer; while off, it comes back
+    /// with at least the floor of misses in a window of first draws.
+    #[test]
+    fn the_hand_over_is_decided_by_a_window_against_the_floor() {
+        let mut handing = Handing::default();
+        let window = |handing: &mut Handing, taken: usize| {
+            (0..HANDING_WINDOW)
+                .filter(|at| handing.left(*at < taken, LAID_OUT_COUNT))
+                .count()
+        };
+        assert_eq!(window(&mut handing, HANDING_FLOOR), 0, "the floor: on");
+        assert!(handing.on());
+        assert_eq!(
+            window(&mut handing, HANDING_FLOOR - 1),
+            1,
+            "one fewer: off"
+        );
+        assert!(!handing.on());
+        let first_draws = |handing: &mut Handing, missed: usize| {
+            (0..missed).for_each(|_| handing.passed(true));
+            (0..HANDING_WINDOW).for_each(|_| handing.passed(false));
+        };
+        first_draws(&mut handing, HANDING_FLOOR - 1);
+        assert!(!handing.on(), "one miss short of the floor: still off");
+        first_draws(&mut handing, HANDING_FLOOR);
+        assert!(handing.on(), "the floor of misses: on again");
     }
 
     #[test]

@@ -610,6 +610,10 @@ thread_local! {
     /// off, every run takes the GPU's own route, the reference the bytes a
     /// batch leaves beside its runs are held to.
     pub(crate) static BACKDROP_ROUTE: Cell<bool> = const { Cell::new(true) };
+    /// Whether [`play_entries`] holds gradient draws for one snapshot across
+    /// the page's runs on this thread: off, each run's are flushed as it
+    /// ends, the reference the bytes a page-long batch leaves are held to.
+    pub(crate) static PAGE_BATCH: Cell<bool> = const { Cell::new(true) };
     /// Whether [`played_on_a_root`] plays a layer's entries on a surface of
     /// their own on this thread: off, every layer's entries play inside it,
     /// where their runs are drawn by the GPU.
@@ -3510,7 +3514,7 @@ struct Slot {
     image: Image,
     at: IPoint,
     /// The CPU's coverage of each path in the atlas, at the same slots as
-    /// `image` -- see [`draw_coverage`]. `None` where it could not be made,
+    /// `image` -- see [`DeviceCoverage`]. `None` where it could not be made,
     /// and the path then makes its own -- see [`coverage_image`].
     mask: Option<Image>,
 }
@@ -3525,6 +3529,19 @@ struct Slot {
 struct Found {
     effect: Option<Exact>,
     slot: Option<Slot>,
+    /// For a path wider than the effect's atlas, where the run's alpha atlas
+    /// holds its coverage.
+    wide: Option<WideSlot>,
+}
+
+/// Where the alpha atlas of a run's paths too wide for its effect atlas
+/// holds a path's coverage: `at`, in `mask`, holds the device pixel one up
+/// and one left of the path's `area`, as a [`Slot`]'s does. Such a path
+/// takes the effect itself, so only its coverage needs a place.
+#[derive(Clone)]
+struct WideSlot {
+    mask: Image,
+    at: IPoint,
 }
 
 /// How far an atlas slot reaches past the path's area on every side.
@@ -3537,13 +3554,14 @@ const ATLAS_WIDTH_PX: i32 = 2048;
 /// One image holding the effect of each of `draws` that needs one, drawn in
 /// one pass onto a surface made from `canvas`, and one of the CPU's
 /// coverage of each at the same place, drawn on the CPU and uploaded once;
-/// and, by index, what was found for each path: its effect, and where its
-/// images are -- none for one on whole pixels, which takes the effect
-/// itself, or for one that does not fit, which takes the effect itself
-/// through a coverage image of its own -- see [`drawn_with_effect`].
-/// `None` for a draw that is no path. With an image of its own for each
-/// draw, 2000 small gradient fills cost about eight times what Ganesh's own
-/// gradient did.
+/// one more holding the CPU's coverage of every path wider than that atlas,
+/// up to the GPU's own limit, which takes the effect itself; and, by index,
+/// what was found for each path: its effect, and where its images are --
+/// none for one on whole pixels, which takes the effect itself, or for one
+/// that fits neither, which takes the effect itself through a coverage
+/// image of its own -- see [`drawn_with_effect`]. `None` for a draw that is
+/// no path. With an image of its own for each draw, 2000 small gradient
+/// fills cost about eight times what Ganesh's own gradient did.
 fn atlas(
     canvas: &SkCanvas,
     draws: &[Option<&GradientPath>],
@@ -3562,9 +3580,15 @@ fn atlas(
         })
         .collect();
     let mut slots: Vec<Option<IPoint>> = vec![None; draws.len()];
+    let mut wide_slots: Vec<Option<IPoint>> = vec![None; draws.len()];
     let limit = max_texture_size(canvas);
     let width_limit = ATLAS_WIDTH_PX.min(limit);
     let (mut x, mut y, mut row, mut width) = (0, 0, 0, 0);
+    // The wide paths' shelf: as wide as the GPU takes.
+    let (mut wide_x, mut wide_y, mut wide_row, mut wide_width) = (0, 0, 0, 0);
+    // The page's pixels from its origin to the farthest corner of a path
+    // the atlas holds, which their coverage is drawn over.
+    let mut extent = ISize::new(0, 0);
     let mut page = None;
     for (index, (draw, effect)) in draws.iter().zip(&effects).enumerate() {
         let (Some(draw), Some(_)) = (draw, effect) else {
@@ -3577,7 +3601,28 @@ fn atlas(
             draw.area.width() + 2 * SLOT_MARGIN_PX,
             draw.area.height() + 2 * SLOT_MARGIN_PX,
         );
+        let reaching = ISize::new(
+            extent.width.max(draw.area.right),
+            extent.height.max(draw.area.bottom),
+        );
+        if w > limit || !DeviceCoverage::fits(reaching) {
+            continue;
+        }
         if w > width_limit {
+            if wide_x + w > limit {
+                (wide_x, wide_y, wide_row) = (0, wide_y + wide_row, 0);
+            }
+            let grown = ISize::new(
+                wide_width.max(wide_x + w),
+                wide_y + wide_row.max(h),
+            );
+            if grown.height > limit || !DeviceCoverage::fits(grown) {
+                continue;
+            }
+            extent = reaching;
+            wide_slots[index] = Some(IPoint::new(wide_x, wide_y));
+            (wide_x, wide_row, wide_width) =
+                (wide_x + w, wide_row.max(h), wide_width.max(wide_x + w));
             continue;
         }
         if x + w > width_limit {
@@ -3586,6 +3631,7 @@ fn atlas(
         if y + h > limit {
             continue;
         }
+        extent = reaching;
         slots[index] = Some(IPoint::new(x, y));
         page.get_or_insert_with(|| draw.page.clone());
         (x, row, width) = (x + w, row.max(h), width.max(x + w));
@@ -3628,29 +3674,24 @@ fn atlas(
         }
         Some(surface.image_snapshot())
     });
-    // The CPU's coverage of each path the atlas holds, at the same slots.
+    // The CPU's coverage of each path the atlas holds, at the same slots,
+    // and of each wide path, at its slot in an atlas of their own.
+    let mut device = DeviceCoverage::new(extent);
     let mask = made.as_ref().and_then(|_| {
-        let mut surface =
-            started::raster(&coverage_info((width, height)), None, None)?;
-        let target = surface.canvas();
-        target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-        for (draw, at) in draws.iter().zip(&slots) {
-            let (Some(draw), Some(at)) = (draw, at) else {
-                continue;
-            };
-            let origin = IPoint::new(
-                draw.area.left - SLOT_MARGIN_PX,
-                draw.area.top - SLOT_MARGIN_PX,
-            );
-            draw_coverage(target, draw, *at, origin);
-        }
-        Some(surface.image_snapshot())
+        coverage_atlas(draws, &slots, (width, height), &mut device)
     });
+    let wide_mask = coverage_atlas(
+        draws,
+        &wide_slots,
+        (wide_width, wide_y + wide_row),
+        &mut device,
+    );
     draws
         .iter()
         .zip(effects)
         .zip(slots)
-        .map(|((draw, effect), at)| {
+        .zip(wide_slots)
+        .map(|(((draw, effect), at), wide_at)| {
             draw.map(|_| Found {
                 effect,
                 slot: at.and_then(|at| {
@@ -3660,9 +3701,43 @@ fn atlas(
                         mask: mask.clone(),
                     })
                 }),
+                wide: wide_at.and_then(|at| {
+                    Some(WideSlot {
+                        mask: wide_mask.clone()?,
+                        at,
+                    })
+                }),
             })
         })
         .collect()
+}
+
+/// An alpha image `size` pixels of the CPU's coverage of each of `draws`
+/// with a slot in `slots`, drawn at the page's own pixels on `device` and
+/// copied in -- see [`DeviceCoverage`]. `None` where no draw has a slot, or
+/// any cannot be drawn.
+fn coverage_atlas(
+    draws: &[Option<&GradientPath>],
+    slots: &[Option<IPoint>],
+    size: (i32, i32),
+    device: &mut Option<DeviceCoverage>,
+) -> Option<Image> {
+    if slots.iter().all(Option::is_none) {
+        return None;
+    }
+    let device = device.as_mut()?;
+    let mut surface = started::raster(&coverage_info(size), None, None)?;
+    surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+    for (draw, at) in draws.iter().zip(slots) {
+        let (Some(draw), Some(at)) = (draw, at) else {
+            continue;
+        };
+        // The slot's pixel `at` is the page's pixel a margin outside the
+        // path's area.
+        let to = IPoint::new(at.x + SLOT_MARGIN_PX, at.y + SLOT_MARGIN_PX);
+        device.copy(draw, &mut surface, to)?;
+    }
+    Some(surface.image_snapshot())
 }
 
 /// The widest and tallest texture the GPU `canvas` draws on takes.
@@ -3687,9 +3762,11 @@ fn max_texture_size(_canvas: &SkCanvas) -> i32 {
 /// A rectangle on whole pixels is the effect itself. Any other path is an
 /// aliased rectangle over the pixels it inks, its effect -- the atlas's
 /// image of it, or the effect itself for one the atlas does not hold --
-/// masked by the CPU's coverage of the path -- see [`draw_coverage`] -- so
-/// that its edge is the CPU canvas's, as its shadow and its blur already
-/// are, made on the CPU -- see `Context2D::chain_input`. Drawn through the
+/// masked by the CPU's coverage of the path, from the run's atlas, its
+/// atlas of paths too wide for that, or an image of its own -- see
+/// [`DeviceCoverage`] -- so that its edge is the CPU canvas's, as its
+/// shadow and its blur already are, made on the CPU -- see
+/// `Context2D::chain_input`. Drawn through the
 /// path, it took Ganesh's anti-aliasing instead, up to 125 levels from the
 /// CPU canvas along a hard-stop conic's edge.
 ///
@@ -3781,17 +3858,32 @@ fn drawn_with_effect(
                 .to_shader(DECAL, nearest(), Some(&local))
                 .zip(mask.to_shader(DECAL, nearest(), Some(&local)))
         }
-        _ => coverage_image(draw, reach).and_then(|mask| {
-            let local = Matrix::translate((
-                on_canvas.left as f32,
-                on_canvas.top as f32,
-            ));
-            effect.placed(&draw.matrix, -shift).zip(mask.to_shader(
-                DECAL,
-                nearest(),
-                Some(&local),
-            ))
-        }),
+        _ => match found.and_then(|found| found.wide.as_ref()) {
+            // The wide atlas's slot `at` holds the page's pixel `reach`'s
+            // corner.
+            Some(WideSlot { mask, at }) => {
+                let local = Matrix::translate((
+                    (on_canvas.left - at.x) as f32,
+                    (on_canvas.top - at.y) as f32,
+                ));
+                effect.placed(&draw.matrix, -shift).zip(mask.to_shader(
+                    DECAL,
+                    nearest(),
+                    Some(&local),
+                ))
+            }
+            None => coverage_image(draw, reach).and_then(|mask| {
+                let local = Matrix::translate((
+                    on_canvas.left as f32,
+                    on_canvas.top as f32,
+                ));
+                effect.placed(&draw.matrix, -shift).zip(mask.to_shader(
+                    DECAL,
+                    nearest(),
+                    Some(&local),
+                ))
+            }),
+        },
     };
     let Some((effect, coverage)) = layers else {
         return false;
@@ -3841,60 +3933,112 @@ fn nearest() -> SamplingOptions {
 /// How the effect's image and the coverage are tiled: transparent outside.
 const DECAL: (TileMode, TileMode) = (TileMode::Decal, TileMode::Decal);
 
-/// Draws the CPU's coverage of `draw`'s path onto `target`, an alpha
-/// surface whose pixel `at` is the page's device pixel `origin`: the path
-/// under the draw's own paint -- its style, its stroke and its
-/// anti-aliasing -- in opaque white, which leaves at each pixel the
-/// coverage the CPU canvas's scan conversion hands its blend.
-///
-/// Clipped to the draw's `area`, which ends where the page does, so that a
-/// path crossing the page's edge is cut where the CPU canvas cuts it and
-/// nowhere else. Skia's analytic anti-aliasing cuts a path's edges at its
-/// clip's bounds and snaps the new ends to a quarter pixel, which moves
-/// the coverage along the whole edge: cut at the reach, a pixel past the
-/// page, a triangle crossing the page's right edge stood up to 52 levels
-/// from the CPU canvas, and unclipped in the atlas a path spilled into the
-/// slot beside it.
-fn draw_coverage(
-    target: &SkCanvas,
-    draw: &GradientPath,
-    at: IPoint,
-    origin: IPoint,
-) {
-    let mut paint = draw.paint.clone();
-    paint
-        .set_shader(None)
-        .set_color(Color::WHITE)
-        .set_blend_mode(BlendMode::SrcOver);
-    let shift = (at.x - origin.x, at.y - origin.y);
-    target.save();
-    target.clip_irect(draw.area.with_offset(shift), ClipOp::Intersect);
-    target.set_matrix(
-        &Matrix::concat(
-            &Matrix::translate((shift.0 as f32, shift.1 as f32)),
-            &draw.matrix,
-        )
-        .into(),
-    );
-    target.draw_path(&draw.path.lock(), &paint);
-    target.restore();
+/// The most bytes the surface of a [`DeviceCoverage`] takes, at one a
+/// pixel: an 8192 pixel square page's worth, and the most the alpha atlas
+/// of a run's paths too wide for its effect atlas takes. Chosen rather than
+/// derived, so that a page up to that size draws its paths' edges through
+/// the effect, and a larger one holds no more than that while it plays. A
+/// path past it is drawn on the CPU, whose route is exact too -- see
+/// [`played_on_gpu`].
+const DEVICE_COVERAGE_BYTES: usize = 8192 * 8192;
+
+/// An alpha surface whose pixel (x, y) is the page's device pixel (x, y),
+/// which the CPU's coverage of a path is drawn onto under the draw's own
+/// matrix before its area is copied to where the GPU reads it, so that it
+/// is the CPU canvas's coverage to the byte.
+struct DeviceCoverage(Surface);
+
+impl DeviceCoverage {
+    /// Whether a surface reaching `extent` from the page's origin keeps to
+    /// [`DEVICE_COVERAGE_BYTES`].
+    fn fits(extent: ISize) -> bool {
+        let side = |n: i32| usize::try_from(n).ok();
+        side(extent.width)
+            .zip(side(extent.height))
+            .and_then(|(w, h)| w.checked_mul(h))
+            .is_some_and(|bytes| bytes <= DEVICE_COVERAGE_BYTES)
+    }
+
+    /// A surface reaching `extent` from the page's origin, where it
+    /// [`fits`](Self::fits) and is not empty.
+    fn new(extent: ISize) -> Option<Self> {
+        if extent.is_empty() || !Self::fits(extent) {
+            return None;
+        }
+        started::raster(&coverage_info(extent), None, None).map(Self)
+    }
+
+    /// Draws `draw`'s path in opaque white under its own paint -- its style,
+    /// its stroke and its anti-aliasing -- which leaves at each pixel the
+    /// coverage the CPU canvas's scan conversion hands its blend, and copies
+    /// the path's area to `target`'s pixel `to`. `None` where the area does
+    /// not lie on the surface.
+    ///
+    /// Clipped to the draw's `area`, so that the clear and the draw reach
+    /// only the pixels copied: cleared whole, the surface would cost every
+    /// path its whole extent. Where a path crosses the page's edge, its area
+    /// ends there and so does the surface, so it is cut where the CPU canvas
+    /// cuts it and nowhere else. Skia's analytic anti-aliasing cuts a path's
+    /// edges at its clip's bounds and snaps the new ends to a quarter pixel,
+    /// which moves the coverage along the whole edge: cut a pixel past the
+    /// page, a triangle crossing the page's right edge stood up to 52 levels
+    /// from the CPU canvas.
+    fn copy(
+        &mut self,
+        draw: &GradientPath,
+        target: &mut Surface,
+        to: IPoint,
+    ) -> Option<()> {
+        // UPSTREAM: skia-safe 0.156.0 -- unfiled -- worked around
+        // Re-check: cargo test skia_covers_a_curve_by_where_it_lies
+        //
+        // Skia's analytic anti-aliasing covers a curved edge by where on the
+        // device it lies, so the path is drawn at the page's own pixels and
+        // only the result is moved. Drawn into its slot under the draw's
+        // matrix moved by whole pixels, a disc stored 86 on a pixel where the
+        // CPU canvas stores 85 moved by (-4, -4), and 200 where it stores
+        // 208 moved by (110, 0) (#813). Were curves covered alike wherever
+        // they lie, the path could be drawn into its slot directly.
+        let mut paint = draw.paint.clone();
+        paint
+            .set_shader(None)
+            .set_color(Color::WHITE)
+            .set_blend_mode(BlendMode::SrcOver);
+        let canvas = self.0.canvas();
+        canvas.save();
+        canvas.clip_irect(draw.area, ClipOp::Intersect);
+        canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+        canvas.set_matrix(&draw.matrix.into());
+        canvas.draw_path(&draw.path.lock(), &paint);
+        canvas.restore();
+        let drawn = self.0.peek_pixels()?.extract_subset(draw.area)?;
+        target.write_pixels_from_pixmap(&drawn, to);
+        Some(())
+    }
 }
 
 /// The CPU's coverage of `draw`'s path over `reach`, the page's device
-/// pixels, as an alpha image of its own: for a draw the run's atlas does
-/// not hold -- see [`atlas`].
+/// pixels, as an alpha image of its own: for a draw neither of the run's
+/// atlases holds -- see [`atlas`].
 fn coverage_image(draw: &GradientPath, reach: IRect) -> Option<Image> {
+    #[cfg(test)]
+    COVERAGE_IMAGES.with(|made| made.set(made.get() + 1));
     let mut surface =
         started::raster(&coverage_info(reach.size()), None, None)?;
-    let target = surface.canvas();
-    target.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-    draw_coverage(
-        target,
+    surface.canvas().clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+    DeviceCoverage::new(ISize::new(draw.area.right, draw.area.bottom))?.copy(
         draw,
-        IPoint::new(0, 0),
-        IPoint::new(reach.left, reach.top),
-    );
+        &mut surface,
+        IPoint::new(draw.area.left - reach.left, draw.area.top - reach.top),
+    )?;
     Some(surface.image_snapshot())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many coverage images of their own [`coverage_image`] has made
+    /// on this thread.
+    static COVERAGE_IMAGES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// An alpha image `size` pixels, which coverage is drawn into.
@@ -4052,7 +4196,7 @@ fn maps_whole_pixels(device: &Matrix) -> bool {
 
 impl GradientDraw {
     fn playback(&self, canvas: &SkCanvas, target: Target) {
-        self.played(canvas, target, None);
+        self.played(canvas, target, None, None);
     }
 
     /// The paths among `draws` whose effect a GPU canvas makes where the
@@ -4068,12 +4212,32 @@ impl GradientDraw {
     /// from what an atlas `found`, one for each draw, where one for more
     /// than this run was made -- see [`play_entries`] -- and from one of its
     /// own where not.
+    ///
+    /// The draws it holds for one snapshot -- see [`exact_composite::Batch`]
+    /// -- go into `page`, the batch of the page's playback, which flushes
+    /// them where something else meets them or the playback ends. A run
+    /// under a clip of its own holds them in a batch of its own instead,
+    /// flushed before its clip is lifted: a held draw is drawn under the
+    /// clip in force when it is flushed, so one held past the run would
+    /// lose the run's clip, and `page` is flushed first, before the clip
+    /// applies, for the same reason. Without `page` the run's batch is its
+    /// own whatever its clip.
     fn played(
         &self,
         canvas: &SkCanvas,
         target: Target,
         found: Option<&[Option<Found>]>,
+        page: Option<&mut exact_composite::Batch>,
     ) {
+        let mut run_batch = exact_composite::Batch::default();
+        let batch = match page {
+            Some(page) if self.clip.is_none() => page,
+            Some(page) => {
+                page.flush(canvas);
+                &mut run_batch
+            }
+            None => &mut run_batch,
+        };
         canvas.save();
         if let Some(clip) = self.clip.as_ref().and_then(Path::deserialize) {
             canvas.clip_path(&clip, ClipOp::Intersect, true);
@@ -4090,7 +4254,6 @@ impl GradientDraw {
         };
         let found_for =
             |index: usize| found.get(index).and_then(Option::as_ref);
-        let mut batch = exact_composite::Batch::default();
         let mut index = 0;
         while index < self.draws.len() {
             // Draws one after another that the CPU makes over the GPU's
@@ -4161,12 +4324,12 @@ impl GradientDraw {
                     &piece.pixels,
                     &piece.gpu,
                     found_for(index),
-                    &mut batch,
+                    batch,
                 ),
             }
             index += 1;
         }
-        batch.flush(canvas);
+        run_batch.flush(canvas);
         canvas.restore();
     }
 
@@ -6877,6 +7040,15 @@ fn read_on_the_cpu(entry: &Layer) -> Option<(KeptRun<'_>, Option<Rect>)> {
 /// one read back of the pixels they ink, with the entries between them that
 /// meet none of them -- see [`replayed_on_their_backdrop`] -- closing an
 /// open batch first, so that the read finds what it drew.
+///
+/// A GPU canvas's gradient draws composited for one snapshot -- see
+/// [`exact_composite::Batch`] -- are held across the page's gradient runs,
+/// not run by run, and drawn where another entry is about to draw over what
+/// they cover, and where the playback ends: a chain casting a shadow alone,
+/// followed by the run it is the shadow of, draws them only where its reach
+/// meets one, and any other entry draws them all first. Held run by run,
+/// 16 discs each casting a shadow took a snapshot each, where 16 casting
+/// none took one between them.
 pub(crate) fn play_entries(
     entries: &[Layer],
     features: &[VectorFeatures],
@@ -6917,13 +7089,16 @@ pub(crate) fn play_entries(
     // together -- see `BatchScope` -- the batch drawn before any other
     // entry plays.
     let mut batch = None;
+    let mut held = exact_composite::Batch::default();
     let mut at = 0;
     while at < entries.len() {
         if paced {
             // A batch of colour runs still open draws when it closes: closed
-            // first, so that the read back finds what it drew.
+            // first, so that the read back finds what it drew, and so do the
+            // draws held for a snapshot.
             if cpu_run_at(entries, at).is_some() {
                 batch = None;
+                held.flush(canvas);
             }
             let played = replayed_on_their_backdrop(
                 &entries[at..],
@@ -6934,6 +7109,12 @@ pub(crate) fn play_entries(
                 batch = None;
                 at += played;
                 continue;
+            }
+        }
+        if !matches!(entries[at], Layer::Gradient(_)) {
+            match cast_reach(&entries[at..], canvas) {
+                Some(reach) => held.flush_meeting(canvas, reach),
+                None => held.flush(canvas),
             }
         }
         match &entries[at] {
@@ -6976,7 +7157,14 @@ pub(crate) fn play_entries(
                 let mut from = 0;
                 for (k, op) in ops.iter().enumerate() {
                     let to = from + op.draws.len();
-                    op.played(canvas, target, Some(&found[from..to]));
+                    op.played(
+                        canvas,
+                        target,
+                        Some(&found[from..to]),
+                        Some(&mut held),
+                    );
+                    #[cfg(test)]
+                    run_played(&mut held, canvas);
                     from = to;
                     if let Some(features) =
                         features.get(at + k).filter(|_| paced)
@@ -6994,7 +7182,14 @@ pub(crate) fn play_entries(
         let run = match &entries[at] {
             Layer::Clipped(piece) if shares_the_clip(piece) => piece.run,
             entry => {
-                entry.playback(canvas, target);
+                match entry {
+                    Layer::Gradient(op) => {
+                        op.played(canvas, target, None, Some(&mut held));
+                        #[cfg(test)]
+                        run_played(&mut held, canvas);
+                    }
+                    entry => entry.playback(canvas, target),
+                }
                 if let Some(features) = features.get(at).filter(|_| paced) {
                     pacing::played(canvas, offscreen_layers(entry, *features));
                 }
@@ -7015,6 +7210,43 @@ pub(crate) fn play_entries(
             .collect();
         at += pieces.len();
         Clipped::play_run(&pieces, &pieces[0].clip, canvas, target, bounded);
+    }
+    held.flush(canvas);
+}
+
+/// What the entry leading `entries` can draw on `canvas`, in its device
+/// pixels, where it is a chain played alone: one followed by a gradient
+/// run, or by nothing, which [`play_shared_chains`] plays with no chain
+/// after it. A chain followed by anything else may be played with the
+/// chains after it, whose reaches this does not ask, so it is `None` for
+/// that, as for any entry that is not a chain.
+///
+/// The reach is the chain's whole, as far as its blurs' taps carry -- six
+/// of their sigmas, see [`Group::chain_reach_under`] -- not as far as an
+/// eight-bit page shows its tail, which is under half of that. An opaque
+/// shadow blurred by 20, a sigma of 10 and a reach of 61 pixels, cast
+/// beside a held fill moves the fill's bytes 28 pixels from the caster and
+/// not 30, so a reach 32 pixels narrower draws that page the same. It is
+/// kept whole on purpose: a fill in the band past what the bytes show
+/// costs an earlier flush and never a byte, where a reach cut to the bytes
+/// would rest on how the tail rounds over each backdrop.
+fn cast_reach(entries: &[Layer], canvas: &SkCanvas) -> Option<IRect> {
+    let [Layer::Group(group), rest @ ..] = entries else {
+        return None;
+    };
+    if !matches!(rest.first(), None | Some(Layer::Gradient(_))) {
+        return None;
+    }
+    group.chain_reach_under(&canvas.local_to_device_as_3x3())
+}
+
+/// After a gradient run plays into the page's batch: on a thread
+/// [`PAGE_BATCH`] is off on, the batch is flushed, as a batch of the run's
+/// own would be at its end.
+#[cfg(test)]
+fn run_played(held: &mut exact_composite::Batch, canvas: &SkCanvas) {
+    if !PAGE_BATCH.get() {
+        held.flush(canvas);
     }
 }
 
@@ -8794,6 +9026,21 @@ mod tests {
         alpha
     }
 
+    #[test]
+    fn a_device_coverage_keeps_to_its_bytes() {
+        use super::{DEVICE_COVERAGE_BYTES, DeviceCoverage};
+        use skia_safe::ISize;
+        let side = (DEVICE_COVERAGE_BYTES as f64).sqrt() as i32;
+        assert_eq!((side as usize).pow(2), DEVICE_COVERAGE_BYTES);
+        assert!(DeviceCoverage::fits(ISize::new(side, side)));
+        assert!(!DeviceCoverage::fits(ISize::new(side + 1, side)));
+        assert!(!DeviceCoverage::fits(ISize::new(side, side + 1)));
+        assert!(!DeviceCoverage::fits(ISize::new(-1, side)));
+        assert!(!DeviceCoverage::fits(ISize::new(i32::MAX, i32::MAX)));
+        assert!(DeviceCoverage::new(ISize::new(0, side)).is_none());
+        assert!(DeviceCoverage::new(ISize::new(3, 2)).is_some());
+    }
+
     /// Skia's anti-aliasing covers a curved edge by where on the device it
     /// lies, not only by its shape: the same oval, moved down by a whole
     /// number of pixels -- every point exactly, on the 1/64 grid -- is
@@ -8804,7 +9051,9 @@ mod tests {
     /// layer in `Group::chain_content`, the bound `text_reach_tests` hold
     /// two placements to, and the entry in `docs/browser-differences.md`
     /// can go -- and the surface of its own `Group::played_at_source` plays
-    /// a canvas drawn in on, unless a cut still moves a path's coverage.
+    /// a canvas drawn in on, unless a cut still moves a path's coverage, and
+    /// the surface at the page's own pixels [`DeviceCoverage`] draws a
+    /// gradient path's coverage on.
     #[test]
     fn skia_covers_a_curve_by_where_it_lies() {
         let here = oval_at(0);
@@ -10538,6 +10787,65 @@ mod shared_chain_tests {
 }
 
 #[cfg(test)]
+mod wide_atlas_tests {
+    //! Which gradient paths too wide for a run's effect atlas share the
+    //! run's alpha atlas -- see [`atlas`] -- rather than each take an image
+    //! of its own coverage. Their bytes are held to the CPU canvas's in
+    //! `tests/gpu_gradient.rs`.
+
+    use super::COVERAGE_IMAGES;
+    use crate::prelude::*;
+
+    /// How many coverage images of their own `paths` triangles, each
+    /// `width` pixels across and one under the next, take when filled with
+    /// a ramp on a GPU page. `None` without a GPU.
+    fn images(paths: usize, width: f32) -> Option<usize> {
+        let page = (width + 40.0, 30.0 * paths as f32 + 20.0);
+        let mut canvas = Canvas::new(page.0, page.1);
+        canvas.set_gpu(true);
+        if canvas.engine_kind() != EngineKind::Gpu {
+            return None;
+        }
+        let ctx = canvas.context();
+        let stop = |position, css| GradientStop {
+            position,
+            color: RgbaLinear::from_css(css).expect("a colour"),
+        };
+        let shader = Shader::linear_gradient(
+            Point { x: 10.0, y: 0.0 },
+            Point { x: width, y: 0.0 },
+            &[stop(0.0, "orange"), stop(1.0, "blue")],
+            GradientColorSpace::Srgb,
+        )
+        .expect("two stops describe a gradient");
+        ctx.set_fill_shader(&shader);
+        for i in 0..paths {
+            let top = 30.0 * i as f32 + 10.3;
+            ctx.begin_path();
+            ctx.move_to(10.5, top + 25.0);
+            ctx.line_to(width / 2.0 + 0.25, top);
+            ctx.line_to(width + 10.4, top + 22.2);
+            ctx.fill(FillRule::NonZero);
+        }
+        let before = COVERAGE_IMAGES.with(|made| made.get());
+        ctx.get_image_data(0.0, 0.0, page.0, page.1)
+            .expect("image data");
+        Some(COVERAGE_IMAGES.with(|made| made.get()) - before)
+    }
+
+    /// Paths past the effect atlas's width, in one run, share one alpha
+    /// atlas: none takes an image of its own coverage.
+    #[test]
+    fn wide_gradient_paths_share_one_coverage_atlas() {
+        let Some(made) = images(4, 2500.0) else {
+            eprintln!("skipped: no GPU engine");
+            return;
+        };
+        assert_eq!(made, 0, "coverage images of their own");
+    }
+}
+
+#[cfg(test)]
 mod coverage_run_tests {
     //! Which runs of text under `blur()` the coverage route plays -- see
     //! [`CoverageRun`] -- and that an opaque one keeps the chain's alpha.
@@ -11623,8 +11931,9 @@ mod shadow_run_tests {
     fn pages(pages: &[Page], filter: &str, kept: bool) -> Vec<Paged> {
         use crate::context::{
             chain::{CAST_LAYERS, CAST_REGION},
-            kept::{CAST_BYTES, FOUND, KEPT},
+            kept::{CAST_BYTES, FOUND, KEPT, OwnKeptResults},
         };
+        let _own = OwnKeptResults::new();
         FontLibrary::new()
             .use_paths(
                 Some(OSWALD),
